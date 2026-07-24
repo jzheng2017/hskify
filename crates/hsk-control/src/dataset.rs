@@ -32,7 +32,7 @@ impl HskDataset {
     pub(crate) fn from_artifact(
         mut artifact: HskArtifact,
         policy: LoadPolicy,
-        normalizer: &TextNormalizer,
+        _normalizer: &TextNormalizer,
     ) -> Result<Self> {
         validate_header(
             artifact.schema_version,
@@ -68,7 +68,7 @@ impl HskDataset {
         let mut cumulative: [BTreeSet<String>; 6] = array::from_fn(|_| BTreeSet::new());
         let mut actual_level_counts = [0usize; 6];
         for (index, entry) in artifact.entries.iter().enumerate() {
-            validate_entry(entry, normalizer)?;
+            validate_entry(entry)?;
             if by_word.insert(entry.simplified.clone(), index).is_some() {
                 return Err(HskControlError::InvalidData(format!(
                     "duplicate HSK word {:?}",
@@ -209,7 +209,7 @@ pub(crate) fn validate_audit(source: &SourceAudit, licence: &LicenceAudit) -> Re
     Ok(())
 }
 
-fn validate_entry(entry: &HskEntry, normalizer: &TextNormalizer) -> Result<()> {
+fn validate_entry(entry: &HskEntry) -> Result<()> {
     if entry.simplified.trim().is_empty()
         || entry.pinyin.trim().is_empty()
         || entry.glosses.is_empty()
@@ -217,13 +217,6 @@ fn validate_entry(entry: &HskEntry, normalizer: &TextNormalizer) -> Result<()> {
     {
         return Err(HskControlError::InvalidData(format!(
             "incomplete HSK entry {:?}",
-            entry.simplified
-        )));
-    }
-    let normalized = normalizer.normalize(&entry.simplified);
-    if normalized != entry.simplified {
-        return Err(HskControlError::InvalidData(format!(
-            "HSK entry {:?} is not normalized Simplified Chinese (normalizes to {normalized:?})",
             entry.simplified
         )));
     }

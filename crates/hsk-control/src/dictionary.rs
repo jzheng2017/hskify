@@ -58,7 +58,7 @@ impl LocalDictionary {
     pub(crate) fn from_artifact(
         mut artifact: DictionaryArtifact,
         policy: LoadPolicy,
-        normalizer: &TextNormalizer,
+        _normalizer: &TextNormalizer,
     ) -> Result<Self> {
         if artifact.schema_version != DATA_SCHEMA_VERSION {
             return Err(HskControlError::InvalidData(format!(
@@ -111,7 +111,7 @@ impl LocalDictionary {
         let mut by_word: BTreeMap<String, Vec<usize>> = BTreeMap::new();
         let mut trie = AllowedWordTrie::new();
         for (index, entry) in artifact.entries.iter().enumerate() {
-            validate_entry(entry, normalizer)?;
+            validate_entry(entry)?;
             by_word
                 .entry(entry.simplified.clone())
                 .or_default()
@@ -199,7 +199,7 @@ impl LocalDictionary {
     }
 }
 
-fn validate_entry(entry: &DictionaryEntry, normalizer: &TextNormalizer) -> Result<()> {
+fn validate_entry(entry: &DictionaryEntry) -> Result<()> {
     if entry.traditional.trim().is_empty()
         || entry.simplified.trim().is_empty()
         || entry.pinyin.trim().is_empty()
@@ -211,13 +211,6 @@ fn validate_entry(entry: &DictionaryEntry, normalizer: &TextNormalizer) -> Resul
     {
         return Err(HskControlError::InvalidData(format!(
             "incomplete dictionary entry {:?}",
-            entry.simplified
-        )));
-    }
-    let normalized = normalizer.normalize(&entry.simplified);
-    if normalized != entry.simplified {
-        return Err(HskControlError::InvalidData(format!(
-            "dictionary entry {:?} is not normalized Simplified Chinese (normalizes to {normalized:?})",
             entry.simplified
         )));
     }

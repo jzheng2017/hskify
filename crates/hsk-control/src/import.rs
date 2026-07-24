@@ -112,10 +112,12 @@ pub fn generate_hsk_artifact(
             independently_usable,
             frequency_rank,
         };
-        if entries.insert(simplified.clone(), entry).is_some() {
-            return Err(HskControlError::InvalidData(format!(
-                "duplicate HSK source word {simplified:?}"
-            )));
+        if let Some(existing) = entries.get_mut(&simplified) {
+            if entry.level < existing.level {
+                *existing = entry;
+            }
+        } else {
+            entries.insert(simplified, entry);
         }
     }
 

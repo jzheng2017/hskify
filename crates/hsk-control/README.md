@@ -11,3 +11,13 @@ vocabulary or a complete dictionary.
 
 See [IMPLEMENTATION.md](IMPLEMENTATION.md) for the API boundary, algorithms,
 licence audit, reproducible import commands, and known limitations.
+
+For a functional local development setup on Windows, run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/bootstrap_local_language_data.ps1
+```
+
+The script downloads pinned HSK 2.0 inputs plus the current CC-CEDICT release,
+generates production-loadable artifacts under `.cache/language-data`, and runs
+the full-resource smoke binary. Large generated resources stay outside Git.
