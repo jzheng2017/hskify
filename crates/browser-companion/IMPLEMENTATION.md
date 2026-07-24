@@ -1,7 +1,7 @@
-# Browser companion: secure fixture-backed Gate 2
+# Browser companion: secure Koharu-backed Gate 3
 
-Status: Workstream B implementation through Gate 2 (fixture adapter; no live ML
-pipeline).
+Status: Workstream B implementation through Gate 3 (real local detection,
+bubble/text masks, English OCR, and inpainting; no translation or HSK rewrite).
 
 ## Delivered shape
 
@@ -27,6 +27,8 @@ The per-user state root contains:
 daemon-v1.lock
 daemon-state-v1.json
 browser-cache-v1/
+  koharu-data/
+  cleaning-projects-v1/<source-sha256>.khrproj/
 ```
 
 On Unix, the directories are mode 0700 and the state/lock files are mode 0600.
@@ -59,15 +61,31 @@ UUID still matches.
 - There is no telemetry, remote fetch, cloud credential, URL-fetch endpoint,
   or manga egress path.
 
-## Fixture adapter and limits
+## Koharu cleaning adapter and limits
 
-All required `/browser/v1` endpoints are present. Health, setup, job result,
-progress, lookup, and retranslation consume the frozen protocol-v1 fixtures.
-Uploaded bytes are used as the clean PNG blob after full safe decoding; other
-supported raster inputs are decoded and re-encoded as PNG. Fixture jobs remain
+`POST /browser/v1/jobs` now retains the validated source under the existing
+daemon bounds and runs the production `koharu_app::pipeline::run` path. The
+Gate-3 spec uses Koharu's configured detector, text segmenter, bubble
+segmenter, English OCR, and manga inpainter. It deliberately omits the
+translator, HSK rewrite, and renderer. Retranslation therefore returns the
+explicit `TRANSLATION_NOT_AVAILABLE` error until Gate 4.
+
+Each source hash owns a persistent Koharu project. Successful runs compact the
+project and write a versioned pipeline marker; a later identical upload can
+package the cached detector/OCR/mask/inpaint artifacts without initializing
+the ML runtime. The browser result contains the real Koharu inpainted PNG/WebP,
+OCR text and confidence, normalized text geometry, and bubble/safe polygons
+derived from Koharu's distinct-ID bubble mask. Region IDs hash the source and
+normalized text geometry, so cache hits preserve IDs. OCR confidence below
+0.60 emits a region-scoped `LOW_OCR_CONFIDENCE` warning.
+
+The frozen protocol requires translation-shaped fields for dialogue regions.
+At Gate 3 those fields contain the source English as an explicit identity
+fallback, pinyin is empty, vocabulary is non-strict, and
+`translationHit=false`; no translation or HSK claim is made. Jobs remain
 daemon-owned while Firefox backgrounds suspend, progress monotonically, can be
-polled with a refreshed session, and use synchronized cancellation so a worker
-cannot revive a cancelled state.
+polled with a refreshed session, and share the same cancellation atomic used
+by Koharu so a worker cannot revive a cancelled state.
 
 Default limits are:
 
@@ -78,7 +96,7 @@ Default limits are:
 - 16,384 pixels on either dimension;
 - 128 MiB decoder allocation budget;
 - 64 MiB clean blob;
-- 128 retained jobs and 256 MiB retained fixture blobs;
+- 128 retained jobs and 256 MiB retained source/clean blobs;
 - four concurrent authenticated requests, including response-body transfer.
 
 Multipart fields are streamed against their individual limits. The daemon
@@ -89,29 +107,28 @@ dimensions before retaining bytes.
 Authentication and protocol checks run before a request can acquire one of the
 four global permits or poll its body. Saturation returns retryable HTTP 429 with
 `REQUEST_CAPACITY_EXHAUSTED`. A permit remains owned through multipart
-consumption, blocking decode/PNG encoding even if the HTTP task is cancelled,
+consumption and safe image decode even if the HTTP task is cancelled,
 and complete response-body transfer. Idle shutdown uses the same synchronized
 admission state, latches only when both admitted requests and active jobs are
 zero, and refuses new admission after latching.
 
-Non-PNG fixture output uses a seekable bounded writer that refuses growth past
-the configured clean-blob cap while encoding. Blob GET bodies retain the
-stored `Arc<[u8]>` through `Bytes::from_owner`, avoiding a per-request copy of
-up to 64 MiB; the response holds its global permit until the body is consumed
-or dropped. Tall narrow reader images remain accepted when they fit the byte,
-dimension, pixel, decoder-allocation, and output limits.
+Koharu output is rejected before retention if it exceeds the configured clean
+blob cap. Blob GET bodies retain the stored `Arc<[u8]>` through
+`Bytes::from_owner`, avoiding a per-request copy of up to 64 MiB; the response
+holds its global permit until the body is consumed or dropped. Tall narrow
+reader images remain accepted when they fit the byte, dimension, pixel,
+decoder-allocation, and output limits.
 
 Retention is deterministic and admission-driven. Each accepted job receives a
 monotonic daemon-local sequence. When either retention bound is under pressure,
 the daemon evicts the oldest inactive terminal job until the new job fits.
 Running jobs are never eviction candidates. An evicted job's clean blob is
-removed only after the last retained job reference disappears; this also keeps
-the source blob valid when a retranslation replaces its completed source job.
-Completed and cancelled jobs therefore remain queryable until later admission
-pressure reclaims them, after which their job endpoint (and any now-orphaned
-blob endpoint) returns 404.
+removed only after the last retained job reference disappears. Completed and
+cancelled jobs therefore remain queryable until later admission pressure
+reclaims them, after which their job endpoint (and any now-orphaned blob
+endpoint) returns 404.
 
-Clean PNG payloads are deduplicated by SHA-256, MIME type, and exact byte
+Clean PNG/WebP payloads are deduplicated by SHA-256, MIME type, and exact byte
 equality. Identical uploads and equivalent cleaned inputs share one blob
 allocation. Capacity can still return a retryable 429 while all reclaimable
 space is held by active jobs, but terminal history can no longer leave a
@@ -124,19 +141,15 @@ CJK font bank planned for Gate 6.
 
 ## Koharu reuse boundary
 
-The existing fork was inspected before writing the adapter:
+Gate 3 reuses `ProjectSession` and its content-addressed `BlobStore`,
+`RuntimeManager`, Koharu's engine registry, and
+`koharu_app::pipeline::run`. The browser layer only adapts progress,
+cancellation, scene artifacts, stable protocol geometry, warnings, and bounded
+blob retention. It does not introduce a second detector/OCR/inpaint engine.
 
-- `koharu-app::BlobStore` is the content-addressed persistent blob layer;
-- `koharu-core::events` contains pipeline/download status snapshots;
-- `koharu-app::pipeline` owns cancellable detector/OCR/inpaint/LLM/render
-  execution;
-- `koharu-app::GoogleFontService` and the renderer own installed font bytes and
-  layout.
-
-Gate 2 intentionally keeps only bounded in-memory fixture jobs/blobs. Gate 3
-must replace that adapter with the existing Koharu session, blob, pipeline, and
-event layers rather than make this fixture executor persistent or add a second
-job engine.
+Health/setup, the lightweight lookup scaffold, and the fallback font remain
+the frozen protocol fixtures from Gate 2. Translation/HSK work begins at Gate
+4, while production font/style integration remains Gate 6.
 
 ## Registration assets
 
@@ -171,22 +184,27 @@ fresh/expired tokens, constant-time authentication use, pre-body rejection,
 Host/origin/protocol/CORS restrictions, every required route, SHA-256/MIME/
 byte/pixel limits, progress/result/blob/font transfer, cancellation races,
 authenticated high-concurrency saturation before body polling, stalled-request
-idle exclusion, bounded PNG output, zero-copy/budgeted blob transfer, active
+idle exclusion, clean-output bounds, zero-copy/budgeted blob transfer, active
 saturation, oldest-terminal eviction, exact-byte SHA deduplication,
-completion/cancellation orphan cleanup, shared/retranslation blob references,
+completion/cancellation orphan cleanup, shared blob references,
 duplicate locks, stale state replacement, random IPv4 loopback binding, and
-idle cleanup. The prestarted-daemon handshake test covers framing, caller
-validation, and authenticated session issuance; it does not exercise launcher
-spawn.
+idle cleanup. A 256 by 4096 synthetic webtoon scene verifies stable IDs,
+normalized OCR geometry, instance-mask-derived bubble/safe polygons,
+low-confidence warnings, identity translation fields, cache flags, cleaned
+image dimensions, and whole-result protocol validation. The prestarted-daemon
+handshake test covers framing, caller validation, and authenticated session
+issuance; it does not exercise launcher spawn or download production models.
 
 ### Evidence captured 2026-07-24
 
 On the Windows Codex development harness:
 
 - `cargo fmt -p browser-companion -- --check`, `cargo check -p
-  browser-companion --all-targets`, and `cargo clippy -p browser-companion
-  --all-targets -- -D warnings` passed.
-- `cargo test -p browser-companion --all-targets` passed 36 library tests, 7
+  browser-companion --lib`, and `cargo clippy -p browser-companion
+  --all-targets -- -D warnings` passed with the Visual Studio 2019 developer
+  environment, the repository's verified LLVM 22.1.0 cache, and AWS-LC's
+  checked-in prebuilt NASM objects.
+- `cargo test -p browser-companion --all-targets` passed 37 library tests, 7
   contract-fixture tests, the prestarted-daemon native handshake, and the
   explicitly non-breakaway Windows lifecycle test. The production breakaway
   probe was reported as ignored.

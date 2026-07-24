@@ -19,7 +19,6 @@ use crate::server::{BridgeConfig, BridgeState, router, wait_until_idle};
 pub struct DaemonOptions {
     pub state_dir: PathBuf,
     pub idle_timeout: Duration,
-    pub fixture_stage_delay: Duration,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,8 +70,7 @@ pub async fn run_daemon(options: DaemonOptions) -> Result<DaemonExit, DaemonErro
 
     let mut config = BridgeConfig::for_port(port);
     config.idle_timeout = options.idle_timeout;
-    config.fixture_stage_delay = options.fixture_stage_delay;
-    let state = BridgeState::new(config, control_secret);
+    let state = BridgeState::new(config, control_secret, paths.cache.clone());
     let service = router(state.clone());
     let serve_result = axum::serve(listener, service)
         .with_graceful_shutdown(wait_until_idle(state))

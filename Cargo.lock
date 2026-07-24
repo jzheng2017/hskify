@@ -908,14 +908,20 @@ dependencies = [
 name = "browser-companion"
 version = "0.61.2"
 dependencies = [
+ "anyhow",
+ "async-trait",
  "axum",
  "base64 0.22.1",
+ "camino",
  "chrono",
  "dirs",
  "fs4",
  "getrandom 0.3.4",
  "http-body",
  "image",
+ "koharu-app",
+ "koharu-core",
+ "koharu-runtime",
  "libc",
  "serde",
  "serde_json",

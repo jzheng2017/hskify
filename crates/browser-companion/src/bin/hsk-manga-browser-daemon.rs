@@ -24,7 +24,6 @@ async fn main() {
 fn parse_options(arguments: Vec<OsString>) -> Result<DaemonOptions, String> {
     let mut state_dir = None;
     let mut idle_timeout = Duration::from_secs(10 * 60);
-    let mut fixture_stage_delay = Duration::from_millis(120);
     let mut arguments = arguments.into_iter();
     while let Some(argument) = arguments.next() {
         match argument.to_str() {
@@ -40,12 +39,6 @@ fn parse_options(arguments: Vec<OsString>) -> Result<DaemonOptions, String> {
                     "--idle-milliseconds requires a positive integer",
                 )?;
             }
-            Some("--fixture-stage-delay-milliseconds") => {
-                fixture_stage_delay = parse_duration(
-                    arguments.next(),
-                    "--fixture-stage-delay-milliseconds requires a positive integer",
-                )?;
-            }
             _ => return Err("unknown command-line argument".to_owned()),
         }
     }
@@ -58,7 +51,6 @@ fn parse_options(arguments: Vec<OsString>) -> Result<DaemonOptions, String> {
     Ok(DaemonOptions {
         state_dir,
         idle_timeout,
-        fixture_stage_delay,
     })
 }
 

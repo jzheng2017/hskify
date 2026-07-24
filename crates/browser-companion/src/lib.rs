@@ -13,6 +13,7 @@ pub mod fixtures;
 pub mod launcher;
 pub mod native_framing;
 pub mod origin;
+mod pipeline_adapter;
 pub mod server;
 
 pub use contracts::{
