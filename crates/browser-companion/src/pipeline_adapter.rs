@@ -1,12 +1,10 @@
-//! Thin browser adapter over Koharu's production cleaning pipeline.
-//!
-//! Gate 3 deliberately stops after detection, masks, OCR, and inpainting.
-//! The frozen result shape still contains translation fields, so until Gate 4
-//! they carry the OCR source text as an identity fallback and vocabulary is
-//! explicitly marked non-strict.
+//! Thin browser adapter over Koharu's production cleaning and local translation
+//! pipeline.
 
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::HashMap;
+use std::env;
+use std::fmt::Write as _;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,7 +13,17 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
 use camino::Utf8PathBuf;
+use hsk_control::{
+    CorrectionOutcome, HskControl, HskLevel as ControlHskLevel,
+    LookupRegionContext as ControlLookupRegion, PreservationViolation, ProperName,
+    ProperNameReason, ValidationReport, ViolationReason,
+};
 use image::{GrayImage, ImageFormat};
+use koharu_app::llm::{
+    FaithfulOcrRegion, FaithfulPageRequest, FaithfulRegionKind, FaithfulTranslation, HskRewrite,
+    HskRewritePageRequest, HskRewriteRegion, HskValidatorFeedback, PrecedingPageContext,
+    ProtectedName,
+};
 use koharu_app::pipeline::{self, Artifact, PipelineSpec, Scope};
 use koharu_app::{App, AppConfig, PipelineRunOptions, ProjectSession};
 use koharu_core::{
@@ -27,15 +35,24 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::OnceCell;
 
 use crate::contracts::{
-    BrowserCacheStatus, BrowserJobRequest, BrowserJobStage, BrowserRegion, BrowserTextLayout,
-    BrowserTextStyle, BrowserWarning, BrowserWarningCode, CleanImageMimeType, FontCategory, Point,
-    ReadingDirection, RegionKind, TextAlignment, VocabularyStatus, WritingMode,
+    BrowserCacheStatus, BrowserJobRequest, BrowserJobResult, BrowserJobStage, BrowserRegion,
+    BrowserTextLayout, BrowserTextStyle, BrowserWarning, BrowserWarningCode, CleanImageMimeType,
+    FontCategory, HskLevel, LookupRegion, LookupResult, LookupToken, Point, ReadingDirection,
+    RegionKind, TextAlignment, VocabularyException, VocabularyExceptionReason, VocabularyStatus,
+    WritingMode,
 };
 use crate::crypto::sha256_hex;
 
 const CACHE_MARKER_VERSION: u8 = 1;
 const PIPELINE_FINGERPRINT: &str = "gate3-v1:pp-doclayout-v3+comic-text-detector-seg+speech-bubble-segmentation+paddle-ocr-vl-1.6+lama-manga";
 const LOW_OCR_CONFIDENCE: f32 = 0.60;
+const RESOURCES_DIRECTORY_ENV: &str = "HSK_MANGA_RESOURCES_DIR";
+const HSK_RESOURCE_ENV: &str = "HSK_MANGA_HSK_PATH";
+const DICTIONARY_RESOURCE_ENV: &str = "HSK_MANGA_DICTIONARY_PATH";
+const QWEN_RESOURCE_ENV: &str = "HSK_MANGA_QWEN_MODEL_PATH";
+const HSK_RESOURCE_FILE: &str = "hsk-2.0.normalized.json";
+const DICTIONARY_RESOURCE_FILE: &str = "cc-cedict.normalized.json";
+const QWEN_RESOURCE_FILE: &str = "Qwen3.5-4B-Q4_K_M.gguf";
 
 pub(crate) type CleaningProgressSink = Arc<dyn Fn(CleaningProgress) + Send + Sync>;
 
@@ -49,6 +66,19 @@ pub(crate) struct CleaningInput {
 pub(crate) struct CleaningOutput {
     pub clean_image: Vec<u8>,
     pub clean_image_mime_type: CleanImageMimeType,
+    pub regions: Vec<BrowserRegion>,
+    pub warnings: Vec<BrowserWarning>,
+    pub cache: BrowserCacheStatus,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RetranslationInput {
+    pub request: BrowserJobRequest,
+    pub base_result: BrowserJobResult,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RetranslationOutput {
     pub regions: Vec<BrowserRegion>,
     pub warnings: Vec<BrowserWarning>,
     pub cache: BrowserCacheStatus,
@@ -94,11 +124,29 @@ pub(crate) trait CleaningPipeline: Send + Sync {
         cancel: Arc<AtomicBool>,
         progress: CleaningProgressSink,
     ) -> std::result::Result<CleaningOutput, CleaningError>;
+
+    async fn retranslate(
+        &self,
+        input: RetranslationInput,
+        cancel: Arc<AtomicBool>,
+        progress: CleaningProgressSink,
+    ) -> std::result::Result<RetranslationOutput, CleaningError>;
+
+    async fn lookup(
+        &self,
+        selected_text: String,
+        region: Option<BrowserRegion>,
+    ) -> std::result::Result<LookupResult, CleaningError>;
+
+    fn resources_ready(&self) -> bool;
 }
 
 pub(crate) struct KoharuPipeline {
     cache_root: PathBuf,
     app: OnceCell<Arc<App>>,
+    hsk_control: OnceCell<Arc<HskControl>>,
+    translation_model_ready: OnceCell<()>,
+    resources: std::result::Result<TranslationResourcePaths, String>,
 }
 
 impl KoharuPipeline {
@@ -106,6 +154,9 @@ impl KoharuPipeline {
         Self {
             cache_root,
             app: OnceCell::new(),
+            hsk_control: OnceCell::new(),
+            translation_model_ready: OnceCell::new(),
+            resources: TranslationResourcePaths::discover().map_err(|error| format!("{error:#}")),
         }
     }
 
@@ -131,6 +182,170 @@ impl KoharuPipeline {
             .join("cleaning-projects-v1")
             .join(format!("{source_sha256}.khrproj"))
     }
+
+    fn resource_paths(&self) -> Result<&TranslationResourcePaths> {
+        self.resources.as_ref().map_err(|error| anyhow!("{error}"))
+    }
+
+    async fn hsk_control(&self) -> Result<&Arc<HskControl>> {
+        let paths = self.resource_paths()?.clone();
+        self.hsk_control
+            .get_or_try_init(|| async move {
+                tokio::task::spawn_blocking(move || {
+                    let hsk_json = std::fs::read_to_string(&paths.hsk)
+                        .with_context(|| format!("read HSK resource {}", paths.hsk.display()))?;
+                    let dictionary_json =
+                        std::fs::read_to_string(&paths.dictionary).with_context(|| {
+                            format!("read dictionary resource {}", paths.dictionary.display())
+                        })?;
+                    HskControl::from_json(&hsk_json, &dictionary_json)
+                        .context("load complete HSK and dictionary resources")
+                        .map(Arc::new)
+                })
+                .await
+                .context("join HSK resource loading task")?
+            })
+            .await
+    }
+
+    async fn ensure_translation_model(&self, app: &Arc<App>) -> Result<()> {
+        let model_path = self.resource_paths()?.model.clone();
+        let app = app.clone();
+        self.translation_model_ready
+            .get_or_try_init(|| async move {
+                app.llm
+                    .load_local_file(koharu_app::llm::FAITHFUL_TRANSLATION_MODEL, model_path)
+                    .await
+                    .context("load local Qwen translation model from managed resource")
+            })
+            .await?;
+        Ok(())
+    }
+
+    async fn translate_cleaned_output(
+        &self,
+        request: &BrowserJobRequest,
+        output: &mut CleaningOutput,
+        reuse_faithful: bool,
+        cancel: &AtomicBool,
+        progress: &CleaningProgressSink,
+    ) -> std::result::Result<(), CleaningError> {
+        let control = self
+            .hsk_control()
+            .await
+            .map_err(|error| CleaningError::new("RESOURCES_NOT_READY", format!("{error:#}")))?;
+        let app = self.app().await.map_err(CleaningError::pipeline)?;
+        self.ensure_translation_model(app).await.map_err(|error| {
+            CleaningError::new("TRANSLATION_MODEL_LOAD_FAILED", format!("{error:#}"))
+        })?;
+        let translator = KoharuPageTranslationModel {
+            model: app.llm.clone(),
+        };
+        let translation_warnings = translate_regions_with(
+            &translator,
+            control,
+            request,
+            &mut output.regions,
+            reuse_faithful,
+            cancel,
+            progress,
+        )
+        .await
+        .map_err(|error| translation_error(error, cancel))?;
+        output.warnings.retain(|warning| {
+            !matches!(
+                warning.code,
+                BrowserWarningCode::HskException | BrowserWarningCode::HskRewriteFailed
+            )
+        });
+        output.warnings.extend(translation_warnings);
+        output.cache.translation_hit = false;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+struct TranslationResourcePaths {
+    hsk: PathBuf,
+    dictionary: PathBuf,
+    model: PathBuf,
+}
+
+impl TranslationResourcePaths {
+    fn discover() -> Result<Self> {
+        let root = nonempty_env_path(RESOURCES_DIRECTORY_ENV)
+            .or_else(default_resource_root)
+            .context(
+                "cannot determine the per-user resource directory; set HSK_MANGA_RESOURCES_DIR",
+            )?;
+        Ok(Self {
+            hsk: nonempty_env_path(HSK_RESOURCE_ENV)
+                .unwrap_or_else(|| root.join(HSK_RESOURCE_FILE)),
+            dictionary: nonempty_env_path(DICTIONARY_RESOURCE_ENV)
+                .unwrap_or_else(|| root.join(DICTIONARY_RESOURCE_FILE)),
+            model: nonempty_env_path(QWEN_RESOURCE_ENV)
+                .unwrap_or_else(|| root.join("models").join(QWEN_RESOURCE_FILE)),
+        })
+    }
+
+    fn all_present(&self) -> bool {
+        self.hsk.is_file() && self.dictionary.is_file() && self.model.is_file()
+    }
+}
+
+fn nonempty_env_path(name: &str) -> Option<PathBuf> {
+    env::var_os(name)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+fn default_resource_root() -> Option<PathBuf> {
+    env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .or_else(dirs::data_local_dir)
+        .map(|root| {
+            root.join("Mangalations")
+                .join("HSKMangaTranslator")
+                .join("resources")
+        })
+}
+
+#[async_trait]
+trait PageTranslationModel: Send + Sync {
+    async fn faithful(
+        &self,
+        request: &FaithfulPageRequest,
+        cancel: &AtomicBool,
+    ) -> Result<Vec<FaithfulTranslation>>;
+
+    async fn rewrite(
+        &self,
+        request: &HskRewritePageRequest,
+        cancel: &AtomicBool,
+    ) -> Result<Vec<HskRewrite>>;
+}
+
+struct KoharuPageTranslationModel {
+    model: Arc<koharu_app::llm::Model>,
+}
+
+#[async_trait]
+impl PageTranslationModel for KoharuPageTranslationModel {
+    async fn faithful(
+        &self,
+        request: &FaithfulPageRequest,
+        cancel: &AtomicBool,
+    ) -> Result<Vec<FaithfulTranslation>> {
+        self.model.translate_faithful_page(request, cancel).await
+    }
+
+    async fn rewrite(
+        &self,
+        request: &HskRewritePageRequest,
+        cancel: &AtomicBool,
+    ) -> Result<Vec<HskRewrite>> {
+        self.model.rewrite_hsk_page(request, cancel).await
+    }
 }
 
 #[async_trait]
@@ -153,13 +368,29 @@ impl CleaningPipeline for KoharuPipeline {
             && cached_artifacts_ready(&session, page_id)
         {
             progress(CleaningProgress {
+                stage: BrowserJobStage::Translating,
+                overall_progress: Some(0.58),
+                current: None,
+                total: None,
+                message: "Reusing cached Koharu cleaning result".to_owned(),
+            });
+            let mut output = extract_output(&session, page_id, &input.request, true)?;
+            self.translate_cleaned_output(
+                &input.request,
+                &mut output,
+                false,
+                cancel.as_ref(),
+                &progress,
+            )
+            .await?;
+            progress(CleaningProgress {
                 stage: BrowserJobStage::Packaging,
                 overall_progress: Some(0.98),
                 current: None,
                 total: None,
-                message: "Packaging cached Koharu cleaning result".to_owned(),
+                message: "Packaging translated browser result".to_owned(),
             });
-            return extract_output(&session, page_id, &input.request, true);
+            return Ok(output);
         }
 
         let app = self.app().await.map_err(CleaningError::pipeline)?;
@@ -175,7 +406,7 @@ impl CleaningPipeline for KoharuPipeline {
                 };
                 progress(CleaningProgress {
                     stage,
-                    overall_progress: Some(f32::from(tick.overall_percent) / 100.0),
+                    overall_progress: Some(f32::from(tick.overall_percent) / 100.0 * 0.55),
                     current: u32::try_from(tick.step_index + 1).ok(),
                     total: u32::try_from(tick.total_steps).ok(),
                     message: message.to_owned(),
@@ -237,17 +468,548 @@ impl CleaningPipeline for KoharuPipeline {
             ));
         }
 
+        let mut output = extract_output(&session, page_id, &input.request, false)?;
+        session.compact().map_err(CleaningError::pipeline)?;
+        write_cache_marker(&project_path, &input.request).map_err(CleaningError::pipeline)?;
+        self.translate_cleaned_output(
+            &input.request,
+            &mut output,
+            false,
+            cancel.as_ref(),
+            &progress,
+        )
+        .await?;
         progress(CleaningProgress {
             stage: BrowserJobStage::Packaging,
             overall_progress: Some(0.98),
             current: None,
             total: None,
-            message: "Packaging Koharu cleaning result".to_owned(),
+            message: "Packaging translated browser result".to_owned(),
         });
-        let output = extract_output(&session, page_id, &input.request, false)?;
-        session.compact().map_err(CleaningError::pipeline)?;
-        write_cache_marker(&project_path, &input.request).map_err(CleaningError::pipeline)?;
         Ok(output)
+    }
+
+    async fn retranslate(
+        &self,
+        input: RetranslationInput,
+        cancel: Arc<AtomicBool>,
+        progress: CleaningProgressSink,
+    ) -> std::result::Result<RetranslationOutput, CleaningError> {
+        let mut output = CleaningOutput {
+            clean_image: Vec::new(),
+            clean_image_mime_type: input.base_result.clean_image_mime_type,
+            regions: input.base_result.regions,
+            warnings: input.base_result.warnings,
+            cache: BrowserCacheStatus {
+                detection_hit: true,
+                ocr_hit: true,
+                inpaint_hit: true,
+                translation_hit: false,
+            },
+        };
+        self.translate_cleaned_output(
+            &input.request,
+            &mut output,
+            true,
+            cancel.as_ref(),
+            &progress,
+        )
+        .await?;
+        progress(CleaningProgress {
+            stage: BrowserJobStage::Packaging,
+            overall_progress: Some(0.98),
+            current: None,
+            total: None,
+            message: "Packaging HSK retranslation".to_owned(),
+        });
+        Ok(RetranslationOutput {
+            regions: output.regions,
+            warnings: output.warnings,
+            cache: output.cache,
+        })
+    }
+
+    async fn lookup(
+        &self,
+        selected_text: String,
+        region: Option<BrowserRegion>,
+    ) -> std::result::Result<LookupResult, CleaningError> {
+        let control = self
+            .hsk_control()
+            .await
+            .map_err(|error| CleaningError::new("RESOURCES_NOT_READY", format!("{error:#}")))?;
+        let proper_names = region
+            .as_ref()
+            .map(proper_names_from_region)
+            .unwrap_or_default();
+        let context = region.as_ref().map(|region| ControlLookupRegion {
+            displayed_chinese: region.displayed_chinese.clone(),
+            faithful_chinese: region.faithful_chinese.clone(),
+            source_english: region.source_english.clone(),
+        });
+        Ok(browser_lookup_result(control.lookup_with_region_context(
+            &selected_text,
+            &proper_names,
+            context,
+        )))
+    }
+
+    fn resources_ready(&self) -> bool {
+        self.resources
+            .as_ref()
+            .is_ok_and(TranslationResourcePaths::all_present)
+    }
+}
+
+struct RegionRewriteState<'a> {
+    id: String,
+    reading_order: u32,
+    source_english: String,
+    faithful_chinese: String,
+    proper_names: Vec<ProperName>,
+    correction: hsk_control::CorrectionLoop<'a>,
+    current_chinese: Option<String>,
+    validator_feedback: Vec<HskValidatorFeedback>,
+    preservation_feedback: Vec<String>,
+    final_report: Option<ValidationReport>,
+    failed: bool,
+}
+
+async fn translate_regions_with(
+    translator: &(dyn PageTranslationModel + Send + Sync),
+    control: &HskControl,
+    request: &BrowserJobRequest,
+    regions: &mut [BrowserRegion],
+    reuse_faithful: bool,
+    cancel: &AtomicBool,
+    progress: &CleaningProgressSink,
+) -> Result<Vec<BrowserWarning>> {
+    check_translation_cancelled(cancel)?;
+    if regions.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    if !reuse_faithful {
+        progress(CleaningProgress {
+            stage: BrowserJobStage::Translating,
+            overall_progress: Some(0.62),
+            current: None,
+            total: None,
+            message: "Translating the full page faithfully with local Qwen".to_owned(),
+        });
+        let faithful_request = FaithfulPageRequest {
+            regions: regions
+                .iter()
+                .map(|region| FaithfulOcrRegion {
+                    id: region.id.clone(),
+                    kind: faithful_region_kind(region.kind),
+                    reading_order: region.reading_order,
+                    source_english: region.source_english.clone(),
+                })
+                .collect(),
+            preceding_context: request
+                .preceding_context
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .map(|context| PrecedingPageContext {
+                    source_english: context.source_english.clone(),
+                    chinese: context.chinese.clone(),
+                })
+                .collect(),
+            // Browser mode currently has no evidence-backed name detector.
+            // Never manufacture protected names from capitalization alone.
+            protected_names: Vec::<ProtectedName>::new(),
+        };
+        let faithful = translator.faithful(&faithful_request, cancel).await?;
+        validate_faithful_coverage(regions, &faithful)?;
+        for (region, translation) in regions.iter_mut().zip(faithful) {
+            region.faithful_chinese = translation.text;
+        }
+    } else if regions
+        .iter()
+        .any(|region| region.faithful_chinese.trim().is_empty())
+    {
+        bail!("cached retranslation input is missing faithful Chinese");
+    }
+    check_translation_cancelled(cancel)?;
+
+    let selected_level = ControlHskLevel::new(u8::from(request.settings.hsk_level))?;
+    let mut states = regions
+        .iter()
+        .map(|region| {
+            let proper_names = proper_names_from_region(region);
+            RegionRewriteState {
+                id: region.id.clone(),
+                reading_order: region.reading_order,
+                source_english: region.source_english.clone(),
+                faithful_chinese: region.faithful_chinese.clone(),
+                correction: control.correction_loop(
+                    selected_level,
+                    &region.faithful_chinese,
+                    &proper_names,
+                ),
+                proper_names,
+                current_chinese: None,
+                validator_feedback: Vec::new(),
+                preservation_feedback: Vec::new(),
+                final_report: None,
+                failed: false,
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut pending = (0..states.len()).collect::<Vec<_>>();
+
+    for attempt in 0_u8..=hsk_control::MAX_CORRECTION_ATTEMPTS {
+        if pending.is_empty() {
+            break;
+        }
+        check_translation_cancelled(cancel)?;
+        progress(CleaningProgress {
+            stage: BrowserJobStage::HskRewriting,
+            overall_progress: Some(0.72 + f32::from(attempt) * 0.08),
+            current: Some(u32::from(attempt) + 1),
+            total: Some(u32::from(hsk_control::MAX_CORRECTION_ATTEMPTS) + 1),
+            message: if attempt == 0 {
+                format!(
+                    "Rewriting the full page for cumulative HSK {} vocabulary",
+                    request.settings.hsk_level as u8
+                )
+            } else {
+                format!("Correcting validator failures (attempt {attempt} of 2)")
+            },
+        });
+        let rewrite_request = HskRewritePageRequest {
+            requested_level: u8::from(request.settings.hsk_level),
+            correction_attempt: attempt,
+            final_attempt: attempt == hsk_control::MAX_CORRECTION_ATTEMPTS,
+            regions: pending
+                .iter()
+                .map(|index| {
+                    let state = &states[*index];
+                    HskRewriteRegion {
+                        id: state.id.clone(),
+                        reading_order: state.reading_order,
+                        source_english: state.source_english.clone(),
+                        faithful_chinese: state.faithful_chinese.clone(),
+                        current_chinese: state.current_chinese.clone(),
+                        protected_names: state
+                            .proper_names
+                            .iter()
+                            .map(|name| name.text.clone())
+                            .collect(),
+                        validator_feedback: state.validator_feedback.clone(),
+                        preservation_feedback: state.preservation_feedback.clone(),
+                    }
+                })
+                .collect(),
+        };
+        let rewrites = translator.rewrite(&rewrite_request, cancel).await?;
+        validate_rewrite_coverage(&rewrite_request, &rewrites)?;
+        check_translation_cancelled(cancel)?;
+        progress(CleaningProgress {
+            stage: BrowserJobStage::HskValidating,
+            overall_progress: Some(0.78 + f32::from(attempt) * 0.08),
+            current: Some(u32::from(attempt) + 1),
+            total: Some(u32::from(hsk_control::MAX_CORRECTION_ATTEMPTS) + 1),
+            message: "Validating HSK vocabulary and preservation deterministically".to_owned(),
+        });
+
+        let mut retry = Vec::new();
+        for (state_index, rewrite) in pending.iter().copied().zip(rewrites) {
+            let state = &mut states[state_index];
+            state.current_chinese = Some(rewrite.text.clone());
+            match state.correction.evaluate(&rewrite.text) {
+                CorrectionOutcome::Accepted { report } => {
+                    state.final_report = Some(report);
+                }
+                CorrectionOutcome::Retry {
+                    report,
+                    preservation_violations,
+                    ..
+                } => {
+                    state.validator_feedback = validator_feedback(&report);
+                    state.preservation_feedback = preservation_feedback(&preservation_violations);
+                    retry.push(state_index);
+                }
+                CorrectionOutcome::Failed {
+                    report,
+                    preservation_violations,
+                } => {
+                    state.validator_feedback = validator_feedback(&report);
+                    state.preservation_feedback = preservation_feedback(&preservation_violations);
+                    state.final_report = Some(report);
+                    state.failed = true;
+                }
+                CorrectionOutcome::Terminated => {
+                    bail!("HSK correction loop terminated before producing a final report")
+                }
+            }
+        }
+        pending = retry;
+    }
+
+    if !pending.is_empty() {
+        bail!("HSK correction loop exceeded its deterministic attempt bound");
+    }
+
+    let mut warnings = Vec::new();
+    for (region, state) in regions.iter_mut().zip(states) {
+        let report = state
+            .final_report
+            .context("HSK rewrite did not produce a final validation report")?;
+        region.faithful_chinese = state.faithful_chinese;
+        region.displayed_chinese = report.normalized_text.clone();
+        region.pinyin = control
+            .lookup(&report.normalized_text, &state.proper_names)
+            .tokens
+            .into_iter()
+            .filter_map(|token| (!token.pinyin.trim().is_empty()).then_some(token.pinyin))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let exceptions = report
+            .exceptions
+            .iter()
+            .map(|exception| VocabularyException {
+                text: exception.text.clone(),
+                reason: browser_name_reason(exception.reason),
+            })
+            .collect::<Vec<_>>();
+        region.vocabulary = VocabularyStatus {
+            requested_hsk_level: request.settings.hsk_level,
+            strictly_valid: report.strictly_valid && exceptions.is_empty() && !state.failed,
+            exceptions,
+        };
+
+        if !region.vocabulary.exceptions.is_empty() {
+            warnings.push(BrowserWarning {
+                code: BrowserWarningCode::HskException,
+                region_id: Some(region.id.clone()),
+                message: "Vocabulary is restricted to the requested cumulative HSK level, except for the explicitly labelled name."
+                    .to_owned(),
+            });
+        }
+        if state.failed {
+            warnings.push(BrowserWarning {
+                code: BrowserWarningCode::HskRewriteFailed,
+                region_id: Some(region.id.clone()),
+                message: unresolved_rewrite_message(
+                    &state.validator_feedback,
+                    &state.preservation_feedback,
+                ),
+            });
+        }
+    }
+    Ok(warnings)
+}
+
+fn validate_faithful_coverage(
+    regions: &[BrowserRegion],
+    faithful: &[FaithfulTranslation],
+) -> Result<()> {
+    if regions.len() != faithful.len() {
+        bail!(
+            "faithful translation returned {} regions; expected {}",
+            faithful.len(),
+            regions.len()
+        );
+    }
+    for (index, (region, translation)) in regions.iter().zip(faithful).enumerate() {
+        if region.id != translation.region_id {
+            bail!(
+                "faithful translation order mismatch at index {index}: expected `{}`, got `{}`",
+                region.id,
+                translation.region_id
+            );
+        }
+        if translation.text.trim().is_empty() {
+            bail!("faithful translation for `{}` is empty", region.id);
+        }
+    }
+    Ok(())
+}
+
+fn validate_rewrite_coverage(
+    request: &HskRewritePageRequest,
+    rewrites: &[HskRewrite],
+) -> Result<()> {
+    if request.regions.len() != rewrites.len() {
+        bail!(
+            "HSK rewrite returned {} regions; expected {}",
+            rewrites.len(),
+            request.regions.len()
+        );
+    }
+    for (index, (region, rewrite)) in request.regions.iter().zip(rewrites).enumerate() {
+        if region.id != rewrite.region_id {
+            bail!(
+                "HSK rewrite order mismatch at index {index}: expected `{}`, got `{}`",
+                region.id,
+                rewrite.region_id
+            );
+        }
+        if rewrite.text.trim().is_empty() {
+            bail!("HSK rewrite for `{}` is empty", region.id);
+        }
+    }
+    Ok(())
+}
+
+fn validator_feedback(report: &ValidationReport) -> Vec<HskValidatorFeedback> {
+    report
+        .violations
+        .iter()
+        .map(|violation| HskValidatorFeedback {
+            text: violation.text.clone(),
+            start_char: violation.start_char,
+            end_char: violation.end_char,
+            reason: match &violation.reason {
+                ViolationReason::AboveSelectedHskLevel { required_level } => {
+                    format!("above-selected-hsk-level:{}", required_level.get())
+                }
+                ViolationReason::KnownDictionaryWord => "known-dictionary-word".to_owned(),
+                ViolationReason::UnknownChineseWord => "unknown-chinese-word".to_owned(),
+                ViolationReason::NonChineseLexicalToken => "non-chinese-lexical-token".to_owned(),
+            },
+            suggested_words: violation.suggested_words.clone(),
+        })
+        .collect()
+}
+
+fn preservation_feedback(violations: &[PreservationViolation]) -> Vec<String> {
+    violations
+        .iter()
+        .map(|violation| match violation {
+            PreservationViolation::NumbersChanged { expected, actual } => {
+                format!("numbers changed: expected {expected:?}, actual {actual:?}")
+            }
+            PreservationViolation::ProperNameOccurrencesChanged {
+                text,
+                expected,
+                actual,
+            } => format!(
+                "protected name `{text}` occurrence count changed: expected {expected}, actual {actual}"
+            ),
+            PreservationViolation::NegationMarkersChanged { expected, actual } => {
+                format!("negation markers changed: expected {expected:?}, actual {actual:?}")
+            }
+        })
+        .collect()
+}
+
+fn unresolved_rewrite_message(
+    validator_feedback: &[HskValidatorFeedback],
+    preservation_feedback: &[String],
+) -> String {
+    let mut message =
+        "HSK rewrite remained invalid after the initial pass and two correction attempts"
+            .to_owned();
+    if !validator_feedback.is_empty() {
+        let spans = validator_feedback
+            .iter()
+            .map(|violation| {
+                format!(
+                    "`{}` at {}..{} ({})",
+                    violation.text, violation.start_char, violation.end_char, violation.reason
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let _ = write!(message, ": {spans}");
+    }
+    if !preservation_feedback.is_empty() {
+        let _ = write!(
+            message,
+            "{}preservation: {}",
+            if validator_feedback.is_empty() {
+                ": "
+            } else {
+                "; "
+            },
+            preservation_feedback.join("; ")
+        );
+    }
+    message
+}
+
+pub(crate) fn proper_names_from_region(region: &BrowserRegion) -> Vec<ProperName> {
+    region
+        .vocabulary
+        .exceptions
+        .iter()
+        .map(|exception| ProperName {
+            text: exception.text.clone(),
+            reason: control_name_reason(exception.reason),
+        })
+        .collect()
+}
+
+pub(crate) fn browser_lookup_result(result: hsk_control::LookupResult) -> LookupResult {
+    LookupResult {
+        selected_text: result.selected_text,
+        tokens: result
+            .tokens
+            .into_iter()
+            .map(|token| LookupToken {
+                simplified: token.simplified,
+                pinyin: token.pinyin,
+                definitions: token.definitions,
+                hsk_level: token
+                    .hsk_level
+                    .and_then(|level| HskLevel::try_from(level.get()).ok()),
+                proper_name: token.proper_name,
+            })
+            .collect(),
+        region: result.region.map(|region| LookupRegion {
+            displayed_chinese: region.displayed_chinese,
+            faithful_chinese: region.faithful_chinese,
+            source_english: region.source_english,
+        }),
+    }
+}
+
+fn control_name_reason(reason: VocabularyExceptionReason) -> ProperNameReason {
+    match reason {
+        VocabularyExceptionReason::PersonName => ProperNameReason::PersonName,
+        VocabularyExceptionReason::PlaceName => ProperNameReason::PlaceName,
+        VocabularyExceptionReason::Title => ProperNameReason::Title,
+        VocabularyExceptionReason::UnavoidableProperNoun => ProperNameReason::UnavoidableProperNoun,
+    }
+}
+
+fn browser_name_reason(reason: ProperNameReason) -> VocabularyExceptionReason {
+    match reason {
+        ProperNameReason::PersonName => VocabularyExceptionReason::PersonName,
+        ProperNameReason::PlaceName => VocabularyExceptionReason::PlaceName,
+        ProperNameReason::Title => VocabularyExceptionReason::Title,
+        ProperNameReason::UnavoidableProperNoun => VocabularyExceptionReason::UnavoidableProperNoun,
+    }
+}
+
+fn faithful_region_kind(kind: RegionKind) -> FaithfulRegionKind {
+    match kind {
+        RegionKind::Dialogue => FaithfulRegionKind::Dialogue,
+        RegionKind::Caption => FaithfulRegionKind::Caption,
+        RegionKind::Thought => FaithfulRegionKind::Thought,
+        RegionKind::Sfx => FaithfulRegionKind::Sfx,
+    }
+}
+
+fn check_translation_cancelled(cancel: &AtomicBool) -> Result<()> {
+    if cancel.load(Ordering::Acquire) {
+        bail!("cancelled");
+    }
+    Ok(())
+}
+
+fn translation_error(error: anyhow::Error, cancel: &AtomicBool) -> CleaningError {
+    if cancel.load(Ordering::Acquire) || error.to_string().contains("cancelled") {
+        CleaningError::new("CANCELLED", "Translation was cancelled.")
+    } else {
+        CleaningError::new(
+            "TRANSLATION_FAILED",
+            format!("Local faithful/HSK translation failed: {error:#}"),
+        )
     }
 }
 
@@ -903,12 +1665,318 @@ fn rgba(color: [u8; 4]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+    use std::sync::atomic::AtomicUsize;
+
+    use anyhow::anyhow;
     use image::{DynamicImage, GenericImageView, GrayImage, Luma, Rgba, RgbaImage};
     use koharu_core::{BlobRef, MaskData};
     use tempfile::tempdir;
 
     use super::*;
     use crate::contracts::{HskLevel, Validate};
+
+    struct FakePageTranslationModel {
+        faithful_outputs: Mutex<VecDeque<Vec<FaithfulTranslation>>>,
+        rewrite_outputs: Mutex<VecDeque<Vec<HskRewrite>>>,
+        rewrite_requests: Mutex<Vec<HskRewritePageRequest>>,
+        faithful_calls: AtomicUsize,
+        rewrite_calls: AtomicUsize,
+    }
+
+    impl FakePageTranslationModel {
+        fn new(
+            faithful: impl IntoIterator<Item = Vec<FaithfulTranslation>>,
+            rewrites: impl IntoIterator<Item = Vec<HskRewrite>>,
+        ) -> Self {
+            Self {
+                faithful_outputs: Mutex::new(faithful.into_iter().collect()),
+                rewrite_outputs: Mutex::new(rewrites.into_iter().collect()),
+                rewrite_requests: Mutex::new(Vec::new()),
+                faithful_calls: AtomicUsize::new(0),
+                rewrite_calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl PageTranslationModel for FakePageTranslationModel {
+        async fn faithful(
+            &self,
+            _request: &FaithfulPageRequest,
+            cancel: &AtomicBool,
+        ) -> Result<Vec<FaithfulTranslation>> {
+            check_translation_cancelled(cancel)?;
+            self.faithful_calls.fetch_add(1, Ordering::Relaxed);
+            self.faithful_outputs
+                .lock()
+                .unwrap()
+                .pop_front()
+                .ok_or_else(|| anyhow!("fake faithful output exhausted"))
+        }
+
+        async fn rewrite(
+            &self,
+            request: &HskRewritePageRequest,
+            cancel: &AtomicBool,
+        ) -> Result<Vec<HskRewrite>> {
+            check_translation_cancelled(cancel)?;
+            self.rewrite_calls.fetch_add(1, Ordering::Relaxed);
+            self.rewrite_requests.lock().unwrap().push(request.clone());
+            self.rewrite_outputs
+                .lock()
+                .unwrap()
+                .pop_front()
+                .ok_or_else(|| anyhow!("fake rewrite output exhausted"))
+        }
+    }
+
+    fn seed_control() -> HskControl {
+        HskControl::from_json_with_policy(
+            include_str!("../../../data/hsk/test-seed.normalized.json"),
+            include_str!("../../../data/dictionary/test-seed.normalized.json"),
+            hsk_control::LoadPolicy::AllowIncompleteTestSeed,
+        )
+        .unwrap()
+    }
+
+    fn translation_request(level: HskLevel) -> BrowserJobRequest {
+        let mut request: BrowserJobRequest = serde_json::from_str(include_str!(
+            "../../../fixtures/contracts/job-request.valid.json"
+        ))
+        .unwrap();
+        request.settings.hsk_level = level;
+        request
+    }
+
+    fn translation_region(source: &str) -> BrowserRegion {
+        let request = translation_request(HskLevel::Two);
+        let mut region = crate::fixtures::result("job", "blob", &request)
+            .regions
+            .remove(0);
+        region.id = "region-1".to_owned();
+        region.reading_order = 0;
+        region.source_english = source.to_owned();
+        region.faithful_chinese = source.to_owned();
+        region.displayed_chinese = source.to_owned();
+        region.pinyin.clear();
+        region.vocabulary.strictly_valid = false;
+        region.vocabulary.exceptions.clear();
+        region
+    }
+
+    fn faithful(text: &str) -> Vec<FaithfulTranslation> {
+        vec![FaithfulTranslation {
+            region_id: "region-1".to_owned(),
+            text: text.to_owned(),
+        }]
+    }
+
+    fn rewrite(text: &str) -> Vec<HskRewrite> {
+        vec![HskRewrite {
+            region_id: "region-1".to_owned(),
+            text: text.to_owned(),
+        }]
+    }
+
+    fn no_progress() -> CleaningProgressSink {
+        Arc::new(|_| {})
+    }
+
+    #[tokio::test]
+    async fn valid_rewrite_fills_faithful_displayed_pinyin_and_strict_vocabulary() {
+        let control = seed_control();
+        let model =
+            FakePageTranslationModel::new([faithful("我们马上离开")], [rewrite("我们马上离开")]);
+        let mut regions = vec![translation_region("We leave now.")];
+        let warnings = translate_regions_with(
+            &model,
+            &control,
+            &translation_request(HskLevel::Two),
+            &mut regions,
+            false,
+            &AtomicBool::new(false),
+            &no_progress(),
+        )
+        .await
+        .unwrap();
+
+        assert!(warnings.is_empty());
+        assert_eq!(model.faithful_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(model.rewrite_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(regions[0].faithful_chinese, "我们马上离开");
+        assert_eq!(regions[0].displayed_chinese, "我们马上离开");
+        assert!(regions[0].pinyin.contains("wǒ men"));
+        assert!(regions[0].pinyin.contains("lí kāi"));
+        assert!(regions[0].vocabulary.strictly_valid);
+        assert_eq!(regions[0].vocabulary.requested_hsk_level, HskLevel::Two);
+    }
+
+    #[tokio::test]
+    async fn validator_feedback_drives_at_most_two_preserving_corrections() {
+        let control = seed_control();
+        let model = FakePageTranslationModel::new(
+            [faithful("我们不马上离开2个")],
+            [
+                rewrite("我们立即离开"),
+                rewrite("我们立即离开"),
+                rewrite("我们不马上离开2个"),
+            ],
+        );
+        let mut regions = vec![translation_region("We do not leave 2.")];
+        let warnings = translate_regions_with(
+            &model,
+            &control,
+            &translation_request(HskLevel::Two),
+            &mut regions,
+            false,
+            &AtomicBool::new(false),
+            &no_progress(),
+        )
+        .await
+        .unwrap();
+
+        assert!(warnings.is_empty());
+        assert_eq!(model.rewrite_calls.load(Ordering::Relaxed), 3);
+        assert_eq!(regions[0].displayed_chinese, "我们不马上离开2个");
+        assert!(regions[0].vocabulary.strictly_valid);
+        let requests = model.rewrite_requests.lock().unwrap();
+        assert_eq!(requests[0].correction_attempt, 0);
+        assert_eq!(requests[1].correction_attempt, 1);
+        assert!(!requests[1].final_attempt);
+        assert_eq!(requests[2].correction_attempt, 2);
+        assert!(requests[2].final_attempt);
+        assert_eq!(requests[1].regions[0].validator_feedback[0].text, "立即");
+        assert!(
+            requests[1].regions[0]
+                .preservation_feedback
+                .iter()
+                .any(|feedback| feedback.starts_with("numbers changed"))
+        );
+        assert!(
+            requests[1].regions[0]
+                .preservation_feedback
+                .iter()
+                .any(|feedback| feedback.starts_with("negation markers changed"))
+        );
+    }
+
+    #[tokio::test]
+    async fn unresolved_third_candidate_is_non_strict_and_warned() {
+        let control = seed_control();
+        let model = FakePageTranslationModel::new(
+            [faithful("我们马上离开")],
+            [
+                rewrite("我们立即离开"),
+                rewrite("我们立即离开"),
+                rewrite("我们立即离开"),
+            ],
+        );
+        let mut regions = vec![translation_region("We leave now.")];
+        let warnings = translate_regions_with(
+            &model,
+            &control,
+            &translation_request(HskLevel::Two),
+            &mut regions,
+            false,
+            &AtomicBool::new(false),
+            &no_progress(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(model.rewrite_calls.load(Ordering::Relaxed), 3);
+        assert!(!regions[0].vocabulary.strictly_valid);
+        assert_eq!(regions[0].displayed_chinese, "我们立即离开");
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].code, BrowserWarningCode::HskRewriteFailed);
+        assert!(
+            warnings[0]
+                .message
+                .contains("initial pass and two correction attempts")
+        );
+        assert!(warnings[0].message.contains("立即"));
+    }
+
+    #[tokio::test]
+    async fn only_explicit_names_become_reported_exceptions() {
+        let control = seed_control();
+        let model = FakePageTranslationModel::new([], [rewrite("小明离开")]);
+        let mut region = translation_region("Xiaoming leaves.");
+        region.faithful_chinese = "小明离开".to_owned();
+        region.vocabulary.exceptions.push(VocabularyException {
+            text: "小明".to_owned(),
+            reason: VocabularyExceptionReason::PersonName,
+        });
+        let mut regions = vec![region];
+        let warnings = translate_regions_with(
+            &model,
+            &control,
+            &translation_request(HskLevel::Two),
+            &mut regions,
+            true,
+            &AtomicBool::new(false),
+            &no_progress(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(model.faithful_calls.load(Ordering::Relaxed), 0);
+        assert!(!regions[0].vocabulary.strictly_valid);
+        assert_eq!(regions[0].vocabulary.exceptions[0].text, "小明");
+        assert_eq!(warnings[0].code, BrowserWarningCode::HskException);
+    }
+
+    #[tokio::test]
+    async fn cancellation_stops_before_any_translation_model_call() {
+        let control = seed_control();
+        let model = FakePageTranslationModel::new([], []);
+        let mut regions = vec![translation_region("We leave now.")];
+        let error = translate_regions_with(
+            &model,
+            &control,
+            &translation_request(HskLevel::Two),
+            &mut regions,
+            false,
+            &AtomicBool::new(true),
+            &no_progress(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("cancelled"));
+        assert_eq!(model.faithful_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(model.rewrite_calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn browser_lookup_uses_real_longest_match_data_and_region_context() {
+        let control = seed_control();
+        let result = browser_lookup_result(control.lookup_with_region_context(
+            "研究生离开",
+            &[],
+            Some(ControlLookupRegion {
+                displayed_chinese: "研究生离开".to_owned(),
+                faithful_chinese: "研究生离开".to_owned(),
+                source_english: "The graduate student leaves.".to_owned(),
+            }),
+        ));
+
+        assert_eq!(
+            result
+                .tokens
+                .iter()
+                .map(|token| token.simplified.as_str())
+                .collect::<Vec<_>>(),
+            ["研究生", "离开"]
+        );
+        assert_eq!(result.tokens[0].pinyin, "yán jiū shēng");
+        assert_eq!(result.tokens[1].hsk_level, Some(HskLevel::Two));
+        assert_eq!(
+            result.region.unwrap().source_english,
+            "The graduate student leaves."
+        );
+    }
 
     fn png(image: DynamicImage) -> Vec<u8> {
         let mut bytes = Cursor::new(Vec::new());

@@ -1,7 +1,8 @@
-# Browser companion: secure Koharu-backed Gate 3
+# Browser companion: secure Koharu-backed Gate 5
 
-Status: Workstream B implementation through Gate 3 (real local detection,
-bubble/text masks, English OCR, and inpainting; no translation or HSK rewrite).
+Status: Workstream B implementation through Gate 5 (real local detection,
+bubble/text masks, English OCR, inpainting, full-page faithful translation,
+HSK rewrite/validation, and dictionary lookup).
 
 ## Delivered shape
 
@@ -61,14 +62,15 @@ UUID still matches.
 - There is no telemetry, remote fetch, cloud credential, URL-fetch endpoint,
   or manga egress path.
 
-## Koharu cleaning adapter and limits
+## Koharu cleaning and translation adapter
 
 `POST /browser/v1/jobs` now retains the validated source under the existing
 daemon bounds and runs the production `koharu_app::pipeline::run` path. The
-Gate-3 spec uses Koharu's configured detector, text segmenter, bubble
-segmenter, English OCR, and manga inpainter. It deliberately omits the
-translator, HSK rewrite, and renderer. Retranslation therefore returns the
-explicit `TRANSLATION_NOT_AVAILABLE` error until Gate 4.
+cleaning spec uses Koharu's configured detector, text segmenter, bubble
+segmenter, English OCR, and manga inpainter. The cleaned page then runs one
+full-page faithful English-to-Simplified-Chinese request through the local
+Qwen model, followed by an HSK-targeted rewrite through that same loaded
+model.
 
 Each source hash owns a persistent Koharu project. Successful runs compact the
 project and write a versioned pipeline marker; a later identical upload can
@@ -79,13 +81,42 @@ derived from Koharu's distinct-ID bubble mask. Region IDs hash the source and
 normalized text geometry, so cache hits preserve IDs. OCR confidence below
 0.60 emits a region-scoped `LOW_OCR_CONFIDENCE` warning.
 
-The frozen protocol requires translation-shaped fields for dialogue regions.
-At Gate 3 those fields contain the source English as an explicit identity
-fallback, pinyin is empty, vocabulary is non-strict, and
-`translationHit=false`; no translation or HSK claim is made. Jobs remain
-daemon-owned while Firefox backgrounds suspend, progress monotonically, can be
-polled with a refreshed session, and share the same cancellation atomic used
-by Koharu so a worker cannot revive a cancelled state.
+Every HSK candidate is checked by `hsk-control`. Only invalid regions are sent
+back with exact vocabulary and preservation feedback, and the loop stops after
+the initial rewrite plus at most two corrections. Numbers, explicit protected
+names, and negation markers are preservation requirements. Results carry the
+faithful Chinese, normalized displayed Chinese, pinyin, strict-vocabulary
+status, explicit proper-name exceptions, and a visible
+`HSK_REWRITE_FAILED` warning when the bounded loop cannot produce a strict
+candidate.
+
+`POST /browser/v1/jobs/{jobId}/retranslate` retains the clean blob and
+detection/OCR/inpaint cache entries. A changed HSK level reruns only the HSK
+rewrite and validator; an identical level and dialogue context is a translation
+cache hit. `POST /browser/v1/lookup` uses the same complete HSK and dictionary
+resources for longest-match pinyin, definitions, HSK overlay, and optional
+region context.
+
+Jobs remain daemon-owned while Firefox backgrounds suspend, progress
+monotonically, can be polled with a refreshed session, and share the same
+cancellation atomic used by Koharu so a worker cannot revive a cancelled
+state.
+
+Translation resources are loaded lazily from
+`%LOCALAPPDATA%\Mangalations\HSKMangaTranslator\resources`:
+
+```text
+hsk-2.0.normalized.json
+cc-cedict.normalized.json
+models/Qwen3.5-4B-Q4_K_M.gguf
+```
+
+`HSK_MANGA_RESOURCES_DIR`, `HSK_MANGA_HSK_PATH`,
+`HSK_MANGA_DICTIONARY_PATH`, and `HSK_MANGA_QWEN_MODEL_PATH` provide explicit
+local path overrides. Handshake, health, and setup status report missing
+resources until all three files are present.
+
+## Limits
 
 Default limits are:
 
@@ -141,15 +172,16 @@ CJK font bank planned for Gate 6.
 
 ## Koharu reuse boundary
 
-Gate 3 reuses `ProjectSession` and its content-addressed `BlobStore`,
+The browser companion reuses `ProjectSession` and its content-addressed `BlobStore`,
 `RuntimeManager`, Koharu's engine registry, and
 `koharu_app::pipeline::run`. The browser layer only adapts progress,
 cancellation, scene artifacts, stable protocol geometry, warnings, and bounded
 blob retention. It does not introduce a second detector/OCR/inpaint engine.
 
-Health/setup, the lightweight lookup scaffold, and the fallback font remain
-the frozen protocol fixtures from Gate 2. Translation/HSK work begins at Gate
-4, while production font/style integration remains Gate 6.
+Faithful and HSK prompts share Koharu's in-process local model state.
+Vocabulary validation and lookup reuse `hsk-control`; no parallel tokenizer or
+dictionary implementation exists in the browser crate. Production font/style
+integration remains Gate 6.
 
 ## Registration assets
 
@@ -167,8 +199,9 @@ Run from the repository root:
 ```text
 cargo fmt -p browser-companion -- --check
 cargo check -p browser-companion
-cargo test -p browser-companion --all-targets
-cargo clippy -p browser-companion --all-targets -- -D warnings
+cargo test -p browser-companion -p koharu-app --all-targets
+cargo test -p hsk-control --all-features --all-targets
+cargo clippy -p browser-companion -p koharu-app --all-targets -- -D warnings
 sh -n installers/linux/native-host-registration/register.sh \
   installers/linux/native-host-registration/unregister.sh \
   installers/macos/native-host-registration/register.sh \
@@ -198,6 +231,16 @@ issuance; it does not exercise launcher spawn or download production models.
 ### Evidence captured 2026-07-24
 
 On the Windows Codex development harness:
+
+- Gate 5: `cargo test -p browser-companion -p koharu-app --all-targets`
+  passed 45 companion library tests, all companion integration tests, and 58
+  Koharu library tests; the opt-in real-model smoke and production breakaway
+  probe remained explicitly ignored.
+- Gate 5: `cargo test -p hsk-control --all-features --all-targets` passed all
+  unit, remediation, reproducibility, and workstream tests; only the explicit
+  full-scale performance smoke remained ignored.
+- Gate 5: `cargo fmt --all -- --check` and `cargo clippy -p
+  browser-companion -p koharu-app --all-targets -- -D warnings` passed.
 
 - `cargo fmt -p browser-companion -- --check`, `cargo check -p
   browser-companion --lib`, and `cargo clippy -p browser-companion

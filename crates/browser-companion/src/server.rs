@@ -33,15 +33,16 @@ use uuid::Uuid;
 
 use crate::contracts::{
     BrowserCapabilities, BrowserJobCreated, BrowserJobRequest, BrowserJobResult, BrowserJobState,
-    BrowserJobStatus, ErrorResponse, HealthResponse, HskLevel, LookupRegion, LookupRequest,
-    NativeReadyResponse, NativeReadyType, RetranslateRequest, Validate,
+    BrowserJobStatus, BrowserSetupState, BrowserSetupStatus, ErrorResponse, HealthResponse,
+    HealthStatus, HskLevel, LookupRequest, NativeReadyResponse, NativeReadyType,
+    RetranslateRequest, Validate,
 };
 use crate::crypto::{SECRET_BYTES, decode_secret, generate_secret, secrets_equal, sha256_hex};
 use crate::fixtures;
 use crate::origin::validate_extension_origin;
 use crate::pipeline_adapter::{
     CleaningError, CleaningInput, CleaningOutput, CleaningPipeline, CleaningProgress,
-    KoharuPipeline,
+    KoharuPipeline, RetranslationInput, RetranslationOutput,
 };
 use crate::{CONTROL_HEADER, PROTOCOL_HEADER};
 
@@ -122,17 +123,24 @@ struct JobRecord {
     sequence: u64,
     status: RwLock<BrowserJobStatus>,
     result: RwLock<Option<BrowserJobResult>>,
+    request: RwLock<BrowserJobRequest>,
     source_bytes: Mutex<Option<Arc<[u8]>>>,
     cancel: Arc<AtomicBool>,
     active: AtomicBool,
 }
 
 impl JobRecord {
-    fn new(sequence: u64, status: BrowserJobStatus, source_bytes: Arc<[u8]>) -> Self {
+    fn new(
+        sequence: u64,
+        status: BrowserJobStatus,
+        source_bytes: Arc<[u8]>,
+        request: BrowserJobRequest,
+    ) -> Self {
         Self {
             sequence,
             status: RwLock::new(status),
             result: RwLock::new(None),
+            request: RwLock::new(request),
             source_bytes: Mutex::new(Some(source_bytes)),
             cancel: Arc::new(AtomicBool::new(false)),
             active: AtomicBool::new(true),
@@ -151,6 +159,17 @@ impl JobRecord {
             .read()
             .expect("job result lock poisoned")
             .clone()
+    }
+
+    fn request(&self) -> BrowserJobRequest {
+        self.request
+            .read()
+            .expect("job request lock poisoned")
+            .clone()
+    }
+
+    fn replace_request(&self, request: BrowserJobRequest) {
+        *self.request.write().expect("job request lock poisoned") = request;
     }
 
     fn source_bytes(&self) -> Option<Arc<[u8]>> {
@@ -511,7 +530,7 @@ impl BridgeState {
                     HskLevel::Five,
                     HskLevel::Six,
                 ],
-                models_ready: true,
+                models_ready: self.pipeline.resources_ready(),
             },
         })
     }
@@ -607,7 +626,7 @@ impl BridgeState {
     fn reserve_uploaded_job(
         &self,
         source_bytes: Arc<[u8]>,
-        _request: &BrowserJobRequest,
+        request: &BrowserJobRequest,
     ) -> Result<(String, Arc<JobRecord>), ApiError> {
         let mut storage = self.storage.write().expect("storage lock poisoned");
         storage.make_room_for_job(&self.config.limits, source_bytes.len())?;
@@ -626,12 +645,17 @@ impl BridgeState {
             overall_progress: Some(0.0),
             current: None,
             total: None,
-            message: "Queued for local Koharu cleaning".to_owned(),
+            message: "Queued for local cleaning and translation".to_owned(),
             error_code: None,
         };
         status.validate().map_err(|_| ApiError::internal())?;
         let sequence = storage.next_sequence();
-        let record = Arc::new(JobRecord::new(sequence, status, source_bytes));
+        let record = Arc::new(JobRecord::new(
+            sequence,
+            status,
+            source_bytes,
+            request.clone(),
+        ));
         let previous = storage.jobs.insert(job_id.clone(), record.clone());
         debug_assert!(previous.is_none());
         self.active_jobs.fetch_add(1, Ordering::AcqRel);
@@ -721,13 +745,133 @@ impl BridgeState {
             overall_progress: Some(1.0),
             current: None,
             total: None,
-            message: "Koharu cleaning complete".to_owned(),
+            message: "Local cleaning and HSK translation complete".to_owned(),
             error_code: None,
         };
         drop(storage);
         self.touch();
         Ok(true)
     }
+
+    fn begin_retranslation(
+        &self,
+        record: &Arc<JobRecord>,
+        request: RetranslateRequest,
+    ) -> Result<(BrowserJobRequest, BrowserJobResult, bool), ApiError> {
+        let mut status = record.status.write().expect("job status lock poisoned");
+        if status.state != BrowserJobState::Complete {
+            return Err(ApiError::conflict(
+                "JOB_NOT_COMPLETE",
+                "Only a complete browser job can be retranslated.",
+            ));
+        }
+        let base_result = record.result().ok_or_else(ApiError::internal)?;
+        let previous_request = record.request();
+        let mut next_request = previous_request.clone();
+        next_request.settings.hsk_standard = request.settings.hsk_standard;
+        next_request.settings.hsk_level = request.settings.hsk_level;
+        next_request.preceding_context = request.preceding_context;
+        next_request.validate().map_err(|_| {
+            ApiError::bad_request(
+                "INVALID_RETRANSLATE_REQUEST",
+                "The retranslation request failed protocol validation.",
+            )
+        })?;
+        let translation_cache_hit = previous_request.settings.hsk_level
+            == next_request.settings.hsk_level
+            && dialogue_contexts_equal(
+                previous_request.preceding_context.as_deref(),
+                next_request.preceding_context.as_deref(),
+            );
+
+        record.cancel.store(false, Ordering::Release);
+        if record
+            .active
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(ApiError::conflict(
+                "JOB_ALREADY_RUNNING",
+                "The browser job is already running.",
+            ));
+        }
+        *status = BrowserJobStatus {
+            revision: status.revision.saturating_add(1),
+            job_id: status.job_id.clone(),
+            state: BrowserJobState::Running,
+            stage: crate::contracts::BrowserJobStage::Queued,
+            stage_progress: None,
+            overall_progress: Some(0.55),
+            current: None,
+            total: None,
+            message: if translation_cache_hit {
+                "Reusing cached HSK translation".to_owned()
+            } else {
+                "Queued for HSK retranslation; cleaning caches retained".to_owned()
+            },
+            error_code: None,
+        };
+        self.active_jobs.fetch_add(1, Ordering::AcqRel);
+        self.touch();
+        Ok((next_request, base_result, translation_cache_hit))
+    }
+
+    fn complete_retranslation(
+        &self,
+        record: &JobRecord,
+        request: BrowserJobRequest,
+        base: BrowserJobResult,
+        output: RetranslationOutput,
+    ) -> Result<bool, CleaningError> {
+        let mut status = record.status.write().expect("job status lock poisoned");
+        if record.cancel.load(Ordering::Acquire) || status.state != BrowserJobState::Running {
+            return Ok(false);
+        }
+        let result = BrowserJobResult {
+            protocol_version: crate::contracts::PROTOCOL_VERSION,
+            job_id: status.job_id.clone(),
+            source_sha256: base.source_sha256,
+            source_width: base.source_width,
+            source_height: base.source_height,
+            clean_image_blob_id: base.clean_image_blob_id,
+            clean_image_mime_type: base.clean_image_mime_type,
+            regions: output.regions,
+            warnings: output.warnings,
+            cache: output.cache,
+        };
+        result.validate().map_err(|error| CleaningError {
+            code: "INVALID_PIPELINE_RESULT",
+            message: format!("Retranslation failed browser protocol validation: {error}"),
+        })?;
+        *record.result.write().expect("job result lock poisoned") = Some(result);
+        record.replace_request(request);
+        *status = BrowserJobStatus {
+            revision: status.revision.saturating_add(1),
+            job_id: status.job_id.clone(),
+            state: BrowserJobState::Complete,
+            stage: crate::contracts::BrowserJobStage::Complete,
+            stage_progress: Some(1.0),
+            overall_progress: Some(1.0),
+            current: None,
+            total: None,
+            message: "HSK retranslation complete; cleaning caches retained".to_owned(),
+            error_code: None,
+        };
+        self.touch();
+        Ok(true)
+    }
+}
+
+fn dialogue_contexts_equal(
+    left: Option<&[crate::contracts::DialogueContext]>,
+    right: Option<&[crate::contracts::DialogueContext]>,
+) -> bool {
+    let left = left.unwrap_or_default();
+    let right = right.unwrap_or_default();
+    left.len() == right.len()
+        && left.iter().zip(right).all(|(left, right)| {
+            left.source_english == right.source_english && left.chinese == right.chinese
+        })
 }
 
 #[derive(Debug)]
@@ -1073,16 +1217,51 @@ async fn issue_internal_session(
     Ok(Json(response))
 }
 
-async fn health() -> Json<HealthResponse> {
-    Json(fixtures::health())
+async fn health(State(state): State<Arc<BridgeState>>) -> Json<HealthResponse> {
+    Json(HealthResponse {
+        protocol_version: crate::contracts::PROTOCOL_VERSION,
+        engine_version: fixtures::health().engine_version,
+        status: HealthStatus::Ready,
+        setup_state: if state.pipeline.resources_ready() {
+            BrowserSetupState::Ready
+        } else {
+            BrowserSetupState::MissingModels
+        },
+    })
 }
 
-async fn setup() -> Json<crate::contracts::BrowserSetupStatus> {
-    Json(fixtures::setup())
+async fn setup(State(state): State<Arc<BridgeState>>) -> Json<BrowserSetupStatus> {
+    Json(resource_setup_status(&state))
 }
 
-async fn setup_models() -> Json<crate::contracts::BrowserSetupStatus> {
-    Json(fixtures::setup())
+async fn setup_models(State(state): State<Arc<BridgeState>>) -> Json<BrowserSetupStatus> {
+    Json(resource_setup_status(&state))
+}
+
+fn resource_setup_status(state: &BridgeState) -> BrowserSetupStatus {
+    if state.pipeline.resources_ready() {
+        BrowserSetupStatus {
+            state: BrowserSetupState::Ready,
+            selected_pack_id: Some("qwen3.5-4b-hsk2-v1".to_owned()),
+            current_file: None,
+            completed_bytes: None,
+            total_bytes: None,
+            required_disk_bytes: None,
+            message: "Local translation and language resources are ready.".to_owned(),
+            error_code: None,
+        }
+    } else {
+        BrowserSetupStatus {
+            state: BrowserSetupState::MissingModels,
+            selected_pack_id: None,
+            current_file: None,
+            completed_bytes: None,
+            total_bytes: None,
+            required_disk_bytes: None,
+            message: "Local translation and language resources are missing.".to_owned(),
+            error_code: None,
+        }
+    }
 }
 
 async fn create_job(
@@ -1368,6 +1547,74 @@ async fn run_cleaning_job(
     finish_active(&state, &record);
 }
 
+async fn run_retranslation_job(
+    state: Arc<BridgeState>,
+    record: Arc<JobRecord>,
+    request: BrowserJobRequest,
+    base_result: BrowserJobResult,
+    translation_cache_hit: bool,
+) {
+    let _pipeline_guard = state.pipeline_gate.lock().await;
+    if record.cancel.load(Ordering::Acquire) {
+        finish_active(&state, &record);
+        return;
+    }
+    let progress = {
+        let state = state.clone();
+        let record = record.clone();
+        Arc::new(move |progress: CleaningProgress| {
+            if record.update_progress(progress) {
+                state.touch();
+            }
+        })
+    };
+    let output = if translation_cache_hit {
+        progress(CleaningProgress {
+            stage: crate::contracts::BrowserJobStage::Packaging,
+            overall_progress: Some(0.98),
+            current: None,
+            total: None,
+            message: "Packaging cached HSK translation".to_owned(),
+        });
+        Ok(RetranslationOutput {
+            regions: base_result.regions.clone(),
+            warnings: base_result.warnings.clone(),
+            cache: crate::contracts::BrowserCacheStatus {
+                detection_hit: true,
+                ocr_hit: true,
+                inpaint_hit: true,
+                translation_hit: true,
+            },
+        })
+    } else {
+        state
+            .pipeline
+            .retranslate(
+                RetranslationInput {
+                    request: request.clone(),
+                    base_result: base_result.clone(),
+                },
+                record.cancel.clone(),
+                progress,
+            )
+            .await
+    };
+    match output {
+        Ok(output) => {
+            if let Err(error) = state.complete_retranslation(&record, request, base_result, output)
+            {
+                fail_job(&state, &record, error);
+            }
+        }
+        Err(error) => {
+            if !record.cancel.load(Ordering::Acquire) {
+                fail_job(&state, &record, error);
+            }
+        }
+    }
+    finish_active(&state, &record);
+}
+
 fn fail_job(state: &BridgeState, record: &JobRecord, error: CleaningError) {
     record.release_source();
     let mut current = record.status.write().expect("job status lock poisoned");
@@ -1476,11 +1723,30 @@ async fn retranslate_job(
             "The retranslation request failed protocol validation.",
         )
     })?;
-    let _ = find_job(&state, &job_id)?;
-    Err(ApiError::service_unavailable(
-        "TRANSLATION_NOT_AVAILABLE",
-        "Local translation is not available until Gate 4.",
-    ))
+    let job = find_job(&state, &job_id)?;
+    for _ in 0..100 {
+        if !job.active.load(Ordering::Acquire) {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    let (next_request, base_result, translation_cache_hit) =
+        state.begin_retranslation(&job, request)?;
+    tokio::spawn(run_retranslation_job(
+        state,
+        job,
+        next_request,
+        base_result,
+        translation_cache_hit,
+    ));
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(BrowserJobCreated {
+            protocol_version: crate::contracts::PROTOCOL_VERSION,
+            job_id,
+        }),
+    )
+        .into_response())
 }
 
 async fn lookup(
@@ -1494,8 +1760,7 @@ async fn lookup(
             "The lookup request failed protocol validation.",
         )
     })?;
-    let mut result = fixtures::lookup(&request.selected_text);
-    if let (Some(job_id), Some(region_id)) = (&request.job_id, &request.region_id) {
+    let region = if let (Some(job_id), Some(region_id)) = (&request.job_id, &request.region_id) {
         let job = find_job(&state, job_id)?;
         let job_result = job.result().ok_or_else(|| {
             ApiError::conflict(
@@ -1503,19 +1768,29 @@ async fn lookup(
                 "The browser job has no complete result yet.",
             )
         })?;
-        let region = job_result
-            .regions
-            .iter()
-            .find(|region| &region.id == region_id)
-            .ok_or_else(|| {
-                ApiError::not_found("REGION_NOT_FOUND", "The browser region does not exist.")
-            })?;
-        result.region = Some(LookupRegion {
-            displayed_chinese: region.displayed_chinese.clone(),
-            faithful_chinese: region.faithful_chinese.clone(),
-            source_english: region.source_english.clone(),
-        });
-    }
+        Some(
+            job_result
+                .regions
+                .iter()
+                .find(|region| &region.id == region_id)
+                .ok_or_else(|| {
+                    ApiError::not_found("REGION_NOT_FOUND", "The browser region does not exist.")
+                })?
+                .clone(),
+        )
+    } else {
+        None
+    };
+    let result = state
+        .pipeline
+        .lookup(request.selected_text, region)
+        .await
+        .map_err(|_| {
+            ApiError::service_unavailable(
+                "LANGUAGE_RESOURCES_NOT_READY",
+                "The local HSK and dictionary resources are unavailable.",
+            )
+        })?;
     result.validate().map_err(|_| ApiError::internal())?;
     Ok(Json(result))
 }
@@ -1681,6 +1956,8 @@ mod tests {
 
     struct FixtureCleaningPipeline {
         stage_delay: Duration,
+        hsk_control: Arc<hsk_control::HskControl>,
+        resources_ready: bool,
     }
 
     #[async_trait::async_trait]
@@ -1740,6 +2017,94 @@ mod tests {
                 cache: fixture.cache,
             })
         }
+
+        async fn retranslate(
+            &self,
+            input: RetranslationInput,
+            cancel: Arc<AtomicBool>,
+            progress: crate::pipeline_adapter::CleaningProgressSink,
+        ) -> std::result::Result<RetranslationOutput, CleaningError> {
+            if cancel.load(Ordering::Acquire) {
+                return Err(CleaningError {
+                    code: "CANCELLED",
+                    message: "Fixture retranslation was cancelled.".to_owned(),
+                });
+            }
+            progress(CleaningProgress {
+                stage: crate::contracts::BrowserJobStage::HskRewriting,
+                overall_progress: Some(0.75),
+                current: Some(1),
+                total: Some(1),
+                message: "Rewriting fixture translation".to_owned(),
+            });
+            sleep(self.stage_delay).await;
+            let mut regions = input.base_result.regions;
+            for region in &mut regions {
+                region.displayed_chinese = "你好".to_owned();
+                region.pinyin = "nǐ hǎo".to_owned();
+                region.vocabulary.requested_hsk_level = input.request.settings.hsk_level;
+                region.vocabulary.strictly_valid = true;
+                region.vocabulary.exceptions.clear();
+            }
+            Ok(RetranslationOutput {
+                regions,
+                warnings: input
+                    .base_result
+                    .warnings
+                    .into_iter()
+                    .filter(|warning| {
+                        !matches!(
+                            warning.code,
+                            crate::contracts::BrowserWarningCode::HskException
+                                | crate::contracts::BrowserWarningCode::HskRewriteFailed
+                        )
+                    })
+                    .collect(),
+                cache: crate::contracts::BrowserCacheStatus {
+                    detection_hit: true,
+                    ocr_hit: true,
+                    inpaint_hit: true,
+                    translation_hit: false,
+                },
+            })
+        }
+
+        async fn lookup(
+            &self,
+            selected_text: String,
+            region: Option<crate::contracts::BrowserRegion>,
+        ) -> std::result::Result<crate::contracts::LookupResult, CleaningError> {
+            let proper_names = region
+                .as_ref()
+                .map(crate::pipeline_adapter::proper_names_from_region)
+                .unwrap_or_default();
+            let context = region
+                .as_ref()
+                .map(|region| hsk_control::LookupRegionContext {
+                    displayed_chinese: region.displayed_chinese.clone(),
+                    faithful_chinese: region.faithful_chinese.clone(),
+                    source_english: region.source_english.clone(),
+                });
+            Ok(crate::pipeline_adapter::browser_lookup_result(
+                self.hsk_control
+                    .lookup_with_region_context(&selected_text, &proper_names, context),
+            ))
+        }
+
+        fn resources_ready(&self) -> bool {
+            self.resources_ready
+        }
+    }
+
+    fn test_hsk_control() -> Arc<hsk_control::HskControl> {
+        Arc::new(
+            hsk_control::HskControl::from_json_with_policy(
+                include_str!("../../../data/hsk/test-seed.normalized.json"),
+                include_str!("../../../data/dictionary/test-seed.normalized.json"),
+                hsk_control::LoadPolicy::AllowIncompleteTestSeed,
+            )
+            .expect("valid project-authored HSK test seed"),
+        )
     }
 
     fn test_state(
@@ -1750,7 +2115,11 @@ mod tests {
         BridgeState::with_pipeline(
             config,
             secret,
-            Arc::new(FixtureCleaningPipeline { stage_delay }),
+            Arc::new(FixtureCleaningPipeline {
+                stage_delay,
+                hsk_control: test_hsk_control(),
+                resources_ready: true,
+            }),
         )
     }
 
@@ -1879,6 +2248,44 @@ mod tests {
             }
         }
         panic!("fixture job should reach a terminal status");
+    }
+
+    #[tokio::test]
+    async fn missing_language_resources_are_truthful_in_handshake_health_and_setup() {
+        let state = BridgeState::with_pipeline(
+            BridgeConfig::for_port(43127),
+            [13_u8; SECRET_BYTES],
+            Arc::new(FixtureCleaningPipeline {
+                stage_delay: Duration::from_millis(1),
+                hsk_control: test_hsk_control(),
+                resources_ready: false,
+            }),
+        );
+        let ready = state.issue_session(ORIGIN_VALUE).unwrap();
+        assert!(!ready.capabilities.models_ready);
+        let token = ready.token;
+        let app = router(state);
+
+        let health = app
+            .clone()
+            .oneshot(
+                authorized(Method::GET, "/browser/v1/health", &token)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(body_json(health).await["setupState"], "missing-models");
+        let setup = app
+            .clone()
+            .oneshot(
+                authorized(Method::GET, "/browser/v1/setup", &token)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(body_json(setup).await["state"], "missing-models");
     }
 
     #[tokio::test]
@@ -2281,14 +2688,33 @@ mod tests {
             )
             .await
             .unwrap();
+        assert_eq!(retranslate_response.status(), StatusCode::ACCEPTED);
+        assert_eq!(body_json(retranslate_response).await["jobId"], job_id);
+        wait_for_completion(&app, &token, job_id).await;
+        let translated = app
+            .clone()
+            .oneshot(
+                authorized(
+                    Method::GET,
+                    &format!("/browser/v1/jobs/{job_id}/result"),
+                    &token,
+                )
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let translated = body_json(translated).await;
+        assert_eq!(translated["cleanImageBlobId"], blob_id);
+        assert_eq!(translated["regions"][0]["displayedChinese"], "你好");
         assert_eq!(
-            retranslate_response.status(),
-            StatusCode::SERVICE_UNAVAILABLE
+            translated["regions"][0]["vocabulary"]["requestedHskLevel"],
+            1
         );
-        assert_eq!(
-            body_json(retranslate_response).await["code"],
-            "TRANSLATION_NOT_AVAILABLE"
-        );
+        assert_eq!(translated["cache"]["detectionHit"], true);
+        assert_eq!(translated["cache"]["ocrHit"], true);
+        assert_eq!(translated["cache"]["inpaintHit"], true);
+        assert_eq!(translated["cache"]["translationHit"], false);
 
         let blob_response = app
             .clone()
@@ -2647,7 +3073,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retranslation_is_explicitly_unavailable_without_eviction() {
+    async fn retranslation_reuses_clean_blob_without_eviction() {
         let mut config = BridgeConfig::for_port(43127);
         config.limits.max_retained_jobs = 1;
         let state = test_state(config, [6_u8; SECRET_BYTES], Duration::from_millis(1));
@@ -2684,11 +3110,9 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(
-            body_json(response).await["code"],
-            "TRANSLATION_NOT_AVAILABLE"
-        );
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        assert_eq!(body_json(response).await["jobId"], original.as_str());
+        wait_for_completion(&app, &token, &original).await;
 
         let original_job = app
             .clone()
@@ -2700,6 +3124,20 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(original_job.status(), StatusCode::OK);
+        let result = app
+            .clone()
+            .oneshot(
+                authorized(
+                    Method::GET,
+                    &format!("/browser/v1/jobs/{original}/result"),
+                    &token,
+                )
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(body_json(result).await["cleanImageBlobId"], blob_id);
         let referenced_blob = app
             .clone()
             .oneshot(
@@ -2710,6 +3148,84 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(referenced_blob.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn identical_retranslation_uses_translation_cache_and_never_reruns_cleaning() {
+        let state = test_state(
+            BridgeConfig::for_port(43127),
+            [12_u8; SECRET_BYTES],
+            Duration::from_millis(1),
+        );
+        let token = state.issue_session(ORIGIN_VALUE).unwrap().token;
+        let app = router(state);
+        let job_id = submit_accepted_job(&app, &token, &png()).await;
+        wait_for_completion(&app, &token, &job_id).await;
+
+        let before = app
+            .clone()
+            .oneshot(
+                authorized(
+                    Method::GET,
+                    &format!("/browser/v1/jobs/{job_id}/result"),
+                    &token,
+                )
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let before = body_json(before).await;
+        let response = app
+            .clone()
+            .oneshot(
+                authorized(
+                    Method::POST,
+                    &format!("/browser/v1/jobs/{job_id}/retranslate"),
+                    &token,
+                )
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&json!({
+                        "protocolVersion": 1,
+                        "settings": {
+                            "hskStandard": "2.0",
+                            "hskLevel": 2
+                        },
+                        "precedingContext": [{
+                            "sourceEnglish": "Are you ready?",
+                            "chinese": "你准备好了吗？"
+                        }]
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        wait_for_completion(&app, &token, &job_id).await;
+
+        let after = app
+            .clone()
+            .oneshot(
+                authorized(
+                    Method::GET,
+                    &format!("/browser/v1/jobs/{job_id}/result"),
+                    &token,
+                )
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let after = body_json(after).await;
+        assert_eq!(after["cleanImageBlobId"], before["cleanImageBlobId"]);
+        assert_eq!(after["regions"], before["regions"]);
+        assert_eq!(after["cache"]["detectionHit"], true);
+        assert_eq!(after["cache"]["ocrHit"], true);
+        assert_eq!(after["cache"]["inpaintHit"], true);
+        assert_eq!(after["cache"]["translationHit"], true);
     }
 
     #[tokio::test]

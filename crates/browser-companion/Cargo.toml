@@ -21,6 +21,7 @@ fs4 = { workspace = true }
 getrandom = "0.3"
 http-body = "1"
 image = { workspace = true }
+hsk-control = { path = "../hsk-control" }
 koharu-app = { workspace = true }
 koharu-core = { workspace = true }
 koharu-runtime = { workspace = true }

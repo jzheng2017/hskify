@@ -12,12 +12,18 @@
 //! ```
 
 mod faithful;
+mod hsk;
 
 pub use faithful::{
     FAITHFUL_PROMPT_REVISION, FAITHFUL_TRANSLATION_MODEL, FaithfulOcrRegion, FaithfulPageRequest,
     FaithfulRegionKind, FaithfulTranslation, PrecedingPageContext, ProtectedName,
 };
+pub use hsk::{
+    HSK_REWRITE_PROMPT_REVISION, HskRewrite, HskRewritePageRequest, HskRewriteRegion,
+    HskValidatorFeedback,
+};
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -174,6 +180,40 @@ impl Model {
             let snapshot = snapshot_from_state(&guard);
             let _ = state_tx.send(snapshot);
         });
+    }
+
+    /// Load a known local model family from an explicit, already-managed GGUF
+    /// file and wait until the in-process llama runtime is ready.
+    pub async fn load_local_file(&self, id: ModelId, model_path: PathBuf) -> Result<()> {
+        let target = local_target(id);
+        *self.state.write().await = State::Loading {
+            target: target.clone(),
+        };
+        self.emit_state().await;
+
+        let result = Llm::load_file(
+            &self.runtime,
+            id,
+            self.cpu,
+            model_path,
+            self.backend.clone(),
+        )
+        .await;
+        match result {
+            Ok(llm) => {
+                *self.state.write().await = State::ReadyLocal(llm);
+                self.emit_state().await;
+                Ok(())
+            }
+            Err(error) => {
+                *self.state.write().await = State::Failed {
+                    target: Some(target),
+                    error: format!("{error:#}"),
+                };
+                self.emit_state().await;
+                Err(error)
+            }
+        }
     }
 
     pub async fn offload(&self) {
