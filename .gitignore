@@ -28,8 +28,15 @@ dist-ssr
 
 target/
 
-# Datasets
-/data
+# Large downloaded datasets remain ignored by default. The small, normalized
+# runtime assets and auditable manifests below are intentionally versioned.
+/data/*
+!/data/hsk/
+!/data/hsk/**
+!/data/dictionary/
+!/data/dictionary/**
+!/data/model-packs/
+!/data/model-packs/**
 
 # model results
 /runs

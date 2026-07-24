@@ -1,0 +1,103 @@
+{
+  "manifestVersion": 1,
+  "generatedAt": "2026-07-24",
+  "selection": {
+    "status": "awaiting-fluent-human-review",
+    "standardPackId": null,
+    "lowMemoryPackId": null,
+    "reason": "The implementation plan requires blinded scores from a fluent Chinese reader and measured hardware thresholds before selection."
+  },
+  "packs": [],
+  "candidates": [
+    {
+      "id": "qwen3.5-4b-q4-k-m",
+      "runtimeModelId": "qwen3.5-4b",
+      "role": "standard-candidate",
+      "eligibility": "benchmark",
+      "minimumRamBytes": null,
+      "recommendedRamBytes": null,
+      "licence": "Apache-2.0",
+      "licenceUrl": "https://huggingface.co/Qwen/Qwen3.5-4B/blob/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a/LICENSE",
+      "sourceModel": "Qwen/Qwen3.5-4B@851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a",
+      "files": [
+        {
+          "id": "translation-model",
+          "url": "https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/e87f176479d0855a907a41277aca2f8ee7a09523/Qwen3.5-4B-Q4_K_M.gguf",
+          "repositoryRevision": "e87f176479d0855a907a41277aca2f8ee7a09523",
+          "filename": "Qwen3.5-4B-Q4_K_M.gguf",
+          "sha256": "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4",
+          "bytes": 2740937888,
+          "licence": "Apache-2.0"
+        }
+      ]
+    },
+    {
+      "id": "qwen3.5-2b-q4-k-m",
+      "runtimeModelId": "qwen3.5-2b",
+      "role": "low-memory-candidate",
+      "eligibility": "benchmark",
+      "minimumRamBytes": null,
+      "recommendedRamBytes": null,
+      "licence": "Apache-2.0",
+      "licenceUrl": "https://huggingface.co/Qwen/Qwen3.5-2B/blob/15852e8c16360a2fea060d615a32b45270f8a8fc/LICENSE",
+      "sourceModel": "Qwen/Qwen3.5-2B@15852e8c16360a2fea060d615a32b45270f8a8fc",
+      "files": [
+        {
+          "id": "translation-model",
+          "url": "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/f6d5376be1edb4d416d56da11e5397a961aca8ae/Qwen3.5-2B-Q4_K_M.gguf",
+          "repositoryRevision": "f6d5376be1edb4d416d56da11e5397a961aca8ae",
+          "filename": "Qwen3.5-2B-Q4_K_M.gguf",
+          "sha256": "aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223",
+          "bytes": 1280835840,
+          "licence": "Apache-2.0"
+        }
+      ]
+    },
+    {
+      "id": "hunyuan-mt-7b-q4-k-m",
+      "runtimeModelId": "hunyuan-mt-7b",
+      "role": "translation-focused-candidate",
+      "eligibility": "excluded",
+      "exclusionReason": "The inherited Tencent Hunyuan licence excludes use in the European Union, United Kingdom, and South Korea.",
+      "minimumRamBytes": null,
+      "recommendedRamBytes": null,
+      "licence": "Tencent Hunyuan Community License Agreement",
+      "licenceUrl": "https://huggingface.co/tencent/Hunyuan-MT-7B/blob/9305c78383f0bcc94358e08667ee2c76107877e3/License.txt",
+      "sourceModel": "tencent/Hunyuan-MT-7B@9305c78383f0bcc94358e08667ee2c76107877e3",
+      "files": [
+        {
+          "id": "translation-model",
+          "url": "https://huggingface.co/Mungert/Hunyuan-MT-7B-GGUF/resolve/61e98ae605cc4fe9581fd3ff1052a271843e4d64/Hunyuan-MT-7B-q4_k_m.gguf",
+          "repositoryRevision": "61e98ae605cc4fe9581fd3ff1052a271843e4d64",
+          "filename": "Hunyuan-MT-7B-q4_k_m.gguf",
+          "sha256": "c6cb1068db17f851a4dd9e1d2e3217a293a50000e617486e7fd0bfaa05674d88",
+          "bytes": 4702111200,
+          "licence": "Tencent Hunyuan Community License Agreement"
+        }
+      ]
+    },
+    {
+      "id": "lfm2.5-1.2b-q4-k-m",
+      "runtimeModelId": "lfm2.5-1.2b-instruct",
+      "role": "small-research-candidate",
+      "eligibility": "legal-review",
+      "exclusionReason": "LFM Open License v1.0 conditions commercial use on annual revenue below US$10M; it cannot be an unrestricted default without a product/legal decision.",
+      "minimumRamBytes": null,
+      "recommendedRamBytes": null,
+      "licence": "LFM Open License v1.0",
+      "licenceUrl": "https://huggingface.co/LiquidAI/LFM2.5-1.2B-Instruct-GGUF/blob/047e06635fbe71469926b35ea414537245218200/LICENSE",
+      "sourceModel": "LiquidAI/LFM2.5-1.2B-Instruct@868df74dd56ff8a0c2ac5dbf281690c2dbebe4c9",
+      "files": [
+        {
+          "id": "translation-model",
+          "url": "https://huggingface.co/LiquidAI/LFM2.5-1.2B-Instruct-GGUF/resolve/047e06635fbe71469926b35ea414537245218200/LFM2.5-1.2B-Instruct-Q4_K_M.gguf",
+          "repositoryRevision": "047e06635fbe71469926b35ea414537245218200",
+          "filename": "LFM2.5-1.2B-Instruct-Q4_K_M.gguf",
+          "sha256": "b1b3de114215d9507409a662a501a631095a479a419584e8a2ded6304b19b4f5",
+          "bytes": 730895168,
+          "licence": "LFM Open License v1.0"
+        }
+      ]
+    }
+  ]
+}

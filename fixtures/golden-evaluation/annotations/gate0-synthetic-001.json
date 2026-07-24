@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 1,
+  "id": "gate0-synthetic-001",
+  "width": 900,
+  "height": 1200,
+  "readingDirection": "ltr",
+  "sourceClass": "synthetic-black-and-white-manga",
+  "regions": [
+    {
+      "id": "gate0-synthetic-001-r0",
+      "kind": "dialogue",
+      "sourceEnglish": "WE HAVE TO LEAVE NOW!",
+      "textPolygon": [[0.3167, 0.0983], [0.8167, 0.0983], [0.8167, 0.2025], [0.3167, 0.2025]],
+      "bubblePolygon": [[0.2833, 0.0750], [0.8500, 0.0750], [0.8500, 0.2333], [0.2833, 0.2333]],
+      "readingOrder": 0,
+      "rotationDegrees": 0,
+      "maskExpectation": "remove every glyph, outline, punctuation mark, and antialiased edge without crossing the bubble boundary",
+      "referenceFaithfulChinese": "我们得马上离开！",
+      "acceptableHskRewrites": {
+        "2": ["我们现在要走！"]
+      },
+      "properNameExceptions": [],
+      "styleCategory": "bold-sans-dialogue"
+    },
+    {
+      "id": "gate0-synthetic-001-r1",
+      "kind": "dialogue",
+      "sourceEnglish": "ARE YOU READY?",
+      "textPolygon": [[0.1111, 0.5625], [0.4111, 0.5625], [0.4111, 0.6583], [0.1111, 0.6583]],
+      "bubblePolygon": [[0.0833, 0.5333], [0.4389, 0.5333], [0.4389, 0.6875], [0.0833, 0.6875]],
+      "readingOrder": 1,
+      "rotationDegrees": 0,
+      "maskExpectation": "clean solid-white bubble interior while preserving the black contour",
+      "referenceFaithfulChinese": "你准备好了吗？",
+      "acceptableHskRewrites": {},
+      "properNameExceptions": [],
+      "styleCategory": "bold-sans-dialogue"
+    },
+    {
+      "id": "gate0-synthetic-001-r2",
+      "kind": "dialogue",
+      "sourceEnglish": "YES. LET'S GO!",
+      "textPolygon": [[0.5944, 0.7542], [0.8833, 0.7542], [0.8833, 0.8542], [0.5944, 0.8542]],
+      "bubblePolygon": [[0.5611, 0.7250], [0.9167, 0.7250], [0.9167, 0.8833], [0.5611, 0.8833]],
+      "readingOrder": 2,
+      "rotationDegrees": 0,
+      "maskExpectation": "clean solid-white bubble interior while preserving the black contour",
+      "referenceFaithfulChinese": "好。我们走吧！",
+      "acceptableHskRewrites": {},
+      "properNameExceptions": [],
+      "styleCategory": "bold-sans-dialogue"
+    }
+  ]
+}
