@@ -2,11 +2,15 @@
 
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::ptr;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use browser_companion::discovery::{prepare_state_paths, read_daemon_record};
 use browser_companion::launcher::{request_session, spawn_detached_daemon};
+use windows_sys::Win32::Foundation::HANDLE;
+use windows_sys::Win32::System::JobObjects::IsProcessInJob;
+use windows_sys::Win32::System::Threading::GetCurrentProcess;
 
 const ORIGIN: &str = "moz-extension://00000000-0000-4000-8000-000000000001";
 
@@ -22,8 +26,8 @@ impl Drop for ChildGuard {
 }
 
 #[test]
-fn in_job_daemon_lifecycle_covers_discovery_lock_and_idle_cleanup() {
-    exercise_lifecycle(LaunchMode::InCurrentJob);
+fn lifecycle_without_breakaway_claim_covers_discovery_lock_and_idle_cleanup() {
+    exercise_lifecycle(LaunchMode::WithoutBreakaway);
 }
 
 #[test]
@@ -34,7 +38,7 @@ fn production_breakaway_launch_probe_covers_detached_lifecycle() {
 
 #[derive(Clone, Copy, Debug)]
 enum LaunchMode {
-    InCurrentJob,
+    WithoutBreakaway,
     ProductionBreakaway,
 }
 
@@ -46,7 +50,7 @@ impl LaunchMode {
         idle_timeout: Duration,
     ) -> std::io::Result<Child> {
         match self {
-            Self::InCurrentJob => spawn_in_job(executable, state_dir, idle_timeout),
+            Self::WithoutBreakaway => spawn_without_breakaway(executable, state_dir, idle_timeout),
             Self::ProductionBreakaway => {
                 spawn_detached_daemon(executable, state_dir, Some(idle_timeout))
             }
@@ -55,13 +59,20 @@ impl LaunchMode {
 
     fn label(self) -> &'static str {
         match self {
-            Self::InCurrentJob => "in-job",
+            Self::WithoutBreakaway => "non-breakaway lifecycle",
             Self::ProductionBreakaway => "production breakaway",
         }
     }
 }
 
 fn exercise_lifecycle(mode: LaunchMode) {
+    if matches!(mode, LaunchMode::ProductionBreakaway) {
+        assert!(
+            process_is_in_any_job(unsafe { GetCurrentProcess() })
+                .expect("query production probe parent job membership"),
+            "production breakaway probe refused: its parent is outside a Windows job, so launching an outside-job child would not prove escape"
+        );
+    }
     let directory = tempfile::tempdir().expect("temporary state directory");
     let paths = prepare_state_paths(directory.path()).expect("state paths");
     let executable = PathBuf::from(env!("CARGO_BIN_EXE_hsk-manga-browser-daemon"));
@@ -78,6 +89,15 @@ fn exercise_lifecycle(mode: LaunchMode) {
             )
         });
     let mut first = ChildGuard(first);
+    if matches!(mode, LaunchMode::ProductionBreakaway) {
+        use std::os::windows::io::AsRawHandle;
+
+        let child_handle = first.0.as_raw_handle() as HANDLE;
+        assert!(
+            !process_is_in_any_job(child_handle).expect("query detached child job membership"),
+            "CREATE_BREAKAWAY_FROM_JOB returned a child that remains in a Windows job"
+        );
+    }
 
     let deadline = Instant::now() + Duration::from_secs(5);
     let record = loop {
@@ -139,7 +159,19 @@ fn exercise_lifecycle(mode: LaunchMode) {
     );
 }
 
-fn spawn_in_job(
+fn process_is_in_any_job(process: HANDLE) -> std::io::Result<bool> {
+    let mut result = 0;
+    // SAFETY: `process` is a live current-process pseudo handle or Child-owned
+    // process handle, the null job handle asks about any job, and `result`
+    // points to writable storage for the duration of the call.
+    if unsafe { IsProcessInJob(process, ptr::null_mut(), &mut result) } == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(result != 0)
+    }
+}
+
+fn spawn_without_breakaway(
     executable: &PathBuf,
     state_dir: &std::path::Path,
     idle_timeout: Duration,

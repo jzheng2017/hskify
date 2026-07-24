@@ -14,7 +14,7 @@ if [ "$(printf '%s' "$host_path" | LC_ALL=C tr -d '\001-\037\177')" != "$host_pa
     echo "native host path must not contain control characters" >&2
     exit 2
 fi
-if [ ! -x "$host_path" ] || [ "$(basename "$host_path")" != "hsk-manga-native-host" ]; then
+if [ ! -f "$host_path" ] || [ ! -x "$host_path" ] || [ "$(basename "$host_path")" != "hsk-manga-native-host" ]; then
     echo "native host executable is missing or has the wrong name" >&2
     exit 2
 fi

@@ -80,7 +80,7 @@ pub fn validate_firefox_caller(
     let metadata = file
         .metadata()
         .map_err(|_| LauncherError::InvalidManifest)?;
-    if metadata.len() == 0 || metadata.len() > MAX_MANIFEST_BYTES {
+    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_MANIFEST_BYTES {
         return Err(LauncherError::InvalidManifest);
     }
     let mut bytes = Vec::with_capacity(metadata.len() as usize);
@@ -105,7 +105,11 @@ pub fn validate_firefox_caller(
     let running = current_executable
         .canonicalize()
         .map_err(|_| LauncherError::InvalidManifest)?;
-    if configured != running {
+    let configured_metadata =
+        std::fs::metadata(&configured).map_err(|_| LauncherError::InvalidManifest)?;
+    let running_metadata =
+        std::fs::metadata(&running).map_err(|_| LauncherError::InvalidManifest)?;
+    if !configured_metadata.is_file() || !running_metadata.is_file() || configured != running {
         return Err(LauncherError::InvalidManifest);
     }
     Ok(())
@@ -235,6 +239,12 @@ pub fn spawn_detached_daemon(
     state_dir: &Path,
     idle_timeout: Option<Duration>,
 ) -> io::Result<Child> {
+    if !std::fs::metadata(daemon_executable)?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "browser daemon executable must be a regular file",
+        ));
+    }
     let mut command = Command::new(daemon_executable);
     command
         .arg("--state-dir")
@@ -314,18 +324,39 @@ mod tests {
             .path()
             .join(format!("host{}", std::env::consts::EXE_SUFFIX));
         std::fs::write(&executable, b"test").unwrap();
-        let manifest = manifest(directory.path(), &executable);
+        let manifest_path = manifest(directory.path(), &executable);
         let valid = vec![
-            manifest.as_os_str().to_owned(),
+            manifest_path.as_os_str().to_owned(),
             OsString::from(FIREFOX_EXTENSION_ID),
         ];
         assert!(validate_firefox_caller(&valid, &executable).is_ok());
         assert!(validate_firefox_caller(&valid[..1], &executable).is_err());
         let wrong_id = vec![
-            manifest.into_os_string(),
+            manifest_path.into_os_string(),
             OsString::from("attacker@example"),
         ];
         assert!(validate_firefox_caller(&wrong_id, &executable).is_err());
+
+        let directory_executable = directory
+            .path()
+            .join(format!("directory-host{}", std::env::consts::EXE_SUFFIX));
+        std::fs::create_dir(&directory_executable).unwrap();
+        let directory_manifest = manifest(directory.path(), &directory_executable);
+        let directory_caller = vec![
+            directory_manifest.into_os_string(),
+            OsString::from(FIREFOX_EXTENSION_ID),
+        ];
+        assert!(
+            validate_firefox_caller(&directory_caller, &directory_executable).is_err(),
+            "a directory must never validate as the running native-host executable"
+        );
+    }
+
+    #[test]
+    fn detached_spawn_rejects_a_directory_before_process_creation() {
+        let directory = tempfile::tempdir().unwrap();
+        let error = spawn_detached_daemon(directory.path(), directory.path(), None).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
     }
 
     #[test]

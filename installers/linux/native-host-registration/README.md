@@ -11,5 +11,6 @@ belongs to the companion uninstaller.
 From the repository root, run
 `sh installers/test-native-host-registration.sh` to exercise both Unix
 registration scripts with a valid non-ASCII UTF-8 executable path and a
-control-character rejection case. The check redirects `HOME` to a temporary
-directory and does not modify the user's Firefox profile.
+control-character rejection case. It also exercises unregistration and rejects
+a directory with the native-host filename. The check redirects `HOME` to a
+temporary directory and does not modify the user's Firefox profile.

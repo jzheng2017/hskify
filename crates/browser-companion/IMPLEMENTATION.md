@@ -14,7 +14,7 @@ The crate builds two executables:
 - `hsk-manga-browser-daemon`: holds a per-user exclusive lock, binds literally
   to `127.0.0.1:0`, publishes a control-secret-protected discovery record,
   serves only the browser router, and exits after an idle period with no active
-  jobs.
+  jobs or admitted authenticated requests.
 
 Windows detached creation requests `CREATE_BREAKAWAY_FROM_JOB`,
 `CREATE_NEW_PROCESS_GROUP`, and `CREATE_NO_WINDOW`. Unix creation calls
@@ -78,12 +78,28 @@ Default limits are:
 - 16,384 pixels on either dimension;
 - 128 MiB decoder allocation budget;
 - 64 MiB clean blob;
-- 128 retained jobs and 256 MiB retained fixture blobs.
+- 128 retained jobs and 256 MiB retained fixture blobs;
+- four concurrent authenticated requests, including response-body transfer.
 
 Multipart fields are streamed against their individual limits. The daemon
 recomputes SHA-256, matches declared/multipart/sniffed MIME types, checks
 declared dimensions, decodes under resource limits, and compares decoded
 dimensions before retaining bytes.
+
+Authentication and protocol checks run before a request can acquire one of the
+four global permits or poll its body. Saturation returns retryable HTTP 429 with
+`REQUEST_CAPACITY_EXHAUSTED`. A permit remains owned through multipart
+consumption, blocking decode/PNG encoding even if the HTTP task is cancelled,
+and complete response-body transfer. Idle shutdown uses the same synchronized
+admission state, latches only when both admitted requests and active jobs are
+zero, and refuses new admission after latching.
+
+Non-PNG fixture output uses a seekable bounded writer that refuses growth past
+the configured clean-blob cap while encoding. Blob GET bodies retain the
+stored `Arc<[u8]>` through `Bytes::from_owner`, avoiding a per-request copy of
+up to 64 MiB; the response holds its global permit until the body is consumed
+or dropped. Tall narrow reader images remain accepted when they fit the byte,
+dimension, pixel, decoder-allocation, and output limits.
 
 Retention is deterministic and admission-driven. Each accepted job receives a
 monotonic daemon-local sequence. When either retention bound is under pressure,
@@ -126,10 +142,10 @@ job engine.
 
 `installers/{windows,linux,macos}/native-host-registration` contains exact-ID
 manifest templates plus per-user register/unregister scripts. They accept only
-an absolute executable with the frozen native-host filename and do not expose
-ports or manual server configuration. The Unix scripts reject ASCII control
-bytes while accepting valid non-ASCII UTF-8 path bytes; the generated JSON
-retains the UTF-8 executable path.
+an absolute regular/leaf executable with the frozen native-host filename and do
+not expose ports or manual server configuration. The Unix scripts reject ASCII
+control bytes while accepting valid non-ASCII UTF-8 path bytes; the generated
+JSON retains the UTF-8 executable path.
 
 ## Verification
 
@@ -146,6 +162,7 @@ sh -n installers/linux/native-host-registration/register.sh \
   installers/macos/native-host-registration/unregister.sh \
   installers/test-native-host-registration.sh
 sh installers/test-native-host-registration.sh
+powershell -File installers/test-native-host-registration.ps1
 ```
 
 Coverage includes framing bounds and endianness, native caller validation, an
@@ -153,7 +170,9 @@ end-to-end native binary handshake against a deliberately prestarted daemon,
 fresh/expired tokens, constant-time authentication use, pre-body rejection,
 Host/origin/protocol/CORS restrictions, every required route, SHA-256/MIME/
 byte/pixel limits, progress/result/blob/font transfer, cancellation races,
-active saturation, oldest-terminal eviction, exact-byte SHA deduplication,
+authenticated high-concurrency saturation before body polling, stalled-request
+idle exclusion, bounded PNG output, zero-copy/budgeted blob transfer, active
+saturation, oldest-terminal eviction, exact-byte SHA deduplication,
 completion/cancellation orphan cleanup, shared/retranslation blob references,
 duplicate locks, stale state replacement, random IPv4 loopback binding, and
 idle cleanup. The prestarted-daemon handshake test covers framing, caller
@@ -165,26 +184,32 @@ spawn.
 On the Windows Codex development harness:
 
 - `cargo fmt -p browser-companion -- --check`, `cargo check -p
-  browser-companion`, and `cargo clippy -p browser-companion --all-targets -- -D
-  warnings` passed.
-- `cargo test -p browser-companion --all-targets` passed 31 library tests, 7
+  browser-companion --all-targets`, and `cargo clippy -p browser-companion
+  --all-targets -- -D warnings` passed.
+- `cargo test -p browser-companion --all-targets` passed 36 library tests, 7
   contract-fixture tests, the prestarted-daemon native handshake, and the
-  explicitly in-job Windows lifecycle test. The production breakaway probe was
-  reported as ignored.
+  explicitly non-breakaway Windows lifecycle test. The production breakaway
+  probe was reported as ignored.
 - Git Bash `sh -n` passed for both Unix register/unregister pairs and the
   registration regression script. `sh
   installers/test-native-host-registration.sh` passed both Linux and macOS
   layouts using `翻訳ツール/hsk-manga-native-host`, and verified that a newline
-  in the path is rejected specifically as a control character. Its temporary
-  `HOME` prevents writes to the real Firefox profile.
-- PowerShell's parser reported zero syntax errors for
-  `Register-NativeHost.ps1` and `Unregister-NativeHost.ps1`.
+  in the path is rejected specifically as a control character, directories are
+  rejected, and unregister removes the isolated manifest. Its temporary `HOME`
+  prevents writes to the real Firefox profile.
+- PowerShell's parser reported zero syntax errors for both Windows registration
+  scripts and their regression script.
+  `installers/test-native-host-registration.ps1` passed isolated
+  register/unregister and directory-rejection checks.
 - The explicitly requested production probe,
   `cargo test -p browser-companion --test windows_lifecycle
   production_breakaway_launch_probe_covers_detached_lifecycle -- --ignored
   --exact --nocapture`, failed immediately with Win32 error 5 (`Access is
-  denied`). This outer job does not grant `JOB_OBJECT_LIMIT_BREAKAWAY_OK`; the
-  test no longer falls back to an in-job child or reports detached coverage.
+  denied`) after verifying that the parent process is in a Windows job. This
+  outer job does not grant `JOB_OBJECT_LIMIT_BREAKAWAY_OK`; the test no longer
+  falls back to an in-job child or reports detached coverage. On a permitting
+  parent it additionally requires `IsProcessInJob` to report that the spawned
+  child escaped every Windows job.
 
 ### Remaining platform smoke requirements
 

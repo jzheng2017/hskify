@@ -1,14 +1,16 @@
 //! Secure, fixture-backed `/browser/v1` loopback service.
 
 use std::collections::HashMap;
-use std::io::Cursor;
+use std::io::{Cursor, Seek, SeekFrom, Write};
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
-use axum::body::{Body, to_bytes};
+use axum::body::{Body, Bytes, to_bytes};
 use axum::extract::multipart::{Field, MultipartRejection};
-use axum::extract::{DefaultBodyLimit, Multipart, Path, Request, State};
+use axum::extract::{DefaultBodyLimit, Extension, Multipart, Path, Request, State};
 use axum::http::header::{
     ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN,
     ACCESS_CONTROL_MAX_AGE, AUTHORIZATION, CACHE_CONTROL, CONTENT_LENGTH, CONTENT_TYPE, HOST,
@@ -20,9 +22,11 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::Utc;
+use http_body::{Body as HttpBody, Frame, SizeHint};
 use image::{GenericImageView, ImageFormat, ImageReader, Limits};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::sleep;
 use uuid::Uuid;
 
@@ -54,6 +58,7 @@ pub struct ServerLimits {
     pub max_clean_blob_bytes: usize,
     pub max_retained_jobs: usize,
     pub max_stored_blob_bytes: usize,
+    pub max_concurrent_requests: usize,
 }
 
 impl Default for ServerLimits {
@@ -69,6 +74,7 @@ impl Default for ServerLimits {
             max_clean_blob_bytes: 64 * MIB,
             max_retained_jobs: DEFAULT_MAX_RETAINED_JOBS,
             max_stored_blob_bytes: 256 * MIB,
+            max_concurrent_requests: 4,
         }
     }
 }
@@ -254,12 +260,67 @@ impl Storage {
 }
 
 #[derive(Debug)]
+struct Lifecycle {
+    last_activity: Instant,
+    admitted_requests: usize,
+    shutdown_latched: bool,
+}
+
+#[derive(Debug)]
+struct RequestAdmission {
+    state: Arc<BridgeState>,
+    _capacity_permit: OwnedSemaphorePermit,
+}
+
+impl Drop for RequestAdmission {
+    fn drop(&mut self) {
+        let mut lifecycle = self
+            .state
+            .lifecycle
+            .lock()
+            .expect("lifecycle lock poisoned");
+        lifecycle.admitted_requests = lifecycle
+            .admitted_requests
+            .checked_sub(1)
+            .expect("request admission count underflow");
+        lifecycle.last_activity = Instant::now();
+    }
+}
+
+#[derive(Debug)]
+struct AdmittedBody {
+    inner: Body,
+    _admission: Arc<RequestAdmission>,
+}
+
+impl HttpBody for AdmittedBody {
+    type Data = Bytes;
+    type Error = axum::Error;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        Pin::new(&mut self.inner).poll_frame(context)
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        self.inner.size_hint()
+    }
+}
+
+#[derive(Debug)]
 pub struct BridgeState {
     config: BridgeConfig,
     control_secret: [u8; SECRET_BYTES],
     sessions: Mutex<Vec<Session>>,
     storage: RwLock<Storage>,
-    last_activity: Mutex<Instant>,
+    lifecycle: Mutex<Lifecycle>,
+    request_capacity: Arc<Semaphore>,
     active_jobs: AtomicUsize,
 }
 
@@ -274,12 +335,22 @@ impl BridgeState {
             config.limits.max_retained_jobs > 0,
             "at least one browser job must be retainable"
         );
+        assert!(
+            config.limits.max_concurrent_requests > 0,
+            "at least one authenticated request must be admissible"
+        );
+        let request_capacity = Arc::new(Semaphore::new(config.limits.max_concurrent_requests));
         Arc::new(Self {
             config,
             control_secret,
             sessions: Mutex::new(Vec::new()),
             storage: RwLock::new(Storage::default()),
-            last_activity: Mutex::new(Instant::now()),
+            lifecycle: Mutex::new(Lifecycle {
+                last_activity: Instant::now(),
+                admitted_requests: 0,
+                shutdown_latched: false,
+            }),
+            request_capacity,
             active_jobs: AtomicUsize::new(0),
         })
     }
@@ -340,14 +411,63 @@ impl BridgeState {
     }
 
     fn touch(&self) {
-        *self.last_activity.lock().expect("activity lock poisoned") = Instant::now();
+        self.lifecycle
+            .lock()
+            .expect("lifecycle lock poisoned")
+            .last_activity = Instant::now();
     }
 
-    fn idle_for(&self) -> Duration {
-        self.last_activity
+    #[cfg(test)]
+    fn admitted_request_count(&self) -> usize {
+        self.lifecycle
             .lock()
-            .expect("activity lock poisoned")
-            .elapsed()
+            .expect("lifecycle lock poisoned")
+            .admitted_requests
+    }
+
+    fn try_admit_authenticated(self: &Arc<Self>) -> Result<Arc<RequestAdmission>, ApiError> {
+        let capacity_permit = self
+            .request_capacity
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| {
+                ApiError::too_many_requests(
+                    "REQUEST_CAPACITY_EXHAUSTED",
+                    "The local browser companion is at its bounded request capacity.",
+                )
+            })?;
+        let mut lifecycle = self.lifecycle.lock().expect("lifecycle lock poisoned");
+        if lifecycle.shutdown_latched {
+            return Err(ApiError::service_unavailable(
+                "DAEMON_SHUTTING_DOWN",
+                "The local browser companion is shutting down; start a fresh session.",
+            ));
+        }
+        lifecycle.admitted_requests = lifecycle
+            .admitted_requests
+            .checked_add(1)
+            .expect("request admission count overflow");
+        lifecycle.last_activity = Instant::now();
+        drop(lifecycle);
+        Ok(Arc::new(RequestAdmission {
+            state: self.clone(),
+            _capacity_permit: capacity_permit,
+        }))
+    }
+
+    fn try_latch_idle_shutdown(&self) -> bool {
+        let mut lifecycle = self.lifecycle.lock().expect("lifecycle lock poisoned");
+        if lifecycle.shutdown_latched {
+            return true;
+        }
+        if self.active_job_count() == 0
+            && lifecycle.admitted_requests == 0
+            && lifecycle.last_activity.elapsed() >= self.config.idle_timeout
+        {
+            lifecycle.shutdown_latched = true;
+            return true;
+        }
+        false
     }
 
     fn origin_has_session(&self, origin: &str) -> bool {
@@ -540,6 +660,15 @@ impl ApiError {
         }
     }
 
+    fn service_unavailable(code: &'static str, message: &'static str) -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code,
+            message,
+            retryable: true,
+        }
+    }
+
     fn unsupported_media(message: &'static str) -> Self {
         Self {
             status: StatusCode::UNSUPPORTED_MEDIA_TYPE,
@@ -611,7 +740,7 @@ pub async fn wait_until_idle(state: Arc<BridgeState>) {
         .clamp(Duration::from_millis(25), Duration::from_secs(1));
     loop {
         sleep(interval).await;
-        if state.active_job_count() == 0 && state.idle_for() >= state.config.idle_timeout {
+        if state.try_latch_idle_shutdown() {
             return;
         }
     }
@@ -619,7 +748,7 @@ pub async fn wait_until_idle(state: Arc<BridgeState>) {
 
 async fn security_boundary(
     State(state): State<Arc<BridgeState>>,
-    request: Request,
+    mut request: Request,
     next: Next,
 ) -> Response {
     let path = request.uri().path();
@@ -644,8 +773,12 @@ async fn security_boundary(
         if !authenticated {
             return ApiError::unauthorized().into_response();
         }
-        state.touch();
-        return next.run(request).await;
+        let admission = match state.try_admit_authenticated() {
+            Ok(admission) => admission,
+            Err(error) => return error.into_response(),
+        };
+        request.extensions_mut().insert(admission.clone());
+        return admitted_response(next.run(request).await, admission);
     }
 
     let origin = match single_header(request.headers(), ORIGIN.as_str()) {
@@ -683,9 +816,24 @@ async fn security_boundary(
         return with_cors(ApiError::unauthorized().into_response(), &origin);
     }
 
-    state.touch();
-    let response = next.run(request).await;
+    let admission = match state.try_admit_authenticated() {
+        Ok(admission) => admission,
+        Err(error) => return with_cors(error.into_response(), &origin),
+    };
+    request.extensions_mut().insert(admission.clone());
+    let response = admitted_response(next.run(request).await, admission);
     with_cors(response, &origin)
+}
+
+fn admitted_response(response: Response, admission: Arc<RequestAdmission>) -> Response {
+    let (parts, body) = response.into_parts();
+    Response::from_parts(
+        parts,
+        Body::new(AdmittedBody {
+            inner: body,
+            _admission: admission,
+        }),
+    )
 }
 
 fn valid_host(headers: &HeaderMap, port: u16) -> bool {
@@ -806,6 +954,7 @@ async fn setup_models() -> Json<crate::contracts::BrowserSetupStatus> {
 
 async fn create_job(
     State(state): State<Arc<BridgeState>>,
+    Extension(admission): Extension<Arc<RequestAdmission>>,
     multipart: Result<Multipart, MultipartRejection>,
 ) -> Result<impl IntoResponse, ApiError> {
     let mut multipart = multipart.map_err(|_| {
@@ -906,6 +1055,7 @@ async fn create_job(
     let limits = state.config.limits.clone();
     let validation_request = job_request.clone();
     let validated = tokio::task::spawn_blocking(move || {
+        let _admission = admission;
         validate_image_upload(image, &validation_request, &limits)
     })
     .await
@@ -953,6 +1103,74 @@ async fn read_multipart_field(
 #[derive(Debug)]
 struct ValidatedUpload {
     clean_png: Vec<u8>,
+}
+
+#[derive(Debug)]
+struct BoundedCursor {
+    inner: Cursor<Vec<u8>>,
+    limit: usize,
+    limit_exceeded: bool,
+}
+
+impl BoundedCursor {
+    fn new(limit: usize) -> Self {
+        Self {
+            inner: Cursor::new(Vec::new()),
+            limit,
+            limit_exceeded: false,
+        }
+    }
+
+    fn into_inner(self) -> Vec<u8> {
+        self.inner.into_inner()
+    }
+}
+
+impl Write for BoundedCursor {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        let position = usize::try_from(self.inner.position()).map_err(|_| {
+            self.limit_exceeded = true;
+            std::io::Error::other("bounded output position overflow")
+        })?;
+        let end = position.checked_add(buffer.len()).ok_or_else(|| {
+            self.limit_exceeded = true;
+            std::io::Error::other("bounded output length overflow")
+        })?;
+        if end > self.limit {
+            self.limit_exceeded = true;
+            return Err(std::io::Error::other("bounded output limit exceeded"));
+        }
+        let additional = end.saturating_sub(self.inner.get_ref().len());
+        if additional > 0 {
+            self.inner
+                .get_mut()
+                .try_reserve_exact(additional)
+                .map_err(|_| std::io::Error::other("bounded output allocation failed"))?;
+        }
+        self.inner.write(buffer)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+impl Seek for BoundedCursor {
+    fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+        let current = i128::from(self.inner.position());
+        let end = i128::try_from(self.inner.get_ref().len())
+            .map_err(|_| std::io::Error::other("bounded output length overflow"))?;
+        let requested = match position {
+            SeekFrom::Start(offset) => i128::from(offset),
+            SeekFrom::End(offset) => end + i128::from(offset),
+            SeekFrom::Current(offset) => current + i128::from(offset),
+        };
+        if requested < 0 || requested > self.limit as i128 {
+            self.limit_exceeded = true;
+            return Err(std::io::Error::other("bounded output seek exceeded limit"));
+        }
+        self.inner.seek(SeekFrom::Start(requested as u64))
+    }
 }
 
 fn validate_image_upload(
@@ -1029,10 +1247,17 @@ fn validate_image_upload(
     let clean_png = if format == ImageFormat::Png {
         image
     } else {
-        let mut output = Cursor::new(Vec::new());
-        decoded
-            .write_to(&mut output, ImageFormat::Png)
-            .map_err(|_| ApiError::internal())?;
+        let mut output = BoundedCursor::new(limits.max_clean_blob_bytes);
+        if decoded.write_to(&mut output, ImageFormat::Png).is_err() {
+            return if output.limit_exceeded {
+                Err(ApiError::payload_too_large(
+                    "CLEAN_IMAGE_TOO_LARGE",
+                    "The clean fixture image exceeds the blob limit.",
+                ))
+            } else {
+                Err(ApiError::internal())
+            };
+        }
         output.into_inner()
     };
     if clean_png.len() > limits.max_clean_blob_bytes {
@@ -1066,8 +1291,9 @@ async fn run_fixture_job(
 
 fn finish_active(state: &BridgeState, record: &JobRecord) {
     if record.active.swap(false, Ordering::AcqRel) {
+        let mut lifecycle = state.lifecycle.lock().expect("lifecycle lock poisoned");
         state.active_jobs.fetch_sub(1, Ordering::AcqRel);
-        state.touch();
+        lifecycle.last_activity = Instant::now();
     }
 }
 
@@ -1204,10 +1430,7 @@ async fn blob(
         .get(&blob_id)
         .cloned()
         .ok_or_else(|| ApiError::not_found("BLOB_NOT_FOUND", "The browser blob does not exist."))?;
-    Ok(bytes_response(
-        blob.bytes.as_ref().to_vec(),
-        blob.content_type,
-    ))
+    Ok(arc_bytes_response(blob.bytes, blob.content_type))
 }
 
 async fn font(Path(font_id): Path<String>) -> Result<Response, ApiError> {
@@ -1219,6 +1442,19 @@ async fn font(Path(font_id): Path<String>) -> Result<Response, ApiError> {
 fn bytes_response(bytes: Vec<u8>, content_type: &'static str) -> Response {
     let length = bytes.len();
     let mut response = Response::new(Body::from(bytes));
+    response
+        .headers_mut()
+        .insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
+    response.headers_mut().insert(
+        CONTENT_LENGTH,
+        HeaderValue::from_str(&length.to_string()).expect("byte length header"),
+    );
+    response
+}
+
+fn arc_bytes_response(bytes: Arc<[u8]>, content_type: &'static str) -> Response {
+    let length = bytes.len();
+    let mut response = Response::new(Body::from(Bytes::from_owner(bytes)));
     response
         .headers_mut()
         .insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
@@ -1259,11 +1495,11 @@ mod tests {
     use std::convert::Infallible;
     use std::io::Write as _;
     use std::pin::Pin;
-    use std::task::{Context, Poll};
+    use std::task::{Context, Poll, Waker};
 
     use axum::body::{Bytes, to_bytes};
     use http_body::{Body as HttpBody, Frame};
-    use image::{DynamicImage, RgbaImage};
+    use image::{DynamicImage, RgbImage, RgbaImage};
     use serde_json::{Value, json};
     use tower::ServiceExt;
 
@@ -1282,6 +1518,62 @@ mod tests {
             _context: &mut Context<'_>,
         ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
             panic!("security middleware must reject this request before reading its body")
+        }
+    }
+
+    #[derive(Debug)]
+    struct GatedBodyState {
+        polled: AtomicBool,
+        released: AtomicBool,
+        waker: Mutex<Option<Waker>>,
+    }
+
+    impl GatedBodyState {
+        fn release(&self) {
+            self.released.store(true, Ordering::Release);
+            if let Some(waker) = self.waker.lock().expect("gate waker lock").take() {
+                waker.wake();
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    struct GatedBody {
+        state: Arc<GatedBodyState>,
+        bytes: Option<Bytes>,
+    }
+
+    impl GatedBody {
+        fn new(bytes: Vec<u8>) -> (Self, Arc<GatedBodyState>) {
+            let state = Arc::new(GatedBodyState {
+                polled: AtomicBool::new(false),
+                released: AtomicBool::new(false),
+                waker: Mutex::new(None),
+            });
+            (
+                Self {
+                    state: state.clone(),
+                    bytes: Some(Bytes::from(bytes)),
+                },
+                state,
+            )
+        }
+    }
+
+    impl HttpBody for GatedBody {
+        type Data = Bytes;
+        type Error = Infallible;
+
+        fn poll_frame(
+            mut self: Pin<&mut Self>,
+            context: &mut Context<'_>,
+        ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+            self.state.polled.store(true, Ordering::Release);
+            if !self.state.released.load(Ordering::Acquire) {
+                *self.state.waker.lock().expect("gate waker lock") = Some(context.waker().clone());
+                return Poll::Pending;
+            }
+            Poll::Ready(self.bytes.take().map(|bytes| Ok(Frame::data(bytes))))
         }
     }
 
@@ -1317,6 +1609,17 @@ mod tests {
         let image = DynamicImage::ImageRgba8(RgbaImage::from_pixel(2, 3, image::Rgba(color)));
         let mut output = Cursor::new(Vec::new());
         image.write_to(&mut output, ImageFormat::Png).unwrap();
+        output.into_inner()
+    }
+
+    fn jpeg_with_dimensions(width: u32, height: u32) -> Vec<u8> {
+        let image = DynamicImage::ImageRgb8(RgbImage::from_pixel(
+            width,
+            height,
+            image::Rgb([127, 96, 64]),
+        ));
+        let mut output = Cursor::new(Vec::new());
+        image.write_to(&mut output, ImageFormat::Jpeg).unwrap();
         output.into_inner()
     }
 
@@ -1525,6 +1828,136 @@ mod tests {
                     .is_success()
             );
         }
+    }
+
+    #[tokio::test]
+    async fn authenticated_request_capacity_rejects_concurrency_before_polling_bodies() {
+        let mut config = BridgeConfig::for_port(43127);
+        config.fixture_stage_delay = Duration::from_secs(30);
+        config.limits.max_concurrent_requests = 1;
+        let state = BridgeState::new(config, [8_u8; SECRET_BYTES]);
+        let token = state.issue_session(ORIGIN_VALUE).unwrap().token;
+        let app = router(state.clone());
+        let image = png();
+        let (content_type, body) = multipart_body(&image);
+        let (gated_body, gate) = GatedBody::new(body);
+        let first_app = app.clone();
+        let first_token = token.clone();
+        let first = tokio::spawn(async move {
+            first_app
+                .oneshot(
+                    authorized(Method::POST, "/browser/v1/jobs", &first_token)
+                        .header(CONTENT_TYPE, content_type)
+                        .body(Body::new(gated_body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        });
+
+        for _ in 0..100 {
+            if gate.polled.load(Ordering::Acquire) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(gate.polled.load(Ordering::Acquire));
+        assert_eq!(state.admitted_request_count(), 1);
+
+        let mut attempts = tokio::task::JoinSet::new();
+        for _ in 0..32 {
+            let attempt_app = app.clone();
+            let attempt_token = token.clone();
+            attempts.spawn(async move {
+                attempt_app
+                    .oneshot(
+                        authorized(Method::POST, "/browser/v1/jobs", &attempt_token)
+                            .header(CONTENT_TYPE, "multipart/form-data; boundary=x")
+                            .body(Body::new(PanicIfReadBody))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap()
+            });
+        }
+        while let Some(response) = attempts.join_next().await {
+            let response = response.unwrap();
+            assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+            assert_eq!(
+                body_json(response).await["code"],
+                "REQUEST_CAPACITY_EXHAUSTED"
+            );
+        }
+
+        gate.release();
+        let response = first.await.unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let job_id = body_json(response).await["jobId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        cancel(&app, &token, &job_id).await;
+    }
+
+    #[tokio::test]
+    async fn stalled_authenticated_upload_prevents_idle_latch_until_its_job_finishes() {
+        let mut config = BridgeConfig::for_port(43127);
+        config.idle_timeout = Duration::from_millis(40);
+        config.fixture_stage_delay = Duration::from_secs(30);
+        config.limits.max_concurrent_requests = 2;
+        let state = BridgeState::new(config, [10_u8; SECRET_BYTES]);
+        let token = state.issue_session(ORIGIN_VALUE).unwrap().token;
+        let app = router(state.clone());
+        let shutdown = tokio::spawn(wait_until_idle(state.clone()));
+        let image = png();
+        let (content_type, body) = multipart_body(&image);
+        let (gated_body, gate) = GatedBody::new(body);
+        let upload_app = app.clone();
+        let upload_token = token.clone();
+        let upload = tokio::spawn(async move {
+            upload_app
+                .oneshot(
+                    authorized(Method::POST, "/browser/v1/jobs", &upload_token)
+                        .header(CONTENT_TYPE, content_type)
+                        .body(Body::new(gated_body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        });
+
+        for _ in 0..100 {
+            if gate.polled.load(Ordering::Acquire) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(gate.polled.load(Ordering::Acquire));
+        sleep(Duration::from_millis(120)).await;
+        assert!(
+            !shutdown.is_finished(),
+            "idle shutdown must not latch while an authenticated upload is admitted"
+        );
+
+        gate.release();
+        let response = upload.await.unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let job_id = body_json(response).await["jobId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(state.active_job_count(), 1);
+        sleep(Duration::from_millis(120)).await;
+        assert!(
+            !shutdown.is_finished(),
+            "the job created by the stalled request must keep the daemon alive"
+        );
+
+        cancel(&app, &token, &job_id).await;
+        tokio::time::timeout(Duration::from_secs(1), shutdown)
+            .await
+            .expect("idle shutdown after request and job finish")
+            .expect("idle shutdown task");
     }
 
     #[tokio::test]
@@ -1770,6 +2203,69 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(body_json(still_cancelled).await["state"], "cancelled");
+    }
+
+    #[tokio::test]
+    async fn blob_transfer_is_zero_copy_and_holds_the_global_response_budget() {
+        let mut config = BridgeConfig::for_port(43127);
+        config.fixture_stage_delay = Duration::from_secs(30);
+        config.limits.max_concurrent_requests = 1;
+        let state = BridgeState::new(config, [11_u8; SECRET_BYTES]);
+        let token = state.issue_session(ORIGIN_VALUE).unwrap().token;
+        let app = router(state.clone());
+        let job_id = submit_accepted_job(&app, &token, &png()).await;
+        let (blob_id, retained_bytes) = {
+            let storage = state.storage.read().expect("storage lock");
+            let blob_id = storage.jobs[&job_id].result.clean_image_blob_id.clone();
+            let bytes = storage.blobs[&blob_id].bytes.clone();
+            (blob_id, bytes)
+        };
+        let baseline_references = Arc::strong_count(&retained_bytes);
+
+        let blob_response = app
+            .clone()
+            .oneshot(
+                authorized(Method::GET, &format!("/browser/v1/blobs/{blob_id}"), &token)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(blob_response.status(), StatusCode::OK);
+        assert!(
+            Arc::strong_count(&retained_bytes) > baseline_references,
+            "the response body must retain the stored Arc instead of copying the blob"
+        );
+
+        let saturated = app
+            .clone()
+            .oneshot(
+                authorized(Method::GET, "/browser/v1/health", &token)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(saturated.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            body_json(saturated).await["code"],
+            "REQUEST_CAPACITY_EXHAUSTED"
+        );
+
+        drop(blob_response);
+        let recovered = app
+            .clone()
+            .oneshot(
+                authorized(Method::GET, "/browser/v1/health", &token)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(recovered.status(), StatusCode::OK);
+        let _ = body_json(recovered).await;
+        assert_eq!(Arc::strong_count(&retained_bytes), baseline_references);
+        cancel(&app, &token, &job_id).await;
     }
 
     #[tokio::test]
@@ -2090,6 +2586,56 @@ mod tests {
             validate_image_upload(image, &request, &limits),
             Err(ApiError {
                 code: "IMAGE_TOO_LARGE",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn tall_images_keep_pixel_decode_and_bounded_png_output_limits() {
+        let image = jpeg_with_dimensions(32, 4_096);
+        let mut request: BrowserJobRequest = serde_json::from_str(include_str!(
+            "../../../fixtures/contracts/job-request.valid.json"
+        ))
+        .unwrap();
+        request.source_sha256 = sha256_hex(&image);
+        request.natural_width = 32;
+        request.natural_height = 4_096;
+        request.source_mime_type = "image/jpeg".into();
+
+        let limits = ServerLimits::default();
+        assert!(
+            validate_image_upload(image.clone(), &request, &limits).is_ok(),
+            "a tall narrow reader image within every configured bound should decode"
+        );
+
+        let mut pixel_limited = limits.clone();
+        pixel_limited.max_pixels =
+            u64::from(request.natural_width) * u64::from(request.natural_height) - 1;
+        assert!(matches!(
+            validate_image_upload(image.clone(), &request, &pixel_limited),
+            Err(ApiError {
+                code: "IMAGE_TOO_LARGE",
+                ..
+            })
+        ));
+
+        let mut decode_limited = limits.clone();
+        decode_limited.max_decoded_bytes = 128;
+        assert!(matches!(
+            validate_image_upload(image.clone(), &request, &decode_limited),
+            Err(ApiError {
+                code: "UNSUPPORTED_IMAGE",
+                ..
+            })
+        ));
+
+        let mut output_limited = limits;
+        output_limited.max_clean_blob_bytes = 8;
+        assert!(matches!(
+            validate_image_upload(image, &request, &output_limited),
+            Err(ApiError {
+                code: "CLEAN_IMAGE_TOO_LARGE",
                 ..
             })
         ));

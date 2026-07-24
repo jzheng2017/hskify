@@ -1,9 +1,14 @@
 param(
     [Parameter(Mandatory = $true)]
-    [string] $NativeHostPath
+    [string] $NativeHostPath,
+    [Parameter(DontShow = $true)]
+    [string] $RegistryPath = 'HKCU:\Software\Mozilla\NativeMessagingHosts\local.mangalations.hsk_manga'
 )
 
 $ErrorActionPreference = 'Stop'
+if (-not (Test-Path -LiteralPath $NativeHostPath -PathType Leaf)) {
+    throw 'NativeHostPath must be an existing executable file'
+}
 $resolvedHost = (Resolve-Path -LiteralPath $NativeHostPath).Path
 if ([IO.Path]::GetFileName($resolvedHost) -ne 'hsk-manga-native-host.exe') {
     throw 'NativeHostPath must name hsk-manga-native-host.exe'
@@ -11,7 +16,6 @@ if ([IO.Path]::GetFileName($resolvedHost) -ne 'hsk-manga-native-host.exe') {
 
 $manifestDirectory = Join-Path $env:LOCALAPPDATA 'Mangalations\HSKMangaTranslator\native-host'
 $manifestPath = Join-Path $manifestDirectory 'local.mangalations.hsk_manga.json'
-$registryPath = 'HKCU:\Software\Mozilla\NativeMessagingHosts\local.mangalations.hsk_manga'
 
 [IO.Directory]::CreateDirectory($manifestDirectory) | Out-Null
 $manifest = [ordered]@{
@@ -24,6 +28,6 @@ $manifest = [ordered]@{
 $json = $manifest | ConvertTo-Json -Depth 3
 [IO.File]::WriteAllText($manifestPath, $json, [Text.UTF8Encoding]::new($false))
 
-New-Item -Path $registryPath -Force | Out-Null
-Set-Item -LiteralPath $registryPath -Value $manifestPath
+New-Item -Path $RegistryPath -Force | Out-Null
+Set-Item -LiteralPath $RegistryPath -Value $manifestPath
 Write-Output $manifestPath
