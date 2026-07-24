@@ -11,7 +11,8 @@
     "typecheck": "wxt prepare && tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "lint:extension": "web-ext lint --source-dir .output/firefox-mv3"
   },
   "devDependencies": {
     "@playwright/test": "1.61.1",

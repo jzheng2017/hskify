@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en" data-hmt-fixture="true">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Responsive manga fixture</title>
+    <link rel="stylesheet" href="./fixture.css" />
+  </head>
+  <body>
+    <header><h1>Responsive image · resize and browser zoom</h1></header>
+    <main class="reader">
+      <picture>
+        <source media="(max-width: 620px)" srcset="../images/synthetic-panel-b.svg" />
+        <img class="manga full" src="../images/synthetic-panel-a.svg" alt="Responsive manga" />
+      </picture>
+    </main>
+    <script src="./fixture.js"></script>
+  </body>
+</html>

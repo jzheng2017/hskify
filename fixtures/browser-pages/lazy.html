@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en" data-hmt-fixture="true">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Lazy manga fixture</title>
+    <link rel="stylesheet" href="./fixture.css" />
+  </head>
+  <body>
+    <header><h1>Mutation and intersection observation</h1></header>
+    <main class="reader">
+      <img class="manga" src="../images/synthetic-panel-a.svg" alt="Initially visible manga" />
+      <div class="spacer">Scroll for lazy fixtures</div>
+      <img class="manga" data-lazy-src="../images/synthetic-panel-b.svg" alt="Lazy manga one" />
+      <img class="manga" data-lazy-src="../images/synthetic-panel-a.svg" alt="Lazy manga two" />
+    </main>
+    <script src="./fixture.js"></script>
+  </body>
+</html>

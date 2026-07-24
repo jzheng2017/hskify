@@ -3,6 +3,7 @@ import { defineConfig } from 'wxt'
 export default defineConfig({
   srcDir: '.',
   outDir: '.output',
+  manifestVersion: 3,
   manifest: {
     name: 'HSK Manga Translator',
     description: 'Translate English manga lettering into selectable, HSK-controlled Chinese.',
@@ -14,6 +15,9 @@ export default defineConfig({
       gecko: {
         id: 'hsk-manga-translator@local.mangalations',
         strict_min_version: '128.0',
+        data_collection_permissions: {
+          required: ['none'],
+        },
       },
     },
   },

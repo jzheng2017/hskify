@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>HSK Manga Translator</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <span class="mark" aria-hidden="true">译</span>
+        <span>
+          <strong>HSK Manga Translator</strong>
+          <small>Local · selectable Chinese</small>
+        </span>
+      </header>
+
+      <label for="hsk-level">Cumulative vocabulary level</label>
+      <select id="hsk-level" aria-describedby="hsk-help">
+        <option value="1">HSK 1</option>
+        <option value="2">HSK 2 · levels 1–2</option>
+        <option value="3">HSK 3 · levels 1–3</option>
+        <option value="4">HSK 4 · levels 1–4</option>
+        <option value="5">HSK 5 · levels 1–5</option>
+        <option value="6">HSK 6 · levels 1–6</option>
+      </select>
+      <small id="hsk-help">Grammar is targeted to this level; vocabulary is cumulative.</small>
+
+      <section class="actions" aria-label="Translation actions">
+        <button id="translate-visible" type="button">Translate visible manga</button>
+        <button id="translate-all" type="button" class="secondary">
+          Translate all manga on page
+        </button>
+      </section>
+
+      <section class="status" aria-live="polite">
+        <span id="status-title">Ready</span>
+        <span id="status-detail">Choose one translation action.</span>
+        <progress id="status-progress" max="1" hidden></progress>
+        <button id="cancel" type="button" class="cancel" hidden>Cancel</button>
+      </section>
+    </main>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

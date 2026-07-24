@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900" role="img" aria-labelledby="title desc">
+  <title id="title">Synthetic wide manga image</title>
+  <desc id="desc">A wide layout fixture for contain and cover object fitting.</desc>
+  <rect width="1600" height="900" fill="#dbeafe"/>
+  <path d="M0 700 280 360 500 610 760 250 1040 650 1310 320 1600 680V900H0Z" fill="#334155"/>
+  <circle cx="210" cy="180" r="110" fill="#fde68a"/>
+  <path d="M470 130h570q120 0 120 110t-120 110H820l-90 95 20-95H470q-120 0-120-110t120-110Z" fill="#fff" stroke="#0f172a" stroke-width="12"/>
+  <text x="760" y="265" text-anchor="middle" font-family="Arial, sans-serif" font-size="72" font-weight="700" fill="#0f172a">WE HAVE TO LEAVE NOW!</text>
+  <text x="1550" y="850" text-anchor="end" font-family="Arial, sans-serif" font-size="28" fill="#fff">SYNTHETIC FIXTURE · CC0</text>
+</svg>

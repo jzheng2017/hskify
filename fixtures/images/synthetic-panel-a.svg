@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1800" viewBox="0 0 1200 1800" role="img" aria-labelledby="title desc">
+  <title id="title">Synthetic black and white manga panel</title>
+  <desc id="desc">A permissively created test fixture with two English speech bubbles.</desc>
+  <defs>
+    <pattern id="dots" width="14" height="14" patternUnits="userSpaceOnUse">
+      <circle cx="3" cy="3" r="2" fill="#a8a8a8"/>
+    </pattern>
+    <linearGradient id="sky" x1="0" x2="0" y1="0" y2="1">
+      <stop offset="0" stop-color="#e9edf2"/>
+      <stop offset="1" stop-color="#a9b3c0"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="1800" fill="#fff"/>
+  <rect x="34" y="34" width="1132" height="1732" fill="none" stroke="#111" stroke-width="20"/>
+  <rect x="54" y="54" width="1092" height="760" fill="url(#sky)"/>
+  <path d="M54 650 L330 410 540 650 760 350 1146 690V814H54Z" fill="#596675"/>
+  <rect x="54" y="814" width="1092" height="932" fill="url(#dots)"/>
+  <path d="M145 1746q45-410 260-590 130-110 250 0 240 205 310 590Z" fill="#232932"/>
+  <circle cx="535" cy="1045" r="190" fill="#f0f1f2" stroke="#171717" stroke-width="16"/>
+  <path d="M380 990q155-245 325 0l-26-190q-170-130-303 8Z" fill="#15191f"/>
+  <circle cx="470" cy="1050" r="18" fill="#111"/>
+  <circle cx="595" cy="1050" r="18" fill="#111"/>
+  <path d="M492 1145q48 28 96 0" fill="none" stroke="#111" stroke-width="12" stroke-linecap="round"/>
+  <path d="M165 150Q120 258 173 350q50 83 171 83h242l70 83-8-99q128-30 128-147 0-140-178-159-236-25-393 39Z" fill="#fff" stroke="#111" stroke-width="14"/>
+  <text x="395" y="235" text-anchor="middle" font-family="Arial, sans-serif" font-size="64" font-weight="700" fill="#111">
+    <tspan x="395" dy="0">WE HAVE TO</tspan>
+    <tspan x="395" dy="78">LEAVE NOW!</tspan>
+  </text>
+  <path d="M700 1095q-56 70-20 166 36 96 146 113l-38 110 103-91q132 10 191-82 63-98-24-194-73-80-196-78-98 1-162 56Z" fill="#fff" stroke="#111" stroke-width="14"/>
+  <text x="881" y="1170" text-anchor="middle" font-family="Arial, sans-serif" font-size="55" font-weight="800" fill="#172a52" transform="rotate(-8 881 1170)">
+    <tspan x="881" dy="0">WAIT</tspan>
+    <tspan x="881" dy="66">FOR ME!</tspan>
+  </text>
+  <text x="1120" y="1705" text-anchor="end" font-family="Arial, sans-serif" font-size="28" fill="#fff">SYNTHETIC FIXTURE · CC0</text>
+</svg>
