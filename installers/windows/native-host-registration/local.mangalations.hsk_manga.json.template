@@ -1,0 +1,9 @@
+{
+  "name": "local.mangalations.hsk_manga",
+  "description": "HSK Manga Translator local browser companion",
+  "path": "__ABSOLUTE_NATIVE_HOST_PATH__",
+  "type": "stdio",
+  "allowed_extensions": [
+    "hsk-manga-translator@local.mangalations"
+  ]
+}

@@ -908,9 +908,25 @@ dependencies = [
 name = "browser-companion"
 version = "0.61.2"
 dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "chrono",
+ "dirs",
+ "fs4",
+ "getrandom 0.3.4",
+ "http-body",
+ "image",
+ "libc",
  "serde",
  "serde_json",
+ "sha2",
+ "subtle",
+ "tempfile",
  "thiserror 2.0.18",
+ "tokio",
+ "tower",
+ "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
