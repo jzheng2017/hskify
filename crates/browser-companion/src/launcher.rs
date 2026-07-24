@@ -353,10 +353,12 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn windows_spawn_requests_firefox_job_breakaway() {
+    fn windows_spawn_flags_include_breakaway_request() {
         use windows_sys::Win32::System::Threading::{
             CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW,
         };
+        // Flag composition is not evidence that a particular parent job grants
+        // breakaway. The ignored Windows lifecycle probe exercises CreateProcess.
         let flags = windows_detached_creation_flags();
         assert_ne!(flags & CREATE_BREAKAWAY_FROM_JOB, 0);
         assert_ne!(flags & CREATE_NEW_PROCESS_GROUP, 0);

@@ -10,7 +10,7 @@ case "$host_path" in
     /*) ;;
     *) echo "native host path must be absolute" >&2; exit 2 ;;
 esac
-if [ "$(printf '%s' "$host_path" | LC_ALL=C tr -d '[:print:]' | wc -c)" -ne 0 ]; then
+if [ "$(printf '%s' "$host_path" | LC_ALL=C tr -d '\001-\037\177')" != "$host_path" ]; then
     echo "native host path must not contain control characters" >&2
     exit 2
 fi

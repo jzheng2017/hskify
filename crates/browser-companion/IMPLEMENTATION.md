@@ -85,6 +85,22 @@ recomputes SHA-256, matches declared/multipart/sniffed MIME types, checks
 declared dimensions, decodes under resource limits, and compares decoded
 dimensions before retaining bytes.
 
+Retention is deterministic and admission-driven. Each accepted job receives a
+monotonic daemon-local sequence. When either retention bound is under pressure,
+the daemon evicts the oldest inactive terminal job until the new job fits.
+Running jobs are never eviction candidates. An evicted job's clean blob is
+removed only after the last retained job reference disappears; this also keeps
+the source blob valid when a retranslation replaces its completed source job.
+Completed and cancelled jobs therefore remain queryable until later admission
+pressure reclaims them, after which their job endpoint (and any now-orphaned
+blob endpoint) returns 404.
+
+Clean PNG payloads are deduplicated by SHA-256, MIME type, and exact byte
+equality. Identical uploads and equivalent cleaned inputs share one blob
+allocation. Capacity can still return a retryable 429 while all reclaimable
+space is held by active jobs, but terminal history can no longer leave a
+long-lived daemon permanently saturated.
+
 The font endpoint returns a valid, project-generated Gate-2 TrueType fixture
 containing only `.notdef` and space. Browsers therefore load it successfully
 and use normal CJK fallback. It intentionally is not the licensed production
@@ -111,7 +127,9 @@ job engine.
 `installers/{windows,linux,macos}/native-host-registration` contains exact-ID
 manifest templates plus per-user register/unregister scripts. They accept only
 an absolute executable with the frozen native-host filename and do not expose
-ports or manual server configuration.
+ports or manual server configuration. The Unix scripts reject ASCII control
+bytes while accepting valid non-ASCII UTF-8 path bytes; the generated JSON
+retains the UTF-8 executable path.
 
 ## Verification
 
@@ -119,22 +137,70 @@ Run from the repository root:
 
 ```text
 cargo fmt -p browser-companion -- --check
+cargo check -p browser-companion
 cargo test -p browser-companion --all-targets
 cargo clippy -p browser-companion --all-targets -- -D warnings
+sh -n installers/linux/native-host-registration/register.sh \
+  installers/linux/native-host-registration/unregister.sh \
+  installers/macos/native-host-registration/register.sh \
+  installers/macos/native-host-registration/unregister.sh \
+  installers/test-native-host-registration.sh
+sh installers/test-native-host-registration.sh
 ```
 
 Coverage includes framing bounds and endianness, native caller validation, an
-end-to-end native binary handshake against the daemon binary, fresh/expired
-tokens, constant-time authentication use, pre-body rejection, Host/origin/
-protocol/CORS restrictions, every required route, SHA-256/MIME/byte/pixel
-limits, progress/result/blob/font transfer, cancellation races, duplicate
-locks, stale state replacement, random IPv4 loopback binding, and idle cleanup.
+end-to-end native binary handshake against a deliberately prestarted daemon,
+fresh/expired tokens, constant-time authentication use, pre-body rejection,
+Host/origin/protocol/CORS restrictions, every required route, SHA-256/MIME/
+byte/pixel limits, progress/result/blob/font transfer, cancellation races,
+active saturation, oldest-terminal eviction, exact-byte SHA deduplication,
+completion/cancellation orphan cleanup, shared/retranslation blob references,
+duplicate locks, stale state replacement, random IPv4 loopback binding, and
+idle cleanup. The prestarted-daemon handshake test covers framing, caller
+validation, and authenticated session issuance; it does not exercise launcher
+spawn.
 
-On the Windows development harness, direct use of
-`CREATE_BREAKAWAY_FROM_JOB` returned Win32 error 5 because the harness's outer
-job does not grant `JOB_OBJECT_LIMIT_BREAKAWAY_OK`. The test verifies the exact
-production flag and then exercises discovery, control auth, duplicate
-prevention, and idle cleanup in the harness job. A regular-Firefox packaging
-smoke test remains required to verify actual breakaway from Firefox's native
-host job. Unix `setsid()` and the macOS/Linux registration scripts were not
-runtime-tested on this Windows machine.
+### Evidence captured 2026-07-24
+
+On the Windows Codex development harness:
+
+- `cargo fmt -p browser-companion -- --check`, `cargo check -p
+  browser-companion`, and `cargo clippy -p browser-companion --all-targets -- -D
+  warnings` passed.
+- `cargo test -p browser-companion --all-targets` passed 31 library tests, 7
+  contract-fixture tests, the prestarted-daemon native handshake, and the
+  explicitly in-job Windows lifecycle test. The production breakaway probe was
+  reported as ignored.
+- Git Bash `sh -n` passed for both Unix register/unregister pairs and the
+  registration regression script. `sh
+  installers/test-native-host-registration.sh` passed both Linux and macOS
+  layouts using `翻訳ツール/hsk-manga-native-host`, and verified that a newline
+  in the path is rejected specifically as a control character. Its temporary
+  `HOME` prevents writes to the real Firefox profile.
+- PowerShell's parser reported zero syntax errors for
+  `Register-NativeHost.ps1` and `Unregister-NativeHost.ps1`.
+- The explicitly requested production probe,
+  `cargo test -p browser-companion --test windows_lifecycle
+  production_breakaway_launch_probe_covers_detached_lifecycle -- --ignored
+  --exact --nocapture`, failed immediately with Win32 error 5 (`Access is
+  denied`). This outer job does not grant `JOB_OBJECT_LIMIT_BREAKAWAY_OK`; the
+  test no longer falls back to an in-job child or reports detached coverage.
+
+### Remaining platform smoke requirements
+
+- **Windows / real Firefox:** install the packaged manifest and signed binaries,
+  invoke the native host from regular Firefox, close the one-shot native host,
+  and verify the production daemon remains alive, serves the returned token,
+  rejects a duplicate daemon, and performs idle cleanup. This is the required
+  evidence that `CREATE_BREAKAWAY_FROM_JOB` works specifically from Firefox's
+  native-host job; the Codex outer job and the direct ignored probe cannot
+  substitute for it.
+- **Linux / real Firefox:** run the registration regression plus an actual
+  per-user install from a non-ASCII UTF-8 path, invoke it from Firefox, verify
+  manifest permissions and origin/ID enforcement, and confirm the `setsid()`
+  daemon survives native-host exit before idle cleanup.
+- **macOS / real Firefox:** repeat the non-ASCII registration and Firefox
+  native-message launch against the packaged, signed/notarized binaries; verify
+  the manifest under `~/Library/Application
+  Support/Mozilla/NativeMessagingHosts`, executable/quarantine behavior,
+  `setsid()` survival, and idle cleanup.

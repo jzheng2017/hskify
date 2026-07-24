@@ -41,7 +41,7 @@ const MAX_INTERNAL_BODY_BYTES: usize = 4 * 1024;
 const MAX_LOOKUP_BODY_BYTES: usize = 16 * 1024;
 const MAX_RETRANSLATE_BODY_BYTES: usize = 64 * 1024;
 const MAX_SESSIONS: usize = 64;
-const MAX_RETAINED_JOBS: usize = 128;
+const DEFAULT_MAX_RETAINED_JOBS: usize = 128;
 
 #[derive(Debug, Clone)]
 pub struct ServerLimits {
@@ -52,6 +52,7 @@ pub struct ServerLimits {
     pub max_dimension: u32,
     pub max_decoded_bytes: u64,
     pub max_clean_blob_bytes: usize,
+    pub max_retained_jobs: usize,
     pub max_stored_blob_bytes: usize,
 }
 
@@ -66,6 +67,7 @@ impl Default for ServerLimits {
             max_dimension: 16_384,
             max_decoded_bytes: 128 * MIB as u64,
             max_clean_blob_bytes: 64 * MIB,
+            max_retained_jobs: DEFAULT_MAX_RETAINED_JOBS,
             max_stored_blob_bytes: 256 * MIB,
         }
     }
@@ -103,10 +105,12 @@ struct Session {
 struct StoredBlob {
     bytes: Arc<[u8]>,
     content_type: &'static str,
+    sha256: String,
 }
 
 #[derive(Debug)]
 struct JobRecord {
+    sequence: u64,
     status: RwLock<BrowserJobStatus>,
     result: BrowserJobResult,
     cancel: AtomicBool,
@@ -114,8 +118,9 @@ struct JobRecord {
 }
 
 impl JobRecord {
-    fn new(status: BrowserJobStatus, result: BrowserJobResult) -> Self {
+    fn new(sequence: u64, status: BrowserJobStatus, result: BrowserJobResult) -> Self {
         Self {
+            sequence,
             status: RwLock::new(status),
             result,
             cancel: AtomicBool::new(false),
@@ -138,6 +143,114 @@ impl JobRecord {
         *current = status;
         true
     }
+
+    fn is_evictable(&self) -> bool {
+        !self.active.load(Ordering::Acquire)
+            && self.status.read().expect("job status lock poisoned").state
+                != BrowserJobState::Running
+    }
+}
+
+#[derive(Debug, Default)]
+struct Storage {
+    jobs: HashMap<String, Arc<JobRecord>>,
+    blobs: HashMap<String, StoredBlob>,
+    next_job_sequence: u64,
+}
+
+impl Storage {
+    fn next_sequence(&mut self) -> u64 {
+        let sequence = self.next_job_sequence;
+        self.next_job_sequence = self.next_job_sequence.saturating_add(1);
+        sequence
+    }
+
+    fn stored_blob_bytes(&self) -> usize {
+        self.blobs
+            .values()
+            .try_fold(0_usize, |total, blob| total.checked_add(blob.bytes.len()))
+            .unwrap_or(usize::MAX)
+    }
+
+    fn identical_blob_id(&self, sha256: &str, bytes: &[u8], content_type: &str) -> Option<String> {
+        self.blobs
+            .iter()
+            .filter(|(_, blob)| {
+                blob.sha256 == sha256
+                    && blob.content_type == content_type
+                    && blob.bytes.as_ref() == bytes
+            })
+            .map(|(blob_id, _)| blob_id)
+            .min()
+            .cloned()
+    }
+
+    fn oldest_evictable_job_id(&self) -> Option<String> {
+        self.jobs
+            .iter()
+            .filter(|(_, job)| job.is_evictable())
+            .min_by(|(left_id, left), (right_id, right)| {
+                left.sequence
+                    .cmp(&right.sequence)
+                    .then_with(|| left_id.cmp(right_id))
+            })
+            .map(|(job_id, _)| job_id.clone())
+    }
+
+    fn evict_job(&mut self, job_id: &str, protected_blob_id: &str) {
+        let Some(job) = self.jobs.remove(job_id) else {
+            return;
+        };
+        let blob_id = &job.result.clean_image_blob_id;
+        if blob_id == protected_blob_id {
+            return;
+        }
+        let still_referenced = self
+            .jobs
+            .values()
+            .any(|retained| retained.result.clean_image_blob_id.as_str() == blob_id.as_str());
+        if !still_referenced {
+            self.blobs.remove(blob_id);
+        }
+    }
+
+    fn make_room(
+        &mut self,
+        limits: &ServerLimits,
+        added_blob_bytes: usize,
+        protected_blob_id: &str,
+    ) -> Result<(), ApiError> {
+        if added_blob_bytes > limits.max_stored_blob_bytes {
+            return Err(ApiError::too_many_requests(
+                "BLOB_LIMIT_REACHED",
+                "The fixture blob cache has reached its bounded capacity.",
+            ));
+        }
+
+        loop {
+            let jobs_full = self.jobs.len() >= limits.max_retained_jobs;
+            let blobs_full = self.stored_blob_bytes().saturating_add(added_blob_bytes)
+                > limits.max_stored_blob_bytes;
+            if !jobs_full && !blobs_full {
+                return Ok(());
+            }
+
+            let Some(job_id) = self.oldest_evictable_job_id() else {
+                return if jobs_full {
+                    Err(ApiError::too_many_requests(
+                        "JOB_LIMIT_REACHED",
+                        "All retained browser jobs are still active.",
+                    ))
+                } else {
+                    Err(ApiError::too_many_requests(
+                        "BLOB_LIMIT_REACHED",
+                        "Active browser jobs still reference the bounded blob cache.",
+                    ))
+                };
+            };
+            self.evict_job(&job_id, protected_blob_id);
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -145,8 +258,7 @@ pub struct BridgeState {
     config: BridgeConfig,
     control_secret: [u8; SECRET_BYTES],
     sessions: Mutex<Vec<Session>>,
-    jobs: RwLock<HashMap<String, Arc<JobRecord>>>,
-    blobs: RwLock<HashMap<String, StoredBlob>>,
+    storage: RwLock<Storage>,
     last_activity: Mutex<Instant>,
     active_jobs: AtomicUsize,
 }
@@ -158,12 +270,15 @@ impl BridgeState {
             config.limits.max_http_body_bytes >= config.limits.max_upload_bytes,
             "HTTP body limit must cover an upload"
         );
+        assert!(
+            config.limits.max_retained_jobs > 0,
+            "at least one browser job must be retainable"
+        );
         Arc::new(Self {
             config,
             control_secret,
             sessions: Mutex::new(Vec::new()),
-            jobs: RwLock::new(HashMap::new()),
-            blobs: RwLock::new(HashMap::new()),
+            storage: RwLock::new(Storage::default()),
             last_activity: Mutex::new(Instant::now()),
             active_jobs: AtomicUsize::new(0),
         })
@@ -261,6 +376,104 @@ impl BridgeState {
         decode_secret(candidate)
             .map(|candidate| secrets_equal(&self.control_secret, &candidate))
             .unwrap_or(false)
+    }
+
+    fn retain_uploaded_job(
+        &self,
+        clean_png: Vec<u8>,
+        request: &BrowserJobRequest,
+    ) -> Result<(String, Arc<JobRecord>, Vec<BrowserJobStatus>), ApiError> {
+        const CLEAN_CONTENT_TYPE: &str = "image/png";
+
+        let clean_sha256 = sha256_hex(&clean_png);
+        let mut storage = self.storage.write().expect("storage lock poisoned");
+        let existing_blob_id =
+            storage.identical_blob_id(&clean_sha256, &clean_png, CLEAN_CONTENT_TYPE);
+        let (blob_id, new_blob) = match existing_blob_id {
+            Some(blob_id) => (blob_id, None),
+            None => {
+                let blob_id = loop {
+                    let candidate = format!("blob-{}", Uuid::new_v4());
+                    if !storage.blobs.contains_key(&candidate) {
+                        break candidate;
+                    }
+                };
+                let blob = StoredBlob {
+                    bytes: clean_png.into(),
+                    content_type: CLEAN_CONTENT_TYPE,
+                    sha256: clean_sha256,
+                };
+                (blob_id, Some(blob))
+            }
+        };
+        let job_id = loop {
+            let candidate = format!("job-{}", Uuid::new_v4());
+            if !storage.jobs.contains_key(&candidate) {
+                break candidate;
+            }
+        };
+        let statuses = fixtures::progress(&job_id);
+        let result = fixtures::result(&job_id, &blob_id, request);
+        let added_blob_bytes = new_blob.as_ref().map_or(0, |blob| blob.bytes.len());
+        storage.make_room(&self.config.limits, added_blob_bytes, &blob_id)?;
+        let sequence = storage.next_sequence();
+        let record = Arc::new(JobRecord::new(sequence, statuses[0].clone(), result));
+        if let Some(blob) = new_blob {
+            let previous = storage.blobs.insert(blob_id, blob);
+            debug_assert!(previous.is_none());
+        }
+        let previous = storage.jobs.insert(job_id.clone(), record.clone());
+        debug_assert!(previous.is_none());
+        self.active_jobs.fetch_add(1, Ordering::AcqRel);
+        drop(storage);
+        self.touch();
+
+        Ok((job_id, record, statuses))
+    }
+
+    fn retain_retranslation_job(
+        &self,
+        original_job_id: &str,
+        request: &RetranslateRequest,
+    ) -> Result<(String, Arc<JobRecord>, Vec<BrowserJobStatus>), ApiError> {
+        let mut storage = self.storage.write().expect("storage lock poisoned");
+        let original = storage.jobs.get(original_job_id).cloned().ok_or_else(|| {
+            ApiError::not_found("JOB_NOT_FOUND", "The browser job does not exist.")
+        })?;
+        if original.status().state != BrowserJobState::Complete {
+            return Err(ApiError::conflict(
+                "JOB_NOT_COMPLETE",
+                "Only a completed browser job can be retranslated.",
+            ));
+        }
+
+        let new_job_id = loop {
+            let candidate = format!("job-{}", Uuid::new_v4());
+            if !storage.jobs.contains_key(&candidate) {
+                break candidate;
+            }
+        };
+        let mut result = original.result.clone();
+        result.job_id.clone_from(&new_job_id);
+        for region in &mut result.regions {
+            region.vocabulary.requested_hsk_level = request.settings.hsk_level;
+        }
+        result.validate().map_err(|_| ApiError::internal())?;
+        let blob_id = result.clean_image_blob_id.clone();
+        if !storage.blobs.contains_key(&blob_id) {
+            return Err(ApiError::internal());
+        }
+        let statuses = fixtures::progress(&new_job_id);
+        storage.make_room(&self.config.limits, 0, &blob_id)?;
+        let sequence = storage.next_sequence();
+        let record = Arc::new(JobRecord::new(sequence, statuses[0].clone(), result));
+        let previous = storage.jobs.insert(new_job_id.clone(), record.clone());
+        debug_assert!(previous.is_none());
+        self.active_jobs.fetch_add(1, Ordering::AcqRel);
+        drop(storage);
+        self.touch();
+
+        Ok((new_job_id, record, statuses))
     }
 }
 
@@ -698,40 +911,8 @@ async fn create_job(
     .await
     .map_err(|_| ApiError::internal())??;
 
-    let blob_id = format!("blob-{}", Uuid::new_v4());
-    let stored_blob = StoredBlob {
-        bytes: validated.clean_png.into(),
-        content_type: "image/png",
-    };
-    let job_id = format!("job-{}", Uuid::new_v4());
-    let statuses = fixtures::progress(&job_id);
-    let result = fixtures::result(&job_id, &blob_id, &job_request);
-    let record = Arc::new(JobRecord::new(statuses[0].clone(), result));
-    let mut jobs = state.jobs.write().expect("job lock poisoned");
-    if jobs.len() >= MAX_RETAINED_JOBS {
-        return Err(ApiError::too_many_requests(
-            "JOB_LIMIT_REACHED",
-            "Too many browser jobs are retained by this daemon.",
-        ));
-    }
-    let mut blobs = state.blobs.write().expect("blob lock poisoned");
-    let stored_bytes = blobs
-        .values()
-        .try_fold(0_usize, |total, blob| total.checked_add(blob.bytes.len()))
-        .unwrap_or(usize::MAX);
-    if stored_bytes.saturating_add(stored_blob.bytes.len())
-        > state.config.limits.max_stored_blob_bytes
-    {
-        return Err(ApiError::too_many_requests(
-            "BLOB_LIMIT_REACHED",
-            "The fixture blob cache has reached its bounded capacity.",
-        ));
-    }
-    blobs.insert(blob_id, stored_blob);
-    jobs.insert(job_id.clone(), record.clone());
-    drop(blobs);
-    drop(jobs);
-    state.active_jobs.fetch_add(1, Ordering::AcqRel);
+    let (job_id, record, statuses) =
+        state.retain_uploaded_job(validated.clean_png, &job_request)?;
     tokio::spawn(run_fixture_job(state.clone(), record, statuses));
 
     Ok((
@@ -892,9 +1073,10 @@ fn finish_active(state: &BridgeState, record: &JobRecord) {
 
 fn find_job(state: &BridgeState, job_id: &str) -> Result<Arc<JobRecord>, ApiError> {
     state
-        .jobs
+        .storage
         .read()
-        .expect("job lock poisoned")
+        .expect("storage lock poisoned")
+        .jobs
         .get(job_id)
         .cloned()
         .ok_or_else(|| ApiError::not_found("JOB_NOT_FOUND", "The browser job does not exist."))
@@ -967,32 +1149,7 @@ async fn retranslate_job(
             "The retranslation request failed protocol validation.",
         )
     })?;
-    let original = find_job(&state, &job_id)?;
-    if original.status().state != BrowserJobState::Complete {
-        return Err(ApiError::conflict(
-            "JOB_NOT_COMPLETE",
-            "Only a completed browser job can be retranslated.",
-        ));
-    }
-    let new_job_id = format!("job-{}", Uuid::new_v4());
-    let mut result = original.result.clone();
-    result.job_id.clone_from(&new_job_id);
-    for region in &mut result.regions {
-        region.vocabulary.requested_hsk_level = request.settings.hsk_level;
-    }
-    result.validate().map_err(|_| ApiError::internal())?;
-    let statuses = fixtures::progress(&new_job_id);
-    let record = Arc::new(JobRecord::new(statuses[0].clone(), result));
-    let mut jobs = state.jobs.write().expect("job lock poisoned");
-    if jobs.len() >= MAX_RETAINED_JOBS {
-        return Err(ApiError::too_many_requests(
-            "JOB_LIMIT_REACHED",
-            "Too many browser jobs are retained by this daemon.",
-        ));
-    }
-    jobs.insert(new_job_id.clone(), record.clone());
-    drop(jobs);
-    state.active_jobs.fetch_add(1, Ordering::AcqRel);
+    let (new_job_id, record, statuses) = state.retain_retranslation_job(&job_id, &request)?;
     tokio::spawn(run_fixture_job(state.clone(), record, statuses));
     Ok((
         StatusCode::ACCEPTED,
@@ -1040,9 +1197,10 @@ async fn blob(
     Path(blob_id): Path<String>,
 ) -> Result<Response, ApiError> {
     let blob = state
-        .blobs
+        .storage
         .read()
-        .expect("blob lock poisoned")
+        .expect("storage lock poisoned")
+        .blobs
         .get(&blob_id)
         .cloned()
         .ok_or_else(|| ApiError::not_found("BLOB_NOT_FOUND", "The browser blob does not exist."))?;
@@ -1152,11 +1310,11 @@ mod tests {
     }
 
     fn png() -> Vec<u8> {
-        let image = DynamicImage::ImageRgba8(RgbaImage::from_pixel(
-            2,
-            3,
-            image::Rgba([255, 255, 255, 255]),
-        ));
+        png_with_color([255, 255, 255, 255])
+    }
+
+    fn png_with_color(color: [u8; 4]) -> Vec<u8> {
+        let image = DynamicImage::ImageRgba8(RgbaImage::from_pixel(2, 3, image::Rgba(color)));
         let mut output = Cursor::new(Vec::new());
         image.write_to(&mut output, ImageFormat::Png).unwrap();
         output.into_inner()
@@ -1187,6 +1345,61 @@ mod tests {
         body.extend_from_slice(image);
         write!(body, "\r\n--{boundary}--\r\n").unwrap();
         (format!("multipart/form-data; boundary={boundary}"), body)
+    }
+
+    async fn submit_job(app: &Router, token: &str, image: &[u8]) -> Response {
+        let (content_type, body) = multipart_body(image);
+        app.clone()
+            .oneshot(
+                authorized(Method::POST, "/browser/v1/jobs", token)
+                    .header(CONTENT_TYPE, content_type)
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    async fn submit_accepted_job(app: &Router, token: &str, image: &[u8]) -> String {
+        let response = submit_job(app, token, image).await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        body_json(response).await["jobId"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+
+    async fn cancel(app: &Router, token: &str, job_id: &str) {
+        let response = app
+            .clone()
+            .oneshot(
+                authorized(Method::DELETE, &format!("/browser/v1/jobs/{job_id}"), token)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(body_json(response).await["state"], "cancelled");
+    }
+
+    async fn wait_for_completion(app: &Router, token: &str, job_id: &str) {
+        for _ in 0..100 {
+            sleep(Duration::from_millis(10)).await;
+            let response = app
+                .clone()
+                .oneshot(
+                    authorized(Method::GET, &format!("/browser/v1/jobs/{job_id}"), token)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            if body_json(response).await["state"] == "complete" {
+                return;
+            }
+        }
+        panic!("fixture job should reach a terminal status");
     }
 
     #[tokio::test]
@@ -1557,6 +1770,287 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(body_json(still_cancelled).await["state"], "cancelled");
+    }
+
+    #[tokio::test]
+    async fn active_saturation_recovers_by_evicting_oldest_terminal_jobs() {
+        let mut config = BridgeConfig::for_port(43127);
+        config.fixture_stage_delay = Duration::from_secs(30);
+        config.limits.max_retained_jobs = 2;
+        let state = BridgeState::new(config, [4_u8; SECRET_BYTES]);
+        let token = state.issue_session(ORIGIN_VALUE).unwrap().token;
+        let app = router(state);
+        let image = png();
+
+        let first = submit_accepted_job(&app, &token, &image).await;
+        let second = submit_accepted_job(&app, &token, &image).await;
+        let saturated = submit_job(&app, &token, &image).await;
+        assert_eq!(saturated.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(body_json(saturated).await["code"], "JOB_LIMIT_REACHED");
+
+        cancel(&app, &token, &first).await;
+        let third = submit_accepted_job(&app, &token, &image).await;
+        let first_status = app
+            .clone()
+            .oneshot(
+                authorized(Method::GET, &format!("/browser/v1/jobs/{first}"), &token)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first_status.status(), StatusCode::NOT_FOUND);
+        let second_status = app
+            .clone()
+            .oneshot(
+                authorized(Method::GET, &format!("/browser/v1/jobs/{second}"), &token)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(body_json(second_status).await["state"], "running");
+
+        cancel(&app, &token, &second).await;
+        cancel(&app, &token, &third).await;
+        let fourth = submit_accepted_job(&app, &token, &image).await;
+        let evicted_second = app
+            .clone()
+            .oneshot(
+                authorized(Method::GET, &format!("/browser/v1/jobs/{second}"), &token)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(evicted_second.status(), StatusCode::NOT_FOUND);
+        let retained_third = app
+            .clone()
+            .oneshot(
+                authorized(Method::GET, &format!("/browser/v1/jobs/{third}"), &token)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(body_json(retained_third).await["state"], "cancelled");
+        cancel(&app, &token, &fourth).await;
+    }
+
+    #[tokio::test]
+    async fn identical_clean_content_is_deduplicated_before_blob_limit_checks() {
+        let image = png();
+        let mut config = BridgeConfig::for_port(43127);
+        config.fixture_stage_delay = Duration::from_secs(30);
+        config.limits.max_retained_jobs = 3;
+        config.limits.max_stored_blob_bytes = image.len();
+        let state = BridgeState::new(config, [3_u8; SECRET_BYTES]);
+        let token = state.issue_session(ORIGIN_VALUE).unwrap().token;
+        let app = router(state.clone());
+
+        let first = submit_accepted_job(&app, &token, &image).await;
+        let second = submit_accepted_job(&app, &token, &image).await;
+        {
+            let storage = state.storage.read().expect("storage lock");
+            assert_eq!(storage.blobs.len(), 1);
+            assert_eq!(
+                storage.jobs[&first].result.clean_image_blob_id,
+                storage.jobs[&second].result.clean_image_blob_id
+            );
+            let blob = storage.blobs.values().next().unwrap();
+            assert_eq!(blob.sha256, sha256_hex(&image));
+            assert_eq!(blob.bytes.len(), image.len());
+        }
+
+        let unique = png_with_color([0, 0, 0, 255]);
+        let saturated = submit_job(&app, &token, &unique).await;
+        assert_eq!(saturated.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(body_json(saturated).await["code"], "BLOB_LIMIT_REACHED");
+        cancel(&app, &token, &first).await;
+        cancel(&app, &token, &second).await;
+    }
+
+    #[tokio::test]
+    async fn cancelled_job_eviction_keeps_shared_blobs_until_last_reference_leaves() {
+        let mut config = BridgeConfig::for_port(43127);
+        config.fixture_stage_delay = Duration::from_secs(30);
+        config.limits.max_retained_jobs = 2;
+        let state = BridgeState::new(config, [2_u8; SECRET_BYTES]);
+        let token = state.issue_session(ORIGIN_VALUE).unwrap().token;
+        let app = router(state.clone());
+        let shared_image = png();
+
+        let first = submit_accepted_job(&app, &token, &shared_image).await;
+        let second = submit_accepted_job(&app, &token, &shared_image).await;
+        let shared_blob_id = {
+            let storage = state.storage.read().expect("storage lock");
+            storage.jobs[&first].result.clean_image_blob_id.clone()
+        };
+        cancel(&app, &token, &first).await;
+        cancel(&app, &token, &second).await;
+
+        let third = submit_accepted_job(&app, &token, &png_with_color([255, 0, 0, 255])).await;
+        let shared_blob = app
+            .clone()
+            .oneshot(
+                authorized(
+                    Method::GET,
+                    &format!("/browser/v1/blobs/{shared_blob_id}"),
+                    &token,
+                )
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(shared_blob.status(), StatusCode::OK);
+
+        let fourth = submit_accepted_job(&app, &token, &png_with_color([0, 0, 255, 255])).await;
+        let evicted_blob = app
+            .clone()
+            .oneshot(
+                authorized(
+                    Method::GET,
+                    &format!("/browser/v1/blobs/{shared_blob_id}"),
+                    &token,
+                )
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(evicted_blob.status(), StatusCode::NOT_FOUND);
+        assert_eq!(state.storage.read().expect("storage lock").blobs.len(), 2);
+        cancel(&app, &token, &third).await;
+        cancel(&app, &token, &fourth).await;
+    }
+
+    #[tokio::test]
+    async fn completed_job_and_unreferenced_blob_are_reclaimed_under_pressure() {
+        let mut config = BridgeConfig::for_port(43127);
+        config.fixture_stage_delay = Duration::from_millis(1);
+        config.limits.max_retained_jobs = 1;
+        let state = BridgeState::new(config, [1_u8; SECRET_BYTES]);
+        let token = state.issue_session(ORIGIN_VALUE).unwrap().token;
+        let app = router(state.clone());
+
+        let first = submit_accepted_job(&app, &token, &png()).await;
+        wait_for_completion(&app, &token, &first).await;
+        for _ in 0..100 {
+            if state.active_job_count() == 0 {
+                break;
+            }
+            sleep(Duration::from_millis(1)).await;
+        }
+        assert_eq!(state.active_job_count(), 0);
+        let result = app
+            .clone()
+            .oneshot(
+                authorized(
+                    Method::GET,
+                    &format!("/browser/v1/jobs/{first}/result"),
+                    &token,
+                )
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let blob_id = body_json(result).await["cleanImageBlobId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        let second = submit_accepted_job(&app, &token, &png_with_color([0, 255, 0, 255])).await;
+        let old_job = app
+            .clone()
+            .oneshot(
+                authorized(Method::GET, &format!("/browser/v1/jobs/{first}"), &token)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(old_job.status(), StatusCode::NOT_FOUND);
+        let old_blob = app
+            .clone()
+            .oneshot(
+                authorized(Method::GET, &format!("/browser/v1/blobs/{blob_id}"), &token)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(old_blob.status(), StatusCode::NOT_FOUND);
+        cancel(&app, &token, &second).await;
+    }
+
+    #[tokio::test]
+    async fn retranslation_eviction_preserves_the_new_jobs_blob_reference() {
+        let mut config = BridgeConfig::for_port(43127);
+        config.fixture_stage_delay = Duration::from_millis(1);
+        config.limits.max_retained_jobs = 1;
+        let state = BridgeState::new(config, [6_u8; SECRET_BYTES]);
+        let token = state.issue_session(ORIGIN_VALUE).unwrap().token;
+        let app = router(state.clone());
+
+        let original = submit_accepted_job(&app, &token, &png()).await;
+        wait_for_completion(&app, &token, &original).await;
+        for _ in 0..100 {
+            if state.active_job_count() == 0 {
+                break;
+            }
+            sleep(Duration::from_millis(1)).await;
+        }
+        assert_eq!(state.active_job_count(), 0);
+        let blob_id = state.storage.read().expect("storage lock").jobs[&original]
+            .result
+            .clean_image_blob_id
+            .clone();
+
+        let response = app
+            .clone()
+            .oneshot(
+                authorized(
+                    Method::POST,
+                    &format!("/browser/v1/jobs/{original}/retranslate"),
+                    &token,
+                )
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(include_str!(
+                    "../../../fixtures/contracts/retranslate.valid.json"
+                )))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let retranslation = body_json(response).await["jobId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        let old_job = app
+            .clone()
+            .oneshot(
+                authorized(Method::GET, &format!("/browser/v1/jobs/{original}"), &token)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(old_job.status(), StatusCode::NOT_FOUND);
+        let referenced_blob = app
+            .clone()
+            .oneshot(
+                authorized(Method::GET, &format!("/browser/v1/blobs/{blob_id}"), &token)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(referenced_blob.status(), StatusCode::OK);
+        cancel(&app, &token, &retranslation).await;
     }
 
     #[tokio::test]

@@ -22,31 +22,61 @@ impl Drop for ChildGuard {
 }
 
 #[test]
-fn detached_daemon_survives_spawn_scope_and_duplicate_exits() {
+fn in_job_daemon_lifecycle_covers_discovery_lock_and_idle_cleanup() {
+    exercise_lifecycle(LaunchMode::InCurrentJob);
+}
+
+#[test]
+#[ignore = "requires a Windows parent job that grants JOB_OBJECT_LIMIT_BREAKAWAY_OK; this is a production-flag launch probe, not a Firefox packaging smoke test"]
+fn production_breakaway_launch_probe_covers_detached_lifecycle() {
+    exercise_lifecycle(LaunchMode::ProductionBreakaway);
+}
+
+#[derive(Clone, Copy, Debug)]
+enum LaunchMode {
+    InCurrentJob,
+    ProductionBreakaway,
+}
+
+impl LaunchMode {
+    fn spawn(
+        self,
+        executable: &PathBuf,
+        state_dir: &std::path::Path,
+        idle_timeout: Duration,
+    ) -> std::io::Result<Child> {
+        match self {
+            Self::InCurrentJob => spawn_in_job(executable, state_dir, idle_timeout),
+            Self::ProductionBreakaway => {
+                spawn_detached_daemon(executable, state_dir, Some(idle_timeout))
+            }
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::InCurrentJob => "in-job",
+            Self::ProductionBreakaway => "production breakaway",
+        }
+    }
+}
+
+fn exercise_lifecycle(mode: LaunchMode) {
     let directory = tempfile::tempdir().expect("temporary state directory");
     let paths = prepare_state_paths(directory.path()).expect("state paths");
     let executable = PathBuf::from(env!("CARGO_BIN_EXE_hsk-manga-browser-daemon"));
-    let (first, breakaway_available) = match spawn_detached_daemon(
-        &executable,
-        directory.path(),
-        Some(Duration::from_millis(700)),
-    ) {
-        Ok(child) => (child, true),
-        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
-            // Some CI/desktop harness jobs intentionally omit
-            // JOB_OBJECT_LIMIT_BREAKAWAY_OK. The unit test still asserts that
-            // production sets CREATE_BREAKAWAY_FROM_JOB; use an in-job child
-            // here to continue exercising discovery, duplicate prevention,
-            // control auth, and idle cleanup.
-            eprintln!("Windows harness denied breakaway spawn; exercising lifecycle in-job");
-            (
-                spawn_in_job(&executable, directory.path(), Duration::from_millis(700))
-                    .expect("spawn in-job lifecycle daemon"),
-                false,
+    let first = mode
+        .spawn(
+            &executable,
+            directory.path(),
+            Duration::from_millis(700),
+        )
+        .unwrap_or_else(|error| {
+            panic!(
+                "{} daemon launch failed: {error}; the production probe requires the parent job to grant JOB_OBJECT_LIMIT_BREAKAWAY_OK",
+                mode.label()
             )
-        }
-        Err(error) => panic!("spawn detached daemon with CREATE_BREAKAWAY_FROM_JOB: {error}"),
-    };
+        });
     let mut first = ChildGuard(first);
 
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -56,7 +86,8 @@ fn detached_daemon_survives_spawn_scope_and_duplicate_exits() {
         }
         assert!(
             Instant::now() < deadline,
-            "detached daemon did not publish discovery state"
+            "{} daemon did not publish discovery state",
+            mode.label()
         );
         thread::sleep(Duration::from_millis(25));
     };
@@ -64,17 +95,9 @@ fn detached_daemon_survives_spawn_scope_and_duplicate_exits() {
     let ready = request_session(&record, ORIGIN).expect("control-secret session issuance");
     assert_eq!(ready.port, record.port);
 
-    let mut duplicate = if breakaway_available {
-        spawn_detached_daemon(
-            &executable,
-            directory.path(),
-            Some(Duration::from_millis(700)),
-        )
-        .expect("spawn duplicate contender")
-    } else {
-        spawn_in_job(&executable, directory.path(), Duration::from_millis(700))
-            .expect("spawn in-job duplicate contender")
-    };
+    let mut duplicate = mode
+        .spawn(&executable, directory.path(), Duration::from_millis(700))
+        .expect("spawn duplicate contender");
     let deadline = Instant::now() + Duration::from_secs(3);
     let status = loop {
         if let Some(status) = duplicate.try_wait().expect("poll duplicate") {
@@ -103,7 +126,8 @@ fn detached_daemon_survives_spawn_scope_and_duplicate_exits() {
         }
         assert!(
             Instant::now() < deadline,
-            "detached daemon did not honor idle shutdown"
+            "{} daemon did not honor idle shutdown",
+            mode.label()
         );
         thread::sleep(Duration::from_millis(25));
     }

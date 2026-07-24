@@ -26,7 +26,10 @@ impl Drop for ChildGuard {
 }
 
 #[test]
-fn native_binary_frames_fresh_session_from_existing_daemon() {
+fn native_binary_handshake_uses_prestarted_daemon() {
+    // This test isolates native framing, Firefox caller validation, and
+    // authenticated session issuance. The daemon is deliberately prestarted,
+    // so success here is not evidence for the launcher's detached spawn path.
     let directory = tempfile::tempdir().expect("temporary daemon state");
     let paths = prepare_state_paths(directory.path()).expect("state paths");
     let daemon = PathBuf::from(env!("CARGO_BIN_EXE_hsk-manga-browser-daemon"));
