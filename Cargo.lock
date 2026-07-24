@@ -1036,7 +1036,7 @@ dependencies = [
  "cudarc 0.19.8",
  "float8",
  "gemm 0.19.0",
- "half",
+ "half 2.7.1",
  "libm",
  "memmap2",
  "num-traits",
@@ -1061,7 +1061,7 @@ dependencies = [
  "anyhow",
  "candle-core",
  "candle-flash-attn-build",
- "half",
+ "half 2.7.1",
 ]
 
 [[package]]
@@ -1085,7 +1085,7 @@ name = "candle-metal-kernels"
 version = "0.9.2"
 source = "git+https://github.com/mayocream/candle?branch=flash-attn#e7e71e18414db8de91113963beaabb6b4046a0a5"
 dependencies = [
- "half",
+ "half 2.7.1",
  "objc2",
  "objc2-foundation",
  "objc2-metal",
@@ -1101,7 +1101,7 @@ source = "git+https://github.com/mayocream/candle?branch=flash-attn#e7e71e18414d
 dependencies = [
  "candle-core",
  "candle-metal-kernels",
- "half",
+ "half 2.7.1",
  "libc",
  "num-traits",
  "objc2-metal",
@@ -1303,7 +1303,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "57663b653d948a338bfb3eeba9bb2fd5fcfaecb9e199e87e1eda4d9e8b240fd9"
 dependencies = [
  "ciborium-io",
- "half",
+ "half 2.7.1",
 ]
 
 [[package]]
@@ -1689,6 +1689,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "csv"
+version = "1.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "52cd9d68cf7efc6ddfaaee42e7288d3a99d613d4b50f76ce9827ae0c6e14f938"
+dependencies = [
+ "csv-core",
+ "itoa",
+ "ryu",
+ "serde_core",
+]
+
+[[package]]
+name = "csv-core"
+version = "0.1.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "704a3c26996a80471189265814dbc2c257598b96b8a7feae2d31ace646bb9782"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
 name = "ctor"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1710,7 +1731,7 @@ version = "0.17.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0bf99ab37ee7072d64d906aa2dada9a3422f1d975cdf8c8055a573bc84897ed8"
 dependencies = [
- "half",
+ "half 2.7.1",
  "libloading 0.8.9",
 ]
 
@@ -1721,7 +1742,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "42310153e06cf4cd532901f7096beb27504d681736a29ee90728ae4e2d93b2a8"
 dependencies = [
  "float8",
- "half",
+ "half 2.7.1",
  "libloading 0.9.0",
 ]
 
@@ -2301,7 +2322,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4300e043a56aa2cb633c01af81ca8f699a321879a7854d3896a0ba89056363be"
 dependencies = [
  "bit_field",
- "half",
+ "half 2.7.1",
  "lebe",
  "miniz_oxide",
  "rayon-core",
@@ -2403,7 +2424,7 @@ version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2d1f04709a8ac06e8e8042875a3c466cc4832d3c1a18dbcb9dba3c6e83046bc"
 dependencies = [
- "half",
+ "half 2.7.1",
  "num-traits",
  "rand 0.9.4",
  "rand_distr 0.5.1",
@@ -2844,7 +2865,7 @@ checksum = "a352d4a69cbe938b9e2a9cb7a3a63b7e72f9349174a2752a558a8a563510d0f3"
 dependencies = [
  "bytemuck",
  "dyn-stack",
- "half",
+ "half 2.7.1",
  "libm",
  "num-complex",
  "num-traits",
@@ -2865,7 +2886,7 @@ checksum = "88027625910cc9b1085aaaa1c4bc46bb3a36aad323452b33c25b5e4e7c8e2a3e"
 dependencies = [
  "bytemuck",
  "dyn-stack",
- "half",
+ "half 2.7.1",
  "libm",
  "num-complex",
  "num-traits",
@@ -2887,7 +2908,7 @@ dependencies = [
  "dyn-stack",
  "gemm-common 0.18.2",
  "gemm-f32 0.18.2",
- "half",
+ "half 2.7.1",
  "num-complex",
  "num-traits",
  "paste",
@@ -2905,7 +2926,7 @@ dependencies = [
  "dyn-stack",
  "gemm-common 0.19.0",
  "gemm-f32 0.19.0",
- "half",
+ "half 2.7.1",
  "num-complex",
  "num-traits",
  "paste",
@@ -3254,6 +3275,12 @@ dependencies = [
 
 [[package]]
 name = "half"
+version = "1.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1b43ede17f21864e81be2fa654110bf1e793774238d86ef8555c37e6519c0403"
+
+[[package]]
+name = "half"
 version = "2.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ea2d84b969582b4b1864a92dc5d27cd2b77b622a8d79306834f1be5ba20d84b"
@@ -3406,6 +3433,21 @@ dependencies = [
  "cfg-if",
  "libc",
  "windows-link 0.2.1",
+]
+
+[[package]]
+name = "hsk-control"
+version = "0.61.2"
+dependencies = [
+ "csv",
+ "jieba-rs",
+ "opencc-fmmseg",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.18",
+ "unicode-normalization",
 ]
 
 [[package]]
@@ -5529,6 +5571,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "opencc-fmmseg"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eda869f168cd9b237134147209015b0533dc561b8d27ad49abb833946d722ce0"
+dependencies = [
+ "once_cell",
+ "rayon",
+ "regex",
+ "rustc-hash",
+ "serde",
+ "serde_cbor",
+ "serde_json",
+ "zstd",
+]
+
+[[package]]
 name = "openssl"
 version = "0.10.81"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7309,6 +7367,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_cbor"
+version = "0.11.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2bef2ebfde456fb76bbcf9f59315333decc4fda0b2b44b420243c11e0f5ec1f5"
+dependencies = [
+ "half 1.8.3",
+ "serde",
+]
+
+[[package]]
 name = "serde_core"
 version = "1.0.228"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8393,7 +8461,7 @@ checksum = "b63feaf3343d35b6ca4d50483f94843803b0f51634937cc2ec519fc32232bc52"
 dependencies = [
  "fax",
  "flate2",
- "half",
+ "half 2.7.1",
  "quick-error 2.0.1",
  "weezl",
  "zune-jpeg",
@@ -8989,7 +9057,7 @@ version = "0.5.0"
 source = "git+https://github.com/mayocream/ug?branch=cuda-dynamic-loading#bce254b909c02f687d9587d90b8bdacb8d2fbd60"
 dependencies = [
  "gemm 0.18.2",
- "half",
+ "half 2.7.1",
  "libloading 0.8.9",
  "memmap2",
  "num",
@@ -9009,7 +9077,7 @@ version = "0.5.0"
 source = "git+https://github.com/mayocream/ug?branch=cuda-dynamic-loading#bce254b909c02f687d9587d90b8bdacb8d2fbd60"
 dependencies = [
  "cudarc 0.17.8",
- "half",
+ "half 2.7.1",
  "serde",
  "thiserror 1.0.69",
  "ug",
@@ -9021,7 +9089,7 @@ version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7adf545a99a086d362efc739e7cf4317c18cbeda22706000fd434d70ea3d95"
 dependencies = [
- "half",
+ "half 2.7.1",
  "metal",
  "objc",
  "serde",
@@ -9102,6 +9170,15 @@ name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
+
+[[package]]
+name = "unicode-normalization"
+version = "0.1.25"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5fd4f6878c9cb28d874b009da9e8d183b5abc80117c40bbd187a1fde336be6e8"
+dependencies = [
+ "tinyvec",
+]
 
 [[package]]
 name = "unicode-normalization-alignments"
