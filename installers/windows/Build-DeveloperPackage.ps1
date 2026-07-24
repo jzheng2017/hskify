@@ -7,6 +7,8 @@ param(
     [string] $HskArtifactPath,
     [string] $DictionaryArtifactPath,
     [string] $ModelPath,
+    [string] $SansFontPath,
+    [string] $SerifFontPath,
     [Parameter(DontShow = $true)]
     [string] $ModelManifestPath,
     [switch] $SkipNpmInstall,
@@ -22,6 +24,12 @@ if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
 }
 if ([string]::IsNullOrWhiteSpace($ModelManifestPath)) {
     $ModelManifestPath = Join-Path $repositoryRoot 'data\model-packs\manifest.v1.json'
+}
+if ([string]::IsNullOrWhiteSpace($SansFontPath)) {
+    $SansFontPath = Join-Path $env:WINDIR 'Fonts\NotoSansSC-VF.ttf'
+}
+if ([string]::IsNullOrWhiteSpace($SerifFontPath)) {
+    $SerifFontPath = Join-Path $env:WINDIR 'Fonts\NotoSerifSC-VF.ttf'
 }
 
 function Resolve-LeafFile {
@@ -138,6 +146,16 @@ if ([string]::IsNullOrWhiteSpace($HskArtifactPath) -ne [string]::IsNullOrWhiteSp
 }
 
 $resolvedModelManifest = Resolve-LeafFile -Path $ModelManifestPath -Label 'ModelManifestPath'
+$resolvedSansFont = Resolve-LeafFile -Path $SansFontPath -Label 'SansFontPath'
+$resolvedSerifFont = Resolve-LeafFile -Path $SerifFontPath -Label 'SerifFontPath'
+if ([IO.Path]::GetExtension($resolvedSansFont) -ne '.ttf' -or [IO.Path]::GetExtension($resolvedSerifFont) -ne '.ttf') {
+    throw 'SansFontPath and SerifFontPath must be TrueType font files'
+}
+foreach ($font in @($resolvedSansFont, $resolvedSerifFont)) {
+    if ([uint64] (Get-Item -LiteralPath $font).Length -gt 32MB) {
+        throw "packaged CJK font exceeds the 32 MiB browser bound: $font"
+    }
+}
 $modelManifest = Get-Content -LiteralPath $resolvedModelManifest -Raw | ConvertFrom-Json
 if ($modelManifest.manifestVersion -ne 1 -or $modelManifest.selection.status -ne 'selected') {
     throw 'the model manifest must be version 1 with a selected standard pack'
@@ -270,9 +288,11 @@ $extensionDirectory = Join-Path $resolvedOutput 'extension'
 $resourceDirectory = Join-Path $resolvedOutput 'resources'
 $modelDirectory = Join-Path $resourceDirectory 'models'
 $modelPackDirectory = Join-Path $resourceDirectory 'model-packs'
+$fontDirectory = Join-Path $resourceDirectory 'fonts'
 [IO.Directory]::CreateDirectory($companionDirectory) | Out-Null
 [IO.Directory]::CreateDirectory($extensionDirectory) | Out-Null
 [IO.Directory]::CreateDirectory($modelPackDirectory) | Out-Null
+[IO.Directory]::CreateDirectory($fontDirectory) | Out-Null
 
 $stagedNativeHost = Join-Path $companionDirectory 'hsk-manga-native-host.exe'
 $stagedBrowserDaemon = Join-Path $companionDirectory 'hsk-manga-browser-daemon.exe'
@@ -281,6 +301,10 @@ Copy-Item -LiteralPath $resolvedNativeHost -Destination $stagedNativeHost
 Copy-Item -LiteralPath $resolvedBrowserDaemon -Destination $stagedBrowserDaemon
 Copy-Item -LiteralPath $resolvedExtensionZip -Destination $stagedExtension
 Copy-Item -LiteralPath $resolvedModelManifest -Destination (Join-Path $modelPackDirectory 'manifest.v1.json')
+$stagedSansFont = Join-Path $fontDirectory 'NotoSansSC-VF.ttf'
+$stagedSerifFont = Join-Path $fontDirectory 'NotoSerifSC-VF.ttf'
+Copy-Item -LiteralPath $resolvedSansFont -Destination $stagedSansFont
+Copy-Item -LiteralPath $resolvedSerifFont -Destination $stagedSerifFont
 
 $fileEntries = @(
     [ordered]@{
@@ -297,6 +321,16 @@ $fileEntries = @(
         role = 'firefox-extension'
         path = 'extension\hsk-manga-translator-firefox.zip'
         sha256 = Get-Sha256 -Path $stagedExtension
+    },
+    [ordered]@{
+        role = 'cjk-sans-font'
+        path = 'resources\fonts\NotoSansSC-VF.ttf'
+        sha256 = Get-Sha256 -Path $stagedSansFont
+    },
+    [ordered]@{
+        role = 'cjk-serif-font'
+        path = 'resources\fonts\NotoSerifSC-VF.ttf'
+        sha256 = Get-Sha256 -Path $stagedSerifFont
     }
 )
 
@@ -353,6 +387,8 @@ $bundleManifest = [ordered]@{
         hskInstallPath = 'resources\hsk-2.0.normalized.json'
         dictionaryInstallPath = 'resources\cc-cedict.normalized.json'
         modelInstallPath = 'resources\models\Qwen3.5-4B-Q4_K_M.gguf'
+        sansFontInstallPath = 'resources\fonts\NotoSansSC-VF.ttf'
+        serifFontInstallPath = 'resources\fonts\NotoSerifSC-VF.ttf'
         expectedModelSha256 = $expectedModelSha256
     }
     files = @($fileEntries)

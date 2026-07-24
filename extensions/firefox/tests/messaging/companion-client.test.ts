@@ -207,17 +207,30 @@ describe('authenticated localhost companion client', () => {
     expect([...new Uint8Array(font)]).toEqual([1, 2, 3])
   })
 
+  it('accepts packaged TrueType CJK fonts', async () => {
+    const { manager } = sessionManager()
+    const client = new CompanionClient(
+      manager,
+      async () =>
+        new Response(Uint8Array.of(0, 1, 0, 0), {
+          status: 200,
+          headers: { 'Content-Type': 'font/ttf' },
+        }),
+    )
+    expect([...new Uint8Array(await client.getFont('hmt-sans'))]).toEqual([0, 1, 0, 0])
+  })
+
   it('enforces binary caps while streaming before materializing the response', async () => {
     const { manager } = sessionManager()
     let produced = 0
     const body = new ReadableStream<Uint8Array>({
       pull(controller) {
-        if (produced >= 13) {
+        if (produced >= 9) {
           controller.close()
           return
         }
         produced += 1
-        controller.enqueue(new Uint8Array(1024 * 1024))
+        controller.enqueue(new Uint8Array(4 * 1024 * 1024))
       },
       cancel() {},
     })
@@ -232,6 +245,6 @@ describe('authenticated localhost companion client', () => {
     await expect(client.getFont('oversized')).rejects.toMatchObject({
       code: 'BINARY_RESPONSE_TOO_LARGE',
     })
-    expect(produced).toBeLessThan(20)
+    expect(produced).toBeLessThan(12)
   })
 })

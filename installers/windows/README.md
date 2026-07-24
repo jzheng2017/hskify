@@ -53,6 +53,10 @@ powershell -ExecutionPolicy Bypass -File .\installers\windows\Build-DeveloperPac
   -Force
 ```
 
+The build also packages `NotoSansSC-VF.ttf` and `NotoSerifSC-VF.ttf` from
+`%WINDIR%\Fonts` by default. Use `-SansFontPath` and `-SerifFontPath` when
+those fonts are installed elsewhere.
+
 The model must match the selected standard pack in
 `data\model-packs\manifest.v1.json`. The build checks both its byte count and
 SHA-256 (`00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4`
@@ -87,6 +91,9 @@ dist\hsk-manga-translator-windows\
     cc-cedict.normalized.json               # only when supplied
     models\
       Qwen3.5-4B-Q4_K_M.gguf                # only when supplied
+    fonts\
+      NotoSansSC-VF.ttf
+      NotoSerifSC-VF.ttf
     model-packs\
       manifest.v1.json
 ```
@@ -111,6 +118,8 @@ The production resource contract is:
 %LOCALAPPDATA%\Mangalations\HSKMangaTranslator\resources\hsk-2.0.normalized.json
 %LOCALAPPDATA%\Mangalations\HSKMangaTranslator\resources\cc-cedict.normalized.json
 %LOCALAPPDATA%\Mangalations\HSKMangaTranslator\resources\models\Qwen3.5-4B-Q4_K_M.gguf
+%LOCALAPPDATA%\Mangalations\HSKMangaTranslator\resources\fonts\NotoSansSC-VF.ttf
+%LOCALAPPDATA%\Mangalations\HSKMangaTranslator\resources\fonts\NotoSerifSC-VF.ttf
 ```
 
 The installer verifies staged file hashes, copies the bundle, and invokes the

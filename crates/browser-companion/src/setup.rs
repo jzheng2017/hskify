@@ -21,12 +21,15 @@ const QWEN_RESOURCE_ENV: &str = "HSK_MANGA_QWEN_MODEL_PATH";
 const HSK_RESOURCE_FILE: &str = "hsk-2.0.normalized.json";
 const DICTIONARY_RESOURCE_FILE: &str = "cc-cedict.normalized.json";
 const EXPECTED_MODEL_FILE: &str = "Qwen3.5-4B-Q4_K_M.gguf";
+const SANS_FONT_FILE: &str = "NotoSansSC-VF.ttf";
+const SERIF_FONT_FILE: &str = "NotoSerifSC-VF.ttf";
 
 #[derive(Debug, Clone)]
 pub(crate) struct ManagedResourcePaths {
     pub(crate) hsk: PathBuf,
     pub(crate) dictionary: PathBuf,
     pub(crate) model: PathBuf,
+    pub(crate) fonts: PathBuf,
 }
 
 impl ManagedResourcePaths {
@@ -43,6 +46,7 @@ impl ManagedResourcePaths {
                 .unwrap_or_else(|| root.join(DICTIONARY_RESOURCE_FILE)),
             model: nonempty_env_path(QWEN_RESOURCE_ENV)
                 .unwrap_or_else(|| root.join("models").join(EXPECTED_MODEL_FILE)),
+            fonts: root.join("fonts"),
         })
     }
 
@@ -177,6 +181,15 @@ impl ModelSetup {
     pub(crate) fn resources_ready(&self) -> bool {
         self.resources.language_data_present()
             && model_has_expected_size(&self.resources.model, self.selected.bytes)
+    }
+
+    pub(crate) fn font_path(&self, font_id: &str) -> Option<PathBuf> {
+        let filename = match font_id {
+            "hmt-sans" | "hmt-display" => SANS_FONT_FILE,
+            "hmt-serif" | "hmt-handwritten" | "hmt-brush" => SERIF_FONT_FILE,
+            _ => return None,
+        };
+        Some(self.resources.fonts.join(filename))
     }
 
     pub(crate) fn status(&self) -> BrowserSetupStatus {
@@ -488,6 +501,7 @@ mod tests {
             hsk: temp.path().join("hsk.json"),
             dictionary: temp.path().join("dictionary.json"),
             model: temp.path().join("model.gguf"),
+            fonts: temp.path().join("fonts"),
         };
         let mut setup = ModelSetup::new(resources.clone(), temp.path().join("cache")).unwrap();
         setup.selected.bytes = 4;

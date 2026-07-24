@@ -57,6 +57,10 @@ try {
 
     $modelPath = Join-Path $fixtureRoot 'tiny-model.gguf'
     [IO.File]::WriteAllBytes($modelPath, [Text.Encoding]::UTF8.GetBytes('tiny deterministic Qwen fixture'))
+    $sansFontPath = Join-Path $fixtureRoot 'sans.ttf'
+    $serifFontPath = Join-Path $fixtureRoot 'serif.ttf'
+    [IO.File]::WriteAllBytes($sansFontPath, [byte[]](0, 1, 0, 0, 10, 20, 30))
+    [IO.File]::WriteAllBytes($serifFontPath, [byte[]](0, 1, 0, 0, 40, 50, 60))
     $modelHash = (Get-FileHash -LiteralPath $modelPath -Algorithm SHA256).Hash.ToLowerInvariant()
     $modelBytes = (Get-Item -LiteralPath $modelPath).Length
     $modelManifest = [ordered]@{
@@ -99,6 +103,8 @@ try {
             -HskArtifactPath $hskPath `
             -DictionaryArtifactPath $dictionaryPath `
             -ModelPath $badModelPath `
+            -SansFontPath $sansFontPath `
+            -SerifFontPath $serifFontPath `
             -ModelManifestPath $modelManifestPath
         throw 'the developer package accepted a model with the wrong SHA-256'
     }
@@ -119,6 +125,8 @@ try {
             -NativeHostPath $nativeHostPath `
             -BrowserDaemonPath $browserDaemonPath `
             -FirefoxExtensionZipPath $extensionZipPath `
+            -SansFontPath $sansFontPath `
+            -SerifFontPath $serifFontPath `
             -ModelManifestPath $modelManifestPath `
             -Force
         throw 'the developer package replaced a populated unmarked directory'
@@ -141,6 +149,8 @@ try {
         -HskArtifactPath $hskPath `
         -DictionaryArtifactPath $dictionaryPath `
         -ModelPath $modelPath `
+        -SansFontPath $sansFontPath `
+        -SerifFontPath $serifFontPath `
         -ModelManifestPath $modelManifestPath | Out-Null
 
     foreach ($relativePath in @(
@@ -150,6 +160,8 @@ try {
         'resources\hsk-2.0.normalized.json',
         'resources\cc-cedict.normalized.json',
         'resources\models\Qwen3.5-4B-Q4_K_M.gguf',
+        'resources\fonts\NotoSansSC-VF.ttf',
+        'resources\fonts\NotoSerifSC-VF.ttf',
         'resources\model-packs\manifest.v1.json',
         'native-host-registration\Register-NativeHost.ps1',
         'native-host-registration\Unregister-NativeHost.ps1',
@@ -186,7 +198,9 @@ try {
     $installedHsk = Join-Path $productRoot 'resources\hsk-2.0.normalized.json'
     $installedDictionary = Join-Path $productRoot 'resources\cc-cedict.normalized.json'
     $installedModel = Join-Path $productRoot 'resources\models\Qwen3.5-4B-Q4_K_M.gguf'
-    foreach ($installedPath in @($installedNativeHost, $installedHsk, $installedDictionary, $installedModel)) {
+    $installedSansFont = Join-Path $productRoot 'resources\fonts\NotoSansSC-VF.ttf'
+    $installedSerifFont = Join-Path $productRoot 'resources\fonts\NotoSerifSC-VF.ttf'
+    foreach ($installedPath in @($installedNativeHost, $installedHsk, $installedDictionary, $installedModel, $installedSansFont, $installedSerifFont)) {
         Assert-True -Condition (Test-Path -LiteralPath $installedPath -PathType Leaf) -Message "installed file missing: $installedPath"
     }
 

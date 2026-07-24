@@ -18,7 +18,7 @@ import {
 import { NativeSessionManager } from './native-session'
 
 const MAX_CLEAN_IMAGE_BYTES = 25 * 1024 * 1024
-const MAX_FONT_BYTES = 12 * 1024 * 1024
+const MAX_FONT_BYTES = 32 * 1024 * 1024
 
 export class CompanionHttpError extends Error {
   constructor(
@@ -289,6 +289,8 @@ export class CompanionClient {
     if (
       mimeType !== 'font/woff2' &&
       mimeType !== 'font/woff' &&
+      mimeType !== 'font/ttf' &&
+      mimeType !== 'font/otf' &&
       mimeType !== 'application/font-woff'
     ) {
       throw new CompanionHttpError(

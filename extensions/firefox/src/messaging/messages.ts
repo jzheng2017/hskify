@@ -14,7 +14,7 @@ import {
 } from '../contracts/browser'
 
 const MAX_RUNTIME_BINARY_BYTES = 25 * 1024 * 1024
-const MAX_RUNTIME_FONT_BYTES = 12 * 1024 * 1024
+const MAX_RUNTIME_FONT_BYTES = 32 * 1024 * 1024
 const MAX_RECOVERY_CANDIDATES = 512
 
 export type TranslationScope = 'visible' | 'all'
