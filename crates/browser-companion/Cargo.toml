@@ -1,0 +1,18 @@
+[package]
+name = "browser-companion"
+version.workspace = true
+edition.workspace = true
+description = "Authenticated Firefox browser adapter for Koharu"
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

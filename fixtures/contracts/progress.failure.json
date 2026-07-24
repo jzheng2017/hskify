@@ -1,0 +1,17 @@
+[
+  {
+    "revision": 1,
+    "jobId": "fixture-job-failed",
+    "state": "running",
+    "stage": "ocr",
+    "message": "Reading text"
+  },
+  {
+    "revision": 2,
+    "jobId": "fixture-job-failed",
+    "state": "failed",
+    "stage": "failed",
+    "message": "The OCR model could not read this image.",
+    "errorCode": "OCR_FAILED"
+  }
+]

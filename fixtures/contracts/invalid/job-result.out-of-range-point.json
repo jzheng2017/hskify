@@ -1,0 +1,57 @@
+{
+  "protocolVersion": 1,
+  "jobId": "invalid-point",
+  "sourceSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "sourceWidth": 1200,
+  "sourceHeight": 1800,
+  "cleanImageBlobId": "invalid",
+  "cleanImageMimeType": "image/png",
+  "regions": [
+    {
+      "id": "invalid-region",
+      "kind": "dialogue",
+      "textPolygon": [
+        { "x": -0.1, "y": 0.1 },
+        { "x": 0.5, "y": 0.1 },
+        { "x": 0.5, "y": 0.5 }
+      ],
+      "rotationDegrees": 0,
+      "sourceEnglish": "No",
+      "faithfulChinese": "不",
+      "displayedChinese": "不",
+      "pinyin": "bù",
+      "ocrConfidence": 1,
+      "readingOrder": 0,
+      "vocabulary": {
+        "requestedHskLevel": 1,
+        "strictlyValid": true,
+        "exceptions": []
+      },
+      "style": {
+        "fontId": "fixture-sans",
+        "category": "sans",
+        "foreground": "#000000",
+        "weight": 400,
+        "italicDegrees": 0,
+        "outlineWidthRatio": 0,
+        "shadowXRatio": 0,
+        "shadowYRatio": 0,
+        "alignment": "center",
+        "writingMode": "horizontal-tb",
+        "lineHeight": 1,
+        "letterSpacingEm": 0
+      },
+      "layout": {
+        "suggestedLines": ["不"],
+        "fontSizeToImageWidth": 0.03
+      }
+    }
+  ],
+  "warnings": [],
+  "cache": {
+    "detectionHit": false,
+    "ocrHit": false,
+    "inpaintHit": false,
+    "translationHit": false
+  }
+}

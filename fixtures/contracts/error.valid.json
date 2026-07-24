@@ -1,0 +1,6 @@
+{
+  "protocolVersion": 1,
+  "code": "IMAGE_TOO_LARGE",
+  "message": "The decoded image exceeds the configured pixel limit.",
+  "retryable": false
+}

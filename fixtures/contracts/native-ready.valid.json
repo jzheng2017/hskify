@@ -1,0 +1,14 @@
+{
+  "type": "ready",
+  "protocolVersion": 1,
+  "engineVersion": "0.1.0",
+  "port": 43127,
+  "token": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "sessionExpiresAtUnixMs": 1790000000000,
+  "capabilities": {
+    "sourceLanguages": ["en"],
+    "targetLanguages": ["zh-CN"],
+    "hskLevels": [1, 2, 3, 4, 5, 6],
+    "modelsReady": true
+  }
+}

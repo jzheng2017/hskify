@@ -1,0 +1,55 @@
+[
+  {
+    "revision": 1,
+    "jobId": "fixture-job-0001",
+    "state": "running",
+    "stage": "queued",
+    "overallProgress": 0,
+    "message": "Queued"
+  },
+  {
+    "revision": 2,
+    "jobId": "fixture-job-0001",
+    "state": "running",
+    "stage": "detecting",
+    "stageProgress": 0.4,
+    "overallProgress": 0.12,
+    "message": "Finding text regions"
+  },
+  {
+    "revision": 3,
+    "jobId": "fixture-job-0001",
+    "state": "running",
+    "stage": "ocr",
+    "current": 1,
+    "total": 2,
+    "overallProgress": 0.3,
+    "message": "Reading text"
+  },
+  {
+    "revision": 4,
+    "jobId": "fixture-job-0001",
+    "state": "running",
+    "stage": "inpainting",
+    "overallProgress": 0.48,
+    "message": "Removing source lettering"
+  },
+  {
+    "revision": 5,
+    "jobId": "fixture-job-0001",
+    "state": "running",
+    "stage": "hsk-validating",
+    "stageProgress": 1,
+    "overallProgress": 0.88,
+    "message": "Checking HSK vocabulary"
+  },
+  {
+    "revision": 6,
+    "jobId": "fixture-job-0001",
+    "state": "complete",
+    "stage": "complete",
+    "stageProgress": 1,
+    "overallProgress": 1,
+    "message": "Complete"
+  }
+]

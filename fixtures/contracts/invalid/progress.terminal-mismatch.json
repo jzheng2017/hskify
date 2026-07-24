@@ -1,0 +1,8 @@
+{
+  "revision": 3,
+  "jobId": "invalid-status",
+  "state": "complete",
+  "stage": "ocr",
+  "overallProgress": 1,
+  "message": "This state and stage combination is invalid."
+}

@@ -1,0 +1,6 @@
+{
+  "type": "start-or-discover-daemon",
+  "protocolVersion": 1,
+  "extensionVersion": "0.1.0",
+  "extensionOrigin": "moz-extension://00000000-0000-4000-8000-000000000001"
+}

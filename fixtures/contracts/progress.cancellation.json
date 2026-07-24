@@ -1,0 +1,17 @@
+[
+  {
+    "revision": 1,
+    "jobId": "fixture-job-cancelled",
+    "state": "running",
+    "stage": "detecting",
+    "overallProgress": 0.08,
+    "message": "Finding text regions"
+  },
+  {
+    "revision": 2,
+    "jobId": "fixture-job-cancelled",
+    "state": "cancelled",
+    "stage": "cancelled",
+    "message": "Cancelled"
+  }
+]

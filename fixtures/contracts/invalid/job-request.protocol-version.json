@@ -1,0 +1,18 @@
+{
+  "protocolVersion": 2,
+  "clientImageId": "invalid-version",
+  "sourceSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "sourceMimeType": "image/png",
+  "naturalWidth": 1200,
+  "naturalHeight": 1800,
+  "pageSessionId": "fixture-page-invalid",
+  "pageIndex": 0,
+  "settings": {
+    "sourceLanguage": "en",
+    "targetLanguage": "zh-CN",
+    "hskStandard": "2.0",
+    "hskLevel": 2,
+    "readingDirection": "auto",
+    "translateSoundEffects": false
+  }
+}

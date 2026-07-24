@@ -1,0 +1,17 @@
+{
+  "selectedText": "离开",
+  "tokens": [
+    {
+      "simplified": "离开",
+      "pinyin": "lí kāi",
+      "definitions": ["leave", "depart"],
+      "hskLevel": 2,
+      "properName": false
+    }
+  ],
+  "region": {
+    "displayedChinese": "我们现在要走！",
+    "faithfulChinese": "我们得马上离开！",
+    "sourceEnglish": "We have to leave now!"
+  }
+}

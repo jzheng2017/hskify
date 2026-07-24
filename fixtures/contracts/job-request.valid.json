@@ -1,0 +1,24 @@
+{
+  "protocolVersion": 1,
+  "clientImageId": "fixture-page-0001-image-0001",
+  "sourceSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "sourceMimeType": "image/png",
+  "naturalWidth": 1200,
+  "naturalHeight": 1800,
+  "pageSessionId": "fixture-page-0001",
+  "pageIndex": 0,
+  "settings": {
+    "sourceLanguage": "en",
+    "targetLanguage": "zh-CN",
+    "hskStandard": "2.0",
+    "hskLevel": 2,
+    "readingDirection": "auto",
+    "translateSoundEffects": false
+  },
+  "precedingContext": [
+    {
+      "sourceEnglish": "Are you ready?",
+      "chinese": "你准备好了吗？"
+    }
+  ]
+}

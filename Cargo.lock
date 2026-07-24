@@ -905,6 +905,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "browser-companion"
+version = "0.61.2"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "bs58"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
