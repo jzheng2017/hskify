@@ -9,20 +9,30 @@ pub enum PreservationViolation {
         expected: Vec<String>,
         actual: Vec<String>,
     },
-    MissingProperName {
+    ProperNameOccurrencesChanged {
         text: String,
+        expected: usize,
+        actual: usize,
     },
-    RemovedNegation,
-    AddedNegation,
+    NegationMarkersChanged {
+        expected: Vec<String>,
+        actual: Vec<String>,
+    },
 }
 
 /// Preservation requirements derived from the faithful Chinese reference.
 #[derive(Debug, Clone)]
 pub struct CorrectionContext {
     proper_names: Vec<ProperName>,
-    required_name_forms: Vec<String>,
+    required_name_forms: Vec<RequiredNameForm>,
     reference_numbers: Vec<String>,
-    reference_has_negation: bool,
+    reference_negation_markers: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct RequiredNameForm {
+    text: String,
+    occurrences: usize,
 }
 
 impl CorrectionContext {
@@ -32,19 +42,26 @@ impl CorrectionContext {
         proper_names: &[ProperName],
     ) -> Self {
         let reference = control.normalize_text(faithful_chinese);
-        let mut required_name_forms = proper_names
+        let mut normalized_name_forms = proper_names
             .iter()
             .map(|name| control.normalize_text(&name.text))
-            .filter(|name| !name.is_empty() && reference.contains(name))
+            .filter(|name| !name.is_empty())
             .collect::<Vec<_>>();
-        required_name_forms.sort();
-        required_name_forms.dedup();
+        normalized_name_forms.sort();
+        normalized_name_forms.dedup();
+        let required_name_forms = normalized_name_forms
+            .into_iter()
+            .filter_map(|text| {
+                let occurrences = count_occurrences(&reference, &text);
+                (occurrences > 0).then_some(RequiredNameForm { text, occurrences })
+            })
+            .collect();
 
         Self {
             proper_names: proper_names.to_vec(),
             required_name_forms,
             reference_numbers: extract_numeric_forms(&reference),
-            reference_has_negation: control.has_negation(&reference),
+            reference_negation_markers: control.negation_markers(&reference),
         }
     }
 
@@ -151,17 +168,21 @@ impl<'a> CorrectionLoop<'a> {
             });
         }
         for name in &self.context.required_name_forms {
-            if !candidate.contains(name) {
-                violations.push(PreservationViolation::MissingProperName { text: name.clone() });
+            let actual = count_occurrences(candidate, &name.text);
+            if actual != name.occurrences {
+                violations.push(PreservationViolation::ProperNameOccurrencesChanged {
+                    text: name.text.clone(),
+                    expected: name.occurrences,
+                    actual,
+                });
             }
         }
-        match (
-            self.context.reference_has_negation,
-            self.control.has_negation(candidate),
-        ) {
-            (true, false) => violations.push(PreservationViolation::RemovedNegation),
-            (false, true) => violations.push(PreservationViolation::AddedNegation),
-            _ => {}
+        let actual_negation_markers = self.control.negation_markers(candidate);
+        if actual_negation_markers != self.context.reference_negation_markers {
+            violations.push(PreservationViolation::NegationMarkersChanged {
+                expected: self.context.reference_negation_markers.clone(),
+                actual: actual_negation_markers,
+            });
         }
         violations
     }
@@ -195,6 +216,10 @@ fn extract_numeric_forms(text: &str) -> Vec<String> {
     }
     flush_numeric(&mut current, &mut forms);
     forms
+}
+
+fn count_occurrences(text: &str, needle: &str) -> usize {
+    text.match_indices(needle).count()
 }
 
 fn flush_numeric(current: &mut String, forms: &mut Vec<String>) {

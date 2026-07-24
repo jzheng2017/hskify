@@ -591,16 +591,18 @@ impl HskControl {
         result
     }
 
-    pub(crate) fn has_negation(&self, text: &str) -> bool {
+    pub(crate) fn negation_markers(&self, text: &str) -> Vec<String> {
         let normalized = self.normalizer.normalize(text);
         let characters = normalized.chars().collect::<Vec<_>>();
         self.jieba
             .tokenize(&normalized, TokenizeMode::Default, true)
             .into_iter()
-            .any(|token| {
+            .filter(|token| {
                 !token_is_fragment_of_lexicalized_prefix(&characters, token.start, token.end)
-                    && token_has_negation_unit(token.word)
             })
+            .flat_map(|token| negation_markers_in_token(token.word))
+            .map(str::to_owned)
+            .collect()
     }
 }
 
@@ -739,6 +741,7 @@ impl ScoredSuggestion {
 // frequency causes Jieba to split the marker from the rest of the word.
 const LEXICALIZED_NEGATION_PREFIXES: &[&str] = &[
     "非常", "非洲", "非凡", "非得", "未来", "别人", "别致", "别扭", "别墅", "没收", "没落", "莫名",
+    "不错",
 ];
 
 fn token_is_fragment_of_lexicalized_prefix(
@@ -758,54 +761,81 @@ fn token_is_fragment_of_lexicalized_prefix(
     })
 }
 
-fn token_has_negation_unit(token: &str) -> bool {
-    let lexicalized_prefix = LEXICALIZED_NEGATION_PREFIXES
-        .iter()
-        .filter(|prefix| token.starts_with(**prefix))
-        .max_by_key(|prefix| prefix.len());
-    let token = lexicalized_prefix.map_or(token, |prefix| &token[prefix.len()..]);
-
-    token == "没有"
-        || ["不", "没", "别", "未", "非", "莫"]
+fn negation_markers_in_token(mut token: &str) -> Vec<&'static str> {
+    let mut markers = Vec::new();
+    while !token.is_empty() {
+        if let Some(prefix) = LEXICALIZED_NEGATION_PREFIXES
             .iter()
-            .any(|marker| token == *marker || token.starts_with(marker))
-        || token.starts_with("并非")
-        || token.starts_with("绝非")
+            .filter(|prefix| token.starts_with(**prefix))
+            .max_by_key(|prefix| prefix.len())
+        {
+            token = &token[prefix.len()..];
+            continue;
+        }
+        if token.starts_with("并非") || token.starts_with("绝非") {
+            markers.push("非");
+            token = &token["并非".len()..];
+            continue;
+        }
+        if token.starts_with("没有") {
+            markers.push("没");
+            token = &token["没有".len()..];
+            continue;
+        }
+        let Some(character) = token.chars().next() else {
+            break;
+        };
+        let marker = match character {
+            '不' => Some("不"),
+            '没' => Some("没"),
+            '别' => Some("别"),
+            '未' => Some("未"),
+            '非' => Some("非"),
+            '莫' => Some("莫"),
+            _ => None,
+        };
+        if let Some(marker) = marker {
+            markers.push(marker);
+        }
+        token = &token[character.len_utf8()..];
+    }
+    markers
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{token_has_negation_unit, token_is_fragment_of_lexicalized_prefix};
+    use super::{negation_markers_in_token, token_is_fragment_of_lexicalized_prefix};
 
     #[test]
     fn negation_units_exclude_lexicalized_marker_prefixes() {
-        for word in ["非常", "非常好", "非洲", "未来", "别人", "没收", "莫名其妙"]
-        {
-            assert!(!token_has_negation_unit(word), "{word}");
+        for word in [
+            "非常",
+            "非常好",
+            "非洲",
+            "未来",
+            "别人",
+            "没收",
+            "莫名其妙",
+            "不错",
+        ] {
+            assert!(negation_markers_in_token(word).is_empty(), "{word}");
         }
     }
 
     #[test]
     fn negation_units_keep_real_markers_and_contextual_compounds() {
-        for word in [
-            "不",
-            "不好",
-            "没",
-            "没有",
-            "别",
-            "别走",
-            "未",
-            "未完成",
-            "非",
-            "非法",
-            "莫",
-            "莫走",
-            "并非",
-            "绝非如此",
-            "非常不好",
-        ] {
-            assert!(token_has_negation_unit(word), "{word}");
-        }
+        assert_eq!(negation_markers_in_token("不"), ["不"]);
+        assert_eq!(negation_markers_in_token("不好"), ["不"]);
+        assert_eq!(negation_markers_in_token("没"), ["没"]);
+        assert_eq!(negation_markers_in_token("没有"), ["没"]);
+        assert_eq!(negation_markers_in_token("别走"), ["别"]);
+        assert_eq!(negation_markers_in_token("未完成"), ["未"]);
+        assert_eq!(negation_markers_in_token("非法"), ["非"]);
+        assert_eq!(negation_markers_in_token("莫走"), ["莫"]);
+        assert_eq!(negation_markers_in_token("并非"), ["非"]);
+        assert_eq!(negation_markers_in_token("绝非如此"), ["非"]);
+        assert_eq!(negation_markers_in_token("非常不好"), ["不"]);
+        assert_eq!(negation_markers_in_token("不吃也不喝"), ["不", "不"]);
     }
 
     #[test]

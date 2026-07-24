@@ -53,7 +53,7 @@ pub const SEGMENTATION_REVISION: &str =
 pub const LOOKUP_REVISION: &str = "longest-match-simplified-optional-region-context-v2";
 
 /// Correction-preservation policy revision included in cache identities.
-pub const PRESERVATION_REVISION: &str = "numbers-names-token-context-negation-v2";
+pub const PRESERVATION_REVISION: &str = "numbers-name-occurrences-ordered-negation-markers-v3";
 
 /// Exact `jieba-rs` release whose segmentation behavior is cache-relevant.
 pub const JIEBA_CRATE_VERSION: &str = "0.10.1";

@@ -146,13 +146,17 @@ most two subsequent correction requests. Feedback includes exact HSK
 violations plus deterministic preservation failures for:
 
 - numeric forms;
-- protected names present in the faithful reference;
-- added or removed Chinese negation.
+- every occurrence of each protected name present in the faithful reference;
+- the ordered sequence and multiplicity of Chinese negation markers.
 
-Negation is detected from Jieba lexical tokens and contextual marker prefixes,
-not raw substring presence. Real `不`, `没`/`没有`, `别`, `未`, `非`, and `莫`
-units remain protected, while lexicalized words such as `非常`, `未来`, and
-`别人` do not create spurious additions/removals.
+Negation is extracted from Jieba lexical tokens and contextual marker prefixes,
+not reduced to a sentence-level boolean. Diagnostics return the expected and
+actual ordered marker sequences, so removed, added, replaced, and reordered
+units are actionable. `没` and `没有` share one marker identity, as do `非`,
+`并非`, and `绝非`; the remaining marker identities stay distinct. Real `不`,
+`没`/`没有`, `别`, `未`, `非`, and `莫` units remain protected, while
+lexicalized words such as `非常`, `不错`, `未来`, and `别人` do not create
+spurious additions/removals. The preservation revision is cache-keyed.
 
 After the third invalid evaluation it returns `Failed`; later evaluations return
 `Terminated`. The crate never initiates or owns a model request.
@@ -233,12 +237,12 @@ completed data-provenance audit.
 ## Verification evidence (2026-07-24, Windows, Rust 1.95.0)
 
 - `cargo fmt -p hsk-control -- --check`: pass.
-- `cargo test -p hsk-control --all-features --all-targets`: 35 passed, 0
+- `cargo test -p hsk-control --all-features --all-targets`: 40 passed, 0
   failed, one explicit scale test ignored by the normal suite.
 - `cargo test -p hsk-control --all-features --test performance_smoke --
   --ignored --nocapture`: pass; loaded 5,000 synthetic HSK records plus 125,000
   synthetic dictionary records and completed 1,000 validation+lookup
-  iterations in 18.53 seconds in an unoptimized test build.
+  iterations in 20.36 seconds in an unoptimized test build.
 - `cargo clippy -p hsk-control --all-features --all-targets -- -D warnings`:
   pass.
 - `cargo check -p hsk-control --no-default-features --all-targets`: pass,
