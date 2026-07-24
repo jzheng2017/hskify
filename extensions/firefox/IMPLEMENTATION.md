@@ -1,11 +1,11 @@
-# Firefox Gate 1 implementation
+# Firefox production extension implementation
 
 ## Scope
 
-This directory contains the Firefox side of the HSK Manga Translator through
-the fixture/browser-interaction gate and the client half of the secure local
-bridge. It does not change the frozen protocol parser or shared contract
-fixtures.
+This directory contains the Firefox side of the HSK Manga Translator, including
+the browser interaction layer, secure native/loopback client, recovery queue,
+selectable renderer, setup UI, and packaged-extension assets. It retains the
+frozen protocol parser and shared contract fixtures.
 
 The extension uses WXT Manifest V3, TypeScript, DOM, and CSS. The page runtime
 is built as the unlisted `translator.js` artifact and is injected only after a
@@ -61,7 +61,7 @@ The companion never receives a page-controlled remote URL to fetch.
 Native session endpoints remain in `storage.session`. A background instance
 that reuses a cached endpoint first validates `/health`. A failed transport or
 401 invalidates the lease, performs one fresh native handshake, and retries
-once. Clean-image and font responses are streamed with 25 MiB and 12 MiB
+once. Clean-image and font responses are streamed with 25 MiB and 32 MiB
 ceilings respectively before an `ArrayBuffer` is created.
 
 Before result delivery, the background verifies:
@@ -165,7 +165,7 @@ npm run lint:extension
 Latest evidence for this branch:
 
 - strict TypeScript/WXT typecheck: passed;
-- Vitest: 74 tests passed across 18 files;
+- Vitest: 80 tests passed across 19 files;
 - Playwright Firefox renderer harness: 6 tests passed;
 - WXT Firefox MV3 production build: passed;
 - production-output fixture-marker scan: no matches;
@@ -173,6 +173,13 @@ Latest evidence for this branch:
 - bounded `web-ext run` packaged launch: passed using a temporary profile,
   pre-installed extension, headless Firefox, and an auto-exiting screenshot
   smoke.
+- live Nano Machine chapter 100 page 1: 11 English speech-bubble regions,
+  non-bubble sound effects retained, and 11 real selectable Chinese regions
+  rendered with no degraded fit.
+- installed packaged-extension E2E: a fresh disposable Firefox profile used a
+  trusted click on the real popup, the registered native host, the installed
+  daemon, cached clean-image reuse, and HSK 5 correction to finish 11 regions
+  with zero degraded fits in 186.7 seconds.
 
 The two lint warnings are the known compatibility interaction between retained
 Firefox 128 support and the newer
@@ -180,19 +187,23 @@ Firefox 128 support and the newer
 
 ## Unclaimed integration work
 
-The implementation is not claiming the full release scenario. In particular:
+The primary Windows installed path is proven, but the implementation is not
+claiming every release edge case. In particular:
 
-- the installed native launcher/daemon and real companion endpoints must be
-  present to validate process lifetime, authentication, origin rejection, and
-  reconnect behaviour end to end;
+- the installed native launcher/daemon and real companion endpoints completed
+  one full Firefox translation; explicit duplicate-launch, idle-cleanup,
+  authentication-rejection, suspension, and reconnect probes remain;
 - practical 5–20 MiB Firefox extension runtime-message ceilings still require
   an installed packaged-extension probe; unit cloning is not evidence for that
   browser limit;
 - popup permission UI, denial, and a redirect to a newly required hostname
   still need an interactive packaged Firefox run;
-- real redistributable companion font bytes depend on the model/data pack; and
-- OCR, inpainting, translation quality, strict HSK vocabulary, cache reuse, and
-  golden-set clipping belong to later companion/model gates.
+- the packaged Noto CJK font bytes and production companion endpoints are
+  implemented, but broader font-category and golden-set clipping review
+  remains pending; and
+- live OCR, speech-bubble cleanup, local translation, bounded HSK correction,
+  and cache reuse are implemented, while representative fluent-reader quality
+  review remains release work.
 
 The exact manual matrix is maintained in
 `docs/firefox-manual-test-checklist.md`.

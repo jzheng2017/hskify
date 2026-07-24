@@ -189,7 +189,7 @@ impl PaddleOcrVl {
             &MtmdContextParams {
                 use_gpu: !cpu && backend.as_ref().supports_gpu_offload(),
                 print_timings: false,
-                n_threads: num_cpus::get().try_into().unwrap_or(i32::MAX),
+                n_threads: crate::inference_threads(),
                 media_marker: CString::new(PADDLEOCR_IMAGE_MARKER)
                     .expect("PaddleOCR image marker contains no null bytes"),
             },
@@ -580,7 +580,9 @@ fn context_params(
     let mut params = LlamaContextParams::default()
         .with_n_ctx(Some(n_ctx))
         .with_n_batch(n_batch)
-        .with_n_ubatch(n_ubatch);
+        .with_n_ubatch(n_ubatch)
+        .with_n_threads(crate::inference_threads())
+        .with_n_threads_batch(crate::inference_threads());
     if mtmd.decode_use_non_causal() {
         params = params.with_attention_type(LlamaAttentionType::NonCausal);
     }

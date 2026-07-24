@@ -10,6 +10,7 @@ pub mod bubble_segmentation;
 pub mod comic_text_bubble;
 pub mod ctd_full;
 pub mod ctd_segment;
+pub mod dialogue_bubble_fill;
 pub mod flux2_klein;
 pub mod lama;
 pub mod llm_translate;

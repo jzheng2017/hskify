@@ -18,12 +18,13 @@ use hsk_control::{
     LookupRegionContext as ControlLookupRegion, PreservationViolation, ProperName,
     ProperNameReason, ValidationReport, ViolationReason,
 };
-use image::{GrayImage, ImageFormat};
+use image::{DynamicImage, GrayImage, ImageFormat, Luma};
 use koharu_app::llm::{
     FaithfulOcrRegion, FaithfulPageRequest, FaithfulRegionKind, FaithfulTranslation, HskRewrite,
     HskRewritePageRequest, HskRewriteRegion, HskValidatorFeedback, PrecedingPageContext,
     ProtectedName,
 };
+use koharu_app::pipeline::support::upsert_mask_blob;
 use koharu_app::pipeline::{self, Artifact, PipelineSpec, Scope};
 use koharu_app::{App, AppConfig, PipelineRunOptions, ProjectSession};
 use koharu_core::{
@@ -43,8 +44,9 @@ use crate::contracts::{
 };
 use crate::crypto::sha256_hex;
 
-const CACHE_MARKER_VERSION: u8 = 1;
-const PIPELINE_FINGERPRINT: &str = "gate3-v1:pp-doclayout-v3+comic-text-detector-seg+speech-bubble-segmentation+paddle-ocr-vl-1.6+lama-manga";
+const CACHE_MARKER_VERSION: u8 = 4;
+const PIPELINE_FINGERPRINT: &str = "gate3-v4:comic-text-bubble-detector+detector-bubble-mask+speech-bubble-only+paddle-ocr-vl-1.6+english-only+dialogue-box-erase+dialogue-bubble-fill";
+const BROWSER_DIALOGUE_CLEANER: &str = "dialogue-bubble-fill";
 const LOW_OCR_CONFIDENCE: f32 = 0.60;
 const RESOURCES_DIRECTORY_ENV: &str = "HSK_MANGA_RESOURCES_DIR";
 const HSK_RESOURCE_ENV: &str = "HSK_MANGA_HSK_PATH";
@@ -395,65 +397,69 @@ impl CleaningPipeline for KoharuPipeline {
 
         let app = self.app().await.map_err(CleaningError::pipeline)?;
         let config = app.config.load();
-        let steps = cleaning_steps(&config);
+        let detection_steps = detection_steps(&config);
+        let ocr_steps = ocr_steps(&config);
+        let inpainting_steps = inpainting_steps();
         drop(config);
 
-        let progress_bridge = {
-            let progress = progress.clone();
-            Arc::new(move |tick: pipeline::ProgressTick| {
-                let Some((stage, message)) = tick.step.and_then(progress_stage) else {
-                    return;
-                };
-                progress(CleaningProgress {
-                    stage,
-                    overall_progress: Some(f32::from(tick.overall_percent) / 100.0 * 0.55),
-                    current: u32::try_from(tick.step_index + 1).ok(),
-                    total: u32::try_from(tick.total_steps).ok(),
-                    message: message.to_owned(),
-                });
-            }) as pipeline::ProgressSink
-        };
         let warnings = Arc::new(Mutex::new(Vec::<String>::new()));
-        let warning_bridge = {
-            let warnings = warnings.clone();
-            Arc::new(move |tick: pipeline::WarningTick| {
-                warnings
-                    .lock()
-                    .expect("pipeline warning lock poisoned")
-                    .push(format!("{}: {}", tick.step_id, tick.message));
-            }) as pipeline::WarningSink
+        let options = PipelineRunOptions {
+            target_language: None,
+            system_prompt: None,
+            default_font: None,
+            text_node_ids: None,
+            region: None,
+            reading_order: Some(reading_order(input.request.settings.reading_direction)),
         };
-        let spec = PipelineSpec {
-            scope: Scope::Pages(vec![page_id]),
-            steps,
-            options: PipelineRunOptions {
-                target_language: None,
-                system_prompt: None,
-                default_font: None,
-                text_node_ids: None,
-                region: None,
-                reading_order: Some(reading_order(input.request.settings.reading_direction)),
-            },
-        };
-
-        let outcome = pipeline::run(
+        let detection_warnings = run_pipeline_phase(
             session.clone(),
-            app.registry.clone(),
-            app.runtime.clone(),
-            app.cpu_only(),
-            app.llm.clone(),
-            app.renderer.clone(),
-            spec,
+            app,
+            page_id,
+            detection_steps,
+            options.clone(),
             cancel.clone(),
-            Some(progress_bridge),
-            Some(warning_bridge),
+            progress.clone(),
+            0.0,
+            0.22,
+            warnings.clone(),
+        )
+        .await
+        .map_err(CleaningError::pipeline)?;
+        retain_speech_bubble_text(&session, page_id).map_err(CleaningError::pipeline)?;
+        let ocr_warnings = run_pipeline_phase(
+            session.clone(),
+            app,
+            page_id,
+            ocr_steps,
+            options.clone(),
+            cancel.clone(),
+            progress.clone(),
+            0.22,
+            0.16,
+            warnings.clone(),
+        )
+        .await
+        .map_err(CleaningError::pipeline)?;
+        retain_english_text(&session, page_id).map_err(CleaningError::pipeline)?;
+        write_dialogue_erase_mask(&session, page_id).map_err(CleaningError::pipeline)?;
+        let inpainting_warnings = run_pipeline_phase(
+            session.clone(),
+            app,
+            page_id,
+            inpainting_steps,
+            options,
+            cancel.clone(),
+            progress.clone(),
+            0.38,
+            0.17,
+            warnings.clone(),
         )
         .await
         .map_err(CleaningError::pipeline)?;
         if cancel.load(Ordering::Acquire) {
             return Err(CleaningError::new("CANCELLED", "Cleaning was cancelled."));
         }
-        if outcome.warning_count > 0 {
+        if detection_warnings + ocr_warnings + inpainting_warnings > 0 {
             let details = warnings
                 .lock()
                 .expect("pipeline warning lock poisoned")
@@ -624,7 +630,7 @@ async fn translate_regions_with(
         let faithful = translator.faithful(&faithful_request, cancel).await?;
         validate_faithful_coverage(regions, &faithful)?;
         for (region, translation) in regions.iter_mut().zip(faithful) {
-            region.faithful_chinese = translation.text;
+            region.faithful_chinese = canonicalize_mainland_question_particles(&translation.text);
         }
     } else if regions
         .iter()
@@ -639,14 +645,16 @@ async fn translate_regions_with(
         .iter()
         .map(|region| {
             let proper_names = proper_names_from_region(region);
+            let faithful_chinese =
+                canonicalize_mainland_question_particles(&region.faithful_chinese);
             RegionRewriteState {
                 id: region.id.clone(),
                 reading_order: region.reading_order,
                 source_english: region.source_english.clone(),
-                faithful_chinese: region.faithful_chinese.clone(),
+                faithful_chinese: faithful_chinese.clone(),
                 correction: control.correction_loop(
                     selected_level,
-                    &region.faithful_chinese,
+                    &faithful_chinese,
                     &proper_names,
                 ),
                 proper_names,
@@ -718,8 +726,9 @@ async fn translate_regions_with(
         let mut retry = Vec::new();
         for (state_index, rewrite) in pending.iter().copied().zip(rewrites) {
             let state = &mut states[state_index];
-            state.current_chinese = Some(rewrite.text.clone());
-            match state.correction.evaluate(&rewrite.text) {
+            let candidate = canonicalize_mainland_question_particles(&rewrite.text);
+            state.current_chinese = Some(candidate.clone());
+            match state.correction.evaluate(&candidate) {
                 CorrectionOutcome::Accepted { report } => {
                     state.final_report = Some(report);
                 }
@@ -755,13 +764,18 @@ async fn translate_regions_with(
 
     let mut warnings = Vec::new();
     for (region, state) in regions.iter_mut().zip(states) {
-        let report = state
-            .final_report
-            .context("HSK rewrite did not produce a final validation report")?;
+        let report = if state.failed {
+            control.validate(&state.faithful_chinese, selected_level, &state.proper_names)
+        } else {
+            state
+                .final_report
+                .context("HSK rewrite did not produce a final validation report")?
+        };
         region.faithful_chinese = state.faithful_chinese;
-        region.displayed_chinese = report.normalized_text.clone();
+        region.displayed_chinese =
+            canonicalize_mainland_question_particles(&report.normalized_text);
         region.pinyin = control
-            .lookup(&report.normalized_text, &state.proper_names)
+            .lookup(&region.displayed_chinese, &state.proper_names)
             .tokens
             .into_iter()
             .filter_map(|token| (!token.pinyin.trim().is_empty()).then_some(token.pinyin))
@@ -801,6 +815,18 @@ async fn translate_regions_with(
         }
     }
     Ok(warnings)
+}
+
+/// Qwen occasionally emits Taiwan-style `幺` in common Mandarin question
+/// particles despite a zh-CN prompt. Keep literal uses of `幺` intact while
+/// canonicalizing only the unambiguous particle forms before HSK validation.
+fn canonicalize_mainland_question_particles(input: &str) -> String {
+    input
+        .replace("什幺", "什么")
+        .replace("怎幺", "怎么")
+        .replace("这幺", "这么")
+        .replace("那幺", "那么")
+        .replace("多幺", "多么")
 }
 
 fn validate_faithful_coverage(
@@ -1022,19 +1048,249 @@ fn progress_stage(step: PipelineStep) -> Option<(BrowserJobStage, &'static str)>
     }
 }
 
-fn cleaning_steps(config: &AppConfig) -> Vec<String> {
+#[allow(clippy::too_many_arguments)]
+async fn run_pipeline_phase(
+    session: Arc<ProjectSession>,
+    app: &Arc<App>,
+    page_id: PageId,
+    steps: Vec<String>,
+    options: PipelineRunOptions,
+    cancel: Arc<AtomicBool>,
+    progress: CleaningProgressSink,
+    progress_start: f32,
+    progress_span: f32,
+    warnings: Arc<Mutex<Vec<String>>>,
+) -> Result<usize> {
+    let progress_bridge = Arc::new(move |tick: pipeline::ProgressTick| {
+        let Some((stage, message)) = tick.step.and_then(progress_stage) else {
+            return;
+        };
+        progress(CleaningProgress {
+            stage,
+            overall_progress: Some(
+                progress_start + f32::from(tick.overall_percent) / 100.0 * progress_span,
+            ),
+            current: u32::try_from(tick.step_index + 1).ok(),
+            total: u32::try_from(tick.total_steps).ok(),
+            message: message.to_owned(),
+        });
+    }) as pipeline::ProgressSink;
+    let warning_bridge = Arc::new(move |tick: pipeline::WarningTick| {
+        warnings
+            .lock()
+            .expect("pipeline warning lock poisoned")
+            .push(format!("{}: {}", tick.step_id, tick.message));
+    }) as pipeline::WarningSink;
+    let outcome = pipeline::run(
+        session,
+        app.registry.clone(),
+        app.runtime.clone(),
+        app.cpu_only(),
+        app.llm.clone(),
+        app.renderer.clone(),
+        PipelineSpec {
+            scope: Scope::Pages(vec![page_id]),
+            steps,
+            options,
+        },
+        cancel,
+        Some(progress_bridge),
+        Some(warning_bridge),
+    )
+    .await?;
+    Ok(outcome.warning_count)
+}
+
+fn detection_steps(config: &AppConfig) -> Vec<String> {
     let pipeline = &config.pipeline;
-    [
-        pipeline.detector.as_str(),
-        pipeline.segmenter.as_str(),
-        pipeline.bubble_segmenter.as_str(),
-        pipeline.ocr.as_str(),
-        pipeline.inpainter.as_str(),
-    ]
-    .into_iter()
-    .filter(|step| !step.trim().is_empty())
-    .map(ToOwned::to_owned)
-    .collect()
+    let mut steps = Vec::with_capacity(2);
+    if !pipeline.detector.trim().is_empty() {
+        steps.push(pipeline.detector.clone());
+    }
+    let detector_produces_bubbles = pipeline::Registry::find(&pipeline.detector)
+        .is_ok_and(|engine| engine.produces.contains(&Artifact::BubbleMask));
+    if !detector_produces_bubbles && !pipeline.bubble_segmenter.trim().is_empty() {
+        steps.push(pipeline.bubble_segmenter.clone());
+    }
+    steps
+}
+
+fn ocr_steps(config: &AppConfig) -> Vec<String> {
+    (!config.pipeline.ocr.trim().is_empty())
+        .then(|| config.pipeline.ocr.clone())
+        .into_iter()
+        .collect()
+}
+
+fn inpainting_steps() -> Vec<String> {
+    vec![BROWSER_DIALOGUE_CLEANER.to_owned()]
+}
+
+fn retain_speech_bubble_text(session: &ProjectSession, page_id: PageId) -> Result<usize> {
+    let scene = session.scene_snapshot();
+    let page = scene
+        .pages
+        .get(&page_id)
+        .context("Koharu page disappeared before dialogue filtering")?;
+    let bubble_blob = page
+        .nodes
+        .values()
+        .find_map(|node| match &node.kind {
+            NodeKind::Mask(mask) if mask.role == MaskRole::Bubble => Some(&mask.blob),
+            _ => None,
+        })
+        .context("Koharu bubble mask is missing before dialogue filtering")?;
+    let bubble_mask = session.blobs.load_image(bubble_blob)?.to_luma8();
+
+    let mut kept = 0;
+    let mut removals = Vec::new();
+    for (index, (node_id, node)) in page.nodes.iter().enumerate() {
+        let NodeKind::Text(_) = &node.kind else {
+            continue;
+        };
+        let keep = bubble_label_for(&bubble_mask, node.transform).is_some();
+        if keep {
+            kept += 1;
+        } else {
+            removals.push(Op::RemoveNode {
+                page: page_id,
+                id: *node_id,
+                prev_node: node.clone(),
+                prev_index: index,
+            });
+        }
+    }
+    if !removals.is_empty() {
+        session.apply(Op::Batch {
+            ops: removals,
+            label: "Keep speech-bubble text geometry".to_owned(),
+        })?;
+    }
+    if kept == 0 {
+        bail!("no text was detected inside a speech bubble");
+    }
+    Ok(kept)
+}
+
+fn retain_english_text(session: &ProjectSession, page_id: PageId) -> Result<usize> {
+    let scene = session.scene_snapshot();
+    let page = scene
+        .pages
+        .get(&page_id)
+        .context("Koharu page disappeared before English dialogue filtering")?;
+    let mut kept = 0;
+    let mut removals = Vec::new();
+    for (index, (node_id, node)) in page.nodes.iter().enumerate() {
+        let NodeKind::Text(text) = &node.kind else {
+            continue;
+        };
+        if text
+            .text
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(is_probably_english)
+        {
+            kept += 1;
+        } else {
+            removals.push(Op::RemoveNode {
+                page: page_id,
+                id: *node_id,
+                prev_node: node.clone(),
+                prev_index: index,
+            });
+        }
+    }
+    if !removals.is_empty() {
+        session.apply(Op::Batch {
+            ops: removals,
+            label: "Keep English speech-bubble dialogue".to_owned(),
+        })?;
+    }
+    if kept == 0 {
+        bail!("no English dialogue was detected inside a speech bubble");
+    }
+    Ok(kept)
+}
+
+fn write_dialogue_erase_mask(session: &ProjectSession, page_id: PageId) -> Result<()> {
+    let scene = session.scene_snapshot();
+    let page = scene
+        .pages
+        .get(&page_id)
+        .context("Koharu page disappeared before dialogue mask generation")?;
+    let bubble_blob = page
+        .nodes
+        .values()
+        .find_map(|node| match &node.kind {
+            NodeKind::Mask(mask) if mask.role == MaskRole::Bubble => Some(&mask.blob),
+            _ => None,
+        })
+        .context("Koharu bubble mask is missing before dialogue mask generation")?;
+    let mut bubbles = session.blobs.load_image(bubble_blob)?.to_luma8();
+    let (width, height) = bubbles.dimensions();
+    let mut erase = GrayImage::new(width, height);
+    let mut painted = 0_u64;
+
+    for node in page.nodes.values() {
+        let NodeKind::Text(_) = &node.kind else {
+            continue;
+        };
+        let Some(label) = bubble_label_for(&bubbles, node.transform) else {
+            continue;
+        };
+        let Some([x0, y0, x1, y1]) = clamped_transform_bounds(node.transform, width, height) else {
+            continue;
+        };
+        let pad_x = ((x1 - x0) as f32 * 0.12).ceil().clamp(3.0, 18.0) as u32;
+        let pad_y = ((y1 - y0) as f32 * 0.12).ceil().clamp(3.0, 18.0) as u32;
+        let outer_x0 = x0.saturating_sub(pad_x);
+        let outer_y0 = y0.saturating_sub(pad_y);
+        let outer_x1 = x1.saturating_add(pad_x).min(width);
+        let outer_y1 = y1.saturating_add(pad_y).min(height);
+
+        for y in outer_y0..outer_y1 {
+            for x in outer_x0..outer_x1 {
+                let core = x >= x0 && x < x1 && y >= y0 && y < y1;
+                if !core && bubbles.get_pixel(x, y).0[0] != label {
+                    continue;
+                }
+                erase.put_pixel(x, y, Luma([255]));
+                // Detector ellipses are conservative. Once OCR has confirmed
+                // English inside this bubble, extending the same bubble ID
+                // through the text box lets the flat-fill path erase every
+                // original glyph without touching unrelated artwork.
+                bubbles.put_pixel(x, y, Luma([label]));
+                painted += 1;
+            }
+        }
+    }
+    if painted == 0 {
+        bail!("English dialogue produced an empty erase mask");
+    }
+
+    let bubble_blob = session.blobs.put_webp(&DynamicImage::ImageLuma8(bubbles))?;
+    let erase_blob = session.blobs.put_webp(&DynamicImage::ImageLuma8(erase))?;
+    session.apply(Op::Batch {
+        ops: vec![
+            upsert_mask_blob(&scene, page_id, MaskRole::Bubble, bubble_blob),
+            upsert_mask_blob(&scene, page_id, MaskRole::Segment, erase_blob),
+        ],
+        label: "Build English dialogue erase mask".to_owned(),
+    })?;
+    Ok(())
+}
+
+fn is_probably_english(text: &str) -> bool {
+    let mut ascii_letters = 0;
+    let mut non_ascii_letters = 0;
+    for character in text.chars() {
+        if character.is_ascii_alphabetic() {
+            ascii_letters += 1;
+        } else if character.is_alphabetic() {
+            non_ascii_letters += 1;
+        }
+    }
+    ascii_letters > 0 && non_ascii_letters == 0
 }
 
 fn reading_order(direction: ReadingDirection) -> ReadingOrder {
@@ -1246,18 +1502,19 @@ fn extract_output(
     let mut warnings = Vec::new();
     let mut id_counts = HashMap::<String, usize>::new();
     for (reading_order, (transform, text)) in text_nodes.into_iter().enumerate() {
-        let source_english = text
+        let Some(source_english) = text
             .text
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .ok_or_else(|| {
-                CleaningError::new(
-                    "OCR_INCOMPLETE",
-                    "Koharu returned an empty OCR text region.",
-                )
-            })?
-            .to_owned();
+            .filter(|value| is_probably_english(value))
+            .map(ToOwned::to_owned)
+        else {
+            continue;
+        };
+        let Some(bubble_label) = bubble_label_for(&bubble_mask, transform) else {
+            continue;
+        };
         let text_polygon = text_polygon(transform, text, page.width, page.height);
         let base_id = stable_region_id(&request.source_sha256, &text_polygon);
         let count = id_counts.entry(base_id.clone()).or_default();
@@ -1267,8 +1524,7 @@ fn extract_output(
         } else {
             format!("{base_id}-{}", *count)
         };
-        let bubble_polygon = bubble_label_for(&bubble_mask, transform)
-            .and_then(|label| bubble_polygons.get(&label).cloned());
+        let bubble_polygon = bubble_polygons.get(&bubble_label).cloned();
         let confidence = finite_unit(text.confidence);
         if confidence < LOW_OCR_CONFIDENCE {
             warnings.push(BrowserWarning {
@@ -1467,6 +1723,39 @@ fn convex_hull(mut points: Vec<[f32; 2]>) -> Vec<[f32; 2]> {
 
 fn bubble_label_for(mask: &GrayImage, transform: Transform) -> Option<u8> {
     let (width, height) = mask.dimensions();
+    let [x0, y0, x1, y1] = clamped_transform_bounds(transform, width, height)?;
+    let center_x = x0 + (x1 - x0) / 2;
+    let center_y = y0 + (y1 - y0) / 2;
+    let center_label = mask
+        .get_pixel(center_x.min(width - 1), center_y.min(height - 1))
+        .0[0];
+    if center_label != 0 {
+        return Some(center_label);
+    }
+    let mut counts = [0_u32; 256];
+    for y in y0.min(height)..y1 {
+        for x in x0.min(width)..x1 {
+            let label = mask.get_pixel(x, y).0[0];
+            if label != 0 {
+                counts[usize::from(label)] = counts[usize::from(label)].saturating_add(1);
+            }
+        }
+    }
+    let area = (x1 - x0).saturating_mul(y1 - y0);
+    counts
+        .iter()
+        .enumerate()
+        .skip(1)
+        .max_by_key(|(_, count)| *count)
+        .and_then(|(label, count)| {
+            (area > 0 && count.saturating_mul(5) >= area).then_some(label as u8)
+        })
+}
+
+fn clamped_transform_bounds(transform: Transform, width: u32, height: u32) -> Option<[u32; 4]> {
+    if width == 0 || height == 0 {
+        return None;
+    }
     let x0 = finite_or(transform.x, 0.0).floor().max(0.0) as u32;
     let y0 = finite_or(transform.y, 0.0).floor().max(0.0) as u32;
     let x1 = (finite_or(transform.x + transform.width, 0.0)
@@ -1477,21 +1766,7 @@ fn bubble_label_for(mask: &GrayImage, transform: Transform) -> Option<u8> {
         .ceil()
         .max(0.0) as u32)
         .min(height);
-    let mut counts = [0_u32; 256];
-    for y in y0.min(height)..y1 {
-        for x in x0.min(width)..x1 {
-            let label = mask.get_pixel(x, y).0[0];
-            if label != 0 {
-                counts[usize::from(label)] = counts[usize::from(label)].saturating_add(1);
-            }
-        }
-    }
-    counts
-        .iter()
-        .enumerate()
-        .skip(1)
-        .max_by_key(|(_, count)| *count)
-        .and_then(|(label, count)| (*count > 0).then_some(label as u8))
+    (x1 > x0 && y1 > y0).then_some([x0, y0, x1, y1])
 }
 
 fn bubble_polygons(mask: &GrayImage, width: u32, height: u32) -> HashMap<u8, Vec<Point>> {
@@ -1783,6 +2058,28 @@ mod tests {
         Arc::new(|_| {})
     }
 
+    #[test]
+    fn mainland_question_particles_do_not_rewrite_literal_yao() {
+        assert_eq!(
+            canonicalize_mainland_question_particles(
+                "为什么这么难？怎么会那么快？多么好。幺妹打一幺。"
+            ),
+            "为什么这么难？怎么会那么快？多么好。幺妹打一幺。"
+        );
+        assert_eq!(
+            canonicalize_mainland_question_particles(
+                "为什幺这幺难？怎幺会那幺快？多幺好。幺妹打一幺。"
+            ),
+            "为什么这么难？怎么会那么快？多么好。幺妹打一幺。"
+        );
+        assert_eq!(
+            canonicalize_mainland_question_particles(
+                &seed_control().normalize_text("为什么这么难？")
+            ),
+            "为什么这么难？"
+        );
+    }
+
     #[tokio::test]
     async fn valid_rewrite_fills_faithful_displayed_pinyin_and_strict_vocabulary() {
         let control = seed_control();
@@ -1887,7 +2184,7 @@ mod tests {
 
         assert_eq!(model.rewrite_calls.load(Ordering::Relaxed), 3);
         assert!(!regions[0].vocabulary.strictly_valid);
-        assert_eq!(regions[0].displayed_chinese, "我们立即离开");
+        assert_eq!(regions[0].displayed_chinese, "我们马上离开");
         assert_eq!(warnings.len(), 1);
         assert_eq!(warnings[0].code, BrowserWarningCode::HskRewriteFailed);
         assert!(
@@ -2043,6 +2340,139 @@ mod tests {
                 }),
             },
         );
+    }
+
+    #[test]
+    fn english_filter_rejects_non_latin_dialogue() {
+        assert!(is_probably_english("Why do I feel like this?"));
+        assert!(is_probably_english("I"));
+        assert!(!is_probably_english("저벅"));
+        assert!(!is_probably_english("你好"));
+        assert!(!is_probably_english("hello 世界"));
+        assert!(!is_probably_english("..."));
+    }
+
+    #[test]
+    fn bubble_matching_requires_center_or_meaningful_overlap() {
+        let mut mask = GrayImage::new(32, 32);
+        for y in 8..24 {
+            for x in 8..24 {
+                mask.put_pixel(x, y, Luma([7]));
+            }
+        }
+        assert_eq!(
+            bubble_label_for(
+                &mask,
+                Transform {
+                    x: 10.0,
+                    y: 10.0,
+                    width: 10.0,
+                    height: 10.0,
+                    rotation_deg: 0.0,
+                },
+            ),
+            Some(7)
+        );
+        assert_eq!(
+            bubble_label_for(
+                &mask,
+                Transform {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 10.0,
+                    height: 10.0,
+                    rotation_deg: 0.0,
+                },
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn dialogue_filter_removes_non_bubble_and_non_english_text_nodes() {
+        const WIDTH: u32 = 128;
+        const HEIGHT: u32 = 128;
+        let temp = tempdir().unwrap();
+        let project = Utf8PathBuf::from_path_buf(temp.path().join("filter.khrproj")).unwrap();
+        let session = ProjectSession::create(&project, "dialogue filter").unwrap();
+        let mut bubbles = GrayImage::new(WIDTH, HEIGHT);
+        for y in 8..64 {
+            for x in 8..64 {
+                bubbles.put_pixel(x, y, Luma([3]));
+            }
+        }
+        let bubble_blob = session
+            .blobs
+            .put_bytes(&png(DynamicImage::ImageLuma8(bubbles)))
+            .unwrap();
+        let mut page = Page::new("filter.png", WIDTH, HEIGHT);
+        let page_id = page.id;
+        add_mask_node(&mut page, MaskRole::Bubble, bubble_blob);
+        add_text_node(
+            &mut page,
+            Transform {
+                x: 16.0,
+                y: 16.0,
+                width: 32.0,
+                height: 20.0,
+                rotation_deg: 0.0,
+            },
+            0.9,
+            "HELLO",
+            [[16.0, 16.0], [48.0, 16.0], [48.0, 36.0], [16.0, 36.0]],
+        );
+        add_text_node(
+            &mut page,
+            Transform {
+                x: 80.0,
+                y: 80.0,
+                width: 24.0,
+                height: 20.0,
+                rotation_deg: 0.0,
+            },
+            0.9,
+            "SFX",
+            [[80.0, 80.0], [104.0, 80.0], [104.0, 100.0], [80.0, 100.0]],
+        );
+        add_text_node(
+            &mut page,
+            Transform {
+                x: 20.0,
+                y: 40.0,
+                width: 24.0,
+                height: 16.0,
+                rotation_deg: 0.0,
+            },
+            0.9,
+            "저벅",
+            [[20.0, 40.0], [44.0, 40.0], [44.0, 56.0], [20.0, 56.0]],
+        );
+        session.apply(Op::AddPage { page, at: 0 }).unwrap();
+
+        assert_eq!(retain_speech_bubble_text(&session, page_id).unwrap(), 2);
+        assert_eq!(retain_english_text(&session, page_id).unwrap(), 1);
+        write_dialogue_erase_mask(&session, page_id).unwrap();
+        let scene = session.scene_snapshot();
+        let retained = scene.pages[&page_id]
+            .nodes
+            .values()
+            .filter_map(|node| match &node.kind {
+                NodeKind::Text(text) => text.text.as_deref(),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(retained, ["HELLO"]);
+        let segment_blob = scene.pages[&page_id]
+            .nodes
+            .values()
+            .find_map(|node| match &node.kind {
+                NodeKind::Mask(mask) if mask.role == MaskRole::Segment => Some(&mask.blob),
+                _ => None,
+            })
+            .unwrap();
+        let segment = session.blobs.load_image(segment_blob).unwrap().to_luma8();
+        assert_ne!(segment.get_pixel(20, 20).0[0], 0);
+        assert_eq!(segment.get_pixel(90, 90).0[0], 0);
     }
 
     #[test]

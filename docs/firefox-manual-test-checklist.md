@@ -13,10 +13,13 @@ installed native companion. A pending row is not release evidence.
 | Strict TypeScript/WXT typecheck | Passed | `npm run typecheck` |
 | Firefox MV3 production build | Passed | `npm run build` |
 | Production fixture isolation | Passed | No `data-hmt-fixture`, `hmtFixture`, fixture service, fixture response, or `structuredClone` test marker in `.output/firefox-mv3` |
-| Unit/component suite | Passed | 74 Vitest tests across 18 files |
+| Unit/component suite | Passed | 80 Vitest tests across 19 files |
 | Firefox renderer harness | Passed | 6 Playwright tests |
 | Long raster decode | Passed | Firefox decoded the query-string 900×16,000 WebP |
 | Long-reader discovery | Passed | Exactly 20 chapter images selected among 154 images; cover/comments/avatars excluded |
+| Live Asura page pipeline | Passed | Nano Machine chapter 100 page 1: 11 English bubble regions, non-bubble SFX retained, 217 s, 4.75 GiB peak working set |
+| Live production renderer | Passed | 11 selectable Chinese regions over the actual clean 800×11,470 WebP; zero degraded fits |
+| Installed packaged-extension E2E | Passed | Fresh disposable Firefox used the real popup, registered native host, installed daemon, cached clean page, and HSK 5 correction; 11 selectable regions, zero degraded fits, 186.7 s |
 | Direct and ancestor click delivery | Passed | Original image listener once and reader ancestor once; selected text suppresses navigation |
 | Corrupt/stale renderer safety | Passed | Decode failure and an awaited stale font path leave the original unchanged |
 | Clean/font response streaming caps | Passed | Unit streams stop over the configured limit before full materialization |
@@ -82,7 +85,13 @@ probe. It does not measure Firefox extension messaging.
 
 ### Launcher and daemon security
 
-Status: **Blocked on installed Workstream B companion**
+Status: **Primary installed path passed; adversarial variants remain pending**
+
+The packaged extension was temporarily installed in a fresh disposable Firefox
+profile. A trusted click on the real extension popup launched the registered
+native host and installed daemon, reused the cached clean image, completed HSK
+5 translation, and left 11 selectable regions with zero degraded fits. The
+original image remained visible until completion.
 
 - Native-host registration accepts only the permanent Firefox extension ID.
 - One-shot launch returns a random loopback port and short-lived bearer token.
@@ -93,7 +102,11 @@ Status: **Blocked on installed Workstream B companion**
 
 ### Suspension, restart, and reconnect
 
-Status: **Blocked on installed Workstream B companion**
+Status: **Initial native-host-to-daemon survival passed; restart variants pending**
+
+The installed run proves that the one-shot native host can return and the
+daemon remains available long enough for the extension to complete the job.
+The following interruption cases still need dedicated runs:
 
 - Close the popup while a job runs; processing continues.
 - Allow the MV3 background to suspend; the next content poll reconstructs
@@ -106,7 +119,7 @@ Status: **Blocked on installed Workstream B companion**
 
 ### Live cancellation and navigation
 
-Status: **Blocked on installed Workstream B companion**
+Status: **Pending packaged/installed Firefox run**
 
 - Cancel during upload, processing, polling, clean-image transfer, font load,
   and immediately before render commit.
@@ -119,7 +132,7 @@ Status: **Blocked on installed Workstream B companion**
 
 ### Corrupt companion artifacts in the installed extension
 
-Status: **Blocked on installed Workstream B companion**
+Status: **Pending packaged/installed Firefox run**
 
 - Return a bad clean-image signature, MIME mismatch, truncated stream, wrong
   decoded dimensions, oversized body with and without `Content-Length`, and a
@@ -127,13 +140,14 @@ Status: **Blocked on installed Workstream B companion**
 - Verify the original is not wrapped or hidden, no partial Chinese is shown,
   the response is bounded, and the user receives one retry action.
 
-## Later-gate visual and model checks
+## Final visual and model checks
 
-Status: **Not part of Firefox Gate 1 acceptance**
+Status: **Implemented; representative human acceptance remains pending**
 
-- Real redistributable CJK font bank and font-category quality.
+- Redistributable Noto Sans/Serif CJK bytes are packaged and served; broader
+  font-category and golden-set quality review remains pending.
 - Golden-set polygon fitting with no unreported clipping.
-- OCR, masks, inpainting, translation, strict HSK vocabulary, names, numbers,
-  and negation.
-- OCR/inpainting cache reuse after HSK-level changes.
+- OCR, speech-bubble gating, dialogue-only cleanup, local translation, bounded
+  HSK correction, and preservation checks are implemented.
+- Detection/OCR/cleanup cache reuse after HSK-level changes is implemented.
 - Final fully local network inspection with the production model pack.

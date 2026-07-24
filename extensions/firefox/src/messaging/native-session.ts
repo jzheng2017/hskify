@@ -16,7 +16,7 @@ export type RuntimeNativeApi = {
   sendNativeMessage(application: string, message: unknown): Promise<unknown>
 }
 
-function extensionOrigin(runtime: RuntimeNativeApi): string {
+export function extensionOrigin(runtime: RuntimeNativeApi): string {
   const url = new URL(runtime.getURL(''))
   return `${url.protocol}//${url.host}`
 }
@@ -96,6 +96,10 @@ export class NativeSessionManager {
 
   async getOrLaunch(forceRefresh = false): Promise<NativeReadyResponse> {
     return (await this.getOrLaunchWithState(forceRefresh)).session
+  }
+
+  origin(): string {
+    return extensionOrigin(this.runtime)
   }
 
   async invalidate(): Promise<void> {

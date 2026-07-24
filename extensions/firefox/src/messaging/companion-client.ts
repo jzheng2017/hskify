@@ -19,6 +19,7 @@ import { NativeSessionManager } from './native-session'
 
 const MAX_CLEAN_IMAGE_BYTES = 25 * 1024 * 1024
 const MAX_FONT_BYTES = 32 * 1024 * 1024
+const EXTENSION_ORIGIN_HEADER = 'X-HSK-Manga-Extension-Origin'
 
 export class CompanionHttpError extends Error {
   constructor(
@@ -130,13 +131,14 @@ export class CompanionClient {
 
   constructor(
     private readonly sessions = new NativeSessionManager(),
-    private readonly fetcher: FetchLike = fetch,
+    private readonly fetcher: FetchLike = (input, init) => fetch(input, init),
   ) {}
 
   private headers(session: NativeReadyResponse, init: RequestInit): Headers {
     const headers = new Headers(init.headers)
     headers.set('Authorization', `Bearer ${session.token}`)
     headers.set('X-HSK-Manga-Protocol', String(PROTOCOL_VERSION))
+    headers.set(EXTENSION_ORIGIN_HEADER, this.sessions.origin())
     return headers
   }
 

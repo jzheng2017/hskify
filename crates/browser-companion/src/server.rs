@@ -45,7 +45,7 @@ use crate::pipeline_adapter::{
     KoharuPipeline, RetranslationInput, RetranslationOutput,
 };
 use crate::setup::{ManagedResourcePaths, ModelSetup};
-use crate::{CONTROL_HEADER, PROTOCOL_HEADER};
+use crate::{CONTROL_HEADER, EXTENSION_ORIGIN_HEADER, PROTOCOL_HEADER};
 
 const INTERNAL_SESSION_PATH: &str = "/browser-internal/v1/session";
 const MAX_INTERNAL_BODY_BYTES: usize = 4 * 1024;
@@ -54,6 +54,7 @@ const MAX_RETRANSLATE_BODY_BYTES: usize = 64 * 1024;
 const MAX_FONT_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_SESSIONS: usize = 64;
 const DEFAULT_MAX_RETAINED_JOBS: usize = 128;
+const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(2 * 60);
 
 #[derive(Debug, Clone)]
 pub struct ServerLimits {
@@ -100,7 +101,7 @@ impl BridgeConfig {
         Self {
             port,
             session_ttl: Duration::from_secs(15 * 60),
-            idle_timeout: Duration::from_secs(10 * 60),
+            idle_timeout: DEFAULT_IDLE_TIMEOUT,
             limits: ServerLimits::default(),
         }
     }
@@ -1086,14 +1087,18 @@ async fn security_boundary(
         return admitted_response(next.run(request).await, admission);
     }
 
-    let origin = match single_header(request.headers(), ORIGIN.as_str()) {
-        Some(value)
-            if validate_extension_origin(value).is_ok() && state.origin_has_session(value) =>
-        {
-            value.to_owned()
-        }
+    let standard_origin = single_header(request.headers(), ORIGIN.as_str());
+    let extension_origin = single_header(request.headers(), EXTENSION_ORIGIN_HEADER);
+    let origin = match (standard_origin, extension_origin) {
+        (Some(standard), Some(extension)) if standard == extension => standard,
+        (Some(standard), None) => standard,
+        (None, Some(extension)) => extension,
         _ => return ApiError::unauthorized().into_response(),
     };
+    if validate_extension_origin(origin).is_err() || !state.origin_has_session(origin) {
+        return ApiError::unauthorized().into_response();
+    };
+    let origin = origin.to_owned();
 
     if request.method() == Method::OPTIONS {
         return preflight(request.headers(), &origin);
@@ -1176,6 +1181,7 @@ fn preflight(headers: &HeaderMap, origin: &str) -> Response {
             saw_authorization = true;
         } else if value.eq_ignore_ascii_case(PROTOCOL_HEADER) {
             saw_protocol = true;
+        } else if value.eq_ignore_ascii_case(EXTENSION_ORIGIN_HEADER) {
         } else if !value.eq_ignore_ascii_case("content-type") {
             return ApiError::bad_request(
                 "INVALID_PREFLIGHT",
@@ -1200,7 +1206,9 @@ fn preflight(headers: &HeaderMap, origin: &str) -> Response {
     );
     headers.insert(
         ACCESS_CONTROL_ALLOW_HEADERS,
-        HeaderValue::from_static("authorization, content-type, x-hsk-manga-protocol"),
+        HeaderValue::from_static(
+            "authorization, content-type, x-hsk-manga-extension-origin, x-hsk-manga-protocol",
+        ),
     );
     headers.insert(ACCESS_CONTROL_MAX_AGE, HeaderValue::from_static("300"));
     with_cors(response, origin)
@@ -2377,6 +2385,30 @@ mod tests {
             ORIGIN_VALUE
         );
 
+        let privileged_firefox_get = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/browser/v1/health")
+                    .header(HOST, "127.0.0.1:43127")
+                    .header(EXTENSION_ORIGIN_HEADER, ORIGIN_VALUE)
+                    .header(PROTOCOL_HEADER, "1")
+                    .header(AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(privileged_firefox_get.status(), StatusCode::OK);
+        assert_eq!(
+            privileged_firefox_get
+                .headers()
+                .get(ACCESS_CONTROL_ALLOW_ORIGIN)
+                .unwrap(),
+            ORIGIN_VALUE
+        );
+
         for request in [
             authorized(
                 Method::GET,
@@ -2399,6 +2431,19 @@ mod tests {
                 .uri("/browser/v1/health")
                 .header(HOST, "127.0.0.1:43127")
                 .header(ORIGIN, "https://attacker.invalid")
+                .header(PROTOCOL_HEADER, "1")
+                .header(AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+            Request::builder()
+                .method(Method::GET)
+                .uri("/browser/v1/health")
+                .header(HOST, "127.0.0.1:43127")
+                .header(ORIGIN, ORIGIN_VALUE)
+                .header(
+                    EXTENSION_ORIGIN_HEADER,
+                    "moz-extension://different-installation",
+                )
                 .header(PROTOCOL_HEADER, "1")
                 .header(AUTHORIZATION, format!("Bearer {token}"))
                 .body(Body::empty())
@@ -2622,7 +2667,7 @@ mod tests {
             .header("access-control-request-method", "POST")
             .header(
                 "access-control-request-headers",
-                "authorization, content-type, x-hsk-manga-protocol",
+                "authorization, content-type, x-hsk-manga-extension-origin, x-hsk-manga-protocol",
             )
             .body(Body::empty())
             .unwrap();

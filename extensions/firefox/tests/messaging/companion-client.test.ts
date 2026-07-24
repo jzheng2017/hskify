@@ -67,6 +67,11 @@ describe('authenticated localhost companion client', () => {
     expect(
       new Headers(fetcher.mock.calls[1]?.[1]?.headers).get('X-HSK-Manga-Protocol'),
     ).toBe('1')
+    expect(
+      new Headers(fetcher.mock.calls[1]?.[1]?.headers).get(
+        'X-HSK-Manga-Extension-Origin',
+      ),
+    ).toBe('moz-extension://fixture')
   })
 
   it('health-checks a cached endpoint and re-handshakes after transport failure', async () => {

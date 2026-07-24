@@ -1,8 +1,8 @@
-# Browser companion: secure Koharu-backed Gate 5
+# Browser companion: secure Koharu-backed production pipeline
 
-Status: Workstream B implementation through Gate 5 (real local detection,
-bubble/text masks, English OCR, inpainting, full-page faithful translation,
-HSK rewrite/validation, and dictionary lookup).
+Status: production browser companion with real local speech-bubble/text
+detection, English OCR, dialogue-only cleanup, full-page faithful translation,
+HSK rewrite/validation, packaged fonts, and dictionary lookup.
 
 ## Delivered shape
 
@@ -14,8 +14,11 @@ The crate builds two executables:
   bounded response frame, and exits.
 - `hsk-manga-browser-daemon`: holds a per-user exclusive lock, binds literally
   to `127.0.0.1:0`, publishes a control-secret-protected discovery record,
-  serves only the browser router, and exits after an idle period with no active
-  jobs or admitted authenticated requests.
+  serves only the browser router, and exits after two idle minutes with no
+  active jobs or admitted authenticated requests. Its Tokio runtime uses two
+  workers and four blocking threads. On Windows it runs below normal priority
+  and defaults to half the available CPUs with a six-core cap;
+  `KOHARU_INFERENCE_THREADS` provides an explicit override.
 
 Windows detached creation requests `CREATE_BREAKAWAY_FROM_JOB`,
 `CREATE_NEW_PROCESS_GROUP`, and `CREATE_NO_WINDOW`. Unix creation calls
@@ -55,8 +58,10 @@ UUID still matches.
   handler or body extractor runs. Secret comparison uses constant-time byte
   equality.
 - CORS permits only an active extension origin, methods GET/POST/DELETE, and
-  headers Authorization, Content-Type, and X-HSK-Manga-Protocol. No wildcard
-  origins, credentials, or permissive fallback are present.
+  headers Authorization, Content-Type, X-HSK-Manga-Extension-Origin, and
+  X-HSK-Manga-Protocol. The explicit origin header covers privileged extension
+  fetches that omit the standard `Origin` header. No wildcard origins,
+  credentials, or permissive fallback are present.
 - `/api/v1`, `/mcp`, UI assets, and all non-browser namespaces return 404 and
   are not mounted.
 - There is no telemetry, remote fetch, cloud credential, URL-fetch endpoint,
@@ -66,11 +71,15 @@ UUID still matches.
 
 `POST /browser/v1/jobs` now retains the validated source under the existing
 daemon bounds and runs the production `koharu_app::pipeline::run` path. The
-cleaning spec uses Koharu's configured detector, text segmenter, bubble
-segmenter, English OCR, and manga inpainter. The cleaned page then runs one
+cleaning spec runs Koharu's sliced joint comic text/bubble detector first,
+rejects text without meaningful speech-bubble overlap, OCRs only that reduced
+geometry, and then rejects OCR that is not English. A distinct-ID bubble mask
+and accepted dialogue boxes form the erase mask. Koharu's
+`dialogue-bubble-fill` engine fills only those pixels with the median
+background colour of their own bubble; pixels outside the accepted erase mask,
+including sound effects, are never changed. The cleaned page then runs one
 full-page faithful English-to-Simplified-Chinese request through the local
-Qwen model, followed by an HSK-targeted rewrite through that same loaded
-model.
+Qwen model, followed by an HSK-targeted rewrite through that same loaded model.
 
 Each source hash owns a persistent Koharu project. Successful runs compact the
 project and write a versioned pipeline marker; a later identical upload can
@@ -128,7 +137,10 @@ Default limits are:
 - 128 MiB decoder allocation budget;
 - 64 MiB clean blob;
 - 128 retained jobs and 256 MiB retained source/clean blobs;
-- four concurrent authenticated requests, including response-body transfer.
+- four concurrent authenticated requests, including response-body transfer;
+- one active cleaning/retranslation pipeline; and
+- bounded detector/model threads, with the browser daemon's two-minute idle
+  shutdown releasing loaded model memory.
 
 Multipart fields are streamed against their individual limits. The daemon
 recomputes SHA-256, matches declared/multipart/sniffed MIME types, checks
@@ -165,10 +177,10 @@ allocation. Capacity can still return a retryable 429 while all reclaimable
 space is held by active jobs, but terminal history can no longer leave a
 long-lived daemon permanently saturated.
 
-The font endpoint returns a valid, project-generated Gate-2 TrueType fixture
-containing only `.notdef` and space. Browsers therefore load it successfully
-and use normal CJK fallback. It intentionally is not the licensed production
-CJK font bank planned for Gate 6.
+The font endpoint serves the installed, hash-verified Noto Sans SC and Noto
+Serif SC variable font bytes from the developer package. Unknown font IDs and
+missing resources fail closed; browser fallback remains available if a
+supported font cannot be loaded.
 
 ## Koharu reuse boundary
 
@@ -176,12 +188,14 @@ The browser companion reuses `ProjectSession` and its content-addressed `BlobSto
 `RuntimeManager`, Koharu's engine registry, and
 `koharu_app::pipeline::run`. The browser layer only adapts progress,
 cancellation, scene artifacts, stable protocol geometry, warnings, and bounded
-blob retention. It does not introduce a second detector/OCR/inpaint engine.
+blob retention. The speech-bubble filter and deterministic dialogue fill are
+registered Koharu pipeline engines and artifacts, not a parallel browser-only
+image stack.
 
 Faithful and HSK prompts share Koharu's in-process local model state.
 Vocabulary validation and lookup reuse `hsk-control`; no parallel tokenizer or
-dictionary implementation exists in the browser crate. Production font/style
-integration remains Gate 6.
+dictionary implementation exists in the browser crate. Production font bytes
+are served from the same installed resource pack used by setup verification.
 
 ## Registration assets
 
@@ -197,11 +211,13 @@ JSON retains the UTF-8 executable path.
 Run from the repository root:
 
 ```text
-cargo fmt -p browser-companion -- --check
-cargo check -p browser-companion
-cargo test -p browser-companion -p koharu-app --all-targets
-cargo test -p hsk-control --all-features --all-targets
-cargo clippy -p browser-companion -p koharu-app --all-targets -- -D warnings
+cargo fmt --all -- --check
+cargo test -p browser-companion --all-targets -j 1
+cargo test -p koharu-app --all-targets -j 1
+cargo test -p koharu-llm --all-targets -j 1
+cargo test -p hsk-control --all-targets -j 1
+cargo clippy -p browser-companion -p koharu-app -p koharu-llm \
+  --all-targets -j 1 -- -D warnings
 sh -n installers/linux/native-host-registration/register.sh \
   installers/linux/native-host-registration/unregister.sh \
   installers/macos/native-host-registration/register.sh \
@@ -232,25 +248,31 @@ issuance; it does not exercise launcher spawn or download production models.
 
 On the Windows Codex development harness:
 
-- Gate 5: `cargo test -p browser-companion -p koharu-app --all-targets`
-  passed 45 companion library tests, all companion integration tests, and 58
-  Koharu library tests; the opt-in real-model smoke and production breakaway
-  probe remained explicitly ignored.
-- Gate 5: `cargo test -p hsk-control --all-features --all-targets` passed all
-  unit, remediation, reproducibility, and workstream tests; only the explicit
+- `cargo test -p browser-companion --all-targets -j 1` passed 54 library
+  tests, the daemon resource test, 7 contract-fixture tests, the native
+  handshake test, and the non-breakaway lifecycle test. The production
+  breakaway probe remained explicitly ignored.
+- `cargo test -p koharu-app --all-targets -j 1` passed 64 tests, including the
+  joint bubble-mask and deterministic dialogue-fill regressions; the opt-in
+  real-model smoke remained ignored.
+- `cargo test -p koharu-llm --all-targets -j 1` passed 30 runtime tests; tests
+  requiring initialized native runtime fixtures remained explicitly ignored.
+- `cargo test -p hsk-control --all-targets -j 1` passed all unit,
+  remediation, reproducibility, and workstream tests; only the explicit
   full-scale performance smoke remained ignored.
-- Gate 5: `cargo fmt --all -- --check` and `cargo clippy -p
-  browser-companion -p koharu-app --all-targets -- -D warnings` passed.
-
-- `cargo fmt -p browser-companion -- --check`, `cargo check -p
-  browser-companion --lib`, and `cargo clippy -p browser-companion
-  --all-targets -- -D warnings` passed with the Visual Studio 2019 developer
-  environment, the repository's verified LLVM 22.1.0 cache, and AWS-LC's
-  checked-in prebuilt NASM objects.
-- `cargo test -p browser-companion --all-targets` passed 37 library tests, 7
-  contract-fixture tests, the prestarted-daemon native handshake, and the
-  explicitly non-breakaway Windows lifecycle test. The production breakaway
-  probe was reported as ignored.
+- `cargo fmt --all`, `git diff --check`, and `cargo clippy -p
+  browser-companion -p koharu-app -p koharu-llm --all-targets -j 1 -- -D
+  warnings` passed with the Visual Studio 2019 developer environment, the
+  repository's verified LLVM 22.1.0 cache, and AWS-LC's prebuilt NASM path.
+- A release daemon processed Nano Machine chapter 100 page 1 in 217 seconds,
+  producing 11 English speech-bubble regions. Peak working set was 4.75 GiB;
+  Korean and non-bubble English sound effects remained unchanged, and the real
+  Firefox renderer reported 11 selectable regions with zero degraded fits.
+- The packaged extension was temporarily installed in a fresh disposable
+  Firefox profile and exercised through its real popup. The registered native
+  host launched the installed daemon, which reused the cached clean image and
+  completed HSK 5 correction for all 11 regions in 186.7 seconds with zero
+  degraded fits.
 - Git Bash `sh -n` passed for both Unix register/unregister pairs and the
   registration regression script. `sh
   installers/test-native-host-registration.sh` passed both Linux and macOS
@@ -274,13 +296,11 @@ On the Windows Codex development harness:
 
 ### Remaining platform smoke requirements
 
-- **Windows / real Firefox:** install the packaged manifest and signed binaries,
-  invoke the native host from regular Firefox, close the one-shot native host,
-  and verify the production daemon remains alive, serves the returned token,
-  rejects a duplicate daemon, and performs idle cleanup. This is the required
-  evidence that `CREATE_BREAKAWAY_FROM_JOB` works specifically from Firefox's
-  native-host job; the Codex outer job and the direct ignored probe cannot
-  substitute for it.
+- **Windows / real Firefox:** the installed native host and daemon completed a
+  real popup-triggered Firefox translation after the one-shot host returned.
+  Dedicated duplicate-daemon, idle-cleanup, and forced reconnect probes remain.
+  The Codex outer job and the direct ignored probe still cannot substitute for
+  explicit breakaway coverage on every supported Firefox/Windows combination.
 - **Linux / real Firefox:** run the registration regression plus an actual
   per-user install from a non-ASCII UTF-8 path, invoke it from Firefox, verify
   manifest permissions and origin/ID enforcement, and confirm the `setsid()`

@@ -381,7 +381,9 @@ fn context_params(prompt_tokens: usize, max_tokens: usize) -> Result<LlamaContex
     Ok(LlamaContextParams::default()
         .with_n_ctx(Some(n_ctx))
         .with_n_batch(n_batch)
-        .with_n_ubatch(n_ubatch))
+        .with_n_ubatch(n_ubatch)
+        .with_n_threads(crate::inference_threads())
+        .with_n_threads_batch(crate::inference_threads()))
 }
 
 fn build_sampler(model: &LlamaModel, opts: &GenerateOptions) -> Result<LlamaSampler> {

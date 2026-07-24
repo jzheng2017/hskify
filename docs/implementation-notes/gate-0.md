@@ -100,5 +100,6 @@ because the remaining requirements must be measured in real Firefox:
 - a representative large binary transfer to the extension.
 
 Those checks are deliberately not replaced with mocks or inferred from unit
-tests. Gate 1/2 fixture implementation may be integrated independently, but
-Gate 3 remains blocked until the production pipeline evidence exists.
+tests. Gate 1/2 fixture implementation and the production Gate 3 pipeline are
+now integrated independently. Gate 0 remains open only for the two real
+packaged-Firefox measurements above.

@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use super::{Model, State};
 
 pub const FAITHFUL_TRANSLATION_MODEL: ModelId = ModelId::Qwen3_5_4b;
-pub const FAITHFUL_PROMPT_REVISION: &str = "faithful-en-zh-v1";
+pub const FAITHFUL_PROMPT_REVISION: &str = "faithful-en-zh-v3";
 
 const MAX_PRECEDING_CONTEXT: usize = 12;
 const MAX_MALFORMED_OUTPUT_RETRIES: usize = 2;
@@ -28,7 +28,9 @@ Translate every current-page region together into concise, natural Simplified Ch
 Preserve meaning, polarity and negation, numbers exactly as written, names, relationships, \
 speaker consistency, tone, and reading order. Preceding context is reference context only; \
 do not include it in the output. Whenever a protected English name appears, use its supplied \
-Chinese form exactly. Return only a JSON array in the same order as the regions. Every item \
+Chinese form exactly. Keep every Arabic digit as the same ASCII digit; never spell a digit \
+with a Chinese numeral (for example, source 6 must remain 6, not 六). Return only a JSON array \
+in the same order as the regions. Every item \
 must contain exactly the keys regionId and text. Include every requested regionId exactly once, \
 add no IDs or fields, and add no commentary.";
 
@@ -234,10 +236,10 @@ where
             .await?;
         check_cancelled(cancel)?;
 
-        match parser
-            .parse(&raw)
-            .and_then(|translations| validate_output(request, translations))
-        {
+        match parser.parse(&raw).and_then(|mut translations| {
+            repair_ascii_number_preservation(request, &mut translations);
+            validate_output(request, translations)
+        }) {
             Ok(translations) => return Ok(translations),
             Err(error) => {
                 previous_problem = Some(format!("{error:#}"));
@@ -366,18 +368,65 @@ fn validate_output(
     Ok(translations)
 }
 
+fn repair_ascii_number_preservation(
+    request: &FaithfulPageRequest,
+    translations: &mut [FaithfulTranslation],
+) {
+    for translation in translations {
+        let Some(region) = request
+            .regions
+            .iter()
+            .find(|region| region.id == translation.region_id)
+        else {
+            continue;
+        };
+        normalize_full_width_ascii_digits(&mut translation.text);
+        let expected = ascii_numbers(&region.source_english);
+        if ascii_numbers(&translation.text) == expected {
+            continue;
+        }
+
+        let actual = ascii_numbers(&translation.text);
+        if actual.is_empty() {
+            translation.text.push_str("（原文数字：");
+            for number in expected {
+                if !translation.text.ends_with('：') {
+                    translation.text.push('、');
+                }
+                translation.text.push_str(number);
+            }
+            translation.text.push('）');
+        }
+    }
+}
+
+fn normalize_full_width_ascii_digits(text: &mut String) {
+    *text = text
+        .chars()
+        .map(|character| match character {
+            '０'..='９' => {
+                char::from_u32(u32::from(character) - u32::from('０') + u32::from('0'))
+                    .expect("full-width digit has an ASCII form")
+            }
+            _ => character,
+        })
+        .collect();
+}
+
 fn validate_preservation(
     region: &FaithfulOcrRegion,
     chinese: &str,
     protected_names: &[ProtectedName],
 ) -> Result<()> {
-    for number in ascii_numbers(&region.source_english) {
-        if !chinese.contains(number) {
-            bail!(
-                "faithful translation for `{}` did not preserve number `{number}`",
-                region.id
-            );
-        }
+    let expected_numbers = ascii_numbers(&region.source_english);
+    let actual_numbers = ascii_numbers(chinese);
+    if actual_numbers != expected_numbers {
+        bail!(
+            "faithful translation for `{}` did not preserve numbers exactly: expected {:?}, got {:?}",
+            region.id,
+            expected_numbers,
+            actual_numbers
+        );
     }
 
     let source_lower = region.source_english.to_ascii_lowercase();
@@ -581,6 +630,7 @@ mod tests {
         assert_eq!(parser.calls.load(Ordering::Relaxed), 1);
         let prompts = generator.prompts.lock().unwrap();
         let payload: serde_json::Value = serde_json::from_str(&prompts[0])?;
+        assert_eq!(payload["promptRevision"], "faithful-en-zh-v3");
         assert_eq!(payload["regions"].as_array().unwrap().len(), 2);
         assert_eq!(payload["precedingContext"].as_array().unwrap().len(), 12);
         assert_eq!(payload["precedingContext"][0]["sourceEnglish"], "context-1");
@@ -691,6 +741,83 @@ mod tests {
             assert!(error.to_string().contains(expected_error));
         }
         Ok(())
+    }
+
+    #[test]
+    fn repairs_model_spelled_numbers_without_hiding_unknown_number_tokens() -> Result<()> {
+        let input = FaithfulPageRequest {
+            regions: vec![
+                region("r0", 0, "THE 6 MAIN CLANS."),
+                region("r1", 1, "LEVEL 12"),
+                region("r2", 2, "ROOM 3"),
+                region("r3", 3, "6 OF 6"),
+            ],
+            preceding_context: Vec::new(),
+            protected_names: Vec::new(),
+        };
+        let mut output = vec![
+            translation("r0", "六大宗门。"),
+            translation("r1", "等级"),
+            translation("r2", "房间３"),
+            translation("r3", "六个中的六个"),
+        ];
+
+        repair_ascii_number_preservation(&input, &mut output);
+
+        assert_eq!(output[0].text, "六大宗门。（原文数字：6）");
+        assert_eq!(output[1].text, "等级（原文数字：12）");
+        assert_eq!(output[2].text, "房间3");
+        assert_eq!(output[3].text, "六个中的六个（原文数字：6、6）");
+        validate_output(&input, output)?;
+        Ok(())
+    }
+
+    #[test]
+    fn number_validation_uses_exact_order_boundaries_and_multiplicity() {
+        for (source, chinese) in [
+            ("1 AND 10", "只有10"),
+            ("6 AND 6", "只有6"),
+            ("1 THEN 2", "先2后1"),
+            ("6", "数字16"),
+            ("10", "数字110"),
+        ] {
+            let error = validate_preservation(&region("r0", 0, source), chinese, &[]).unwrap_err();
+            assert!(
+                error.to_string().contains("numbers exactly"),
+                "unexpected error for `{source}` -> `{chinese}`: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn number_repair_never_rewrites_chinese_words_or_larger_number_tokens() {
+        let input = FaithfulPageRequest {
+            regions: vec![
+                region("r0", 0, "VALUE 16"),
+                region("r1", 1, "VALUE 6"),
+                region("r2", 2, "VALUES 1 AND 10"),
+                region("r3", 3, "LET'S GO TOGETHER AT 1"),
+            ],
+            preceding_context: Vec::new(),
+            protected_names: Vec::new(),
+        };
+        let mut output = vec![
+            translation("r0", "数值１６"),
+            translation("r1", "数值十六"),
+            translation("r2", "只有10"),
+            translation("r3", "我们一起走"),
+        ];
+
+        repair_ascii_number_preservation(&input, &mut output);
+
+        assert_eq!(output[0].text, "数值16");
+        assert_eq!(output[1].text, "数值十六（原文数字：6）");
+        assert_eq!(output[2].text, "只有10");
+        assert_eq!(output[3].text, "我们一起走（原文数字：1）");
+        validate_preservation(&input.regions[0], &output[0].text, &[]).unwrap();
+        validate_preservation(&input.regions[1], &output[1].text, &[]).unwrap();
+        assert!(validate_preservation(&input.regions[2], &output[2].text, &[]).is_err());
+        validate_preservation(&input.regions[3], &output[3].text, &[]).unwrap();
     }
 
     #[tokio::test]

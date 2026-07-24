@@ -32,5 +32,9 @@ pub const NATIVE_HOST_NAME: &str = "local.mangalations.hsk_manga";
 /// Browser protocol header name.
 pub const PROTOCOL_HEADER: &str = "x-hsk-manga-protocol";
 
+/// Explicit Firefox extension origin used when privileged extension fetches
+/// omit the standard `Origin` header.
+pub const EXTENSION_ORIGIN_HEADER: &str = "x-hsk-manga-extension-origin";
+
 /// Internal launcher-to-daemon control header. This is never exposed to Firefox.
 pub const CONTROL_HEADER: &str = "x-hsk-manga-control";

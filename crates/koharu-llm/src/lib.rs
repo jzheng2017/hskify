@@ -16,6 +16,42 @@ pub use language::{Language, language_from_tag, supported_locales};
 pub use model::{GenerateOptions, Grammar, Llm};
 pub use prompt::{ChatMessage, ChatRole};
 
+/// Optional positive thread limit for local llama.cpp and multimodal inference.
+pub const INFERENCE_THREADS_ENV: &str = "KOHARU_INFERENCE_THREADS";
+
+/// Keep local inference responsive by default while still allowing an explicit
+/// per-process override for dedicated workstations.
+pub fn inference_threads() -> i32 {
+    let available = num_cpus::get().max(1);
+    let configured = std::env::var(INFERENCE_THREADS_ENV)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0);
+    inference_threads_for(available, configured)
+}
+
+fn inference_threads_for(available: usize, configured: Option<usize>) -> i32 {
+    let available = available.max(1);
+    let threads = configured
+        .unwrap_or_else(|| available.div_ceil(2).min(6))
+        .clamp(1, available);
+    i32::try_from(threads).unwrap_or(i32::MAX)
+}
+
+#[cfg(test)]
+mod resource_tests {
+    use super::inference_threads_for;
+
+    #[test]
+    fn inference_threads_default_to_half_with_a_six_thread_cap() {
+        assert_eq!(inference_threads_for(1, None), 1);
+        assert_eq!(inference_threads_for(8, None), 4);
+        assert_eq!(inference_threads_for(32, None), 6);
+        assert_eq!(inference_threads_for(8, Some(2)), 2);
+        assert_eq!(inference_threads_for(8, Some(99)), 8);
+    }
+}
+
 /// Suppress all llama.cpp / ggml / mtmd / clip native log output.
 /// Must be called after `LlamaBackend::init()`.
 pub fn suppress_native_logs() {

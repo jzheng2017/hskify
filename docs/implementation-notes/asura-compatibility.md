@@ -34,23 +34,64 @@ At the top of the chapter, the first two long images intersected the viewport.
 After scrolling 13,500 CSS pixels, only page index 2 intersected, which matches
 the visible-first queue model.
 
-## Required regression and acceptance work
+## Implemented compatibility work
 
-This check does not claim the extension works end to end on the site. An
-independent review found that the initial Firefox implementation requested the
-CDN optional permission after the popup gesture had already crossed
-asynchronous messaging, which Firefox may reject. It also generated invalid
-port-bearing match patterns for development origins. Gate 1 remains rejected
-until the permission flow is moved into the direct popup action and tested in
-packaged Firefox.
+The popup now requests the exact, portless page/CDN origins directly from the
+translate click. Background acquisition only checks an already granted
+permission, and a newly observed redirect host is deferred to the next popup
+click. The permanent site-neutral regression fixture exists at
+`fixtures/browser-pages/webtoon.html`; it preserves long query-string WebP
+pages, a separate image origin, `data-page-index`, responsive sizing, a very
+tall document, and distracting cover/avatar/comment images.
 
-The permanent regression fixture must be synthetic and site-neutral while
-preserving the relevant shape: multiple long WebP-like raster pages, query
-strings, a separate fixture origin, `data-page-index`, a responsive 720-pixel
-maximum, a very tall scroll document, and distracting cover/avatar/comment
-images. Real Asura assets must not be copied into the repository.
+Automated discovery still accepts exactly the 20 fixture chapter pages among
+154 images. Firefox also decodes the 900 by 16,000 long-page fixture at its
+production dimensions and keeps renderer geometry within two CSS pixels after
+resize. The interactive packaged-Firefox permission prompt remains a manual
+release check.
 
-After those fixes, the manual Firefox check should verify:
+## Nano Machine chapter 100 acceptance
+
+The current Nano Machine chapter 100 reader exposed 10 WebP page images. Their
+intrinsic sizes were:
+
+```text
+800x11470  800x10865  800x10445  800x10780  800x11655
+800x11925  800x11005  800x11830  800x11270  800x3477
+```
+
+The first 800 by 11,470 page was submitted to the release browser daemon with
+four inference threads and one pipeline job. It completed in 217 seconds:
+detection reached OCR at 22 seconds, deterministic dialogue cleanup finished
+at 30 seconds, and local translation plus bounded HSK correction consumed the
+remaining time. Peak daemon working set was 4.75 GiB, peak private memory was
+7.89 GiB, and at least 16.34 GiB of physical RAM remained free.
+
+The detector/OCR gate produced 11 English dialogue regions. Visual inspection
+of the actual clean WebP confirmed:
+
+- every accepted English speech-bubble region was emptied before rendering;
+- Korean sound effects were byte-for-byte outside the erase mask and remained
+  visible;
+- the English `CLENCH` sound effect outside a bubble remained visible;
+- the punctuation-only `?` bubble remained untouched; and
+- the production Firefox renderer placed 11 selectable Chinese DOM regions
+  with no degraded fit.
+
+After rebuilding and installing the final package, a second acceptance used a
+fresh disposable regular-Firefox profile and the extension's real toolbar
+popup. The trusted popup click injected the page runtime, launched the
+registered native host and installed daemon, reused the cached Koharu cleaning
+artifacts, ran local translation plus HSK 5 correction, and rendered the same
+11 selectable regions in 186.7 seconds. The final DOM had zero degraded fits,
+the original image opacity changed to zero only after completion, and the page
+HUD reported `1 of 1 images translated`. This run did not touch the user's
+normal Firefox profile.
+
+Acceptance images and chapter bytes remain in the ignored local `.cache`
+directory; no chapter artwork or derived translation is committed.
+
+The remaining installed-Firefox check should verify:
 
 1. the popup's direct user action requests only the page and CDN origins;
 2. visible mode starts with the intersecting pages and all mode keeps DOM order;
