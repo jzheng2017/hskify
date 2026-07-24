@@ -134,6 +134,27 @@ impl Downloads {
         })
     }
 
+    /// Download an exact HTTPS URL into the managed download cache.
+    ///
+    /// Browser-companion setup manifests pin the full model URL, revision, size,
+    /// and digest. Keeping the transfer here reuses Koharu's bounded chunks,
+    /// retry policy, and progress stream without teaching the browser adapter a
+    /// second downloader.
+    pub async fn pinned_url(&self, url: &str, file_name: &str) -> Result<PathBuf> {
+        anyhow::ensure!(
+            url.starts_with("https://"),
+            "managed downloads require an HTTPS URL"
+        );
+        anyhow::ensure!(
+            Path::new(file_name)
+                .file_name()
+                .and_then(|name| name.to_str())
+                == Some(file_name),
+            "managed download filename must be a single path component"
+        );
+        self.cached_download(url, file_name).await
+    }
+
     /// Download a file to the downloads cache, returning the cached path.
     pub(crate) async fn cached_download(&self, url: &str, file_name: &str) -> Result<PathBuf> {
         let destination = self.downloads_root.join(file_name);
@@ -372,11 +393,34 @@ fn part_path(destination: &Path) -> Result<PathBuf> {
 mod tests {
     use std::path::Path;
 
-    use super::part_path;
+    use super::{Downloads, RuntimeHttpConfig, part_path};
 
     #[test]
     fn partial_download_path_appends_suffix() {
         let part = part_path(Path::new("/tmp/models/config.json")).unwrap();
         assert_eq!(part, Path::new("/tmp/models/config.json.part"));
+    }
+
+    #[tokio::test]
+    async fn pinned_download_rejects_untrusted_paths_before_network_access() {
+        let root = tempfile::tempdir().unwrap();
+        let downloads = Downloads::new(
+            root.path().join("downloads"),
+            root.path().join("huggingface"),
+            &RuntimeHttpConfig::default(),
+        )
+        .unwrap();
+        assert!(
+            downloads
+                .pinned_url("http://example.test/model.gguf", "model.gguf")
+                .await
+                .is_err()
+        );
+        assert!(
+            downloads
+                .pinned_url("https://example.test/model.gguf", "../model.gguf")
+                .await
+                .is_err()
+        );
     }
 }
