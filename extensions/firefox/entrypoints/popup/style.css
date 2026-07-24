@@ -145,3 +145,8 @@ button.cancel {
   justify-self: end;
   padding: 5px 0 0;
 }
+
+#setup-primary {
+  margin-top: 5px;
+  width: 100%;
+}

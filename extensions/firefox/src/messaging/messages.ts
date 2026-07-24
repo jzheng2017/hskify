@@ -1,11 +1,13 @@
 import {
   parseBrowserJobResult,
   parseBrowserJobStatus,
+  parseBrowserSetupStatus,
   parseLookupRequest,
   parseLookupResult,
   type BrowserJobRequest,
   type BrowserJobResult,
   type BrowserJobStatus,
+  type BrowserSetupStatus,
   type HskLevel,
   type LookupRequest,
   type LookupResult,
@@ -30,6 +32,9 @@ export type PopupStartMessage = {
 }
 export type PopupCancelMessage = { type: 'popup:cancel' }
 export type PopupStateMessage = { type: 'popup:state' }
+export type SetupStatusMessage = { type: 'setup:status' }
+export type SetupStartMessage = { type: 'setup:start' }
+export type SetupOpenInstallerMessage = { type: 'setup:open-installer' }
 
 export type ContentPrepareMessage = { type: 'content:prepare' }
 export type ContentStartMessage = {
@@ -106,6 +111,9 @@ export type BackgroundRequest =
   | PopupStartMessage
   | PopupCancelMessage
   | PopupStateMessage
+  | SetupStatusMessage
+  | SetupStartMessage
+  | SetupOpenInstallerMessage
   | SubmitImageMessage
   | PollJobMessage
   | GetJobResultMessage
@@ -176,6 +184,9 @@ export type MessageResultMap = {
   'popup:start': PageState
   'popup:cancel': PageState
   'popup:state': PopupState
+  'setup:status': BrowserSetupStatus
+  'setup:start': BrowserSetupStatus
+  'setup:open-installer': undefined
   'job:submit': SubmittedJob
   'job:poll': BrowserJobStatus
   'job:result': DeliveredJobResult
@@ -377,6 +388,9 @@ export function parseBackgroundRequest(value: unknown): BackgroundRequest {
     case 'popup:prepare':
     case 'popup:cancel':
     case 'popup:state':
+    case 'setup:status':
+    case 'setup:start':
+    case 'setup:open-installer':
       exact(item, ['type'])
       return { type }
     case 'popup:start':
@@ -590,6 +604,10 @@ function parseResult<T extends BackgroundRequest['type']>(
     case 'popup:state':
       parsed = pageState(value, true)
       break
+    case 'setup:status':
+    case 'setup:start':
+      parsed = parseBrowserSetupStatus(value)
+      break
     case 'job:submit':
       parsed = submittedJob(value)
       break
@@ -607,6 +625,7 @@ function parseResult<T extends BackgroundRequest['type']>(
     }
     case 'job:cancel':
     case 'jobs:cancel-page':
+    case 'setup:open-installer':
       if (value !== undefined) {
         throw new RuntimeMessageValidationError('$ must be undefined.')
       }

@@ -55,4 +55,19 @@ describe('strict extension runtime messages', () => {
       }),
     ).toThrow(/pageControlled is not permitted/i)
   })
+
+  it('accepts only exact setup control messages', () => {
+    expect(parseBackgroundRequest({ type: 'setup:status' })).toEqual({
+      type: 'setup:status',
+    })
+    expect(parseBackgroundRequest({ type: 'setup:start' })).toEqual({
+      type: 'setup:start',
+    })
+    expect(parseBackgroundRequest({ type: 'setup:open-installer' })).toEqual({
+      type: 'setup:open-installer',
+    })
+    expect(() =>
+      parseBackgroundRequest({ type: 'setup:start', model: 'untrusted-model' }),
+    ).toThrow(/not permitted/i)
+  })
 })

@@ -3,12 +3,14 @@ import {
   parseBrowserJobCreated,
   parseBrowserJobResult,
   parseBrowserJobStatus,
+  parseBrowserSetupStatus,
   parseErrorResponse,
   parseHealthResponse,
   parseLookupResult,
   type BrowserJobRequest,
   type BrowserJobResult,
   type BrowserJobStatus,
+  type BrowserSetupStatus,
   type LookupRequest,
   type LookupResult,
   type NativeReadyResponse,
@@ -247,6 +249,16 @@ export class CompanionClient {
 
   async cancelJob(jobId: string): Promise<void> {
     await this.request(`/jobs/${encodeURIComponent(jobId)}`, { method: 'DELETE' })
+  }
+
+  async getSetupStatus(): Promise<BrowserSetupStatus> {
+    const response = await this.request('/setup')
+    return parseBrowserSetupStatus(await parseJsonResponse(response))
+  }
+
+  async startModelSetup(): Promise<BrowserSetupStatus> {
+    const response = await this.request('/setup/models', { method: 'POST' })
+    return parseBrowserSetupStatus(await parseJsonResponse(response))
   }
 
   async lookup(request: LookupRequest): Promise<LookupResult> {

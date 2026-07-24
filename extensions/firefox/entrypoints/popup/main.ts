@@ -1,4 +1,4 @@
-import type { HskLevel } from '../../src/contracts/browser'
+import type { BrowserSetupStatus, HskLevel } from '../../src/contracts/browser'
 import {
   RuntimeMessageError,
   sendBackgroundMessage,
@@ -26,9 +26,14 @@ const cancel = requiredElement<HTMLButtonElement>('#cancel')
 const statusTitle = requiredElement<HTMLElement>('#status-title')
 const statusDetail = requiredElement<HTMLElement>('#status-detail')
 const statusProgress = requiredElement<HTMLProgressElement>('#status-progress')
+const setupPrimary = requiredElement<HTMLButtonElement>('#setup-primary')
 
 let preparedPermissions: PermissionPlan | undefined
 let startInFlight = false
+let refreshInFlight = false
+let setupReady = false
+let pagePreparationFailed = false
+let setupAction: 'install' | 'download' | 'retry' | undefined
 
 function selectedLevel(): HskLevel {
   const parsed = Number(levelSelect.value)
@@ -37,12 +42,16 @@ function selectedLevel(): HskLevel {
 
 function setBusy(busy: boolean): void {
   const unavailable = busy || startInFlight
-  translateVisible.disabled = unavailable || !preparedPermissions
-  translateAll.disabled = unavailable || !preparedPermissions
-  levelSelect.disabled = unavailable
+  translateVisible.disabled = unavailable || !setupReady || !preparedPermissions
+  translateAll.disabled = unavailable || !setupReady || !preparedPermissions
+  levelSelect.disabled = unavailable || !setupReady
+  setupPrimary.disabled = unavailable
 }
 
 function renderState(state: PopupState): void {
+  setupReady = true
+  setupAction = undefined
+  setupPrimary.hidden = true
   levelSelect.value = String(state.hskLevel)
   const active = state.state === 'running'
   cancel.hidden = !active
@@ -73,6 +82,79 @@ function renderError(error: unknown): void {
     error instanceof RuntimeMessageError || error instanceof Error
       ? error.message
       : 'The extension action failed.'
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  const units = ['KiB', 'MiB', 'GiB'] as const
+  let value = bytes / 1024
+  let unit: (typeof units)[number] = units[0]
+  for (let index = 1; index < units.length && value >= 1024; index += 1) {
+    value /= 1024
+    unit = units[index] ?? unit
+  }
+  return `${value >= 10 ? value.toFixed(0) : value.toFixed(1)} ${unit}`
+}
+
+function renderCompanionMissing(error: unknown): void {
+  setupReady = false
+  setupAction = 'install'
+  preparedPermissions = undefined
+  cancel.hidden = true
+  statusProgress.hidden = true
+  setupPrimary.hidden = false
+  setupPrimary.textContent = 'Install local engine'
+  statusTitle.textContent = 'Local engine required'
+  statusDetail.textContent =
+    error instanceof Error
+      ? error.message
+      : 'Install the local translation engine, then return here.'
+  setBusy(false)
+}
+
+function renderSetup(status: BrowserSetupStatus): void {
+  setupReady = status.state === 'ready'
+  cancel.hidden = true
+  statusDetail.textContent = status.message
+  setupPrimary.hidden = true
+  setupAction = undefined
+
+  if (status.state === 'ready') {
+    statusProgress.hidden = true
+    return
+  }
+
+  preparedPermissions = undefined
+  statusTitle.textContent =
+    status.state === 'missing-models'
+      ? 'Local models required'
+      : status.state === 'downloading'
+        ? 'Downloading local models'
+        : status.state === 'verifying'
+          ? 'Verifying local models'
+          : 'Model setup needs attention'
+
+  if (status.state === 'missing-models' || status.state === 'failed') {
+    setupAction = status.state === 'failed' ? 'retry' : 'download'
+    setupPrimary.textContent =
+      status.state === 'failed' ? 'Retry model download' : 'Download local models'
+    setupPrimary.hidden = false
+  }
+
+  const hasProgress =
+    status.completedBytes !== undefined &&
+    status.totalBytes !== undefined &&
+    status.totalBytes > 0
+  statusProgress.hidden = status.state !== 'downloading' && status.state !== 'verifying'
+  if (!statusProgress.hidden) {
+    if (hasProgress) {
+      statusProgress.value = status.completedBytes! / status.totalBytes!
+      statusDetail.textContent = `${status.message} ${formatBytes(status.completedBytes!)} of ${formatBytes(status.totalBytes!)}`
+    } else {
+      statusProgress.removeAttribute('value')
+    }
+  }
+  setBusy(status.state === 'downloading' || status.state === 'verifying')
 }
 
 async function finishStart(
@@ -149,6 +231,33 @@ cancel.addEventListener('click', async () => {
 })
 levelSelect.addEventListener('change', () => void saveHskLevel(selectedLevel()))
 
+setupPrimary.addEventListener('click', async () => {
+  if (!setupAction || startInFlight) return
+  startInFlight = true
+  setBusy(true)
+  try {
+    if (setupAction === 'install') {
+      await sendBackgroundMessage({ type: 'setup:open-installer' })
+      statusDetail.textContent =
+        'Install the companion from the product bundle, then reopen this popup.'
+      return
+    }
+    renderSetup(await sendBackgroundMessage({ type: 'setup:start' }))
+  } catch (error) {
+    if (error instanceof RuntimeMessageError && error.code === 'COMPANION_UNAVAILABLE') {
+      renderCompanionMissing(error)
+    } else {
+      renderError(error)
+      setupAction = 'retry'
+      setupPrimary.textContent = 'Retry model download'
+      setupPrimary.hidden = false
+    }
+  } finally {
+    startInFlight = false
+    setBusy(false)
+  }
+})
+
 async function refresh(): Promise<void> {
   if (startInFlight) return
   try {
@@ -160,19 +269,42 @@ async function refresh(): Promise<void> {
   }
 }
 
-async function prepare(): Promise<void> {
-  setBusy(false)
-  statusTitle.textContent = 'Preparing page'
-  statusDetail.textContent = 'Inspecting supported image hosts…'
+async function prepareReadyPage(): Promise<void> {
+  if (!preparedPermissions && !pagePreparationFailed) {
+    statusTitle.textContent = 'Preparing page'
+    statusDetail.textContent = 'Inspecting supported image hosts…'
+    try {
+      preparedPermissions = await sendBackgroundMessage({ type: 'popup:prepare' })
+    } catch (error) {
+      pagePreparationFailed = true
+      renderError(error)
+      return
+    }
+  }
+  if (preparedPermissions) await refresh()
+}
+
+async function refreshAll(): Promise<void> {
+  if (refreshInFlight || startInFlight) return
+  refreshInFlight = true
   try {
-    preparedPermissions = await sendBackgroundMessage({ type: 'popup:prepare' })
-    setBusy(false)
-    await refresh()
+    const status = await sendBackgroundMessage({ type: 'setup:status' })
+    renderSetup(status)
+    if (status.state === 'ready') await prepareReadyPage()
   } catch (error) {
-    renderError(error)
+    if (error instanceof RuntimeMessageError && error.code === 'COMPANION_UNAVAILABLE') {
+      renderCompanionMissing(error)
+    } else {
+      renderError(error)
+    }
+  } finally {
+    refreshInFlight = false
   }
 }
 
-void prepare()
-const refreshTimer = window.setInterval(() => void refresh(), 1_000)
+void loadHskLevel().then((level) => {
+  levelSelect.value = String(level)
+})
+void refreshAll()
+const refreshTimer = window.setInterval(() => void refreshAll(), 1_000)
 window.addEventListener('unload', () => window.clearInterval(refreshTimer), { once: true })

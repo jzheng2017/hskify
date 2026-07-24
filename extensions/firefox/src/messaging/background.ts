@@ -3,6 +3,7 @@ import {
   type BrowserJobRequest,
   type BrowserJobResult,
   type BrowserJobStatus,
+  type BrowserSetupStatus,
   type LookupRequest,
   type LookupResult,
 } from '../contracts/browser'
@@ -25,6 +26,7 @@ import {
   type ActiveJobRecord,
 } from './active-jobs'
 import { CompanionClient, CompanionHttpError } from './companion-client'
+import { NativeSessionError } from './native-session'
 import {
   parseBackgroundRequest,
   parsePageState,
@@ -80,7 +82,8 @@ function messageError(error: unknown): MessageError {
   if (
     error instanceof BackgroundOperationError ||
     error instanceof ImageValidationError ||
-    error instanceof CompanionHttpError
+    error instanceof CompanionHttpError ||
+    error instanceof NativeSessionError
   ) {
     return {
       code: error.code,
@@ -288,6 +291,18 @@ export class BackgroundRouter {
       message: active.length > 0 ? 'Translation continues in this tab.' : 'Ready',
       hskLevel: level,
     }
+  }
+
+  private setupStatus(): Promise<BrowserSetupStatus> {
+    return this.companion.getSetupStatus()
+  }
+
+  private startSetup(): Promise<BrowserSetupStatus> {
+    return this.companion.startModelSetup()
+  }
+
+  private async openInstaller(): Promise<void> {
+    await browser.tabs.create({ url: browser.runtime.getURL('/setup.html') })
   }
 
   private async acquire(
@@ -674,6 +689,12 @@ export class BackgroundRouter {
         return this.cancelTab(await this.activeTab())
       case 'popup:state':
         return this.popupState()
+      case 'setup:status':
+        return this.setupStatus()
+      case 'setup:start':
+        return this.startSetup()
+      case 'setup:open-installer':
+        return this.openInstaller()
       case 'job:submit':
         return this.submit(message, sender)
       case 'job:poll':
@@ -710,6 +731,9 @@ const BACKGROUND_MESSAGE_TYPES = new Set([
   'popup:start',
   'popup:cancel',
   'popup:state',
+  'setup:status',
+  'setup:start',
+  'setup:open-installer',
   'job:submit',
   'job:poll',
   'job:result',

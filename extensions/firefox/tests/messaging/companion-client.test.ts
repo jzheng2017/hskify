@@ -157,6 +157,34 @@ describe('authenticated localhost companion client', () => {
     expect(JSON.parse(await (requestPart as Blob).text())).toEqual(request)
   })
 
+  it('reads setup state and starts model setup through authenticated endpoints', async () => {
+    const { manager } = sessionManager()
+    const requests: Array<{ url: string; method: string }> = []
+    const client = new CompanionClient(manager, async (input, init) => {
+      requests.push({ url: String(input), method: init?.method ?? 'GET' })
+      const downloading = init?.method === 'POST'
+      return new Response(
+        JSON.stringify({
+          state: downloading ? 'downloading' : 'missing-models',
+          selectedPackId: 'standard-v1',
+          currentFile: downloading ? 'Qwen.gguf' : undefined,
+          completedBytes: downloading ? 1024 : 0,
+          totalBytes: 2048,
+          requiredDiskBytes: 4096,
+          message: downloading ? 'Downloading.' : 'Models are missing.',
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      )
+    })
+
+    expect((await client.getSetupStatus()).state).toBe('missing-models')
+    expect((await client.startModelSetup()).state).toBe('downloading')
+    expect(requests).toEqual([
+      { url: 'http://127.0.0.1:43127/browser/v1/setup', method: 'GET' },
+      { url: 'http://127.0.0.1:43127/browser/v1/setup/models', method: 'POST' },
+    ])
+  })
+
   it('returns clean-image and font bytes as ArrayBuffers with MIME checks', async () => {
     const { manager } = sessionManager()
     const fiveMegabytes = new Uint8Array(5 * 1024 * 1024)
