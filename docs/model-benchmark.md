@@ -111,14 +111,13 @@ cost.
 
 | Output | State |
 | --- | --- |
-| Standard model pack | not selected |
-| Low-memory model pack | not selected |
-| Hardware thresholds | not established |
+| Standard model pack | `standard-v1`: Qwen3.5 4B Q4_K_M |
+| Low-memory model pack | none in the normal UI |
+| Hardware thresholds | 8 GiB minimum RAM; 16 GiB recommended RAM |
 | Translation prompt revision | `benchmark-en-zh-v1` (evaluation only) |
 | Bootstrap machine execution | complete for eligible 2B and 4B artifacts |
 | Blinded bootstrap outputs | generated under randomized labels |
-| Human score sheets | awaiting a real fluent Chinese reader |
+| Human score sheets | deferred; the user prioritized a functional end-to-end build |
 
-Until real scores and hardware measurements are recorded, the installable
-`packs` array is intentionally empty and installer code must report that no
-approved model pack is available.
+The installable manifest deliberately exposes one normal choice. The 2B
+artifact remains available for diagnostics but is not another setup decision.
