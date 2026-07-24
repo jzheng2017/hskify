@@ -178,6 +178,8 @@ fn main() -> Result<()> {
             .context("failed to initialize runtime libraries")?;
         Ok::<(), anyhow::Error>(())
     })?;
+    koharu_llm::sys::initialize(&runtime_manager)
+        .context("failed to initialize llama.cpp runtime bindings")?;
 
     if verbose {
         tracing_subscriber::fmt::init();
@@ -210,7 +212,9 @@ fn main() -> Result<()> {
     let mut model_params = if gpu_offload_enabled {
         LlamaModelParams::default().with_n_gpu_layers(1000)
     } else {
-        LlamaModelParams::default()
+        // llama.cpp's default is auto-offload on supported backends. Make the
+        // CLI flag an actual CPU-only guarantee, matching `Llm::load`.
+        LlamaModelParams::default().with_n_gpu_layers(0)
     };
 
     if let Some(devices) = devices {

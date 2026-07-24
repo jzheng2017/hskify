@@ -1,9 +1,11 @@
 # Local translation model benchmark
 
-Status: **awaiting execution and fluent-reader review**
+Status: **bootstrap execution complete; awaiting representative corpus and
+fluent-reader review**
 
-This document is the benchmark protocol and audit record. It contains no
-invented quality scores and does not select a production model.
+This document is the benchmark protocol and audit record. It contains measured
+machine results but no invented human quality scores, and it does not select a
+production model.
 
 ## Licence filter
 
@@ -38,6 +40,52 @@ payload and prompt revision. Each run records:
 The faithful pass and HSK rewrite are scored separately. No candidate sees a
 different source order or additional context.
 
+## Bootstrap execution
+
+Both eligible Qwen artifacts were downloaded from the exact revision URLs in
+the manifest. Their local byte counts and SHA-256 digests matched before either
+was loaded:
+
+| Candidate | Verified bytes | Verified SHA-256 |
+| --- | ---: | --- |
+| Qwen3.5 4B Q4_K_M | 2,740,937,888 | `00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4` |
+| Qwen3.5 2B Q4_K_M | 1,280,835,840 | `aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223` |
+
+The first frozen request is
+`fixtures/golden-evaluation/prompts/benchmark-en-zh-v1.json`. It sends all
+three dialogue regions from the synthetic page in one ordered request.
+Generation used the pinned Koharu revision, llama.cpp tag `b8935`, a 2,048
+token context, a fixed seed of `299792458`, disabled thinking, and greedy
+sampling through Koharu's local GGUF executable.
+
+Two defects in that executable were found and fixed before recording results:
+the runtime bindings were prepared but not initialized, and `--disable-gpu`
+left llama.cpp's auto-offload default enabled. The latter now explicitly sets
+zero GPU layers, matching the production `Llm` path.
+
+Machine: Windows, Ryzen-class `zen4` runtime build, 32 GiB RAM, RTX 4080 SUPER
+16 GiB. Values below are warm single-process runs of the same short prompt.
+Peak process memory came from Windows process counters sampled during the run.
+WDDM does not expose per-process VRAM, so GPU memory is only an approximate
+global `nvidia-smi` delta over the immediately sampled baseline.
+
+| Candidate/backend | Wall | Load | Decode | Peak working set | Peak private bytes | Approx. GPU delta |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Qwen3.5 2B / CUDA | 1.91 s | 0.86 s | 67 tokens at 207.38 t/s | 1,938,345,984 | 3,924,303,872 | 2,043 MiB |
+| Qwen3.5 4B / CUDA | 3.26 s | 2.03 s | 68 tokens at 131.54 t/s | 3,403,534,336 | 5,472,055,296 | 3,502 MiB |
+| Qwen3.5 2B / CPU-only | 4.46 s | 1.40 s | 68 tokens at 28.65 t/s | 1,565,274,112 | 1,736,404,992 | not used |
+| Qwen3.5 4B / CPU-only | 7.80 s | 1.75 s | 68 tokens at 13.00 t/s | 3,077,185,536 | 1,914,425,344 | not used |
+
+Both candidates returned valid JSON with every requested region ID exactly
+once and no unknown IDs. The outputs are stored only under randomized labels
+in `fixtures/golden-evaluation/blinded-review`; the identity key remains
+ignored until a fluent reader completes the score sheet.
+
+These numbers are an engineering smoke result, not pack thresholds. The
+bootstrap set has one synthetic page, no names, no numbers, no negation, and no
+HSK rewrite pass. The raw harness also tests prompt-only JSON compliance; Gate
+4 still requires llama.cpp-compatible grammar/schema-constrained decoding.
+
 ## Human rubric
 
 At least one fluent Chinese reader scores anonymized outputs from 1 to 5:
@@ -67,7 +115,9 @@ cost.
 | Low-memory model pack | not selected |
 | Hardware thresholds | not established |
 | Translation prompt revision | `benchmark-en-zh-v1` (evaluation only) |
-| Human score sheets | awaiting |
+| Bootstrap machine execution | complete for eligible 2B and 4B artifacts |
+| Blinded bootstrap outputs | generated under randomized labels |
+| Human score sheets | awaiting a real fluent Chinese reader |
 
 Until real scores and hardware measurements are recorded, the installable
 `packs` array is intentionally empty and installer code must report that no

@@ -13,3 +13,10 @@ The current set is a bootstrap fixture, not a representative quality corpus.
 Colour webtoon, patterned/dark bubbles, low-resolution text, different reading
 orders, and decorative sound effects must be added under equally clear rights
 before translation quality thresholds are established.
+
+`prompts/benchmark-en-zh-v1.json` freezes the first faithful-translation
+benchmark request. The generated `blinded-review/candidate-*.json` files expose
+labels but no model identities. The candidate key is deliberately kept outside
+version control until a real fluent Chinese reader finishes the score sheet.
+These bootstrap outputs are useful for exercising the review workflow, but one
+synthetic page is not enough to select a production model or hardware tier.

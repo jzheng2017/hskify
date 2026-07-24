@@ -1,0 +1,41 @@
+{
+  "promptRevision": "benchmark-en-zh-v1",
+  "purpose": "faithful-pass local model comparison",
+  "system": "You are a professional English-to-Simplified-Chinese manga translator. Translate all regions together into concise, natural Simplified Chinese dialogue. Preserve meaning, polarity, names, numbers, relationships, tone, and reading order. Return only a JSON array in the same order. Every item must contain exactly the keys regionId and text. Include every requested regionId exactly once, add no IDs, and add no commentary.",
+  "request": {
+    "imageId": "gate0-synthetic-001",
+    "readingDirection": "ltr",
+    "precedingContext": [],
+    "protectedNames": [],
+    "regions": [
+      {
+        "regionId": "gate0-synthetic-001-r0",
+        "kind": "dialogue",
+        "readingOrder": 0,
+        "sourceEnglish": "WE HAVE TO LEAVE NOW!"
+      },
+      {
+        "regionId": "gate0-synthetic-001-r1",
+        "kind": "dialogue",
+        "readingOrder": 1,
+        "sourceEnglish": "ARE YOU READY?"
+      },
+      {
+        "regionId": "gate0-synthetic-001-r2",
+        "kind": "dialogue",
+        "readingOrder": 2,
+        "sourceEnglish": "YES. LET'S GO!"
+      }
+    ]
+  },
+  "decoding": {
+    "temperature": 0.0,
+    "seed": 299792458,
+    "maximumNewTokens": 512,
+    "thinking": false
+  },
+  "constraint": {
+    "productionRequirement": "llama.cpp-compatible JSON grammar or schema-constrained decoding",
+    "benchmarkHarnessLimitation": "The raw local-model smoke harness records prompt-only JSON compliance; it is not evidence that the production constraint is implemented."
+  }
+}
