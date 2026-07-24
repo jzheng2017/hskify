@@ -1,6 +1,7 @@
 use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -20,6 +21,7 @@ use crate::{Language, ModelId};
 const DEFAULT_GPU_LAYERS: u32 = 1000;
 const MAX_UBATCH: u32 = 512;
 const SAKURA_QWEN_CORRECT_EOS_ID: i32 = 151645;
+static NEVER_CANCELLED: AtomicBool = AtomicBool::new(false);
 
 pub struct Llm {
     model_id: ModelId,
@@ -41,6 +43,14 @@ pub struct GenerateOptions {
     pub repeat_penalty: f32,
     pub repeat_last_n: usize,
     pub presence_penalty: f32,
+    /// Optional llama.cpp GBNF constraint applied to every sampled token.
+    pub grammar: Option<Grammar>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Grammar {
+    pub source: String,
+    pub root: String,
 }
 
 impl Default for GenerateOptions {
@@ -56,6 +66,7 @@ impl Default for GenerateOptions {
             repeat_penalty: 1.1,
             repeat_last_n: 64,
             presence_penalty: 0.0,
+            grammar: None,
         }
     }
 }
@@ -71,6 +82,32 @@ impl Llm {
             .context("failed to initialize llama.cpp runtime bindings")?;
         let model_path = id.get(runtime).await?;
 
+        Self::load_owned_path(id, cpu, model_path, backend).await
+    }
+
+    /// Load a known model family from an already-downloaded GGUF file.
+    ///
+    /// Normal product code should use [`Self::load`]. This entry point is
+    /// useful for opt-in local smoke tests and managed model-pack installers
+    /// that have already verified the file.
+    pub async fn load_file(
+        runtime: &RuntimeManager,
+        id: ModelId,
+        cpu: bool,
+        model_path: PathBuf,
+        backend: Arc<LlamaBackend>,
+    ) -> Result<Self> {
+        crate::sys::initialize(runtime)
+            .context("failed to initialize llama.cpp runtime bindings")?;
+        Self::load_owned_path(id, cpu, model_path, backend).await
+    }
+
+    async fn load_owned_path(
+        id: ModelId,
+        cpu: bool,
+        model_path: PathBuf,
+        backend: Arc<LlamaBackend>,
+    ) -> Result<Self> {
         tokio::task::spawn_blocking(move || Self::load_from_path(id, cpu, model_path, backend))
             .await
             .context("failed to join llama.cpp model loading task")?
@@ -115,15 +152,77 @@ impl Llm {
         target_language: Language,
         system_prompt: Option<&str>,
     ) -> Result<String> {
+        self.generate_with_cancel(
+            prompt,
+            opts,
+            target_language,
+            system_prompt,
+            &NEVER_CANCELLED,
+        )
+    }
+
+    /// Generate with the normal translation prompt behavior while observing
+    /// an external cancellation flag between llama.cpp decode calls.
+    pub fn generate_with_cancel(
+        &mut self,
+        prompt: &str,
+        opts: &GenerateOptions,
+        target_language: Language,
+        system_prompt: Option<&str>,
+        cancel: &AtomicBool,
+    ) -> Result<String> {
+        self.generate_inner(prompt, opts, target_language, system_prompt, false, cancel)
+    }
+
+    /// Generate with an exact system prompt and optional GBNF constraint.
+    ///
+    /// Unlike [`Self::generate`], this does not append Koharu's legacy
+    /// numbered-block instructions to the supplied system prompt.
+    pub fn generate_constrained(
+        &mut self,
+        prompt: &str,
+        opts: &GenerateOptions,
+        target_language: Language,
+        system_prompt: &str,
+        cancel: &AtomicBool,
+    ) -> Result<String> {
+        self.generate_inner(
+            prompt,
+            opts,
+            target_language,
+            Some(system_prompt),
+            true,
+            cancel,
+        )
+    }
+
+    fn generate_inner(
+        &mut self,
+        prompt: &str,
+        opts: &GenerateOptions,
+        target_language: Language,
+        system_prompt: Option<&str>,
+        exact_system_prompt: bool,
+        cancel: &AtomicBool,
+    ) -> Result<String> {
+        check_cancelled(cancel)?;
         if opts.max_tokens == 0 {
             return Ok(String::new());
         }
 
-        let prompt = self.prompt_renderer.format_chat_prompt(
-            prompt.to_string(),
-            target_language,
-            system_prompt,
-        )?;
+        let prompt = if exact_system_prompt {
+            self.prompt_renderer.format_chat_prompt_exact_system(
+                prompt.to_string(),
+                target_language,
+                system_prompt,
+            )?
+        } else {
+            self.prompt_renderer.format_chat_prompt(
+                prompt.to_string(),
+                target_language,
+                system_prompt,
+            )?
+        };
         tracing::debug!("Generating with prompt:\n{}", prompt);
 
         let prompt_tokens = self
@@ -133,6 +232,7 @@ impl Llm {
         if prompt_tokens.is_empty() {
             anyhow::bail!("prompt produced no tokens");
         }
+        check_cancelled(cancel)?;
 
         let mut ctx = self
             .model
@@ -141,15 +241,16 @@ impl Llm {
                 context_params(prompt_tokens.len(), opts.max_tokens)?,
             )
             .context("unable to create llama.cpp context")?;
-        let mut sampler = build_sampler(opts);
+        let mut sampler = build_sampler(&self.model, opts)?;
         let mut decoder = encoding_rs::UTF_8.new_decoder();
 
         let start_prompt_processing = Instant::now();
         let mut next_token = if opts.split_prompt {
-            self.process_prompt_split(&mut ctx, &prompt_tokens, &mut sampler)?
+            self.process_prompt_split(&mut ctx, &prompt_tokens, &mut sampler, cancel)?
         } else {
-            self.process_prompt_batch(&mut ctx, &prompt_tokens, &mut sampler)?
+            self.process_prompt_batch(&mut ctx, &prompt_tokens, &mut sampler, cancel)?
         };
+        check_cancelled(cancel)?;
         let prompt_dt = start_prompt_processing.elapsed();
 
         tracing::info!(
@@ -170,7 +271,7 @@ impl Llm {
         let mut batch = LlamaBatch::new(1, 1);
 
         while sampled < opts.max_tokens {
-            sampler.accept(next_token);
+            check_cancelled(cancel)?;
             generated.push_str(&decode_token(&self.model, next_token, &mut decoder)?);
             sampled += 1;
 
@@ -184,6 +285,7 @@ impl Llm {
                 .context("failed to add generated token to llama batch")?;
             ctx.decode(&mut batch)
                 .context("failed to decode generated token")?;
+            check_cancelled(cancel)?;
             position += 1;
 
             next_token = sampler.sample(&ctx, batch.n_tokens() - 1);
@@ -207,13 +309,16 @@ impl Llm {
         ctx: &mut crate::safe::context::LlamaContext<'_>,
         prompt_tokens: &[LlamaToken],
         sampler: &mut LlamaSampler,
+        cancel: &AtomicBool,
     ) -> Result<LlamaToken> {
+        check_cancelled(cancel)?;
         let mut batch = LlamaBatch::new(prompt_tokens.len(), 1);
         batch
             .add_sequence(prompt_tokens, 0, false)
             .context("failed to build prompt batch")?;
         ctx.decode(&mut batch)
             .context("failed to process prompt batch")?;
+        check_cancelled(cancel)?;
         Ok(sampler.sample(ctx, batch.n_tokens() - 1))
     }
 
@@ -222,10 +327,12 @@ impl Llm {
         ctx: &mut crate::safe::context::LlamaContext<'_>,
         prompt_tokens: &[LlamaToken],
         sampler: &mut LlamaSampler,
+        cancel: &AtomicBool,
     ) -> Result<LlamaToken> {
         let last_index = prompt_tokens.len() - 1;
 
         for (index, token) in prompt_tokens.iter().copied().enumerate() {
+            check_cancelled(cancel)?;
             let mut batch = LlamaBatch::new(1, 1);
             batch
                 .add(
@@ -237,6 +344,7 @@ impl Llm {
                 .context("failed to build split prompt batch")?;
             ctx.decode(&mut batch)
                 .with_context(|| format!("failed to process prompt token {index}"))?;
+            check_cancelled(cancel)?;
 
             if index == last_index {
                 return Ok(sampler.sample(ctx, batch.n_tokens() - 1));
@@ -276,8 +384,15 @@ fn context_params(prompt_tokens: usize, max_tokens: usize) -> Result<LlamaContex
         .with_n_ubatch(n_ubatch))
 }
 
-fn build_sampler(opts: &GenerateOptions) -> LlamaSampler {
+fn build_sampler(model: &LlamaModel, opts: &GenerateOptions) -> Result<LlamaSampler> {
     let mut samplers = Vec::new();
+
+    if let Some(grammar) = &opts.grammar {
+        samplers.push(
+            LlamaSampler::grammar(model, &grammar.source, &grammar.root)
+                .context("failed to initialize generation grammar")?,
+        );
+    }
 
     let has_repeat = (opts.repeat_penalty - 1.0).abs() >= f32::EPSILON && opts.repeat_last_n > 0;
     let has_presence = opts.presence_penalty.abs() >= f32::EPSILON;
@@ -292,7 +407,7 @@ fn build_sampler(opts: &GenerateOptions) -> LlamaSampler {
 
     if opts.temperature <= 0.0 {
         samplers.push(LlamaSampler::greedy());
-        return LlamaSampler::chain_simple(samplers);
+        return Ok(LlamaSampler::chain_simple(samplers));
     }
 
     if let Some(top_k) = opts.top_k.filter(|value| *value > 0) {
@@ -309,7 +424,14 @@ fn build_sampler(opts: &GenerateOptions) -> LlamaSampler {
 
     samplers.push(LlamaSampler::temp(opts.temperature as f32));
     samplers.push(LlamaSampler::dist(opts.seed as u32));
-    LlamaSampler::chain_simple(samplers)
+    Ok(LlamaSampler::chain_simple(samplers))
+}
+
+fn check_cancelled(cancel: &AtomicBool) -> Result<()> {
+    if cancel.load(Ordering::Relaxed) {
+        anyhow::bail!("cancelled");
+    }
+    Ok(())
 }
 
 fn eos_token_for(id: ModelId, model: &LlamaModel) -> (LlamaToken, String) {

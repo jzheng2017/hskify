@@ -72,12 +72,14 @@ impl PromptRenderer {
         text: impl Into<String>,
         target_language: Language,
         custom_prompt: Option<&str>,
+        append_block_instructions: bool,
     ) -> Vec<ChatMessage> {
         let text = text.into();
         let sys = match custom_prompt {
-            Some(p) if !p.trim().is_empty() => {
+            Some(p) if !p.trim().is_empty() && append_block_instructions => {
                 format!("{p} {BLOCK_TAG_INSTRUCTIONS}")
             }
+            Some(p) if !p.trim().is_empty() => p.to_string(),
             _ => system_prompt(target_language),
         };
 
@@ -103,7 +105,33 @@ impl PromptRenderer {
         target_language: Language,
         custom_prompt: Option<&str>,
     ) -> anyhow::Result<String> {
-        let messages = self.messages(prompt, target_language, custom_prompt);
+        self.format_chat_prompt_inner(prompt, target_language, custom_prompt, true)
+    }
+
+    /// Format a chat prompt without adding numbered-block instructions to a
+    /// caller-supplied system prompt.
+    pub fn format_chat_prompt_exact_system(
+        &self,
+        prompt: String,
+        target_language: Language,
+        system_prompt: Option<&str>,
+    ) -> anyhow::Result<String> {
+        self.format_chat_prompt_inner(prompt, target_language, system_prompt, false)
+    }
+
+    fn format_chat_prompt_inner(
+        &self,
+        prompt: String,
+        target_language: Language,
+        custom_prompt: Option<&str>,
+        append_block_instructions: bool,
+    ) -> anyhow::Result<String> {
+        let messages = self.messages(
+            prompt,
+            target_language,
+            custom_prompt,
+            append_block_instructions,
+        );
         let tmpl = self.env.template_from_str(&self.template)?;
 
         let prompt = tmpl
@@ -203,6 +231,28 @@ mod tests {
             renderer.format_chat_prompt("hello".to_string(), Language::English, None)?;
         assert_eq!(formatted, "<think>\n\n</think>\n\n");
 
+        Ok(())
+    }
+
+    #[test]
+    fn exact_system_prompt_does_not_append_block_instructions() -> anyhow::Result<()> {
+        let renderer = PromptRenderer::new(
+            ModelId::Qwen3_5_4b,
+            r#"{% for message in messages %}{{ message['role'] }}={{ message['content'] }}
+{% endfor %}"#
+                .to_string(),
+            "<s>".to_string(),
+            "</s>".to_string(),
+        );
+
+        let formatted = renderer.format_chat_prompt_exact_system(
+            "payload".to_string(),
+            Language::ChineseSimplified,
+            Some("JSON only."),
+        )?;
+
+        assert!(formatted.contains("system=JSON only."));
+        assert!(!formatted.contains(BLOCK_TAG_INSTRUCTIONS));
         Ok(())
     }
 }

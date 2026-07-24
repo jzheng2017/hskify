@@ -11,6 +11,13 @@
 //! // then: llm.load_local(...) or llm.load_provider(...)
 //! ```
 
+mod faithful;
+
+pub use faithful::{
+    FAITHFUL_PROMPT_REVISION, FAITHFUL_TRANSLATION_MODEL, FaithfulOcrRegion, FaithfulPageRequest,
+    FaithfulRegionKind, FaithfulTranslation, PrecedingPageContext, ProtectedName,
+};
+
 use std::sync::Arc;
 
 use anyhow::Result;
