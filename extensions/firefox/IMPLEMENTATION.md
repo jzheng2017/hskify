@@ -1,133 +1,198 @@
-# Firefox Gate 1 and bridge-client implementation
+# Firefox Gate 1 implementation
 
 ## Scope
 
-This branch implements Workstreams A and E through Gate 1, plus the Firefox
-half of Gate 2. It does not change the frozen protocol parser or shared contract
+This directory contains the Firefox side of the HSK Manga Translator through
+the fixture/browser-interaction gate and the client half of the secure local
+bridge. It does not change the frozen protocol parser or shared contract
 fixtures.
 
-The extension uses WXT Manifest V3 with plain TypeScript, DOM, and CSS. The
-translator page bundle is an unlisted `translator.js` artifact and is injected
-only after a popup action with `activeTab` and `scripting`. No install-time page
-content script or required broad webpage host permission is present.
+The extension uses WXT Manifest V3, TypeScript, DOM, and CSS. The page runtime
+is built as the unlisted `translator.js` artifact and is injected only after a
+popup action using `activeTab` and `scripting`. It is not a static content
+script, and the manifest does not request broad webpage access at install time.
 
-## Runtime shape
+## Permission and message boundary
 
-- The popup persists one global cumulative HSK 1–6 setting and exposes visible
-  and all-image actions plus cancellation and recovered state.
-- The background performs the one-shot
-  `local.mangalations.hsk_manga` native handshake, keeps the bearer endpoint in
-  `storage.session`, and retries an authenticated localhost request once after
-  a 401 with a fresh handshake.
-- Active job identity, tab/frame/page ownership, source hash, page index,
-  fixture flag, timestamp, and decoded dimensions are recoverable from
-  `storage.local`. Image/font bytes and bearer tokens are not stored there.
-- Remote image acquisition requests an optional permission for the exact
-  origin, follows at most three validated HTTP(S) redirects, retries credentials
-  only after 401/403, bounds streamed bytes, sniffs MIME signatures, reads
-  decoded dimensions from image headers, enforces byte/pixel/dimension limits,
-  hashes with Web Crypto SHA-256, and uploads image plus JSON metadata as
-  multipart form data. The companion never receives an untrusted source URL.
-- The content runtime discovers conservative loaded `<img>` and `<picture>`
-  candidates, observes lazy/SPA mutation and intersection state, sorts visible
-  images first, and runs one job at a time. Polling is one ordinary message per
-  snapshot (1 second while visible, 4 seconds while hidden). Cancel removes
-  queued work and cancels the current job; failed images stay original and show
-  one Retry action.
+- Opening the popup injects the page runtime and precomputes the cross-origin
+  image hosts required for visible and all-image actions.
+- Firefox match patterns are exact, deduplicated, and portless
+  (`https://cdn.example/*`). The manifest merely declares the optional
+  HTTP/HTTPS pattern scope; a concrete subset is requested at runtime.
+- `browser.permissions.request()` is invoked directly in the translate button's
+  click stack. The popup does not await background or content work before that
+  call, and it suppresses duplicate starts while the request is pending.
+- Background acquisition only checks `permissions.contains()`. It never tries
+  to open an optional-permission prompt from an asynchronous message handler.
+- If a redirect or newly loaded image reveals another hostname, that exact
+  pattern is retained in `storage.session` and merged into the next popup
+  click's permission plan.
+- Every known background and content message is parsed into an exact shape.
+  Unknown fields, invalid bounds, malformed hashes, oversized runtime buffers,
+  and page-controlled fixture switches are rejected.
+- Active-job operations require the originating tab, frame, and document URL.
+  Completed lookup/font operations additionally require a small
+  owner-and-artifact record that lists the result's allowed region and font
+  IDs.
 
-## Fixture mode
+Production has no page-controlled fixture mode. The deterministic backend is a
+constructor-injected test dependency, and no fixture adapter or fixture marker
+is present in the production WXT output.
 
-Local pages opt into Gate 1 fixture mode with
-`<html data-hmt-fixture="true">` or `?hmtFixture=1`. The same background job
-store, polling messages, queue, binary result delivery, renderer, progress UI,
-selection code, and cancellation path are used. Only the companion-side status,
-result, lookup, clean-image, and font payloads are deterministic fixtures.
+## Image and companion lifecycle
 
-Fixture job status is derived from persisted creation metadata, so closing the
-popup or reconstructing the background does not stop or reset it. The adapter
-transfers clean-image and font payloads as `ArrayBuffer`; the fixture font is
-intentionally invalid to exercise the measured local-system-font fallback.
+The content runtime attempts bounded byte acquisition for same-origin,
+`data:`, and `blob:` sources. It streams those responses and stops before
+materializing a payload over 25 MiB. When background acquisition is needed, it:
 
-Synthetic CC0 fixture pages under `fixtures/browser-pages` cover responsive and
-lazy images, navigation links, fixed/max widths, object-fit contain/cover,
-transform rejection, SPA replacement, cross-origin simulation, selection,
-resize/zoom, and renderer modes.
+1. validates HTTP(S) URLs and each redirect;
+2. verifies a pre-granted exact host pattern for each cross-origin hop;
+3. fetches without credentials first and retries with credentials only after
+   401/403;
+4. rejects unsafe credentialed cross-origin redirects;
+5. streams with a byte ceiling;
+6. sniffs PNG, JPEG, WebP, or GIF signatures and checks declared MIME,
+   dimensions, pixel count, and configured limits;
+7. hashes the actual bytes with Web Crypto SHA-256; and
+8. uploads bytes plus the frozen request metadata as multipart form data.
+
+The companion never receives a page-controlled remote URL to fetch.
+
+Native session endpoints remain in `storage.session`. A background instance
+that reuses a cached endpoint first validates `/health`. A failed transport or
+401 invalidates the lease, performs one fresh native handshake, and retries
+once. Clean-image and font responses are streamed with 25 MiB and 12 MiB
+ceilings respectively before an `ArrayBuffer` is created.
+
+Before result delivery, the background verifies:
+
+- the caller's full page/source identity;
+- result job ID, source hash, and decoded source dimensions;
+- cleaned-image signature and declared MIME; and
+- cleaned-image dimensions equal to the submitted source.
+
+Only then is the result transferred to the page runtime.
+
+## Recovery, navigation, cancellation, and retry
+
+`storage.local` holds only small active-job recovery records. Each record
+includes tab, frame, page session, normalized document/source URLs, source
+hash, decoded dimensions, page index, selected HSK level, and creation time.
+Completed-result authorization records use `storage.session`, so tab IDs
+cannot accidentally inherit them across browser restarts.
+
+Recovery is scoped to tab, frame, page session, and document URL. URL,
+dimensions, and SHA-256 must match the live image. For an HTTP(S) candidate
+whose content script cannot supply a hash, the background reacquires and hashes
+the bytes. DOM index is only an additional mapping key; it is never sufficient
+identity by itself.
+
+The page runtime checks generation, page-session ID, document URL, source URL,
+intrinsic dimensions, connectivity, and cancellation after every awaited
+operation and immediately before renderer commit. If navigation or source
+replacement happens while submission is awaited, the returned job identity is
+retained long enough to cancel that newly created companion job.
+
+Full and same-document navigation cancel the old page session, remove its
+completed authorization records, restore rendered originals, and create a new
+page-session ID. `tabs.onUpdated` URL changes and `tabs.onRemoved` provide a
+background-side cleanup path as well.
+
+The queue is one-at-a-time and visible-first. Failed queue IDs remain failed;
+visibility and mutation callbacks cannot silently enqueue them again. Only the
+image Retry action clears the failed state. Source removal/replacement aborts
+the affected active item and updates `current`, `failed`, `completed`, and
+`total` without double-counting.
 
 ## Selectable renderer
 
-The wrapper is created only after a complete validated result and after font
-loading/fallback resolves. It moves the original live `<img>` or `<picture>`
-rather than cloning it, verifies wrapping changes layout by no more than two CSS
-pixels, and restores the original on failure or teardown.
+The original live `<img>` or `<picture>` remains unchanged while work is in
+progress. The renderer:
 
-The wrapper keeps the original as the layout/click anchor. Its Shadow DOM owns
-the clean Blob image, normalized selectable text layer, isolated controls,
-dictionary popover, and CSS. Chinese enters only through `textContent`;
-`innerHTML` is not used. The geometry mapper accounts for border, padding,
-object-fit, object-position, contain letterboxing, and cover cropping.
-`ResizeObserver` refits on responsive changes and zoom.
+- browser-decodes the cleaned Blob image and verifies its actual intrinsic
+  dimensions before creating a wrapper;
+- awaits result-owned font loading and `document.fonts.ready`;
+- rechecks the stale-render guard after every wait and immediately before DOM
+  mutation;
+- moves the original live owner instead of cloning it;
+- rejects a wrapper that changes controlled layout by more than two CSS pixels;
+- keeps the original as the layout anchor and restores it on every failure;
+- uses a Shadow DOM for the clean image, text, controls, and lookup popover; and
+- inserts Chinese only with `textContent`.
 
-The browser fitter starts with the companion's suggested size/lines, performs a
-rectangle fit, then checks usable polygon spans while respecting Chinese
-opening/closing punctuation. The DOM preserves the exact `displayedChinese`
-text without synthetic newline nodes. Validated style application includes
-local font family, colour, bounded weight/slant, outline, shadow, rotation,
-alignment, spacing, and horizontal/vertical writing mode. Overflow is marked
-`data-fit="degraded"` for diagnostics.
+Suggested line breaks are represented by real `.hmt-region-line` spans while
+the region's text content remains exactly `displayedChinese`. Polygon fitting
+uses the widest contiguous horizontal interval instead of summing across
+excluded holes. Ties preserve the companion's suggested candidate. After the
+font is loaded, real DOM overflow is measured and the font is reduced in small
+steps when needed.
 
-Original and Chinese are persistent modes; Compare is press-and-hold. Controls
-and dictionary interactions cannot trigger an enclosing reader link. A normal
-click without selection still bubbles to it, while a click carrying a
-non-collapsed translated-text selection is stopped. Default copy is normalized
-to exactly the selected Chinese and includes no source English or metadata.
-Focused regions support Ctrl/Cmd+A keyboard selection.
+An unselected primary click in translated text dispatches exactly one
+non-bubbling click to the original image, preserving direct image listeners.
+The overlay click itself continues to the reader ancestor exactly once.
+Selected text, controls, and the dictionary popover suppress reader navigation.
+Copy reads the selected range's text content so visual line spans add no hidden
+English or layout whitespace.
+
+## Synthetic browser fixtures
+
+The browser pages use actual generated PNG/WebP assets, not SVG page inputs or
+header-only fake buffers. The source artwork is original synthetic geometry.
+
+`fixtures/browser-pages/webtoon.html` models a long reader with:
+
+- 20 query-string WebP chapter images at 900×16,000 intrinsic pixels;
+- one cover and 133 generated comment avatars, for 154 page images total;
+- page-image width capped at 720 CSS pixels; and
+- a 465 CSS-pixel responsive width at a 480-pixel viewport.
+
+Discovery regression coverage selects exactly the 20 chapter pages while
+excluding the cover and comment/user images. Firefox Playwright also decodes
+the long WebP at its production dimensions.
 
 ## Local verification
 
 Run from `extensions/firefox`:
 
 ```text
-wxt build -b firefox
-tsc --noEmit
-vitest run
-playwright test
-web-ext lint --source-dir .output/firefox-mv3
+npm run typecheck
+npm run test
+npm run test:e2e
+npm run build
+npm run lint:extension
 ```
 
-Latest local Gate 1 evidence:
+Latest evidence for this branch:
 
-- WXT Firefox MV3 production build: passed; `translator.js` is packaged but
-  absent from the manifest's static content scripts.
-- TypeScript strict typecheck: passed.
-- Vitest: 56 tests passed across 15 files.
-- Playwright Firefox renderer harness: 5 tests passed. Playwright intentionally
-  tests the regular-page renderer harness because it cannot load Firefox
-  extensions.
-- `web-ext lint`: 0 errors, 0 notices, 2 warnings. Both warnings are the known
-  compatibility interaction between the retained Firefox 128 minimum and the
-  newer Firefox data-collection declaration.
-- `web-ext run`: a bounded headless system-Firefox temporary-profile smoke
-  reached a live session and was then terminated; no pre-existing Firefox
-  process was stopped.
+- strict TypeScript/WXT typecheck: passed;
+- Vitest: 74 tests passed across 18 files;
+- Playwright Firefox renderer harness: 6 tests passed;
+- WXT Firefox MV3 production build: passed;
+- production-output fixture-marker scan: no matches;
+- `web-ext lint`: 0 errors, 0 notices, 2 compatibility warnings;
+- bounded `web-ext run` packaged launch: passed using a temporary profile,
+  pre-installed extension, headless Firefox, and an auto-exiting screenshot
+  smoke.
 
-## Remaining integration gaps
+The two lint warnings are the known compatibility interaction between retained
+Firefox 128 support and the newer
+`browser_specific_settings.gecko.data_collection_permissions` declaration.
 
-- Workstream B must supply and test the installed native launcher/daemon,
-  loopback-only binding, origin rejection, bearer rejection, daemon lifetime,
-  real endpoints, and native-host registration. This branch tests the client
-  handshake, authentication headers, one 401 refresh, recovery, multipart
-  shape, and response bounds with deterministic fakes.
-- The cross-origin optional-permission prompt and actual extension runtime
-  structured-clone ceiling still need an installed-extension manual run. Unit
-  coverage clones an 8 MiB clean image and the client test transfers a 5 MiB
-  response without copying it into Firefox storage.
-- Real redistributable companion font bytes are pending the model/data pack.
-  The successful `FontFace` cache and failed-font fallback are unit tested, and
-  the binary font message path is implemented.
-- Playwright does not validate popup injection or native messaging because it
-  cannot install a Firefox extension. The regular Firefox `web-ext run` manual
-  checklist must cover popup → injection → fixture translation and the exact
-  permission prompt before integration Gate 2 is accepted.
-- Golden-set clipping, actual OCR/inpainting/translation quality, strict HSK
-  vocabulary, and cache reuse are later companion/model gates and are not
-  claimed here.
+## Unclaimed integration work
+
+The implementation is not claiming the full release scenario. In particular:
+
+- the installed native launcher/daemon and real companion endpoints must be
+  present to validate process lifetime, authentication, origin rejection, and
+  reconnect behaviour end to end;
+- practical 5–20 MiB Firefox extension runtime-message ceilings still require
+  an installed packaged-extension probe; unit cloning is not evidence for that
+  browser limit;
+- popup permission UI, denial, and a redirect to a newly required hostname
+  still need an interactive packaged Firefox run;
+- real redistributable companion font bytes depend on the model/data pack; and
+- OCR, inpainting, translation quality, strict HSK vocabulary, cache reuse, and
+  golden-set clipping belong to later companion/model gates.
+
+The exact manual matrix is maintained in
+`docs/firefox-manual-test-checklist.md`.

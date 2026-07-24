@@ -89,7 +89,7 @@ nav a {
   object-position: 25% 50%;
 }
 
-.cover {
+.fit-cover {
   object-fit: cover;
   object-position: 70% 50%;
 }
@@ -117,4 +117,55 @@ button {
 
 .reader-link img {
   width: 100%;
+}
+
+.webtoon-fixture header {
+  position: relative;
+  z-index: 1;
+}
+
+.webtoon-reader {
+  margin: 0 auto;
+  max-width: 720px;
+  padding: 0;
+}
+
+.webtoon-reader > img {
+  display: block;
+  height: auto;
+  margin: 0;
+  max-width: 100%;
+  width: 720px;
+}
+
+.series-cover,
+.comments {
+  margin: 24px auto;
+  max-width: 720px;
+  padding: 16px;
+}
+
+.manga-cover {
+  display: block;
+  height: auto;
+  width: 320px;
+}
+
+.synthetic-comment {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  min-height: 64px;
+}
+
+.comment-avatar {
+  border-radius: 50%;
+  height: 48px;
+  width: 48px;
+}
+
+@media (max-width: 480px) {
+  .webtoon-reader {
+    max-width: calc(100vw - 15px);
+  }
 }

@@ -7,7 +7,7 @@ const CATEGORY_FALLBACKS = {
 } as const
 
 export type FontCategory = keyof typeof CATEGORY_FALLBACKS
-export type FontFetcher = (fontId: string) => Promise<ArrayBuffer>
+export type FontFetcher = (fontId: string, jobId: string) => Promise<ArrayBuffer>
 
 export class FontLoader {
   private readonly cache = new Map<string, Promise<string>>()
@@ -18,19 +18,24 @@ export class FontLoader {
     private readonly FontFaceType: typeof FontFace | undefined = globalThis.FontFace,
   ) {}
 
-  load(fontId: string, category: FontCategory): Promise<string> {
-    const cached = this.cache.get(fontId)
+  load(fontId: string, category: FontCategory, jobId: string): Promise<string> {
+    const cacheKey = `${jobId}:${fontId}`
+    const cached = this.cache.get(cacheKey)
     if (cached) return cached
-    const task = this.loadUncached(fontId, category)
-    this.cache.set(fontId, task)
+    const task = this.loadUncached(fontId, category, jobId)
+    this.cache.set(cacheKey, task)
     return task
   }
 
-  private async loadUncached(fontId: string, category: FontCategory): Promise<string> {
+  private async loadUncached(
+    fontId: string,
+    category: FontCategory,
+    jobId: string,
+  ): Promise<string> {
     const fallback = CATEGORY_FALLBACKS[category]
     if (!this.FontFaceType) return fallback
     try {
-      const bytes = await this.fetcher(fontId)
+      const bytes = await this.fetcher(fontId, jobId)
       const family = `HMT-${fontId.replace(/[^\w-]/g, '-')}`
       const face = new this.FontFaceType(family, bytes)
       await face.load()

@@ -1,50 +1,68 @@
 import {
   PROTOCOL_VERSION,
   type BrowserJobRequest,
+  type BrowserJobResult,
   type BrowserJobStatus,
+  type LookupRequest,
+  type LookupResult,
 } from '../contracts/browser'
 import {
-  validateInlineImage,
   acquireRemoteImage,
+  ImagePermissionRequiredError,
+  validateInlineImage,
   type AcquiredImage,
 } from '../acquisition/image-acquisition'
-import { ImageValidationError } from '../acquisition/image-format'
+import { PendingOriginPermissionStore } from '../acquisition/origin-permissions'
+import {
+  DEFAULT_IMAGE_LIMITS,
+  ImageValidationError,
+  validateImageBytes,
+} from '../acquisition/image-format'
 import { sha256Hex } from '../acquisition/hash'
-import { ActiveJobStore, type ActiveJobRecord } from './active-jobs'
+import {
+  ActiveJobStore,
+  PageArtifactStore,
+  type ActiveJobRecord,
+} from './active-jobs'
 import { CompanionClient, CompanionHttpError } from './companion-client'
 import {
-  FixtureService,
-  fixtureFontBytes,
-  fixtureSourceBytes,
-} from './fixture-service'
-import {
+  parseBackgroundRequest,
+  parsePageState,
+  parsePermissionPlan,
   type BackgroundRequest,
   type DeliveredJobResult,
   type FontPayload,
   type MessageError,
   type MessageResponse,
   type PageState,
+  type PermissionPlan,
   type PopupState,
   type RecoveredJob,
+  type RecoveryCandidate,
   type SubmittedJob,
 } from './messages'
 import { loadHskLevel, saveHskLevel } from './settings'
 
 type Sender = browser.runtime.MessageSender
 
+type FixtureBackend = {
+  sourceImage(width: number, height: number): Promise<ArrayBuffer>
+  createJobId(pageSessionId: string, pageIndex: number, sourceSha256: string): string
+  status(record: ActiveJobRecord): BrowserJobStatus
+  result(record: ActiveJobRecord): BrowserJobResult
+  cleanImage(width: number, height: number): Promise<ArrayBuffer>
+  font(): ArrayBuffer
+  lookup(request: LookupRequest): LookupResult
+}
+
 type BackgroundDependencies = {
   jobs: ActiveJobStore
+  artifacts: PageArtifactStore
   companion: CompanionClient
-  fixture: FixtureService
+  fixture: FixtureBackend
+  pendingPermissions: PendingOriginPermissionStore
   now: () => number
 }
-
-type DimensionsByJob = {
-  width: number
-  height: number
-}
-
-const DIMENSIONS_PREFIX = 'hmt.activeJobDimensions.'
 
 class BackgroundOperationError extends Error {
   constructor(
@@ -98,39 +116,75 @@ function senderLocation(sender: Sender): { tabId: number; frameId: number } {
 function activeTabId(tabs: browser.tabs.Tab[]): number {
   const tabId = tabs[0]?.id
   if (tabId === undefined) {
-    throw new BackgroundOperationError(
-      'NO_ACTIVE_TAB',
-      'No active webpage tab is available.',
-      true,
-    )
+    throw new BackgroundOperationError('NO_ACTIVE_TAB', 'No active webpage tab is available.', true)
   }
   return tabId
 }
 
-function dimensionsKey(jobId: string): string {
-  return `${DIMENSIONS_PREFIX}${jobId}`
+function normalizedDocumentUrl(value: string): string {
+  const url = new URL(value)
+  url.hash = ''
+  return url.href
 }
 
-function isDimensions(value: unknown): value is DimensionsByJob {
-  return (
-    typeof value === 'object' &&
-    value !== null &&
-    !Array.isArray(value) &&
-    typeof (value as DimensionsByJob).width === 'number' &&
-    typeof (value as DimensionsByJob).height === 'number'
-  )
+function assertSenderDocument(sender: Sender, pageUrl: string): void {
+  if (!sender.url) {
+    throw new BackgroundOperationError(
+      'MISSING_DOCUMENT_IDENTITY',
+      'The webpage document identity is missing.',
+    )
+  }
+  let actual: string
+  let expected: string
+  try {
+    actual = normalizedDocumentUrl(sender.url)
+    expected = normalizedDocumentUrl(pageUrl)
+  } catch {
+    throw new BackgroundOperationError('INVALID_DOCUMENT_IDENTITY', 'The webpage URL is invalid.')
+  }
+  if (actual !== expected) {
+    throw new BackgroundOperationError(
+      'DOCUMENT_IDENTITY_MISMATCH',
+      'The page navigated before the extension request was handled.',
+      true,
+    )
+  }
+}
+
+function normalizeSourceUrl(value: string, pageUrl: string): string {
+  let url: URL
+  try {
+    url = new URL(value, pageUrl)
+  } catch {
+    throw new BackgroundOperationError('INVALID_IMAGE_URL', 'The image URL is invalid.')
+  }
+  url.hash = ''
+  return url.href
+}
+
+function sameOwner(
+  record: Pick<ActiveJobRecord, 'tabId' | 'frameId'>,
+  sender: Sender,
+): boolean {
+  const { tabId, frameId } = senderLocation(sender)
+  return record.tabId === tabId && record.frameId === frameId
 }
 
 export class BackgroundRouter {
   private readonly jobs: ActiveJobStore
+  private readonly artifacts: PageArtifactStore
   private readonly companion: CompanionClient
-  private readonly fixture: FixtureService
+  private readonly fixture: FixtureBackend | undefined
+  private readonly pendingPermissions: PendingOriginPermissionStore
   private readonly now: () => number
 
   constructor(dependencies?: Partial<BackgroundDependencies>) {
     this.jobs = dependencies?.jobs ?? new ActiveJobStore()
+    this.artifacts = dependencies?.artifacts ?? new PageArtifactStore()
     this.companion = dependencies?.companion ?? new CompanionClient()
-    this.fixture = dependencies?.fixture ?? new FixtureService()
+    this.fixture = dependencies?.fixture
+    this.pendingPermissions =
+      dependencies?.pendingPermissions ?? new PendingOriginPermissionStore()
     this.now = dependencies?.now ?? Date.now
   }
 
@@ -138,22 +192,7 @@ export class BackgroundRouter {
     return activeTabId(await browser.tabs.query({ active: true, currentWindow: true }))
   }
 
-  private async contentState(tabId: number): Promise<PageState | undefined> {
-    try {
-      return (await browser.tabs.sendMessage(tabId, {
-        type: 'content:state',
-      })) as PageState
-    } catch {
-      return undefined
-    }
-  }
-
-  private async startContent(
-    scope: 'visible' | 'all',
-    hskLevel: 1 | 2 | 3 | 4 | 5 | 6,
-  ): Promise<PageState> {
-    const tabId = await this.activeTab()
-    await saveHskLevel(hskLevel)
+  private async ensureContent(tabId: number): Promise<void> {
     try {
       await browser.scripting.executeScript({
         target: { tabId, allFrames: false },
@@ -167,21 +206,66 @@ export class BackgroundRouter {
         { cause: error },
       )
     }
-    return (await browser.tabs.sendMessage(tabId, {
-      type: 'content:start',
-      scope,
-      hskLevel,
-    })) as PageState
+  }
+
+  private async prepareContent(): Promise<PermissionPlan> {
+    const tabId = await this.activeTab()
+    await this.ensureContent(tabId)
+    const raw = await browser.tabs.sendMessage(tabId, { type: 'content:prepare' })
+    const plan = parsePermissionPlan(raw)
+    const pending = await this.pendingPermissions.list(tabId)
+    const unresolved: string[] = []
+    for (const origin of pending) {
+      if (!(await browser.permissions.contains({ origins: [origin] }))) {
+        unresolved.push(origin)
+      }
+    }
+    await this.pendingPermissions.replace(tabId, unresolved)
+    return {
+      visibleOrigins: [...new Set([...plan.visibleOrigins, ...unresolved])].sort(),
+      allOrigins: [...new Set([...plan.allOrigins, ...unresolved])].sort(),
+    }
+  }
+
+  private async contentState(tabId: number): Promise<PageState | undefined> {
+    try {
+      return parsePageState(
+        await browser.tabs.sendMessage(tabId, {
+          type: 'content:state',
+        }),
+      )
+    } catch {
+      return undefined
+    }
+  }
+
+  private async startContent(
+    scope: 'visible' | 'all',
+    hskLevel: 1 | 2 | 3 | 4 | 5 | 6,
+  ): Promise<PageState> {
+    const tabId = await this.activeTab()
+    await saveHskLevel(hskLevel)
+    await this.ensureContent(tabId)
+    return parsePageState(
+      await browser.tabs.sendMessage(tabId, {
+        type: 'content:start',
+        scope,
+        hskLevel,
+      }),
+    )
   }
 
   private async cancelTab(tabId: number): Promise<PageState> {
     try {
-      return (await browser.tabs.sendMessage(tabId, {
-        type: 'content:cancel',
-      })) as PageState
+      return parsePageState(
+        await browser.tabs.sendMessage(tabId, {
+          type: 'content:cancel',
+        }),
+      )
     } catch {
       const records = await this.jobs.forTab(tabId)
       await Promise.allSettled(records.map((record) => this.cancelRecord(record)))
+      await this.artifacts.removeForTab(tabId)
       return {
         state: 'cancelled',
         current: 0,
@@ -206,20 +290,21 @@ export class BackgroundRouter {
     }
   }
 
-  private async acquire(message: Extract<BackgroundRequest, { type: 'job:submit' }>) {
-    if (message.fixtureMode) {
-      return {
-        bytes: fixtureSourceBytes(),
-        mimeType: 'image/png',
-        width: message.naturalWidth,
-        height: message.naturalHeight,
-        finalUrl: 'fixture://synthetic-page',
-      } satisfies AcquiredImage
+  private async acquire(
+    message: Extract<BackgroundRequest, { type: 'job:submit' }>,
+  ): Promise<AcquiredImage> {
+    if (this.fixture) {
+      return validateInlineImage(
+        await this.fixture.sourceImage(message.naturalWidth, message.naturalHeight),
+        'image/png',
+      )
     }
     if (message.sourceBytes) {
       return validateInlineImage(message.sourceBytes, message.sourceMimeType)
     }
-    return acquireRemoteImage(message.imageUrl, { pageOrigin: message.pageOrigin })
+    return acquireRemoteImage(message.imageUrl, {
+      pageOrigin: new URL(message.pageUrl).origin,
+    })
   }
 
   private async submit(
@@ -227,7 +312,27 @@ export class BackgroundRouter {
     sender: Sender,
   ): Promise<SubmittedJob> {
     const { tabId, frameId } = senderLocation(sender)
-    const acquired = await this.acquire(message)
+    assertSenderDocument(sender, message.pageUrl)
+    const expectedSourceUrl = normalizeSourceUrl(message.imageUrl, message.pageUrl)
+    let acquired: AcquiredImage
+    try {
+      acquired = await this.acquire(message)
+    } catch (error) {
+      if (error instanceof ImagePermissionRequiredError) {
+        await this.pendingPermissions.add(tabId, error.originPattern)
+      }
+      throw error
+    }
+    if (
+      acquired.width !== message.naturalWidth ||
+      acquired.height !== message.naturalHeight
+    ) {
+      throw new BackgroundOperationError(
+        'SOURCE_DIMENSIONS_CHANGED',
+        'The decoded image dimensions changed while translation was starting.',
+        true,
+      )
+    }
     const sourceSha256 = await sha256Hex(acquired.bytes)
     const clientImageId = `${message.pageSessionId}-${message.pageIndex}-${sourceSha256.slice(0, 16)}`
     const request: BrowserJobRequest = {
@@ -251,36 +356,49 @@ export class BackgroundRouter {
         ? { precedingContext: message.precedingContext.slice(-12) }
         : {}),
     }
-    const jobId = message.fixtureMode
+    const jobId = this.fixture
       ? this.fixture.createJobId(message.pageSessionId, message.pageIndex, sourceSha256)
       : await this.companion.createJob(acquired.bytes, request)
     const record: ActiveJobRecord = {
       tabId,
       frameId,
       pageSessionId: message.pageSessionId,
+      pageUrl: normalizedDocumentUrl(message.pageUrl),
       clientImageId,
       jobId,
       sourceSha256,
+      sourceUrl: expectedSourceUrl,
+      sourceWidth: acquired.width,
+      sourceHeight: acquired.height,
       pageIndex: message.pageIndex,
-      fixtureMode: message.fixtureMode,
+      hskLevel: message.hskLevel,
       createdAtUnixMs: this.now(),
     }
-    await Promise.all([
-      this.jobs.put(record),
-      browser.storage.local.set({
-        [dimensionsKey(jobId)]: { width: acquired.width, height: acquired.height },
-      }),
-    ])
-    return { jobId, clientImageId, sourceSha256 }
+    await this.jobs.put(record)
+    return {
+      jobId,
+      clientImageId,
+      sourceSha256,
+      sourceUrl: record.sourceUrl,
+      sourceWidth: record.sourceWidth,
+      sourceHeight: record.sourceHeight,
+    }
   }
 
   private async status(record: ActiveJobRecord): Promise<BrowserJobStatus> {
-    return record.fixtureMode
+    const status = this.fixture
       ? this.fixture.status(record)
-      : this.companion.getJobStatus(record.jobId)
+      : await this.companion.getJobStatus(record.jobId)
+    if (status.jobId !== record.jobId) {
+      throw new BackgroundOperationError(
+        'STATUS_IDENTITY_MISMATCH',
+        'The local translation status did not match the submitted job.',
+      )
+    }
+    return status
   }
 
-  private async poll(jobId: string): Promise<BrowserJobStatus> {
+  private async ownedActive(jobId: string, sender: Sender): Promise<ActiveJobRecord> {
     const record = await this.jobs.get(jobId)
     if (!record) {
       throw new BackgroundOperationError(
@@ -289,6 +407,18 @@ export class BackgroundRouter {
         true,
       )
     }
+    if (!sameOwner(record, sender)) {
+      throw new BackgroundOperationError(
+        'JOB_OWNER_MISMATCH',
+        'This document does not own the requested translation job.',
+      )
+    }
+    assertSenderDocument(sender, record.pageUrl)
+    return record
+  }
+
+  private async poll(jobId: string, sender: Sender): Promise<BrowserJobStatus> {
+    const record = await this.ownedActive(jobId, sender)
     const status = await this.status(record)
     if (status.state === 'failed' || status.state === 'cancelled') {
       await this.removeRecord(record)
@@ -296,58 +426,92 @@ export class BackgroundRouter {
     return status
   }
 
-  private async getDimensions(jobId: string): Promise<DimensionsByJob> {
-    const key = dimensionsKey(jobId)
-    const values = await browser.storage.local.get(key)
-    const dimensions = values[key]
-    if (!isDimensions(dimensions)) {
+  private assertResultRequest(
+    record: ActiveJobRecord,
+    message: Extract<BackgroundRequest, { type: 'job:result' }>,
+  ): void {
+    if (
+      message.pageSessionId !== record.pageSessionId ||
+      normalizeSourceUrl(message.sourceUrl, record.pageUrl) !== record.sourceUrl ||
+      message.sourceSha256 !== record.sourceSha256 ||
+      message.sourceWidth !== record.sourceWidth ||
+      message.sourceHeight !== record.sourceHeight
+    ) {
       throw new BackgroundOperationError(
-        'JOB_METADATA_MISSING',
-        'The image dimensions for this job could not be recovered.',
-        true,
+        'RESULT_SOURCE_OWNER_MISMATCH',
+        'The completed result no longer belongs to the current page image.',
       )
     }
-    return dimensions
   }
 
-  private async result(jobId: string): Promise<DeliveredJobResult> {
-    const record = await this.jobs.get(jobId)
-    if (!record) {
-      throw new BackgroundOperationError(
-        'ACTIVE_JOB_NOT_FOUND',
-        'The completed translation job could not be recovered.',
-        true,
-      )
-    }
-    const dimensions = await this.getDimensions(jobId)
-    const result = record.fixtureMode
-      ? this.fixture.result(record, dimensions.width, dimensions.height)
-      : await this.companion.getJobResult(jobId)
-    if (result.jobId !== record.jobId || result.sourceSha256 !== record.sourceSha256) {
+  private validateResult(record: ActiveJobRecord, result: BrowserJobResult): void {
+    if (
+      result.jobId !== record.jobId ||
+      result.sourceSha256 !== record.sourceSha256 ||
+      result.sourceWidth !== record.sourceWidth ||
+      result.sourceHeight !== record.sourceHeight
+    ) {
       throw new BackgroundOperationError(
         'RESULT_IDENTITY_MISMATCH',
         'The local translation result did not match the submitted image.',
       )
     }
-    const cleanImage = record.fixtureMode
-      ? this.fixture.cleanImage()
+  }
+
+  private async result(
+    message: Extract<BackgroundRequest, { type: 'job:result' }>,
+    sender: Sender,
+  ): Promise<DeliveredJobResult> {
+    const record = await this.ownedActive(message.jobId, sender)
+    this.assertResultRequest(record, message)
+    const result = this.fixture
+      ? this.fixture.result(record)
+      : await this.companion.getJobResult(record.jobId)
+    this.validateResult(record, result)
+    const cleanImage = this.fixture
+      ? await this.fixture.cleanImage(record.sourceWidth, record.sourceHeight)
       : await this.companion.getCleanImage(
           result.cleanImageBlobId,
           result.cleanImageMimeType,
         )
+    const clean = validateImageBytes(
+      cleanImage,
+      result.cleanImageMimeType,
+      DEFAULT_IMAGE_LIMITS,
+    )
+    if (
+      clean.dimensions.width !== record.sourceWidth ||
+      clean.dimensions.height !== record.sourceHeight
+    ) {
+      throw new BackgroundOperationError(
+        'CLEAN_IMAGE_DIMENSIONS_MISMATCH',
+        'The cleaned image dimensions did not match the submitted source.',
+      )
+    }
+    await this.artifacts.put({
+      tabId: record.tabId,
+      frameId: record.frameId,
+      pageSessionId: record.pageSessionId,
+      pageUrl: record.pageUrl,
+      jobId: record.jobId,
+      sourceSha256: record.sourceSha256,
+      sourceUrl: record.sourceUrl,
+      sourceWidth: record.sourceWidth,
+      sourceHeight: record.sourceHeight,
+      regionIds: result.regions.map((region) => region.id),
+      fontIds: [...new Set(result.regions.map((region) => region.style.fontId))],
+      createdAtUnixMs: this.now(),
+    })
     await this.removeRecord(record)
     return { result, cleanImage }
   }
 
   private async removeRecord(record: ActiveJobRecord): Promise<void> {
-    await Promise.all([
-      this.jobs.remove(record.jobId),
-      browser.storage.local.remove(dimensionsKey(record.jobId)),
-    ])
+    await this.jobs.remove(record.jobId)
   }
 
   private async cancelRecord(record: ActiveJobRecord): Promise<void> {
-    if (!record.fixtureMode) {
+    if (!this.fixture) {
       try {
         await this.companion.cancelJob(record.jobId)
       } finally {
@@ -358,48 +522,152 @@ export class BackgroundRouter {
     await this.removeRecord(record)
   }
 
-  private async cancelJob(jobId: string): Promise<void> {
+  private async cancelJob(jobId: string, sender: Sender): Promise<void> {
     const record = await this.jobs.get(jobId)
-    if (record) await this.cancelRecord(record)
+    if (!record) return
+    if (!sameOwner(record, sender)) {
+      throw new BackgroundOperationError(
+        'JOB_OWNER_MISMATCH',
+        'This document does not own the requested translation job.',
+      )
+    }
+    assertSenderDocument(sender, record.pageUrl)
+    await this.cancelRecord(record)
+  }
+
+  private candidateForRecord(
+    record: ActiveJobRecord,
+    candidates: readonly RecoveryCandidate[],
+  ): RecoveryCandidate | undefined {
+    return candidates.find(
+      (candidate) =>
+        normalizeSourceUrl(candidate.sourceUrl, record.pageUrl) === record.sourceUrl &&
+        candidate.naturalWidth === record.sourceWidth &&
+        candidate.naturalHeight === record.sourceHeight,
+    )
+  }
+
+  private async verifyRecoverySource(
+    record: ActiveJobRecord,
+    candidate: RecoveryCandidate,
+  ): Promise<boolean> {
+    if (candidate.sourceSha256) return candidate.sourceSha256 === record.sourceSha256
+    if (this.fixture) {
+      return (
+        (await sha256Hex(
+          await this.fixture.sourceImage(record.sourceWidth, record.sourceHeight),
+        )) === record.sourceSha256
+      )
+    }
+    const acquired = await acquireRemoteImage(record.sourceUrl, {
+      pageOrigin: new URL(record.pageUrl).origin,
+    })
+    return (
+      acquired.width === record.sourceWidth &&
+      acquired.height === record.sourceHeight &&
+      (await sha256Hex(acquired.bytes)) === record.sourceSha256
+    )
   }
 
   private async recover(
-    pageSessionId: string,
+    message: Extract<BackgroundRequest, { type: 'jobs:recover' }>,
     sender: Sender,
   ): Promise<RecoveredJob[]> {
     const { tabId, frameId } = senderLocation(sender)
-    const records = await this.jobs.forPage(tabId, frameId, pageSessionId)
+    assertSenderDocument(sender, message.pageUrl)
+    const records = await this.jobs.forPage(tabId, frameId, message.pageSessionId)
     const recovered: RecoveredJob[] = []
     for (const record of records) {
+      const candidate = this.candidateForRecord(record, message.candidates)
       try {
+        if (!candidate || !(await this.verifyRecoverySource(record, candidate))) {
+          await this.cancelRecord(record)
+          continue
+        }
         recovered.push({
           jobId: record.jobId,
           clientImageId: record.clientImageId,
           sourceSha256: record.sourceSha256,
+          sourceUrl: record.sourceUrl,
+          sourceWidth: record.sourceWidth,
+          sourceHeight: record.sourceHeight,
           pageIndex: record.pageIndex,
-          fixtureMode: record.fixtureMode,
           status: await this.status(record),
         })
       } catch {
-        await this.removeRecord(record)
+        await this.cancelRecord(record).catch(() => this.removeRecord(record))
       }
     }
     return recovered
   }
 
+  private async ownedArtifact(jobId: string, sender: Sender) {
+    const artifact = await this.artifacts.get(jobId)
+    if (!artifact || !sameOwner(artifact, sender)) {
+      throw new BackgroundOperationError(
+        'RESULT_OWNER_MISMATCH',
+        'This document does not own the requested translation result.',
+      )
+    }
+    assertSenderDocument(sender, artifact.pageUrl)
+    return artifact
+  }
+
+  private async lookup(
+    message: Extract<BackgroundRequest, { type: 'dictionary:lookup' }>,
+    sender: Sender,
+  ): Promise<LookupResult> {
+    const jobId = message.request.jobId
+    const regionId = message.request.regionId
+    if (!jobId || !regionId) {
+      throw new BackgroundOperationError(
+        'LOOKUP_IDENTITY_MISSING',
+        'Dictionary lookups must identify a translated region.',
+      )
+    }
+    const artifact = await this.ownedArtifact(jobId, sender)
+    if (!artifact.regionIds.includes(regionId)) {
+      throw new BackgroundOperationError(
+        'LOOKUP_REGION_MISMATCH',
+        'The requested dictionary region does not belong to this result.',
+      )
+    }
+    return this.fixture
+      ? this.fixture.lookup(message.request)
+      : this.companion.lookup(message.request)
+  }
+
   private async font(
     message: Extract<BackgroundRequest, { type: 'font:get' }>,
+    sender: Sender,
   ): Promise<FontPayload> {
+    const artifact = await this.ownedArtifact(message.jobId, sender)
+    if (!artifact.fontIds.includes(message.fontId)) {
+      throw new BackgroundOperationError(
+        'FONT_RESULT_MISMATCH',
+        'The requested font does not belong to this translation result.',
+      )
+    }
     return {
       fontId: message.fontId,
-      bytes: message.fixtureMode
-        ? fixtureFontBytes()
-        : await this.companion.getFont(message.fontId),
+      bytes: this.fixture ? this.fixture.font() : await this.companion.getFont(message.fontId),
     }
+  }
+
+  private async cancelPage(
+    pageSessionId: string,
+    sender: Sender,
+  ): Promise<void> {
+    const { tabId, frameId } = senderLocation(sender)
+    const records = await this.jobs.forPage(tabId, frameId, pageSessionId)
+    await Promise.allSettled(records.map((record) => this.cancelRecord(record)))
+    await this.artifacts.removeForPage(tabId, frameId, pageSessionId)
   }
 
   async route(message: BackgroundRequest, sender: Sender): Promise<unknown> {
     switch (message.type) {
+      case 'popup:prepare':
+        return this.prepareContent()
       case 'popup:start':
         return this.startContent(message.scope, message.hskLevel)
       case 'popup:cancel':
@@ -409,50 +677,56 @@ export class BackgroundRouter {
       case 'job:submit':
         return this.submit(message, sender)
       case 'job:poll':
-        return this.poll(message.jobId)
+        return this.poll(message.jobId, sender)
       case 'job:result':
-        return this.result(message.jobId)
+        return this.result(message, sender)
       case 'job:cancel':
-        return this.cancelJob(message.jobId)
+        return this.cancelJob(message.jobId, sender)
       case 'jobs:recover':
-        return this.recover(message.pageSessionId, sender)
+        return this.recover(message, sender)
+      case 'jobs:cancel-page':
+        return this.cancelPage(message.pageSessionId, sender)
       case 'dictionary:lookup':
-        return message.fixtureMode
-          ? this.fixture.lookup(message.request)
-          : this.companion.lookup(message.request)
+        return this.lookup(message, sender)
       case 'font:get':
-        return this.font(message)
+        return this.font(message, sender)
     }
   }
 
   async cancelJobsForTab(tabId: number): Promise<void> {
     const records = await this.jobs.forTab(tabId)
     await Promise.allSettled(records.map((record) => this.cancelRecord(record)))
+    await this.artifacts.removeForTab(tabId)
+    await this.pendingPermissions.removeForTab(tabId)
   }
-}
-
-function isBackgroundRequest(value: unknown): value is BackgroundRequest {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
-  const type = (value as Record<string, unknown>).type
-  return (
-    typeof type === 'string' &&
-    [
-      'popup:start',
-      'popup:cancel',
-      'popup:state',
-      'job:submit',
-      'job:poll',
-      'job:result',
-      'job:cancel',
-      'jobs:recover',
-      'dictionary:lookup',
-      'font:get',
-    ].includes(type)
-  )
 }
 
 declare global {
   var __hmtBackgroundRegistered: boolean | undefined
+}
+
+const BACKGROUND_MESSAGE_TYPES = new Set([
+  'popup:prepare',
+  'popup:start',
+  'popup:cancel',
+  'popup:state',
+  'job:submit',
+  'job:poll',
+  'job:result',
+  'job:cancel',
+  'jobs:recover',
+  'jobs:cancel-page',
+  'dictionary:lookup',
+  'font:get',
+])
+
+function looksLikeBackgroundRequest(value: unknown): boolean {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    !Array.isArray(value) &&
+    BACKGROUND_MESSAGE_TYPES.has(String((value as Record<string, unknown>).type))
+  )
 }
 
 export function registerBackgroundHandlers(): void {
@@ -460,8 +734,31 @@ export function registerBackgroundHandlers(): void {
   globalThis.__hmtBackgroundRegistered = true
   const router = new BackgroundRouter()
   browser.runtime.onMessage.addListener(
-    async (message: unknown, sender): Promise<MessageResponse<unknown> | undefined> => {
-      if (!isBackgroundRequest(message)) return undefined
+    async (raw: unknown, sender): Promise<MessageResponse<unknown> | undefined> => {
+      if (!looksLikeBackgroundRequest(raw)) return undefined
+      if (sender.id !== browser.runtime.id) {
+        return {
+          ok: false,
+          error: {
+            code: 'INVALID_MESSAGE_SENDER',
+            message: 'The runtime message did not come from this extension.',
+            retryable: false,
+          },
+        }
+      }
+      let message: BackgroundRequest
+      try {
+        message = parseBackgroundRequest(raw)
+      } catch (error) {
+        return {
+          ok: false,
+          error: {
+            code: 'INVALID_RUNTIME_MESSAGE',
+            message: error instanceof Error ? error.message : 'The runtime message was invalid.',
+            retryable: false,
+          },
+        }
+      }
       try {
         return { ok: true, value: await router.route(message, sender) }
       } catch (error) {
@@ -471,5 +768,8 @@ export function registerBackgroundHandlers(): void {
   )
   browser.tabs.onRemoved.addListener((tabId) => {
     void router.cancelJobsForTab(tabId)
+  })
+  browser.tabs.onUpdated.addListener((tabId, changeInfo) => {
+    if (changeInfo.url) void router.cancelJobsForTab(tabId)
   })
 }

@@ -61,6 +61,72 @@ describe('conservative image discovery', () => {
     })
   })
 
+  it('selects exactly 20 long query-string webtoon pages among 154 site images', () => {
+    const cover = loadedImage(
+      'https://reader.test/images/cover.png',
+      1200,
+      1800,
+      { width: 320, height: 480, right: 320, bottom: 480 },
+    )
+    cover.className = 'manga-cover'
+    document.body.append(cover)
+
+    for (let index = 0; index < 20; index += 1) {
+      const top = index === 0 ? 0 : 17_000 + index * 100
+      const page = loadedImage(
+        `https://cdn.test/chapter.webp?chapter=synthetic&page=${index}`,
+        900,
+        16_000,
+        {
+          top,
+          bottom: top + 12_800,
+          width: 720,
+          height: 12_800,
+          right: 720,
+        },
+      )
+      page.dataset.pageIndex = String(index)
+      document.body.append(page)
+    }
+
+    for (let index = 0; index < 133; index += 1) {
+      const avatar = loadedImage(
+        `https://cdn.test/avatar.webp?user=${index}`,
+        900,
+        900,
+        { width: 48, height: 48, right: 48, bottom: 48 },
+      )
+      avatar.className = 'comment-avatar'
+      document.body.append(avatar)
+    }
+
+    const selected = discoverImages()
+    expect(document.querySelectorAll('img')).toHaveLength(154)
+    expect(selected).toHaveLength(20)
+    expect(selected.every((candidate) => candidate.element.hasAttribute('data-page-index'))).toBe(
+      true,
+    )
+    expect(selected.every((candidate) => candidate.sourceUrl.includes('.webp?'))).toBe(true)
+    expect(selected[0]?.visible).toBe(true)
+    expect(selected.slice(1).every((candidate) => !candidate.visible)).toBe(true)
+
+    const responsive = selected[0]?.element
+    if (!responsive) throw new Error('Synthetic responsive page missing.')
+    responsive.getBoundingClientRect = () =>
+      ({
+        x: 0,
+        y: 0,
+        left: 0,
+        top: 0,
+        right: 465,
+        bottom: 8_267,
+        width: 465,
+        height: 8_267,
+        toJSON: () => ({}),
+      }) satisfies DOMRect
+    expect(evaluateImage(responsive, 1).supported).toBe(true)
+  })
+
   it('orders visible images before offscreen images and then by DOM order', () => {
     const candidates = [
       { ...discoverCandidate(2), visible: false },

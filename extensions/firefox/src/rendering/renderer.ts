@@ -54,10 +54,12 @@ const RENDERER_CSS = `
   transform-origin: center;
   unicode-bidi: plaintext;
   user-select: text;
-  white-space: normal;
+  white-space: pre;
   word-break: normal;
   overflow-wrap: break-word;
 }
+.hmt-region-text { display: block; }
+.hmt-region-line { display: block; }
 .hmt-region:focus {
   outline: 2px solid #3b82f6;
   outline-offset: 2px;
@@ -130,6 +132,13 @@ export type RenderPayload = {
   cleanImage: ArrayBuffer
 }
 
+export type RenderGuard = {
+  signal?: AbortSignal
+  validate(): void
+}
+
+export type CleanImageDecoder = (image: HTMLImageElement) => Promise<void>
+
 export type RendererCallbacks = {
   fetchFont: FontFetcher
   lookup(request: LookupRequest): Promise<LookupResult>
@@ -150,6 +159,7 @@ export class RendererError extends Error {
 type RegionView = {
   region: BrowserRegion
   element: HTMLElement
+  textElement: HTMLElement
   fontFamily: string
 }
 
@@ -178,6 +188,43 @@ function createButton(label: string): HTMLButtonElement {
   button.type = 'button'
   button.textContent = label
   return button
+}
+
+async function decodeCleanImage(image: HTMLImageElement): Promise<void> {
+  if (typeof image.decode === 'function') {
+    await image.decode()
+    return
+  }
+  if (image.complete) {
+    if (image.naturalWidth > 0 && image.naturalHeight > 0) return
+    throw new RendererError('CLEAN_IMAGE_DECODE_FAILED', 'The cleaned image could not be decoded.')
+  }
+  await new Promise<void>((resolve, reject) => {
+    image.addEventListener('load', () => resolve(), { once: true })
+    image.addEventListener(
+      'error',
+      () =>
+        reject(
+          new RendererError(
+            'CLEAN_IMAGE_DECODE_FAILED',
+            'The cleaned image could not be decoded.',
+          ),
+        ),
+      { once: true },
+    )
+  })
+}
+
+function applyChosenLines(element: HTMLElement, lines: readonly string[], text: string): void {
+  const chosen = lines.length > 0 && lines.join('') === text ? lines : [text]
+  const nodes: Node[] = []
+  chosen.forEach((line) => {
+    const lineElement = document.createElement('span')
+    lineElement.className = 'hmt-region-line'
+    lineElement.textContent = line
+    nodes.push(lineElement)
+  })
+  element.replaceChildren(...nodes)
 }
 
 function originalOwnerStyle(owner: HTMLElement): {
@@ -233,17 +280,26 @@ export class RenderedImage {
       element.lang = 'zh-CN'
       element.tabIndex = 0
       element.dataset.regionId = region.id
-      // Model output always enters the DOM through textContent.
-      element.textContent = region.displayedChinese
+      const textElement = document.createElement('span')
+      textElement.className = 'hmt-region-text'
+      // Model output always enters the DOM through text nodes.
+      textElement.textContent = region.displayedChinese
+      element.append(textElement)
       setPercentRegion(element, region)
       this.imageSpace.querySelector('.hmt-text-layer')?.append(element)
       this.regions.push({
         region,
         element,
+        textElement,
         fontFamily: fontFamilies.get(region.style.fontId) ?? 'sans-serif',
       })
     }
-    this.selection = new SelectionController(shadowRoot, popover, callbacks.lookup)
+    this.selection = new SelectionController(
+      shadowRoot,
+      popover,
+      callbacks.lookup,
+      this.forwardPrimaryClick,
+    )
     for (const view of this.regions) {
       this.selection.register(view.element, payload.result.jobId, view.region.id)
     }
@@ -284,6 +340,27 @@ export class RenderedImage {
   private readonly compareKeyUp = (event: KeyboardEvent): void => {
     if (event.key === ' ' || event.key === 'Enter') this.releaseCompare()
   }
+  private readonly forwardPrimaryClick = (event: MouseEvent): void => {
+    if (event.button !== 0 || event.defaultPrevented) return
+    const forwarded = new MouseEvent('click', {
+      bubbles: false,
+      cancelable: true,
+      composed: false,
+      view: window,
+      detail: event.detail,
+      screenX: event.screenX,
+      screenY: event.screenY,
+      clientX: event.clientX,
+      clientY: event.clientY,
+      ctrlKey: event.ctrlKey,
+      shiftKey: event.shiftKey,
+      altKey: event.altKey,
+      metaKey: event.metaKey,
+      button: 0,
+      buttons: event.buttons,
+    })
+    if (!this.candidate.element.dispatchEvent(forwarded)) event.preventDefault()
+  }
 
   setMode(mode: 'chinese' | 'original'): void {
     this.mode = mode
@@ -320,12 +397,25 @@ export class RenderedImage {
         this.geometry.image.width,
         this.geometry.image.height,
       )
-      applyRegionStyle(view.element, view.region, fit.fontSize, view.fontFamily)
+      applyChosenLines(view.textElement, fit.lines, view.region.displayedChinese)
+      let measuredFontSize = fit.fontSize
+      applyRegionStyle(view.element, view.region, measuredFontSize, view.fontFamily)
       if (view.region.style.writingMode === 'vertical-rl') {
         view.element.style.alignItems = 'flex-start'
       }
-      // Do not insert synthetic line-break nodes: textContent stays byte-for-byte
-      // equal to displayedChinese, so normal copy never gains hidden metadata.
+      const minimumFontSize = Math.min(
+        measuredFontSize,
+        Math.max(8, this.geometry.image.width * 0.009),
+      )
+      while (
+        measuredFontSize > minimumFontSize &&
+        view.element.clientWidth > 0 &&
+        (view.element.scrollWidth > view.element.clientWidth + 1 ||
+          view.element.scrollHeight > view.element.clientHeight + 1)
+      ) {
+        measuredFontSize = Math.max(minimumFontSize, measuredFontSize - 0.5)
+        applyRegionStyle(view.element, view.region, measuredFontSize, view.fontFamily)
+      }
       if (
         fit.degraded ||
         (view.element.clientWidth > 0 &&
@@ -380,6 +470,7 @@ export class SelectableRenderer {
     private readonly ResizeObserverType:
       | typeof ResizeObserver
       | undefined = globalThis.ResizeObserver,
+    private readonly cleanImageDecoder: CleanImageDecoder = decodeCleanImage,
   ) {
     this.fontLoader = new FontLoader(callbacks.fetchFont)
   }
@@ -387,7 +478,9 @@ export class SelectableRenderer {
   async render(
     candidate: DiscoveredImage,
     payload: RenderPayload,
+    guard: RenderGuard = { validate: () => undefined },
   ): Promise<RenderedImage> {
+    guard.validate()
     if (!candidate.owner.isConnected || !candidate.element.isConnected) {
       throw new RendererError(
         'IMAGE_REPLACED_DURING_PROCESSING',
@@ -396,6 +489,15 @@ export class SelectableRenderer {
     }
     if (payload.result.sourceWidth < 1 || payload.result.sourceHeight < 1) {
       throw new RendererError('INVALID_RESULT_GEOMETRY', 'The result dimensions are invalid.')
+    }
+    if (
+      payload.result.sourceWidth !== candidate.element.naturalWidth ||
+      payload.result.sourceHeight !== candidate.element.naturalHeight
+    ) {
+      throw new RendererError(
+        'RESULT_SOURCE_DIMENSIONS_MISMATCH',
+        'The result dimensions do not match the live page image.',
+      )
     }
     const transform = getComputedStyle(candidate.element).transform
     if (
@@ -409,19 +511,65 @@ export class SelectableRenderer {
       )
     }
 
-    const fontFamilies = new Map<string, string>()
-    await Promise.all(
-      payload.result.regions.map(async (region) => {
-        if (fontFamilies.has(region.style.fontId)) return
-        fontFamilies.set(
-          region.style.fontId,
-          await this.fontLoader.load(region.style.fontId, region.style.category),
-        )
-      }),
+    const cleanUrl = URL.createObjectURL(
+      new Blob([payload.cleanImage], { type: payload.result.cleanImageMimeType }),
     )
+    const clean = document.createElement('img')
+    clean.className = 'hmt-clean-image'
+    clean.alt = ''
+    clean.draggable = false
+    clean.src = cleanUrl
+    try {
+      await this.cleanImageDecoder(clean)
+    } catch (error) {
+      URL.revokeObjectURL(cleanUrl)
+      throw error instanceof RendererError
+        ? error
+        : new RendererError(
+            'CLEAN_IMAGE_DECODE_FAILED',
+            'The cleaned image could not be decoded.',
+          )
+    }
+    guard.validate()
+    if (
+      clean.naturalWidth !== payload.result.sourceWidth ||
+      clean.naturalHeight !== payload.result.sourceHeight
+    ) {
+      URL.revokeObjectURL(cleanUrl)
+      throw new RendererError(
+        'CLEAN_IMAGE_DIMENSIONS_MISMATCH',
+        'The cleaned image dimensions do not match the translation result.',
+      )
+    }
+
+    const fontFamilies = new Map<string, string>()
+    try {
+      await Promise.all(
+        payload.result.regions.map(async (region) => {
+          if (fontFamilies.has(region.style.fontId)) return
+          fontFamilies.set(
+            region.style.fontId,
+            await this.fontLoader.load(
+              region.style.fontId,
+              region.style.category,
+              payload.result.jobId,
+            ),
+          )
+        }),
+      )
+      guard.validate()
+      if (document.fonts?.ready) {
+        await document.fonts.ready
+        guard.validate()
+      }
+    } catch (error) {
+      URL.revokeObjectURL(cleanUrl)
+      throw error
+    }
 
     const originalParent = candidate.owner.parentNode
     if (!originalParent) {
+      URL.revokeObjectURL(cleanUrl)
       throw new RendererError(
         'IMAGE_REPLACED_DURING_PROCESSING',
         'The page removed this image before translation completed.',
@@ -445,12 +593,14 @@ export class SelectableRenderer {
         : `${before.width}px`
     wrapper.style.maxWidth = '100%'
     wrapper.style.verticalAlign = ownerStyle.verticalAlign || 'baseline'
+    guard.validate()
     originalParent.insertBefore(wrapper, candidate.owner)
     wrapper.append(candidate.owner)
     const after = candidate.element.getBoundingClientRect()
     if (before.width > 0 && rectDifference(before, after) > MAX_LAYOUT_SHIFT_PX) {
       originalParent.insertBefore(candidate.owner, wrapper)
       wrapper.remove()
+      URL.revokeObjectURL(cleanUrl)
       throw new RendererError(
         'UNSUPPORTED_PAGE_LAYOUT',
         'Wrapping this image changed the page layout, so the original was restored.',
@@ -458,9 +608,6 @@ export class SelectableRenderer {
     }
 
     candidate.element.setAttribute('data-hmt-original', 'true')
-    const cleanUrl = URL.createObjectURL(
-      new Blob([payload.cleanImage], { type: payload.result.cleanImageMimeType }),
-    )
     const host = document.createElement('span')
     host.dataset.hmtOwned = 'true'
     host.setAttribute('aria-label', 'HSK manga translation controls')
@@ -472,11 +619,6 @@ export class SelectableRenderer {
     viewport.className = 'hmt-viewport'
     const imageSpace = document.createElement('span')
     imageSpace.className = 'hmt-image-space'
-    const clean = document.createElement('img')
-    clean.className = 'hmt-clean-image'
-    clean.alt = ''
-    clean.draggable = false
-    clean.src = cleanUrl
     const textLayer = document.createElement('span')
     textLayer.className = 'hmt-text-layer'
     imageSpace.append(clean, textLayer)
@@ -509,26 +651,40 @@ export class SelectableRenderer {
     const resizeObserver = this.ResizeObserverType
       ? new this.ResizeObserverType(() => rendered?.refit())
       : undefined
-    rendered = new RenderedImage(
-      candidate,
-      payload,
-      wrapper,
-      viewport,
-      imageSpace,
-      originalButton,
-      chineseButton,
-      compareButton,
-      cleanUrl,
-      originalParent,
-      originalNextSibling,
-      savedOwnerOpacity,
-      savedImageOpacity,
-      this.callbacks,
-      shadow,
-      popover,
-      fontFamilies,
-      resizeObserver,
-    )
+    try {
+      guard.validate()
+      rendered = new RenderedImage(
+        candidate,
+        payload,
+        wrapper,
+        viewport,
+        imageSpace,
+        originalButton,
+        chineseButton,
+        compareButton,
+        cleanUrl,
+        originalParent,
+        originalNextSibling,
+        savedOwnerOpacity,
+        savedImageOpacity,
+        this.callbacks,
+        shadow,
+        popover,
+        fontFamilies,
+        resizeObserver,
+      )
+    } catch (error) {
+      resizeObserver?.disconnect()
+      restoreOpacity(candidate.owner, savedOwnerOpacity)
+      restoreOpacity(candidate.element, savedImageOpacity)
+      candidate.element.removeAttribute('data-hmt-original')
+      if (wrapper.parentNode) {
+        originalParent.insertBefore(candidate.owner, wrapper)
+        wrapper.remove()
+      }
+      URL.revokeObjectURL(cleanUrl)
+      throw error
+    }
     return rendered
   }
 }

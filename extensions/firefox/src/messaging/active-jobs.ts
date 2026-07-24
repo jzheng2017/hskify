@@ -1,17 +1,23 @@
 import type { BrowserJobStatus } from '../contracts/browser'
+import type { HskLevel } from '../contracts/browser'
 import type { StorageArea } from './settings'
 
 const ACTIVE_JOB_PREFIX = 'hmt.activeJob.'
+const PAGE_ARTIFACT_PREFIX = 'hmt.pageArtifact.'
 
 export type ActiveJobRecord = {
   tabId: number
   frameId: number
   pageSessionId: string
+  pageUrl: string
   clientImageId: string
   jobId: string
   sourceSha256: string
+  sourceUrl: string
+  sourceWidth: number
+  sourceHeight: number
   pageIndex: number
-  fixtureMode: boolean
+  hskLevel: HskLevel
   createdAtUnixMs: number
 }
 
@@ -20,14 +26,39 @@ function isActiveJobRecord(value: unknown): value is ActiveJobRecord {
   const record = value as Record<string, unknown>
   return (
     typeof record.tabId === 'number' &&
+    Number.isSafeInteger(record.tabId) &&
     typeof record.frameId === 'number' &&
+    Number.isSafeInteger(record.frameId) &&
     typeof record.pageSessionId === 'string' &&
+    record.pageSessionId.length > 0 &&
+    typeof record.pageUrl === 'string' &&
+    record.pageUrl.length > 0 &&
     typeof record.clientImageId === 'string' &&
+    record.clientImageId.length > 0 &&
     typeof record.jobId === 'string' &&
+    record.jobId.length > 0 &&
     typeof record.sourceSha256 === 'string' &&
+    /^[a-f0-9]{64}$/u.test(record.sourceSha256) &&
+    typeof record.sourceUrl === 'string' &&
+    record.sourceUrl.length > 0 &&
+    typeof record.sourceWidth === 'number' &&
+    Number.isSafeInteger(record.sourceWidth) &&
+    record.sourceWidth > 0 &&
+    typeof record.sourceHeight === 'number' &&
+    Number.isSafeInteger(record.sourceHeight) &&
+    record.sourceHeight > 0 &&
     typeof record.pageIndex === 'number' &&
-    typeof record.fixtureMode === 'boolean' &&
-    typeof record.createdAtUnixMs === 'number'
+    Number.isSafeInteger(record.pageIndex) &&
+    record.pageIndex >= 0 &&
+    (record.hskLevel === 1 ||
+      record.hskLevel === 2 ||
+      record.hskLevel === 3 ||
+      record.hskLevel === 4 ||
+      record.hskLevel === 5 ||
+      record.hskLevel === 6) &&
+    typeof record.createdAtUnixMs === 'number' &&
+    Number.isSafeInteger(record.createdAtUnixMs) &&
+    record.createdAtUnixMs >= 0
   )
 }
 
@@ -76,3 +107,105 @@ export class ActiveJobStore {
 }
 
 export type JobStatusResolver = (record: ActiveJobRecord) => Promise<BrowserJobStatus>
+
+export type PageArtifactRecord = {
+  tabId: number
+  frameId: number
+  pageSessionId: string
+  pageUrl: string
+  jobId: string
+  sourceSha256: string
+  sourceUrl: string
+  sourceWidth: number
+  sourceHeight: number
+  regionIds: string[]
+  fontIds: string[]
+  createdAtUnixMs: number
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return (
+    Array.isArray(value) &&
+    value.length <= 10_000 &&
+    value.every(
+      (item) =>
+        typeof item === 'string' &&
+        item.length > 0 &&
+        item.length <= 512,
+    )
+  )
+}
+
+function isPageArtifactRecord(value: unknown): value is PageArtifactRecord {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const record = value as Record<string, unknown>
+  return (
+    typeof record.tabId === 'number' &&
+    Number.isSafeInteger(record.tabId) &&
+    typeof record.frameId === 'number' &&
+    Number.isSafeInteger(record.frameId) &&
+    typeof record.pageSessionId === 'string' &&
+    record.pageSessionId.length > 0 &&
+    typeof record.pageUrl === 'string' &&
+    record.pageUrl.length > 0 &&
+    typeof record.jobId === 'string' &&
+    record.jobId.length > 0 &&
+    typeof record.sourceSha256 === 'string' &&
+    /^[a-f0-9]{64}$/u.test(record.sourceSha256) &&
+    typeof record.sourceUrl === 'string' &&
+    record.sourceUrl.length > 0 &&
+    typeof record.sourceWidth === 'number' &&
+    Number.isSafeInteger(record.sourceWidth) &&
+    record.sourceWidth > 0 &&
+    typeof record.sourceHeight === 'number' &&
+    Number.isSafeInteger(record.sourceHeight) &&
+    record.sourceHeight > 0 &&
+    isStringArray(record.regionIds) &&
+    isStringArray(record.fontIds) &&
+    typeof record.createdAtUnixMs === 'number' &&
+    Number.isSafeInteger(record.createdAtUnixMs)
+  )
+}
+
+export class PageArtifactStore {
+  constructor(private readonly storage: StorageArea = browser.storage.session) {}
+
+  async put(record: PageArtifactRecord): Promise<void> {
+    await this.storage.set({ [`${PAGE_ARTIFACT_PREFIX}${record.jobId}`]: record })
+  }
+
+  async get(jobId: string): Promise<PageArtifactRecord | undefined> {
+    const key = `${PAGE_ARTIFACT_PREFIX}${jobId}`
+    const values = await this.storage.get(key)
+    return isPageArtifactRecord(values[key]) ? values[key] : undefined
+  }
+
+  async forTab(tabId: number): Promise<PageArtifactRecord[]> {
+    const values = await this.storage.get(null)
+    return Object.entries(values)
+      .filter(([key]) => key.startsWith(PAGE_ARTIFACT_PREFIX))
+      .map(([, value]) => value)
+      .filter(isPageArtifactRecord)
+      .filter((record) => record.tabId === tabId)
+  }
+
+  async remove(jobId: string): Promise<void> {
+    await this.storage.remove(`${PAGE_ARTIFACT_PREFIX}${jobId}`)
+  }
+
+  async removeForPage(
+    tabId: number,
+    frameId: number,
+    pageSessionId: string,
+  ): Promise<void> {
+    const records = (await this.forTab(tabId)).filter(
+      (record) =>
+        record.frameId === frameId && record.pageSessionId === pageSessionId,
+    )
+    await Promise.all(records.map((record) => this.remove(record.jobId)))
+  }
+
+  async removeForTab(tabId: number): Promise<void> {
+    await Promise.all((await this.forTab(tabId)).map((record) => this.remove(record.jobId)))
+  }
+}

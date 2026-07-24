@@ -1,6 +1,7 @@
 import type { LookupRequest, LookupResult } from '../contracts/browser'
 
 export type LookupCallback = (request: LookupRequest) => Promise<LookupResult>
+export type PrimaryClickForwarder = (event: MouseEvent) => void
 
 type SelectionRegion = {
   element: HTMLElement
@@ -22,6 +23,7 @@ export class SelectionController {
     private readonly root: ShadowRoot,
     private readonly popover: HTMLElement,
     private readonly lookup: LookupCallback,
+    private readonly forwardPrimaryClick?: PrimaryClickForwarder,
   ) {
     root.addEventListener('mouseup', this.onSelectionComplete)
     root.addEventListener('keyup', this.onKeyUp)
@@ -82,10 +84,16 @@ export class SelectionController {
     const clickedRegion = [...this.regions.values()].find((region) =>
       region.element.contains(target),
     )
+    if (!clickedRegion) return
     const selected = this.selectedRegion()
-    if (!clickedRegion || !selected || clickedRegion !== selected.region) return
-    event.preventDefault()
-    event.stopPropagation()
+    if (selected && clickedRegion === selected.region) {
+      event.preventDefault()
+      event.stopPropagation()
+      return
+    }
+    if (event instanceof MouseEvent && event.button === 0) {
+      this.forwardPrimaryClick?.(event)
+    }
   }
 
   private readonly onSelectionComplete = (): void => {
@@ -119,14 +127,14 @@ export class SelectionController {
     if (!clipboardData) return
     const selected = this.selectedRegion()
     if (!selected) return
-    clipboardData.setData('text/plain', selected.selection.toString())
+    clipboardData.setData('text/plain', this.selectedText(selected))
     event.preventDefault()
   }
 
   private async showSelection(): Promise<void> {
     const selected = this.selectedRegion()
     if (!selected || this.destroyed) return
-    const selectedText = selected.selection.toString().trim()
+    const selectedText = this.selectedText(selected).trim()
     if (!selectedText || [...selectedText].length > 256) return
     const revision = ++this.requestRevision
     this.popover.hidden = false
@@ -153,6 +161,15 @@ export class SelectionController {
       message.textContent = 'Dictionary lookup unavailable.'
       this.popover.append(message)
     }
+  }
+
+  private selectedText(selected: {
+    selection: Selection
+    range: Range
+  }): string {
+    // `textContent` joins the renderer's visual line spans without adding
+    // layout whitespace, preserving the exact Chinese source text.
+    return selected.range.cloneContents().textContent ?? selected.selection.toString()
   }
 
   private renderResult(result: LookupResult): void {

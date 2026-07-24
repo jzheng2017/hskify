@@ -47,7 +47,9 @@ export class NativeSessionManager {
     private readonly now: () => number = Date.now,
   ) {}
 
-  async getOrLaunch(forceRefresh = false): Promise<NativeReadyResponse> {
+  async getOrLaunchWithState(
+    forceRefresh = false,
+  ): Promise<{ session: NativeReadyResponse; reused: boolean }> {
     if (!forceRefresh) {
       const values = await this.storage.get(SESSION_STORAGE_KEY)
       const stored = values[SESSION_STORAGE_KEY]
@@ -55,7 +57,7 @@ export class NativeSessionManager {
         isStoredSession(stored) &&
         stored.sessionExpiresAtUnixMs > this.now() + EXPIRY_SAFETY_WINDOW_MS
       ) {
-        return stored
+        return { session: stored, reused: true }
       }
     }
 
@@ -89,7 +91,11 @@ export class NativeSessionManager {
       throw new NativeSessionError('The local translation engine returned an expired session.')
     }
     await this.storage.set({ [SESSION_STORAGE_KEY]: ready })
-    return ready
+    return { session: ready, reused: false }
+  }
+
+  async getOrLaunch(forceRefresh = false): Promise<NativeReadyResponse> {
+    return (await this.getOrLaunchWithState(forceRefresh)).session
   }
 
   async invalidate(): Promise<void> {

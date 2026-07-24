@@ -110,7 +110,12 @@ export function horizontalPolygonSpan(points: readonly Point[], y: number): numb
   intersections.sort((left, right) => left - right)
   let span = 0
   for (let index = 0; index + 1 < intersections.length; index += 2) {
-    span += (intersections[index + 1] ?? 0) - (intersections[index] ?? 0)
+    // A line cannot jump across a hole or excluded polygon area. Use the
+    // widest contiguous interval instead of summing disjoint spans.
+    span = Math.max(
+      span,
+      (intersections[index + 1] ?? 0) - (intersections[index] ?? 0),
+    )
   }
   return Math.max(0, span)
 }
@@ -195,8 +200,7 @@ function chooseFit(
       }
       if (
         !best ||
-        candidate.fontSize > best.fontSize ||
-        (candidate.fontSize === best.fontSize && candidate.lines.length < best.lines.length)
+        candidate.fontSize > best.fontSize
       ) {
         best = candidate
       }

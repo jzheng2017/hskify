@@ -15,6 +15,7 @@ export type QueueCallbacks<T> = {
 export class VisibleFirstQueue<T> {
   private pending: QueueItem<T>[] = []
   private pendingIds = new Set<string>()
+  private failedIds = new Set<string>()
   private active: { item: QueueItem<T>; controller: AbortController } | undefined
   private stopped = false
 
@@ -27,13 +28,24 @@ export class VisibleFirstQueue<T> {
   ) {}
 
   enqueue(item: QueueItem<T>): boolean {
-    if (this.pendingIds.has(item.id) || this.active?.item.id === item.id) return false
+    if (
+      this.failedIds.has(item.id) ||
+      this.pendingIds.has(item.id) ||
+      this.active?.item.id === item.id
+    ) {
+      return false
+    }
     this.stopped = false
     this.pending.push(item)
     this.pendingIds.add(item.id)
     this.sort()
     void this.drain()
     return true
+  }
+
+  retry(item: QueueItem<T>): boolean {
+    if (!this.failedIds.delete(item.id)) return false
+    return this.enqueue(item)
   }
 
   reprioritize(id: string, visible: boolean): void {
@@ -47,6 +59,7 @@ export class VisibleFirstQueue<T> {
     const before = this.pending.length
     this.pending = this.pending.filter((item) => item.id !== id)
     if (this.pending.length !== before) this.pendingIds.delete(id)
+    this.failedIds.delete(id)
     if (this.active?.item.id === id) this.active.controller.abort()
   }
 
@@ -54,6 +67,7 @@ export class VisibleFirstQueue<T> {
     this.stopped = true
     this.pending = []
     this.pendingIds.clear()
+    this.failedIds.clear()
     this.active?.controller.abort()
   }
 
@@ -87,7 +101,10 @@ export class VisibleFirstQueue<T> {
       await this.processor(item, controller.signal)
       if (!controller.signal.aborted) this.callbacks.onSuccess?.(item)
     } catch (error) {
-      if (!controller.signal.aborted) this.callbacks.onFailure?.(item, error)
+      if (!controller.signal.aborted) {
+        this.failedIds.add(item.id)
+        this.callbacks.onFailure?.(item, error)
+      }
     } finally {
       this.active = undefined
       if (!this.stopped) void this.drain()

@@ -1,7 +1,8 @@
 import type { DiscoveredImage } from '../../src/discovery/images'
+import fixturePanelUrl from '../../../../fixtures/images/synthetic-panel-a.png?url'
+import longWebtoonUrl from '../../../../fixtures/images/synthetic-webtoon-long.webp?url'
 import {
   createFixtureResult,
-  fixtureSourceBytes,
 } from '../../src/messaging/fixture-service'
 import {
   SelectableRenderer,
@@ -14,20 +15,18 @@ const link = document.querySelector<HTMLAnchorElement>('#reader-link')
 const navigationOutput = document.querySelector<HTMLOutputElement>('#navigation-count')
 if (!source || !frame || !link || !navigationOutput) throw new Error('Harness DOM is incomplete.')
 
-const sourceSvg = `
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1800" viewBox="0 0 1200 1800">
-  <rect width="1200" height="1800" fill="#f8fafc"/>
-  <rect x="35" y="35" width="1130" height="1730" fill="#cbd5e1" stroke="#111827" stroke-width="18"/>
-  <ellipse cx="390" cy="320" rx="250" ry="180" fill="#fff" stroke="#111827" stroke-width="12"/>
-  <text x="390" y="300" text-anchor="middle" font-family="Arial" font-size="56" font-weight="700">WE HAVE TO</text>
-  <text x="390" y="370" text-anchor="middle" font-family="Arial" font-size="56" font-weight="700">LEAVE NOW!</text>
-  <ellipse cx="850" cy="1250" rx="220" ry="180" fill="#fff" stroke="#111827" stroke-width="12"/>
-  <text x="850" y="1260" text-anchor="middle" font-family="Arial" font-size="52" font-weight="700">WAIT FOR ME!</text>
-</svg>`
-source.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(sourceSvg)}`
+source.src = fixturePanelUrl
 await source.decode()
+const cleanImage = await (await fetch(fixturePanelUrl)).arrayBuffer()
+const longWebtoonProbe = new Image()
+longWebtoonProbe.src = `${longWebtoonUrl}?chapter=synthetic&page=0`
+await longWebtoonProbe.decode()
 
 let navigationCount = 0
+let directImageClickCount = 0
+source.addEventListener('click', () => {
+  directImageClickCount += 1
+})
 link.addEventListener('click', (event) => {
   event.preventDefault()
   navigationCount += 1
@@ -86,7 +85,7 @@ try {
     }),
   }).render(candidate, {
     result,
-    cleanImage: fixtureSourceBytes(),
+    cleanImage,
   })
 } catch (error) {
   errorCode =
@@ -99,6 +98,8 @@ declare global {
       ready: boolean
       errorCode?: string
       navigationCount(): number
+      directImageClickCount(): number
+      longFixture(): { width: number; height: number; url: string }
       setWidth(width: number): void
       destroy(): void
     }
@@ -109,6 +110,12 @@ window.hmtHarness = {
   ready: true,
   ...(errorCode ? { errorCode } : {}),
   navigationCount: () => navigationCount,
+  directImageClickCount: () => directImageClickCount,
+  longFixture: () => ({
+    width: longWebtoonProbe.naturalWidth,
+    height: longWebtoonProbe.naturalHeight,
+    url: longWebtoonProbe.currentSrc || longWebtoonProbe.src,
+  }),
   setWidth(width) {
     frame.style.width = `${width}px`
   },

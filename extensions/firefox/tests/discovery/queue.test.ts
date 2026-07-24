@@ -67,4 +67,23 @@ describe('visible-first page queue', () => {
     await vi.waitFor(() => expect(queue.size).toBe(0))
     expect(processed).toEqual(['active'])
   })
+
+  it('does not automatically re-enqueue a failed item and requires explicit retry', async () => {
+    let attempts = 0
+    const failures: string[] = []
+    const queue = new VisibleFirstQueue<string>(
+      async () => {
+        attempts += 1
+        if (attempts === 1) throw new Error('fixture failure')
+      },
+      { onFailure: (item) => failures.push(item.id) },
+    )
+    const item = { id: 'failed', value: 'value', visible: true, order: 0 }
+    expect(queue.enqueue(item)).toBe(true)
+    await vi.waitFor(() => expect(failures).toEqual(['failed']))
+    expect(queue.enqueue(item)).toBe(false)
+    expect(attempts).toBe(1)
+    expect(queue.retry(item)).toBe(true)
+    await vi.waitFor(() => expect(attempts).toBe(2))
+  })
 })

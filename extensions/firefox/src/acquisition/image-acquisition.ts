@@ -5,12 +5,12 @@ import {
   validateImageBytes,
   type ImageLimits,
 } from './image-format'
+import { firefoxOriginPattern } from './origin-permissions'
 
 const MAX_REDIRECTS = 3
 
 export type PermissionApi = {
   contains(permissions: browser.permissions.Permissions): Promise<boolean>
-  request(permissions: browser.permissions.Permissions): Promise<boolean>
 }
 
 export type AcquisitionOptions = {
@@ -26,8 +26,18 @@ export type AcquiredImage = {
   finalUrl: string
 }
 
-function optionalOriginPattern(url: URL): string {
-  return `${url.origin}/*`
+export class ImagePermissionRequiredError extends ImageValidationError {
+  constructor(
+    readonly originPattern: string,
+    origin: string,
+  ) {
+    super(
+      'IMAGE_PERMISSION_REQUIRED',
+      `Permission to read images from ${origin} is required. Reopen the extension and retry.`,
+      true,
+    )
+    this.name = 'ImagePermissionRequiredError'
+  }
 }
 
 function safeHttpUrl(value: string, base?: URL): URL {
@@ -55,16 +65,9 @@ async function ensureOriginPermission(
   permissions: PermissionApi,
 ): Promise<void> {
   if (url.origin === pageOrigin) return
-  const origins = [optionalOriginPattern(url)]
+  const origins = [firefoxOriginPattern(url.href)]
   if (await permissions.contains({ origins })) return
-  const granted = await permissions.request({ origins })
-  if (!granted) {
-    throw new ImageValidationError(
-      'IMAGE_PERMISSION_DENIED',
-      `Permission to read images from ${url.origin} was denied.`,
-      true,
-    )
-  }
+  throw new ImagePermissionRequiredError(origins[0] ?? firefoxOriginPattern(url.href), url.origin)
 }
 
 async function readBoundedBody(response: Response, maximumBytes: number): Promise<ArrayBuffer> {

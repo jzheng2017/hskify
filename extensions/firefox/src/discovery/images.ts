@@ -4,7 +4,7 @@ const MIN_DISPLAY_WIDTH = 180
 const MIN_DISPLAY_HEIGHT = 140
 const MIN_DISPLAY_AREA = 36_000
 const EXCLUDED_SEMANTIC_WORDS =
-  /\b(?:avatar|badge|button|control|emoji|favicon|icon|logo|profile|sprite)\b/i
+  /\b(?:avatar|badge|button|comment|control|cover|emoji|favicon|icon|logo|profile|sprite|thumbnail|userpic)\b/i
 
 export type ImageOwner = HTMLImageElement | HTMLPictureElement
 

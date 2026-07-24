@@ -8,25 +8,6 @@ import {
 } from '../contracts/browser'
 import type { ActiveJobRecord } from './active-jobs'
 
-// A valid one-pixel PNG is intentionally embedded in the fixture adapter. The
-// renderer stretches it over its image-space layer; production paths always
-// transfer the clean blob returned by the companion.
-const FIXTURE_PNG_BASE64 =
-  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='
-
-function decodeBase64(value: string): ArrayBuffer {
-  const decoded = atob(value)
-  const bytes = new Uint8Array(decoded.length)
-  for (let index = 0; index < decoded.length; index += 1) {
-    bytes[index] = decoded.charCodeAt(index)
-  }
-  return bytes.buffer
-}
-
-export function fixtureSourceBytes(): ArrayBuffer {
-  return decodeBase64(FIXTURE_PNG_BASE64)
-}
-
 export function fixtureFontBytes(): ArrayBuffer {
   // Deliberately tiny WOFF-shaped data exercises ArrayBuffer transfer and the
   // renderer's measured system-font fallback without shipping a font asset.
@@ -38,6 +19,7 @@ export type FixtureResultInput = {
   sourceSha256: string
   sourceWidth: number
   sourceHeight: number
+  hskLevel?: 1 | 2 | 3 | 4 | 5 | 6
 }
 
 export function createFixtureResult(input: FixtureResultInput): BrowserJobResult {
@@ -73,7 +55,7 @@ export function createFixtureResult(input: FixtureResultInput): BrowserJobResult
         ocrConfidence: 0.97,
         readingOrder: 0,
         vocabulary: {
-          requestedHskLevel: 2,
+          requestedHskLevel: input.hskLevel ?? 2,
           strictlyValid: true,
           exceptions: [],
         },
@@ -121,7 +103,7 @@ export function createFixtureResult(input: FixtureResultInput): BrowserJobResult
         ocrConfidence: 0.93,
         readingOrder: 1,
         vocabulary: {
-          requestedHskLevel: 2,
+          requestedHskLevel: input.hskLevel ?? 2,
           strictlyValid: true,
           exceptions: [],
         },
@@ -195,6 +177,10 @@ const FIXTURE_STEPS: FixtureStep[] = [
 export class FixtureService {
   constructor(private readonly now: () => number = Date.now) {}
 
+  sourceImage(width: number, height: number): Promise<ArrayBuffer> {
+    return createFixturePng(width, height)
+  }
+
   createJobId(pageSessionId: string, pageIndex: number, sourceSha256: string): string {
     return `fixture-${pageSessionId.slice(0, 12)}-${pageIndex}-${sourceSha256.slice(0, 12)}`
   }
@@ -230,17 +216,22 @@ export class FixtureService {
     }
   }
 
-  result(record: ActiveJobRecord, width: number, height: number): BrowserJobResult {
+  result(record: ActiveJobRecord): BrowserJobResult {
     return createFixtureResult({
       jobId: record.jobId,
       sourceSha256: record.sourceSha256,
-      sourceWidth: width,
-      sourceHeight: height,
+      sourceWidth: record.sourceWidth,
+      sourceHeight: record.sourceHeight,
+      hskLevel: record.hskLevel,
     })
   }
 
-  cleanImage(): ArrayBuffer {
-    return fixtureSourceBytes()
+  cleanImage(width: number, height: number): Promise<ArrayBuffer> {
+    return createFixturePng(width, height)
+  }
+
+  font(): ArrayBuffer {
+    return fixtureFontBytes()
   }
 
   lookup(request: LookupRequest): LookupResult {
@@ -276,4 +267,54 @@ export class FixtureService {
         : {}),
     })
   }
+}
+
+function crc32(bytes: Uint8Array): number {
+  let crc = 0xffffffff
+  for (const byte of bytes) {
+    crc ^= byte
+    for (let bit = 0; bit < 8; bit += 1) {
+      crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1))
+    }
+  }
+  return (crc ^ 0xffffffff) >>> 0
+}
+
+function pngChunk(type: string, data: Uint8Array): Uint8Array {
+  const typeBytes = new TextEncoder().encode(type)
+  const chunk = new Uint8Array(12 + data.byteLength)
+  const view = new DataView(chunk.buffer)
+  view.setUint32(0, data.byteLength)
+  chunk.set(typeBytes, 4)
+  chunk.set(data, 8)
+  view.setUint32(8 + data.byteLength, crc32(chunk.subarray(4, 8 + data.byteLength)))
+  return chunk
+}
+
+export async function createFixturePng(width: number, height: number): Promise<ArrayBuffer> {
+  const raw = new Uint8Array((width + 1) * height)
+  const compressed = new Uint8Array(
+    await new Response(
+      new Blob([raw]).stream().pipeThrough(new CompressionStream('deflate')),
+    ).arrayBuffer(),
+  )
+  const header = new Uint8Array(13)
+  const headerView = new DataView(header.buffer)
+  headerView.setUint32(0, width)
+  headerView.setUint32(4, height)
+  header.set([8, 0, 0, 0, 0], 8)
+  const chunks = [
+    Uint8Array.of(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a),
+    pngChunk('IHDR', header),
+    pngChunk('IDAT', compressed),
+    pngChunk('IEND', new Uint8Array()),
+  ]
+  const total = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0)
+  const png = new Uint8Array(total)
+  let offset = 0
+  for (const chunk of chunks) {
+    png.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return png.buffer
 }

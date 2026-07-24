@@ -9,11 +9,15 @@ function record(overrides: Partial<ActiveJobRecord> = {}): ActiveJobRecord {
     tabId: 7,
     frameId: 0,
     pageSessionId: 'page',
+    pageUrl: 'https://reader.test/chapter',
     clientImageId: 'page-0-hash',
     jobId: 'fixture-job',
     sourceSha256: 'a'.repeat(64),
+    sourceUrl: 'https://cdn.test/page.webp?chapter=1&page=0',
+    sourceWidth: 900,
+    sourceHeight: 16_000,
     pageIndex: 0,
-    fixtureMode: true,
+    hskLevel: 5,
     createdAtUnixMs: 1_000,
     ...overrides,
   }
@@ -44,13 +48,18 @@ describe('active-job recovery metadata', () => {
     })
   })
 
-  it('keeps cloned binary messages intact without persisting image blobs', () => {
-    const bytes = new Uint8Array(8 * 1024 * 1024)
-    bytes[0] = 21
-    bytes[bytes.length - 1] = 42
-    const cloned = structuredClone({ cleanImage: bytes.buffer, font: bytes.slice(0, 32).buffer })
-    expect(cloned.cleanImage.byteLength).toBe(8 * 1024 * 1024)
-    expect(new Uint8Array(cloned.cleanImage).at(-1)).toBe(42)
-    expect(cloned.font).toBeInstanceOf(ArrayBuffer)
+  it('ignores incomplete or malformed recovery metadata', async () => {
+    const storage = new MemoryStorage()
+    const missingPageUrl = { ...record() } as Partial<ActiveJobRecord>
+    delete missingPageUrl.pageUrl
+    await storage.set({
+      'hmt.activeJob.missing-page-url': missingPageUrl,
+      'hmt.activeJob.invalid-tab': record({
+        jobId: 'invalid-tab',
+        tabId: Number.NaN,
+      }),
+    })
+
+    expect(await new ActiveJobStore(storage).list()).toEqual([])
   })
 })

@@ -69,8 +69,8 @@ describe('validated browser typography', () => {
       { add } as unknown as FontFaceSet,
       TestFontFace as unknown as typeof FontFace,
     )
-    const first = await loader.load('fixture-sans', 'sans')
-    const second = await loader.load('fixture-sans', 'sans')
+    const first = await loader.load('fixture-sans', 'sans', 'job-1')
+    const second = await loader.load('fixture-sans', 'sans', 'job-1')
     expect(first).toContain('HMT-fixture-sans')
     expect(second).toBe(first)
     expect(fetcher).toHaveBeenCalledTimes(1)
@@ -88,6 +88,6 @@ describe('validated browser typography', () => {
       { add: vi.fn() } as unknown as FontFaceSet,
       FailingFontFace as unknown as typeof FontFace,
     )
-    await expect(loader.load('broken', 'handwritten')).resolves.toContain('KaiTi')
+    await expect(loader.load('broken', 'handwritten', 'job-1')).resolves.toContain('KaiTi')
   })
 })

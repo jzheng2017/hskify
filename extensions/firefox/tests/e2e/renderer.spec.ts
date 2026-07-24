@@ -1,10 +1,14 @@
-import { expect, test } from '@playwright/test'
+import { expect, test, type Page } from '@playwright/test'
 
-test('renders exact selectable Chinese and dictionary context', async ({ page }) => {
-  await page.goto('/')
+async function waitForHarness(page: Page): Promise<void> {
   await expect
     .poll(() => page.evaluate(() => window.hmtHarness?.ready))
     .toBe(true)
+}
+
+test('renders exact selectable Chinese and dictionary context', async ({ page }) => {
+  await page.goto('/')
+  await waitForHarness(page)
   const regions = page.locator('.hmt-region')
   await expect(regions).toHaveCount(2)
   await expect(regions.first()).toHaveText('我们现在要走！')
@@ -31,9 +35,13 @@ test('keeps reader navigation for clicks and suppresses only selection clicks', 
   page,
 }) => {
   await page.goto('/')
+  await waitForHarness(page)
   const region = page.locator('.hmt-region').first()
   await region.click()
   await expect.poll(() => page.evaluate(() => window.hmtHarness.navigationCount())).toBe(1)
+  await expect
+    .poll(() => page.evaluate(() => window.hmtHarness.directImageClickCount()))
+    .toBe(1)
 
   await region.evaluate((element) => {
     const range = document.createRange()
@@ -48,6 +56,7 @@ test('keeps reader navigation for clicks and suppresses only selection clicks', 
 
 test('refits normalized geometry within two CSS pixels after resize', async ({ page }) => {
   await page.goto('/')
+  await waitForHarness(page)
   await page.evaluate(() => window.hmtHarness.setWidth(420))
   await page.waitForTimeout(50)
   const delta = await page.evaluate(() => {
@@ -67,6 +76,7 @@ test('refits normalized geometry within two CSS pixels after resize', async ({ p
 test('maps contain and cover object-fit content boxes', async ({ page }) => {
   for (const fit of ['contain', 'cover'] as const) {
     await page.goto(`/?fit=${fit}`)
+    await waitForHarness(page)
     await expect
       .poll(() => page.evaluate(() => window.hmtHarness?.errorCode))
       .toBeUndefined()
@@ -101,6 +111,7 @@ test('supports original, Chinese, press compare, vertical text, and safe rejecti
   page,
 }) => {
   await page.goto('/?vertical=1')
+  await waitForHarness(page)
   const image = page.locator('#source')
   await expect(image).toHaveCSS('opacity', '0')
   await page.getByRole('button', { name: 'Original' }).click()
@@ -115,10 +126,21 @@ test('supports original, Chinese, press compare, vertical text, and safe rejecti
   await expect(page.locator('.hmt-region').first()).toHaveCSS('writing-mode', 'vertical-rl')
 
   await page.goto('/?rotated=1')
+  await waitForHarness(page)
   await expect
     .poll(() => page.evaluate(() => window.hmtHarness.errorCode))
     .toBe('UNSUPPORTED_IMAGE_TRANSFORM')
   await expect(page.locator('#source')).toHaveCSS('opacity', '1')
+})
+
+test('browser-decodes the query-string long WebP fixture at production dimensions', async ({
+  page,
+}) => {
+  await page.goto('/')
+  await waitForHarness(page)
+  const fixture = await page.evaluate(() => window.hmtHarness.longFixture())
+  expect(fixture).toMatchObject({ width: 900, height: 16_000 })
+  expect(fixture.url).toContain('.webp?chapter=synthetic&page=0')
 })
 
 declare global {
@@ -127,6 +149,8 @@ declare global {
       ready: boolean
       errorCode?: string
       navigationCount(): number
+      directImageClickCount(): number
+      longFixture(): { width: number; height: number; url: string }
       setWidth(width: number): void
       destroy(): void
     }

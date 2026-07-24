@@ -2,15 +2,20 @@ import { describe, expect, it, vi } from 'vitest'
 
 import { acquireRemoteImage } from '../../src/acquisition/image-acquisition'
 import { sha256Hex } from '../../src/acquisition/hash'
+import {
+  firefoxOriginPattern,
+  PendingOriginPermissionStore,
+  requiredCrossOriginPatterns,
+} from '../../src/acquisition/origin-permissions'
 import { pngHeader } from '../helpers/images'
+import { MemoryStorage } from '../helpers/storage'
 
 describe('background image acquisition', () => {
-  it('requests only the exact redirect origin and validates the final body', async () => {
-    const requested: string[][] = []
+  it('uses only pre-granted exact redirect origins and validates the final body', async () => {
+    const checked: string[][] = []
     const permissions = {
-      contains: vi.fn(async () => false),
-      request: vi.fn(async ({ origins }: browser.permissions.Permissions) => {
-        requested.push(origins ?? [])
+      contains: vi.fn(async ({ origins }: browser.permissions.Permissions) => {
+        checked.push(origins ?? [])
         return true
       }),
     }
@@ -35,7 +40,49 @@ describe('background image acquisition', () => {
     )
     expect(result.finalUrl).toBe('https://cdn.test/pages/1.png')
     expect(result.width).toBe(1200)
-    expect(requested).toEqual([['https://cdn.test/*']])
+    expect(checked).toEqual([['https://cdn.test/*']])
+  })
+
+  it('builds valid Firefox origin patterns without ports before the popup click', () => {
+    expect(firefoxOriginPattern('https://cdn.test:8443/pages/1.webp?token=abc')).toBe(
+      'https://cdn.test/*',
+    )
+    expect(
+      requiredCrossOriginPatterns('https://reader.test:4173/chapter', [
+        'https://reader.test:4173/page.png',
+        'https://cdn.test:9443/page.webp?x=1',
+        'https://cdn.test:9443/next.webp',
+      ]),
+    ).toEqual(['https://cdn.test/*'])
+  })
+
+  it('never prompts from the asynchronous background acquisition path', async () => {
+    const fetcher = vi.fn()
+    await expect(
+      acquireRemoteImage(
+        'https://cdn.test/page.webp',
+        { pageOrigin: 'https://reader.test' },
+        { contains: vi.fn(async () => false) },
+        fetcher,
+      ),
+    ).rejects.toMatchObject({ code: 'IMAGE_PERMISSION_REQUIRED' })
+    expect(fetcher).not.toHaveBeenCalled()
+  })
+
+  it('retains a newly discovered exact redirect host for the next popup click', async () => {
+    const store = new PendingOriginPermissionStore(new MemoryStorage())
+    await store.add(7, 'https://redirect-cdn.test/*')
+    await store.add(7, 'https://redirect-cdn.test/*')
+    await store.add(7, 'http://images.test/*')
+
+    expect(await store.list(7)).toEqual([
+      'http://images.test/*',
+      'https://redirect-cdn.test/*',
+    ])
+    await store.replace(7, ['https://redirect-cdn.test/*'])
+    expect(await store.list(7)).toEqual(['https://redirect-cdn.test/*'])
+    await store.removeForTab(7)
+    expect(await store.list(7)).toEqual([])
   })
 
   it('tries credentials only after an unauthenticated 401', async () => {
@@ -50,7 +97,6 @@ describe('background image acquisition', () => {
     })
     const permissions = {
       contains: vi.fn(async () => true),
-      request: vi.fn(async () => true),
     }
     await acquireRemoteImage(
       'https://cdn.test/private.png',
@@ -64,7 +110,6 @@ describe('background image acquisition', () => {
   it('rejects unsafe redirect chains and oversized content-length', async () => {
     const permissions = {
       contains: vi.fn(async () => true),
-      request: vi.fn(async () => true),
     }
     await expect(
       acquireRemoteImage(

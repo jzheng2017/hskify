@@ -44,6 +44,18 @@ describe('rectangle and polygon-aware text fitting', () => {
     ]
     expect(horizontalPolygonSpan(diamond, 0.5)).toBeCloseTo(1)
     expect(horizontalPolygonSpan(diamond, 0.1)).toBeCloseTo(0.2)
+
+    const excludedMiddle = [
+      { x: 0, y: 0 },
+      { x: 1, y: 0 },
+      { x: 1, y: 1 },
+      { x: 0.7, y: 1 },
+      { x: 0.7, y: 0.3 },
+      { x: 0.3, y: 0.3 },
+      { x: 0.3, y: 1 },
+      { x: 0, y: 1 },
+    ]
+    expect(horizontalPolygonSpan(excludedMiddle, 0.8)).toBeCloseTo(0.3)
   })
 
   it('fits the frozen fixture in both rectangle and polygon modes', () => {

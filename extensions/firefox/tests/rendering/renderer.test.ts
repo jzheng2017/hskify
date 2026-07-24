@@ -40,6 +40,14 @@ function fixturePayload() {
   }
 }
 
+async function decodeFixtureImage(image: HTMLImageElement): Promise<void> {
+  Object.defineProperties(image, {
+    complete: { configurable: true, value: true },
+    naturalWidth: { configurable: true, value: 1200 },
+    naturalHeight: { configurable: true, value: 1800 },
+  })
+}
+
 function shadowOf(wrapper: HTMLElement): ShadowRoot {
   const host = [...wrapper.children].find(
     (element) => element instanceof HTMLElement && element.shadowRoot,
@@ -101,9 +109,11 @@ describe('selectable image renderer', () => {
         }),
       },
       TestResizeObserver as unknown as typeof ResizeObserver,
+      decodeFixtureImage,
     )
     expect(image.parentElement).toBe(document.body)
-    const rendered = await renderer.render(candidate(image), fixturePayload())
+    const payload = fixturePayload()
+    const rendered = await renderer.render(candidate(image), payload)
     expect(rendered.wrapper.contains(image)).toBe(true)
     image.dispatchEvent(new Event('custom-live-listener'))
     expect(clickListener).toHaveBeenCalledTimes(1)
@@ -118,6 +128,11 @@ describe('selectable image renderer', () => {
     expect(regions[0]?.lang).toBe('zh-CN')
     expect(regions[0]?.classList.contains('hmt-region')).toBe(true)
     expect(regions[0]?.style.left).toBe('18%')
+    expect(
+      [...(regions[0]?.querySelectorAll('.hmt-region-line') ?? [])].map(
+        (line) => line.textContent,
+      ),
+    ).toEqual(payload.result.regions[0]?.layout.suggestedLines)
     expect(image.style.opacity).toBe('0')
   })
 
@@ -130,6 +145,7 @@ describe('selectable image renderer', () => {
         lookup: async (request) => ({ selectedText: request.selectedText, tokens: [] }),
       },
       TestResizeObserver as unknown as typeof ResizeObserver,
+      decodeFixtureImage,
     ).render(candidate(image), fixturePayload())
     const shadow = shadowOf(rendered.wrapper)
     const buttons = [...shadow.querySelectorAll('button')]
@@ -155,17 +171,21 @@ describe('selectable image renderer', () => {
     link.append(image)
     document.body.append(link)
     const navigated = vi.fn((event: Event) => event.preventDefault())
+    const directImageClick = vi.fn()
     link.addEventListener('click', navigated)
+    image.addEventListener('click', directImageClick)
     const rendered = await new SelectableRenderer(
       {
         fetchFont: async () => new ArrayBuffer(0),
         lookup: async (request) => ({ selectedText: request.selectedText, tokens: [] }),
       },
       TestResizeObserver as unknown as typeof ResizeObserver,
+      decodeFixtureImage,
     ).render(candidate(image), fixturePayload())
     const region = shadowOf(rendered.wrapper).querySelector<HTMLElement>('.hmt-region')
     region?.click()
     expect(navigated).toHaveBeenCalledTimes(1)
+    expect(directImageClick).toHaveBeenCalledTimes(1)
 
     const range = document.createRange()
     range.selectNodeContents(region as HTMLElement)
@@ -173,6 +193,7 @@ describe('selectable image renderer', () => {
     window.getSelection()?.addRange(range)
     region?.click()
     expect(navigated).toHaveBeenCalledTimes(1)
+    expect(directImageClick).toHaveBeenCalledTimes(1)
   })
 
   it('copies exactly selected Chinese and opens the local lookup popover', async () => {
@@ -198,10 +219,11 @@ describe('selectable image renderer', () => {
     const rendered = await new SelectableRenderer(
       { fetchFont: async () => new ArrayBuffer(0), lookup },
       TestResizeObserver as unknown as typeof ResizeObserver,
+      decodeFixtureImage,
     ).render(candidate(image), fixturePayload())
     const shadow = shadowOf(rendered.wrapper)
     const region = shadow.querySelector<HTMLElement>('.hmt-region')
-    const text = region?.firstChild
+    const text = region?.querySelector('.hmt-region-line')?.firstChild
     if (!region || !text) throw new Error('Fixture region missing.')
     const range = document.createRange()
     range.setStart(text, 0)
@@ -235,6 +257,7 @@ describe('selectable image renderer', () => {
         onRestore: restored,
       },
       TestResizeObserver as unknown as typeof ResizeObserver,
+      decodeFixtureImage,
     ).render(candidate(image), fixturePayload())
     expect(TestResizeObserver.instances[0]?.observe).toHaveBeenCalledWith(image)
     TestResizeObserver.instances[0]?.trigger()
@@ -244,5 +267,60 @@ describe('selectable image renderer', () => {
     expect(image.hasAttribute('data-hmt-original')).toBe(false)
     expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:fixture')
     expect(restored).toHaveBeenCalled()
+  })
+
+  it('keeps the original untouched when the clean image cannot decode', async () => {
+    const image = loadedImage()
+    document.body.append(image)
+    const renderer = new SelectableRenderer(
+      {
+        fetchFont: async () => new ArrayBuffer(0),
+        lookup: async (request) => ({ selectedText: request.selectedText, tokens: [] }),
+      },
+      TestResizeObserver as unknown as typeof ResizeObserver,
+      async () => {
+        throw new Error('corrupt fixture bytes')
+      },
+    )
+    await expect(renderer.render(candidate(image), fixturePayload())).rejects.toMatchObject({
+      code: 'CLEAN_IMAGE_DECODE_FAILED',
+    })
+    expect(image.parentElement).toBe(document.body)
+    expect(image.style.opacity).toBe('')
+    expect(document.querySelector('.hmt-wrapper')).toBeNull()
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:fixture')
+  })
+
+  it('revalidates cancellation and source identity after awaited font work', async () => {
+    const image = loadedImage()
+    document.body.append(image)
+    let releaseFont!: () => void
+    const fontGate = new Promise<void>((resolve) => {
+      releaseFont = resolve
+    })
+    let current = true
+    const renderer = new SelectableRenderer(
+      {
+        fetchFont: async () => {
+          await fontGate
+          return new ArrayBuffer(0)
+        },
+        lookup: async (request) => ({ selectedText: request.selectedText, tokens: [] }),
+      },
+      TestResizeObserver as unknown as typeof ResizeObserver,
+      decodeFixtureImage,
+    )
+    const rendering = renderer.render(candidate(image), fixturePayload(), {
+      validate: () => {
+        if (!current) throw new Error('stale render')
+      },
+    })
+    await vi.waitFor(() => expect(URL.createObjectURL).toHaveBeenCalled())
+    current = false
+    releaseFont()
+    await expect(rendering).rejects.toThrow(/stale render/i)
+    expect(image.parentElement).toBe(document.body)
+    expect(image.style.opacity).toBe('')
+    expect(document.querySelector('.hmt-wrapper')).toBeNull()
   })
 })

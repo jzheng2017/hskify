@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url'
 import { defineConfig } from 'vite'
 
 const root = fileURLToPath(new URL('.', import.meta.url))
-const extensionRoot = fileURLToPath(new URL('../..', import.meta.url))
+const repositoryRoot = fileURLToPath(new URL('../../../..', import.meta.url))
 
 export default defineConfig({
   root,
@@ -12,7 +12,7 @@ export default defineConfig({
     port: 4173,
     strictPort: true,
     fs: {
-      allow: [extensionRoot],
+      allow: [repositoryRoot],
     },
   },
 })

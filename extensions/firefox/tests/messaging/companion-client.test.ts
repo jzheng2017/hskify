@@ -1,7 +1,10 @@
 import { describe, expect, it, vi } from 'vitest'
 
 import { CompanionClient } from '../../src/messaging/companion-client'
-import { NativeSessionManager } from '../../src/messaging/native-session'
+import {
+  NativeSessionManager,
+  SESSION_STORAGE_KEY,
+} from '../../src/messaging/native-session'
 import type { BrowserJobRequest } from '../../src/contracts/browser'
 import { pngHeader } from '../helpers/images'
 import { MemoryStorage } from '../helpers/storage'
@@ -66,6 +69,59 @@ describe('authenticated localhost companion client', () => {
     ).toBe('1')
   })
 
+  it('health-checks a cached endpoint and re-handshakes after transport failure', async () => {
+    const storage = new MemoryStorage()
+    storage.values[SESSION_STORAGE_KEY] = ready('A'.repeat(43))
+    const runtime = {
+      getManifest: () => ({ version: '0.1.0' }),
+      getURL: () => 'moz-extension://fixture/',
+      sendNativeMessage: vi.fn(async () => ready('B'.repeat(43))),
+    }
+    const manager = new NativeSessionManager(storage, runtime)
+    const requests: string[] = []
+    const fetcher = vi.fn(async (input: RequestInfo | URL) => {
+      requests.push(String(input))
+      if (requests.length === 1) throw new TypeError('stale cached port')
+      return new Response(
+        JSON.stringify({
+          revision: 1,
+          jobId: 'job',
+          state: 'running',
+          stage: 'queued',
+          message: 'Queued',
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      )
+    })
+    const client = new CompanionClient(manager, fetcher)
+    expect((await client.getJobStatus('job')).jobId).toBe('job')
+    expect(requests[0]).toContain('/health')
+    expect(requests[1]).toContain('/jobs/job')
+    expect(runtime.sendNativeMessage).toHaveBeenCalledTimes(1)
+  })
+
+  it('invalidates and retries once when an established request loses transport', async () => {
+    const { manager, runtime } = sessionManager()
+    let calls = 0
+    const client = new CompanionClient(manager, async () => {
+      calls += 1
+      if (calls === 1) throw new TypeError('connection refused')
+      return new Response(
+        JSON.stringify({
+          revision: 1,
+          jobId: 'job',
+          state: 'running',
+          stage: 'queued',
+          message: 'Queued',
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      )
+    })
+    expect((await client.getJobStatus('job')).stage).toBe('queued')
+    expect(runtime.sendNativeMessage).toHaveBeenCalledTimes(2)
+    expect(calls).toBe(2)
+  })
+
   it('sends original bytes and frozen metadata as multipart form data', async () => {
     const { manager } = sessionManager()
     let body: FormData | undefined
@@ -121,5 +177,33 @@ describe('authenticated localhost companion client', () => {
     expect(new Uint8Array(clean)[0]).toBe(137)
     expect(font).toBeInstanceOf(ArrayBuffer)
     expect([...new Uint8Array(font)]).toEqual([1, 2, 3])
+  })
+
+  it('enforces binary caps while streaming before materializing the response', async () => {
+    const { manager } = sessionManager()
+    let produced = 0
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (produced >= 13) {
+          controller.close()
+          return
+        }
+        produced += 1
+        controller.enqueue(new Uint8Array(1024 * 1024))
+      },
+      cancel() {},
+    })
+    const client = new CompanionClient(
+      manager,
+      async () =>
+        new Response(body, {
+          status: 200,
+          headers: { 'Content-Type': 'font/woff2' },
+        }),
+    )
+    await expect(client.getFont('oversized')).rejects.toMatchObject({
+      code: 'BINARY_RESPONSE_TOO_LARGE',
+    })
+    expect(produced).toBeLessThan(20)
   })
 })
