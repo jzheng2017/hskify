@@ -1610,7 +1610,7 @@ fn browser_style_and_layout(
         Some(koharu_core::TextAlign::Center) | None => TextAlignment::Center,
     };
     let browser_style = BrowserTextStyle {
-        font_id: "fixture-sans".to_owned(),
+        font_id: if serif { "hmt-serif" } else { "hmt-sans" }.to_owned(),
         category: if serif {
             FontCategory::Serif
         } else {

@@ -365,7 +365,7 @@ impl ModelSetup {
             selected_pack_id: Some(self.selected.pack_id.clone()),
             current_file: Some(progress.filename),
             completed_bytes: Some(progress.downloaded.min(self.selected.bytes)),
-            total_bytes: Some(progress.total.unwrap_or(self.selected.bytes)),
+            total_bytes: Some(self.selected.bytes),
             required_disk_bytes: Some(self.selected.bytes),
             message,
             error_code,
@@ -510,5 +510,27 @@ mod tests {
         std::fs::write(&resources.dictionary, b"{}").unwrap();
         std::fs::write(&resources.model, b"1234").unwrap();
         assert_eq!(setup.status().state, BrowserSetupState::Ready);
+    }
+
+    #[test]
+    fn font_ids_map_only_to_packaged_cjk_fonts() {
+        let temp = tempfile::tempdir().unwrap();
+        let resources = ManagedResourcePaths {
+            hsk: temp.path().join("hsk.json"),
+            dictionary: temp.path().join("dictionary.json"),
+            model: temp.path().join("model.gguf"),
+            fonts: temp.path().join("fonts"),
+        };
+        let setup = ModelSetup::new(resources.clone(), temp.path().join("cache")).unwrap();
+
+        assert_eq!(
+            setup.font_path("hmt-sans"),
+            Some(resources.fonts.join(SANS_FONT_FILE))
+        );
+        assert_eq!(
+            setup.font_path("hmt-serif"),
+            Some(resources.fonts.join(SERIF_FONT_FILE))
+        );
+        assert!(setup.font_path("fixture-sans").is_none());
     }
 }

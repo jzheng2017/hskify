@@ -44,12 +44,14 @@ use crate::pipeline_adapter::{
     CleaningError, CleaningInput, CleaningOutput, CleaningPipeline, CleaningProgress,
     KoharuPipeline, RetranslationInput, RetranslationOutput,
 };
+use crate::setup::{ManagedResourcePaths, ModelSetup};
 use crate::{CONTROL_HEADER, PROTOCOL_HEADER};
 
 const INTERNAL_SESSION_PATH: &str = "/browser-internal/v1/session";
 const MAX_INTERNAL_BODY_BYTES: usize = 4 * 1024;
 const MAX_LOOKUP_BODY_BYTES: usize = 16 * 1024;
 const MAX_RETRANSLATE_BODY_BYTES: usize = 64 * 1024;
+const MAX_FONT_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_SESSIONS: usize = 64;
 const DEFAULT_MAX_RETAINED_JOBS: usize = 128;
 
@@ -423,6 +425,7 @@ pub struct BridgeState {
     config: BridgeConfig,
     control_secret: [u8; SECRET_BYTES],
     pipeline: Arc<dyn CleaningPipeline>,
+    setup: Option<Arc<ModelSetup>>,
     pipeline_gate: AsyncMutex<()>,
     sessions: Mutex<Vec<Session>>,
     storage: RwLock<Storage>,
@@ -437,17 +440,34 @@ impl BridgeState {
         control_secret: [u8; SECRET_BYTES],
         cache_root: PathBuf,
     ) -> Arc<Self> {
-        Self::with_pipeline(
+        let setup = ModelSetup::new(
+            ManagedResourcePaths::discover()
+                .expect("browser companion requires a managed resource directory"),
+            cache_root.clone(),
+        )
+        .expect("embedded model setup manifest must be valid");
+        Self::with_pipeline_and_setup(
             config,
             control_secret,
             Arc::new(KoharuPipeline::new(cache_root)),
+            Some(Arc::new(setup)),
         )
     }
 
+    #[cfg(test)]
     fn with_pipeline(
         config: BridgeConfig,
         control_secret: [u8; SECRET_BYTES],
         pipeline: Arc<dyn CleaningPipeline>,
+    ) -> Arc<Self> {
+        Self::with_pipeline_and_setup(config, control_secret, pipeline, None)
+    }
+
+    fn with_pipeline_and_setup(
+        config: BridgeConfig,
+        control_secret: [u8; SECRET_BYTES],
+        pipeline: Arc<dyn CleaningPipeline>,
+        setup: Option<Arc<ModelSetup>>,
     ) -> Arc<Self> {
         assert_ne!(config.port, 0, "browser daemon requires a bound port");
         assert!(
@@ -467,6 +487,7 @@ impl BridgeState {
             config,
             control_secret,
             pipeline,
+            setup,
             pipeline_gate: AsyncMutex::new(()),
             sessions: Mutex::new(Vec::new()),
             storage: RwLock::new(Storage::default()),
@@ -478,6 +499,13 @@ impl BridgeState {
             request_capacity,
             active_jobs: AtomicUsize::new(0),
         })
+    }
+
+    fn resources_ready(&self) -> bool {
+        self.setup.as_ref().map_or_else(
+            || self.pipeline.resources_ready(),
+            |setup| setup.resources_ready(),
+        )
     }
 
     pub fn port(&self) -> u16 {
@@ -530,7 +558,7 @@ impl BridgeState {
                     HskLevel::Five,
                     HskLevel::Six,
                 ],
-                models_ready: self.pipeline.resources_ready(),
+                models_ready: self.resources_ready(),
             },
         })
     }
@@ -1222,7 +1250,7 @@ async fn health(State(state): State<Arc<BridgeState>>) -> Json<HealthResponse> {
         protocol_version: crate::contracts::PROTOCOL_VERSION,
         engine_version: fixtures::health().engine_version,
         status: HealthStatus::Ready,
-        setup_state: if state.pipeline.resources_ready() {
+        setup_state: if state.resources_ready() {
             BrowserSetupState::Ready
         } else {
             BrowserSetupState::MissingModels
@@ -1231,15 +1259,25 @@ async fn health(State(state): State<Arc<BridgeState>>) -> Json<HealthResponse> {
 }
 
 async fn setup(State(state): State<Arc<BridgeState>>) -> Json<BrowserSetupStatus> {
-    Json(resource_setup_status(&state))
+    Json(
+        state
+            .setup
+            .as_ref()
+            .map_or_else(|| resource_setup_status(&state), |setup| setup.status()),
+    )
 }
 
 async fn setup_models(State(state): State<Arc<BridgeState>>) -> Json<BrowserSetupStatus> {
-    Json(resource_setup_status(&state))
+    Json(
+        state
+            .setup
+            .as_ref()
+            .map_or_else(|| resource_setup_status(&state), ModelSetup::start),
+    )
 }
 
 fn resource_setup_status(state: &BridgeState) -> BrowserSetupStatus {
-    if state.pipeline.resources_ready() {
+    if state.resources_ready() {
         BrowserSetupStatus {
             state: BrowserSetupState::Ready,
             selected_pack_id: Some("qwen3.5-4b-hsk2-v1".to_owned()),
@@ -1810,7 +1848,38 @@ async fn blob(
     Ok(arc_bytes_response(blob.bytes, blob.content_type))
 }
 
-async fn font(Path(font_id): Path<String>) -> Result<Response, ApiError> {
+async fn font(
+    State(state): State<Arc<BridgeState>>,
+    Path(font_id): Path<String>,
+) -> Result<Response, ApiError> {
+    if let Some(setup) = &state.setup {
+        let path = setup.font_path(&font_id).ok_or_else(|| {
+            ApiError::not_found("FONT_NOT_FOUND", "The browser font does not exist.")
+        })?;
+        let metadata = tokio::fs::metadata(&path).await.map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                ApiError::not_found("FONT_NOT_FOUND", "The browser font does not exist.")
+            } else {
+                ApiError::internal()
+            }
+        })?;
+        if !metadata.is_file() {
+            return Err(ApiError::not_found(
+                "FONT_NOT_FOUND",
+                "The browser font does not exist.",
+            ));
+        }
+        if metadata.len() > MAX_FONT_BYTES {
+            return Err(ApiError::payload_too_large(
+                "FONT_TOO_LARGE",
+                "The browser font is too large.",
+            ));
+        }
+        let bytes = tokio::fs::read(path)
+            .await
+            .map_err(|_| ApiError::internal())?;
+        return Ok(bytes_response(bytes, "font/ttf"));
+    }
     let bytes = fixtures::font_bytes(&font_id)
         .ok_or_else(|| ApiError::not_found("FONT_NOT_FOUND", "The browser font does not exist."))?;
     Ok(bytes_response(bytes.to_vec(), "font/ttf"))
@@ -3393,5 +3462,74 @@ mod tests {
             assert_eq!(response.status(), StatusCode::OK);
             assert_eq!(body_json(response).await["state"], "ready");
         }
+    }
+
+    #[tokio::test]
+    async fn production_setup_state_and_packaged_font_are_served() {
+        let temp = tempfile::tempdir().unwrap();
+        let fonts = temp.path().join("fonts");
+        std::fs::create_dir_all(&fonts).unwrap();
+        let font_bytes = b"\0\x01\0\0packaged-cjk-font";
+        std::fs::write(fonts.join("NotoSansSC-VF.ttf"), font_bytes).unwrap();
+        let resources = ManagedResourcePaths {
+            hsk: temp.path().join("hsk.json"),
+            dictionary: temp.path().join("dictionary.json"),
+            model: temp.path().join("models").join("Qwen3.5-4B-Q4_K_M.gguf"),
+            fonts,
+        };
+        let setup =
+            Arc::new(ModelSetup::new(resources, temp.path().join("runtime-cache")).unwrap());
+        let state = BridgeState::with_pipeline_and_setup(
+            BridgeConfig::for_port(43127),
+            [6_u8; SECRET_BYTES],
+            Arc::new(FixtureCleaningPipeline {
+                stage_delay: Duration::from_millis(1),
+                hsk_control: test_hsk_control(),
+                resources_ready: true,
+            }),
+            Some(setup),
+        );
+        let token = state.issue_session(ORIGIN_VALUE).unwrap().token;
+        let app = router(state);
+
+        let setup_response = app
+            .clone()
+            .oneshot(
+                authorized(Method::GET, "/browser/v1/setup", &token)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(setup_response.status(), StatusCode::OK);
+        assert_eq!(body_json(setup_response).await["state"], "missing-models");
+
+        let font_response = app
+            .clone()
+            .oneshot(
+                authorized(Method::GET, "/browser/v1/fonts/hmt-sans", &token)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(font_response.status(), StatusCode::OK);
+        assert_eq!(
+            to_bytes(font_response.into_body(), 1024)
+                .await
+                .unwrap()
+                .as_ref(),
+            font_bytes
+        );
+
+        let fixture_font = app
+            .oneshot(
+                authorized(Method::GET, "/browser/v1/fonts/fixture-sans", &token)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(fixture_font.status(), StatusCode::NOT_FOUND);
     }
 }
