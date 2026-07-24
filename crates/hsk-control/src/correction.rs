@@ -44,7 +44,7 @@ impl CorrectionContext {
             proper_names: proper_names.to_vec(),
             required_name_forms,
             reference_numbers: extract_numeric_forms(&reference),
-            reference_has_negation: has_negation(&reference),
+            reference_has_negation: control.has_negation(&reference),
         }
     }
 
@@ -155,7 +155,10 @@ impl<'a> CorrectionLoop<'a> {
                 violations.push(PreservationViolation::MissingProperName { text: name.clone() });
             }
         }
-        match (self.context.reference_has_negation, has_negation(candidate)) {
+        match (
+            self.context.reference_has_negation,
+            self.control.has_negation(candidate),
+        ) {
             (true, false) => violations.push(PreservationViolation::RemovedNegation),
             (false, true) => violations.push(PreservationViolation::AddedNegation),
             _ => {}
@@ -177,13 +180,6 @@ impl HskControl {
             CorrectionContext::from_reference(self, faithful_chinese, proper_names),
         )
     }
-}
-
-fn has_negation(text: &str) -> bool {
-    const NEGATION_MARKERS: &[&str] = &[
-        "不是", "没有", "不能", "不会", "不要", "不", "没", "别", "无", "未", "莫", "非",
-    ];
-    NEGATION_MARKERS.iter().any(|marker| text.contains(marker))
 }
 
 fn extract_numeric_forms(text: &str) -> Vec<String> {

@@ -14,9 +14,10 @@ HskControl::from_json(hsk_artifact, dictionary_artifact)
 
 and requires both generated artifacts to declare `complete`. The repository
 contains only project-authored `test-seed` artifacts. The normal constructor
-returns `HskControlError::DatasetIncomplete` for them. Fixture code must opt in
-by calling `HskControl::from_embedded_test_seed()` or passing
-`LoadPolicy::AllowIncompleteTestSeed`.
+returns `HskControlError::DatasetIncomplete` for them. Their embedded constants
+and `HskControl::from_embedded_test_seed()` are absent from normal production
+builds; fixture code must enable the non-default `test-seeds` feature and still
+uses `LoadPolicy::AllowIncompleteTestSeed`.
 
 This is deliberate: the current branch cannot be mistaken for a complete HSK
 or dictionary product.
@@ -35,18 +36,29 @@ Generated artifacts record:
 
 The importer rejects a source hash mismatch, missing attribution, a negative
 redistribution audit, or a complete dataset without expected counts. Runtime
-loading rechecks normalized forms and audited counts.
+loading rechecks normalized forms and audited counts. `independentlyUsable`
+defaults to false when omitted from a test-seed entry. A complete import and a
+deserialized complete artifact must explicitly audit that boolean on every HSK
+entry; silent opt-in to compound decomposition is rejected.
 
 `HskControl::cache_revision()` is a SHA-256 identity over the normalized HSK
 and dictionary contents plus the normalization, Jieba segmentation, compound
-guard, lookup, and dependency revisions. It changes deterministically when any
-of those inputs changes.
+guard, lookup, correction-preservation, and dependency revisions. It changes
+deterministically when any of those inputs changes. Output-affecting lexical
+dependencies are exactly pinned in the crate manifest. The cache input records
+`jieba-rs` 0.10.1 plus SHA-256
+`139519822fe8ab9e10d9d07e68ea0451045380aedaf54ecc51e2a28c6b42a13f`
+for its embedded `src/data/dict.txt`, and `unicode-normalization` 0.1.25 plus
+Unicode 17.0.0 and SHA-256
+`177d5f08019cc8e335444fcab61aabb7f6309f158f6ebbd7525c73c0e532ec44`
+for its generated `src/tables.rs`. Tests pin the public Unicode version,
+normalization behavior, Jieba dictionary behavior, and these identities.
 
 ## Normalization
 
 The pipeline is:
 
-1. Unicode NFKC;
+1. Unicode 17.0.0 NFKC through exactly pinned `unicode-normalization` 0.1.25;
 2. removal of soft-hyphen/zero-width formatting controls;
 3. `opencc-fmmseg` 0.8.0 `tw2sp`, then `hk2s`, for mainland Simplified output;
 4. canonical Chinese punctuation, decimal-point preservation, collapsed
@@ -77,19 +89,23 @@ selected HSK level does not bias primary segmentation.
 For each normalized region not occupied by an explicit protected name:
 
 1. Jieba produces the primary segmentation.
-2. A longest-known-compound guard scans Jieba token boundaries using the full
-   HSK/dictionary trie.
+2. A conservative full-lexicon guard scans from every Unicode character
+   position, independently of Jieba starts and ends. Every overlapping known
+   disallowed HSK/dictionary span is retained deterministically.
 3. A known higher-level HSK word is rejected as one span even when its
    characters are lower-level words.
 4. A known dictionary headword outside the allowed HSK set is also rejected as
-   one span. This intentionally prefers false rejection for lexicalized
-   compounds.
+   one span rather than being silently accepted as an allowed component split.
 5. Only an unknown token may pass allowed-word dynamic-programming
    decomposition, and only with complete coverage by independently usable
    allowed HSK words.
 6. Chinese/Arabic numeric forms and numeric-plus-allowed-measure-word
    decompositions are permitted.
 7. Unknown Chinese spans and unprotected non-Chinese lexical tokens fail.
+
+An incidental shorter dictionary spelling wholly inside a selected-level HSK
+headword is not a violation; the audited HSK headword is valid as a whole.
+Cross-boundary and overlapping disallowed spans are still reported exactly.
 
 Protected person names, place names, titles, and unavoidable proper nouns are
 supplied explicitly. Each occurrence is returned with an exact span and reason;
@@ -117,6 +133,12 @@ dictionary pinyin/definitions with HSK pinyin/gloss/level metadata. Proper names
 are marked only when the caller explicitly protects them; dictionary wording
 never silently creates an HSK exception.
 
+`lookup_with_region_context()` is an additive pure API that carries an optional
+`LookupRegionContext` (`displayedChinese`, `faithfulChinese`, and
+`sourceEnglish`) alongside the lookup. It gives the adapter everything needed
+to populate the already-frozen browser response without importing or changing
+the shared protocol definitions.
+
 ## Bounded correction support
 
 `HskControl::correction_loop()` validates the initial rewrite and permits at
@@ -126,6 +148,11 @@ violations plus deterministic preservation failures for:
 - numeric forms;
 - protected names present in the faithful reference;
 - added or removed Chinese negation.
+
+Negation is detected from Jieba lexical tokens and contextual marker prefixes,
+not raw substring presence. Real `不`, `没`/`没有`, `别`, `未`, `非`, and `莫`
+units remain protected, while lexicalized words such as `非常`, `未来`, and
+`别人` do not create spurious additions/removals.
 
 After the third invalid evaluation it returns `Failed`; later evaluations return
 `Terminated`. The crate never initiates or owns a model request.
@@ -192,25 +219,45 @@ Candidate upstream data not committed:
   definitions are not sufficiently clear for this branch to certify the full
   data. No full HSK list is committed until that audit is resolved.
 
+Production HSK and CC-CEDICT artifacts therefore remain release blockers
+pending provenance, licensing, attribution, revision, and redistribution
+approval. The test seeds are not substitutes for either production dataset.
+
+The exact `opencc-fmmseg` crate release is pinned, but its bundled Apache-2.0
+OpenCC-derived lexical payload does not expose a sufficiently precise upstream
+OpenCC data revision/NOTICE trail for this branch to certify. Before release,
+the integrator must identify and record that revision and preserve the required
+Apache attribution/NOTICE material; the current OpenCC dependency note is not a
+completed data-provenance audit.
+
 ## Verification evidence (2026-07-24, Windows, Rust 1.95.0)
 
 - `cargo fmt -p hsk-control -- --check`: pass.
-- `cargo clippy -p hsk-control --all-targets -- -D warnings`: pass.
-- `cargo test -p hsk-control --all-targets`: 20 passed, 0 failed, one explicit
-  performance test ignored by the normal suite.
-- `cargo test -p hsk-control --test performance_smoke -- --ignored --nocapture`:
-  pass; loaded 5,000 synthetic HSK records plus 125,000 synthetic dictionary
-  records and completed 1,000 validation+lookup iterations; total test time
-  22.08 seconds in an unoptimized test build.
+- `cargo test -p hsk-control --all-features --all-targets`: 35 passed, 0
+  failed, one explicit scale test ignored by the normal suite.
+- `cargo test -p hsk-control --all-features --test performance_smoke --
+  --ignored --nocapture`: pass; loaded 5,000 synthetic HSK records plus 125,000
+  synthetic dictionary records and completed 1,000 validation+lookup
+  iterations in 18.53 seconds in an unoptimized test build.
+- `cargo clippy -p hsk-control --all-features --all-targets -- -D warnings`:
+  pass.
+- `cargo check -p hsk-control --no-default-features --all-targets`: pass,
+  confirming the production feature surface builds without embedded test
+  seeds.
+- The final locked no-run check fails only because the integrator-owned root
+  lockfile needs regeneration, as detailed below.
 
 The synthetic scale test contains no third-party words. A measured benchmark
 against real complete datasets remains blocked on the two data audits above.
 
 ## Integration handoff
 
-This workstream was forbidden from changing the root manifest or `Cargo.lock`.
-The crate manifest introduces `opencc-fmmseg` and `unicode-normalization` (and
-uses the already selected `sha2`/CSV ecosystem). The integrator must regenerate
-and review the root lockfile when merging. No existing Koharu crate, frozen
-fixture, browser companion, extension file, root manifest, or committed
+This workstream is forbidden from changing the root manifest or `Cargo.lock`.
+The crate manifest exactly pins `jieba-rs`, `opencc-fmmseg`, and
+`unicode-normalization` (and uses the already selected `sha2`/CSV ecosystem).
+The current root lock does not contain all of those hsk-control selections, so
+`cargo test -p hsk-control --all-features --all-targets --locked --no-run`
+correctly fails with “cannot update the lock file.” The integrator must
+regenerate and review the root lockfile when merging. No existing Koharu crate,
+frozen fixture, browser companion, extension file, root manifest, or committed
 lockfile is changed by this branch.

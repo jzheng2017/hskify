@@ -1,8 +1,18 @@
 use opencc_fmmseg::OpenCC;
 use unicode_normalization::UnicodeNormalization;
 
+/// Exact normalization crate release used by the NFKC stage.
+pub const UNICODE_NORMALIZATION_CRATE_VERSION: &str = "0.1.25";
+
+/// Unicode Character Database version compiled into `unicode-normalization`.
+pub const UNICODE_NORMALIZATION_UNICODE_VERSION: (u8, u8, u8) = (17, 0, 0);
+
+/// SHA-256 of `unicode-normalization` 0.1.25's generated `src/tables.rs`.
+pub const UNICODE_NORMALIZATION_TABLES_SHA256: &str =
+    "177d5f08019cc8e335444fcab61aabb7f6309f158f6ebbd7525c73c0e532ec44";
+
 /// Bump whenever normalization order or mappings change.
-pub const NORMALIZATION_REVISION: &str = "nfkc-zero-width-opencc-tw2sp-hk2s-surface-v2";
+pub const NORMALIZATION_REVISION: &str = "nfkc17-zero-width-opencc-tw2sp-hk2s-surface-v3";
 
 /// Unicode/OpenCC-compatible normalizer used by import, validation, and lookup.
 pub struct TextNormalizer {

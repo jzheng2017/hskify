@@ -7,18 +7,20 @@ use std::{
 use jieba_rs::{Jieba, TokenizeMode};
 
 use crate::{
-    DictionaryArtifact, EMBEDDED_DICTIONARY_TEST_SEED, EMBEDDED_HSK_TEST_SEED, HSK_STANDARD,
-    HskArtifact, HskDataset, HskException, HskLevel, HskViolation, LOOKUP_REVISION, LoadPolicy,
-    LocalDictionary, LookupResult, LookupToken, NORMALIZATION_REVISION, ProperName,
-    ProperNameReason, Result, SEGMENTATION_REVISION, TextNormalizer, ValidationReport,
-    ViolationReason,
+    DictionaryArtifact, HSK_STANDARD, HskArtifact, HskDataset, HskException, HskLevel,
+    HskViolation, JIEBA_CRATE_VERSION, JIEBA_EMBEDDED_DICTIONARY_SHA256, LOOKUP_REVISION,
+    LoadPolicy, LocalDictionary, LookupRegionContext, LookupResult, LookupToken,
+    NORMALIZATION_REVISION, PRESERVATION_REVISION, ProperName, ProperNameReason, Result,
+    SEGMENTATION_REVISION, TextNormalizer, UNICODE_NORMALIZATION_CRATE_VERSION,
+    UNICODE_NORMALIZATION_TABLES_SHA256, ValidationReport, ViolationReason,
     normalization::{is_all_han, is_ignorable_token},
     sha256_hex,
     trie::AllowedWordTrie,
 };
+#[cfg(feature = "test-seeds")]
+use crate::{EMBEDDED_DICTIONARY_TEST_SEED, EMBEDDED_HSK_TEST_SEED};
 
 const OPENCC_DEPENDENCY_REVISION: &str = "opencc-fmmseg-0.8.0-tw2sp-hk2s";
-const JIEBA_DEPENDENCY_REVISION: &str = "jieba-rs-0.10-default-dict";
 
 /// Pure Rust HSK control and dictionary engine.
 pub struct HskControl {
@@ -53,7 +55,9 @@ impl HskControl {
     }
 
     /// Loads the repository's deliberately incomplete seed with an explicit
-    /// test-only policy.
+    /// test-only policy. This API and its embedded resources exist only when
+    /// the non-default `test-seeds` feature is enabled.
+    #[cfg(feature = "test-seeds")]
     pub fn from_embedded_test_seed() -> Result<Self> {
         Self::from_json_with_policy(
             EMBEDDED_HSK_TEST_SEED,
@@ -108,8 +112,12 @@ impl HskControl {
             NORMALIZATION_REVISION,
             SEGMENTATION_REVISION,
             LOOKUP_REVISION,
+            PRESERVATION_REVISION,
             OPENCC_DEPENDENCY_REVISION,
-            JIEBA_DEPENDENCY_REVISION,
+            JIEBA_CRATE_VERSION,
+            JIEBA_EMBEDDED_DICTIONARY_SHA256,
+            UNICODE_NORMALIZATION_CRATE_VERSION,
+            UNICODE_NORMALIZATION_TABLES_SHA256,
         ]
         .join("\n");
         let cache_revision = format!("hsk-control-sha256:{}", sha256_hex(cache_bytes.as_bytes()));
@@ -242,7 +250,7 @@ impl HskControl {
             return;
         }
 
-        let guards = self.compound_guards(characters, &tokens, end, selected_level);
+        let guards = self.disallowed_spans(characters, start, end, selected_level);
         for guard in &guards {
             violations.push(self.make_violation(
                 characters,
@@ -254,10 +262,7 @@ impl HskControl {
         }
 
         for token in tokens {
-            if guards
-                .iter()
-                .any(|guard| token.start >= guard.start && token.end <= guard.end)
-            {
+            if span_is_fully_covered(token.start, token.end, &guards) {
                 continue;
             }
             if is_ignorable_token(&token.text)
@@ -279,9 +284,7 @@ impl HskControl {
             } else if is_all_han(&token.text) {
                 let decomposition =
                     self.allowed_tries[selected_level.index()].best_decomposition(&token.text);
-                if decomposition.as_ref().is_some_and(|parts| parts.len() >= 2)
-                    && !self.contains_known_disallowed_subspan(&token.text, selected_level)
-                {
+                if decomposition.as_ref().is_some_and(|parts| parts.len() >= 2) {
                     None
                 } else {
                     Some(ViolationReason::UnknownChineseWord)
@@ -304,7 +307,7 @@ impl HskControl {
 
     fn numeric_allowed_decomposition(&self, token: &str, selected_level: HskLevel) -> bool {
         let characters = token.chars().collect::<Vec<_>>();
-        if characters.len() < 2 || self.contains_known_disallowed_subspan(token, selected_level) {
+        if characters.len() < 2 {
             return false;
         }
         let trie = &self.allowed_tries[selected_level.index()];
@@ -332,64 +335,56 @@ impl HskControl {
         reachable[characters.len()] && used_numeric[characters.len()]
     }
 
-    fn contains_known_disallowed_subspan(&self, token: &str, selected_level: HskLevel) -> bool {
-        let characters = token.chars().collect::<Vec<_>>();
-        (0..characters.len()).any(|start| {
-            self.full_lexicon
-                .matches_from(&characters, start)
-                .into_iter()
-                .filter(|end| *end > start + 1)
-                .any(|end| {
-                    let word = characters[start..end].iter().collect::<String>();
-                    self.known_disallowed_reason(&word, selected_level)
-                        .is_some()
-                })
-        })
-    }
-
-    fn compound_guards(
+    fn disallowed_spans(
         &self,
         characters: &[char],
-        tokens: &[PrimaryToken],
+        gap_start: usize,
         gap_end: usize,
         selected_level: HskLevel,
     ) -> Vec<CompoundGuard> {
-        let token_boundaries = tokens
-            .iter()
-            .flat_map(|token| [token.start, token.end])
-            .collect::<BTreeSet<_>>();
-        let mut result = Vec::new();
-        let mut token_index = 0;
+        let mut allowed_spans = Vec::new();
+        let mut candidates = Vec::new();
 
-        while token_index < tokens.len() {
-            let start = tokens[token_index].start;
-            let candidate = self
-                .full_lexicon
-                .matches_from(characters, start)
-                .into_iter()
-                .rev()
-                .filter(|end| {
-                    *end <= gap_end
-                        && *end > start + 1
-                        && token_boundaries.contains(end)
-                        && is_all_han(&characters[start..*end].iter().collect::<String>())
-                })
-                .find_map(|end| {
-                    let word = characters[start..end].iter().collect::<String>();
-                    self.known_disallowed_reason(&word, selected_level)
-                        .map(|reason| (end, reason))
-                });
-
-            if let Some((end, reason)) = candidate {
-                result.push(CompoundGuard { start, end, reason });
-                while token_index < tokens.len() && tokens[token_index].end <= end {
-                    token_index += 1;
+        // Scan every Unicode character position in the gap. Jieba remains the
+        // primary tokenizer, but it is not an authority on where a known
+        // HSK/dictionary span is allowed to begin or end.
+        for start in gap_start..gap_end {
+            for end in self.full_lexicon.matches_from(characters, start) {
+                if end > gap_end {
+                    break;
                 }
-            } else {
-                token_index += 1;
+                let word = characters[start..end].iter().collect::<String>();
+                if !is_all_han(&word) {
+                    continue;
+                }
+                if self.hsk.is_allowed(&word, selected_level) {
+                    allowed_spans.push((start, end));
+                } else if let Some(reason) = self.known_disallowed_reason(&word, selected_level) {
+                    candidates.push(CompoundGuard { start, end, reason });
+                }
             }
         }
-        result
+
+        // A selected-level HSK headword is valid as a whole even if a shorter
+        // dictionary spelling happens to occur inside it. Cross-boundary spans
+        // (the failure mode this guard addresses) are not contained and remain
+        // violations. Preserve all other overlapping disallowed matches.
+        candidates.retain(|candidate| {
+            !allowed_spans.iter().any(|(start, end)| {
+                *start <= candidate.start
+                    && candidate.end <= *end
+                    && (*start < candidate.start || candidate.end < *end)
+            })
+        });
+        candidates.sort_by(|left, right| {
+            left.start
+                .cmp(&right.start)
+                .then_with(|| right.end.cmp(&left.end))
+        });
+        candidates.dedup_by(|left, right| {
+            left.start == right.start && left.end == right.end && left.reason == right.reason
+        });
+        candidates
     }
 
     fn known_disallowed_reason(
@@ -499,6 +494,18 @@ impl HskControl {
     /// Longest-match local lookup with HSK metadata and explicit proper-name
     /// labels. Punctuation/whitespace are omitted from token results.
     pub fn lookup(&self, selected_text: &str, proper_names: &[ProperName]) -> LookupResult {
+        self.lookup_with_region_context(selected_text, proper_names, None)
+    }
+
+    /// Adds optional immutable region context to the pure lookup result. The
+    /// Chinese/English context is carried verbatim; only `selected_text` is
+    /// normalized for dictionary lookup.
+    pub fn lookup_with_region_context(
+        &self,
+        selected_text: &str,
+        proper_names: &[ProperName],
+        region: Option<LookupRegionContext>,
+    ) -> LookupResult {
         let selected_text = self.normalizer.normalize(selected_text);
         let characters = selected_text.chars().collect::<Vec<_>>();
         let names = self.normalize_names(proper_names);
@@ -534,6 +541,7 @@ impl HskControl {
         LookupResult {
             selected_text,
             tokens,
+            region,
         }
     }
 
@@ -581,6 +589,18 @@ impl HskControl {
         });
         result.dedup_by(|left, right| left.text == right.text);
         result
+    }
+
+    pub(crate) fn has_negation(&self, text: &str) -> bool {
+        let normalized = self.normalizer.normalize(text);
+        let characters = normalized.chars().collect::<Vec<_>>();
+        self.jieba
+            .tokenize(&normalized, TokenizeMode::Default, true)
+            .into_iter()
+            .any(|token| {
+                !token_is_fragment_of_lexicalized_prefix(&characters, token.start, token.end)
+                    && token_has_negation_unit(token.word)
+            })
     }
 }
 
@@ -661,6 +681,23 @@ fn push_unique(values: &mut Vec<String>, value: &str) {
     }
 }
 
+fn span_is_fully_covered(start: usize, end: usize, guards: &[CompoundGuard]) -> bool {
+    let mut cursor = start;
+    for guard in guards {
+        if guard.end <= cursor {
+            continue;
+        }
+        if guard.start > cursor {
+            return false;
+        }
+        cursor = cursor.max(guard.end);
+        if cursor >= end {
+            return true;
+        }
+    }
+    false
+}
+
 fn gloss_terms(glosses: &[String]) -> BTreeSet<String> {
     const STOP_WORDS: &[&str] = &[
         "a", "an", "and", "be", "for", "in", "of", "on", "or", "the", "to",
@@ -694,5 +731,88 @@ impl ScoredSuggestion {
             .then_with(|| left.level.cmp(&right.level))
             .then_with(|| left.frequency_rank.cmp(&right.frequency_rank))
             .then_with(|| left.word.cmp(&right.word))
+    }
+}
+
+// These are lexical words whose initial scalar only resembles a negation
+// marker. The surrounding-token check also recognizes them if user-dictionary
+// frequency causes Jieba to split the marker from the rest of the word.
+const LEXICALIZED_NEGATION_PREFIXES: &[&str] = &[
+    "非常", "非洲", "非凡", "非得", "未来", "别人", "别致", "别扭", "别墅", "没收", "没落", "莫名",
+];
+
+fn token_is_fragment_of_lexicalized_prefix(
+    characters: &[char],
+    token_start: usize,
+    token_end: usize,
+) -> bool {
+    LEXICALIZED_NEGATION_PREFIXES.iter().any(|prefix| {
+        let prefix_length = prefix.chars().count();
+        token_end <= token_start + prefix_length
+            && token_start + prefix_length <= characters.len()
+            && prefix
+                .chars()
+                .eq(characters[token_start..token_start + prefix_length]
+                    .iter()
+                    .copied())
+    })
+}
+
+fn token_has_negation_unit(token: &str) -> bool {
+    let lexicalized_prefix = LEXICALIZED_NEGATION_PREFIXES
+        .iter()
+        .filter(|prefix| token.starts_with(**prefix))
+        .max_by_key(|prefix| prefix.len());
+    let token = lexicalized_prefix.map_or(token, |prefix| &token[prefix.len()..]);
+
+    token == "没有"
+        || ["不", "没", "别", "未", "非", "莫"]
+            .iter()
+            .any(|marker| token == *marker || token.starts_with(marker))
+        || token.starts_with("并非")
+        || token.starts_with("绝非")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{token_has_negation_unit, token_is_fragment_of_lexicalized_prefix};
+
+    #[test]
+    fn negation_units_exclude_lexicalized_marker_prefixes() {
+        for word in ["非常", "非常好", "非洲", "未来", "别人", "没收", "莫名其妙"]
+        {
+            assert!(!token_has_negation_unit(word), "{word}");
+        }
+    }
+
+    #[test]
+    fn negation_units_keep_real_markers_and_contextual_compounds() {
+        for word in [
+            "不",
+            "不好",
+            "没",
+            "没有",
+            "别",
+            "别走",
+            "未",
+            "未完成",
+            "非",
+            "非法",
+            "莫",
+            "莫走",
+            "并非",
+            "绝非如此",
+            "非常不好",
+        ] {
+            assert!(token_has_negation_unit(word), "{word}");
+        }
+    }
+
+    #[test]
+    fn lexicalized_context_survives_a_split_marker_token() {
+        let characters = "非常不好".chars().collect::<Vec<_>>();
+        assert!(token_is_fragment_of_lexicalized_prefix(&characters, 0, 1));
+        assert!(token_is_fragment_of_lexicalized_prefix(&characters, 0, 2));
+        assert!(!token_is_fragment_of_lexicalized_prefix(&characters, 0, 3));
     }
 }

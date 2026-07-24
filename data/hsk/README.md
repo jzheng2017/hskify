@@ -18,9 +18,11 @@ cargo run -p hsk-control --bin hsk-import -- \
 ```
 
 The source must contain `level`, `simplified`, `pinyin`, and `gloss` headers.
-Optional headers are `simpler_words`, `independently_usable`, and
-`frequency_rank`. List fields use `|`. CSV is supported with
-`--delimiter comma`.
+A source claiming `complete` must also contain `independently_usable`, with an
+explicit audited true/false value on every row. Omission defaults to false only
+for `test-seed` imports. Optional headers are `simpler_words` and
+`frequency_rank`. List fields use `|`. CSV is supported with `--delimiter
+comma`.
 
 The metadata records the exact source URL, revision, SHA-256, SPDX expression,
 attribution, redistribution decision, completeness, expected entry count, and

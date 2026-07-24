@@ -213,10 +213,6 @@ impl ImportMetadata {
     }
 }
 
-fn default_true() -> bool {
-    true
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HskEntry {
@@ -226,7 +222,9 @@ pub struct HskEntry {
     pub level: HskLevel,
     #[serde(default)]
     pub simpler_words: Vec<String>,
-    #[serde(default = "default_true")]
+    /// Whether an entry may participate as one component of an otherwise
+    /// unknown compound. Omission is deliberately conservative.
+    #[serde(default)]
     pub independently_usable: bool,
     #[serde(default)]
     pub frequency_rank: Option<u32>,
@@ -245,7 +243,7 @@ pub struct DictionaryEntry {
     pub frequency_rank: Option<u32>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HskArtifact {
     pub schema_version: u32,
@@ -257,6 +255,59 @@ pub struct HskArtifact {
     pub audited_entry_count: usize,
     pub audited_level_counts: [usize; 6],
     pub entries: Vec<HskEntry>,
+}
+
+impl<'de> Deserialize<'de> for HskArtifact {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct WireArtifact {
+            schema_version: u32,
+            standard: String,
+            dataset_revision: String,
+            completeness: DatasetCompleteness,
+            source: SourceAudit,
+            licence: LicenceAudit,
+            audited_entry_count: usize,
+            audited_level_counts: [usize; 6],
+            entries: Vec<serde_json::Value>,
+        }
+
+        let wire = WireArtifact::deserialize(deserializer)?;
+        let mut entries = Vec::with_capacity(wire.entries.len());
+        for (index, value) in wire.entries.into_iter().enumerate() {
+            let independently_usable_is_explicit_bool = value
+                .get("independentlyUsable")
+                .is_some_and(serde_json::Value::is_boolean);
+            if wire.completeness == DatasetCompleteness::Complete
+                && !independently_usable_is_explicit_bool
+            {
+                let word = value
+                    .get("simplified")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("<unknown>");
+                return Err(D::Error::custom(format!(
+                    "complete HSK entry {index} ({word:?}) must explicitly audit independentlyUsable as true or false"
+                )));
+            }
+            entries.push(serde_json::from_value(value).map_err(D::Error::custom)?);
+        }
+
+        Ok(Self {
+            schema_version: wire.schema_version,
+            standard: wire.standard,
+            dataset_revision: wire.dataset_revision,
+            completeness: wire.completeness,
+            source: wire.source,
+            licence: wire.licence,
+            audited_entry_count: wire.audited_entry_count,
+            audited_level_counts: wire.audited_level_counts,
+            entries,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

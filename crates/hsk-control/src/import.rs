@@ -4,8 +4,9 @@ use csv::{ReaderBuilder, StringRecord, Trim};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    DATA_SCHEMA_VERSION, DatasetKind, DictionaryArtifact, DictionaryEntry, HSK_STANDARD,
-    HskArtifact, HskControlError, HskEntry, HskLevel, ImportMetadata, Result, TextNormalizer,
+    DATA_SCHEMA_VERSION, DatasetCompleteness, DatasetKind, DictionaryArtifact, DictionaryEntry,
+    HSK_STANDARD, HskArtifact, HskControlError, HskEntry, HskLevel, ImportMetadata, Result,
+    TextNormalizer,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,7 +48,10 @@ pub fn generate_hsk_artifact(
         .comment(Some(b'#'))
         .from_reader(source);
     let headers = reader.headers()?.clone();
-    let fields = HskFields::from_headers(&headers)?;
+    let fields = HskFields::from_headers(
+        &headers,
+        metadata.completeness == DatasetCompleteness::Complete,
+    )?;
     let mut entries = BTreeMap::<String, HskEntry>::new();
 
     for row in reader.records() {
@@ -63,12 +67,18 @@ pub fn generate_hsk_artifact(
             .into_iter()
             .map(|word| normalizer.normalize(&word))
             .collect::<Vec<_>>();
-        let independently_usable = match fields
+        let independently_usable_value = fields
             .independently_usable
             .and_then(|index| row.get(index))
-            .map(str::trim)
-        {
-            None | Some("") | Some("true") | Some("1") | Some("yes") => true,
+            .map(str::trim);
+        let independently_usable = match independently_usable_value {
+            None | Some("") if metadata.completeness == DatasetCompleteness::Complete => {
+                return Err(HskControlError::InvalidData(format!(
+                    "complete HSK entry {simplified:?} must explicitly audit independentlyUsable"
+                )));
+            }
+            None | Some("") => false,
+            Some("true") | Some("1") | Some("yes") => true,
             Some("false") | Some("0") | Some("no") => false,
             Some(value) => {
                 return Err(HskControlError::InvalidData(format!(
@@ -240,7 +250,7 @@ struct HskFields {
 }
 
 impl HskFields {
-    fn from_headers(headers: &StringRecord) -> Result<Self> {
+    fn from_headers(headers: &StringRecord, require_independently_usable: bool) -> Result<Self> {
         let normalized = headers
             .iter()
             .map(|header| {
@@ -263,13 +273,20 @@ impl HskFields {
                 ))
             })
         };
+        let independently_usable = find(&["independently_usable", "standalone"]);
+        if require_independently_usable && independently_usable.is_none() {
+            return Err(HskControlError::InvalidData(
+                "complete HSK sources require an independently_usable header with an explicit audited value for every entry"
+                    .into(),
+            ));
+        }
         Ok(Self {
             level: required(&["level", "hsk_level"], "level")?,
             simplified: required(&["simplified", "word", "hanzi"], "simplified")?,
             pinyin: required(&["pinyin"], "pinyin")?,
             glosses: required(&["gloss", "glosses", "definition", "definitions"], "gloss")?,
             simpler_words: find(&["simpler_words", "suggestions"]),
-            independently_usable: find(&["independently_usable", "standalone"]),
+            independently_usable,
             frequency_rank: find(&["frequency_rank", "rank"]),
         })
     }

@@ -1,3 +1,5 @@
+#![cfg(feature = "test-seeds")]
+
 use std::{fs, path::Path};
 
 use hsk_control::{

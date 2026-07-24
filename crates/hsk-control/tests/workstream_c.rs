@@ -1,3 +1,5 @@
+#![cfg(feature = "test-seeds")]
+
 use hsk_control::{
     AllowedWordTrie, CorrectionOutcome, DatasetCompleteness, DictionaryArtifact, DictionaryEntry,
     EMBEDDED_DICTIONARY_TEST_SEED, EMBEDDED_HSK_TEST_SEED, HSK_STANDARD, HskArtifact, HskControl,
