@@ -1,0 +1,355 @@
+{
+  "schemaVersion": 1,
+  "standard": "2.0",
+  "datasetRevision": "project-test-seed-1",
+  "completeness": "test-seed",
+  "source": {
+    "name": "Project-authored HSK control-flow test seed",
+    "url": "project://data/hsk/test-seed-source.tsv",
+    "revision": "1",
+    "sha256": "00e5c5ea1985d25e402ab3452b0aa1d299a788ae45a563747bc58dd062927125"
+  },
+  "licence": {
+    "spdxExpression": "GPL-3.0-only",
+    "url": "project://LICENSE",
+    "attribution": "Project-authored synthetic test seed; not an official HSK vocabulary list.",
+    "redistributionAllowed": true
+  },
+  "auditedEntryCount": 27,
+  "auditedLevelCounts": [
+    15,
+    4,
+    2,
+    2,
+    2,
+    2
+  ],
+  "entries": [
+    {
+      "simplified": "上",
+      "pinyin": "shàng",
+      "glosses": [
+        "above",
+        "on"
+      ],
+      "level": 1,
+      "simplerWords": [],
+      "independentlyUsable": true,
+      "frequencyRank": 13
+    },
+    {
+      "simplified": "不",
+      "pinyin": "bù",
+      "glosses": [
+        "no",
+        "not"
+      ],
+      "level": 1,
+      "simplerWords": [],
+      "independentlyUsable": true,
+      "frequencyRank": 5
+    },
+    {
+      "simplified": "个",
+      "pinyin": "gè",
+      "glosses": [
+        "general measure word"
+      ],
+      "level": 1,
+      "simplerWords": [],
+      "independentlyUsable": true,
+      "frequencyRank": 11
+    },
+    {
+      "simplified": "他",
+      "pinyin": "tā",
+      "glosses": [
+        "he",
+        "him"
+      ],
+      "level": 1,
+      "simplerWords": [],
+      "independentlyUsable": true,
+      "frequencyRank": 3
+    },
+    {
+      "simplified": "你",
+      "pinyin": "nǐ",
+      "glosses": [
+        "you"
+      ],
+      "level": 1,
+      "simplerWords": [],
+      "independentlyUsable": true,
+      "frequencyRank": 2
+    },
+    {
+      "simplified": "你好",
+      "pinyin": "nǐ hǎo",
+      "glosses": [
+        "hello",
+        "hi"
+      ],
+      "level": 1,
+      "simplerWords": [],
+      "independentlyUsable": true,
+      "frequencyRank": 7
+    },
+    {
+      "simplified": "好",
+      "pinyin": "hǎo",
+      "glosses": [
+        "good",
+        "well"
+      ],
+      "level": 1,
+      "simplerWords": [],
+      "independentlyUsable": true,
+      "frequencyRank": 6
+    },
+    {
+      "simplified": "学习",
+      "pinyin": "xué xí",
+      "glosses": [
+        "learn",
+        "study"
+      ],
+      "level": 1,
+      "simplerWords": [],
+      "independentlyUsable": true,
+      "frequencyRank": 14
+    },
+    {
+      "simplified": "我",
+      "pinyin": "wǒ",
+      "glosses": [
+        "I",
+        "me"
+      ],
+      "level": 1,
+      "simplerWords": [],
+      "independentlyUsable": true,
+      "frequencyRank": 1
+    },
+    {
+      "simplified": "我们",
+      "pinyin": "wǒ men",
+      "glosses": [
+        "us",
+        "we"
+      ],
+      "level": 1,
+      "simplerWords": [],
+      "independentlyUsable": true,
+      "frequencyRank": 8
+    },
+    {
+      "simplified": "是",
+      "pinyin": "shì",
+      "glosses": [
+        "be",
+        "is"
+      ],
+      "level": 1,
+      "simplerWords": [],
+      "independentlyUsable": true,
+      "frequencyRank": 4
+    },
+    {
+      "simplified": "有",
+      "pinyin": "yǒu",
+      "glosses": [
+        "have",
+        "there is"
+      ],
+      "level": 1,
+      "simplerWords": [],
+      "independentlyUsable": true,
+      "frequencyRank": 10
+    },
+    {
+      "simplified": "现在",
+      "pinyin": "xiàn zài",
+      "glosses": [
+        "at present",
+        "now"
+      ],
+      "level": 1,
+      "simplerWords": [],
+      "independentlyUsable": true,
+      "frequencyRank": 9
+    },
+    {
+      "simplified": "说话",
+      "pinyin": "shuō huà",
+      "glosses": [
+        "speak",
+        "talk"
+      ],
+      "level": 1,
+      "simplerWords": [],
+      "independentlyUsable": true,
+      "frequencyRank": 15
+    },
+    {
+      "simplified": "马",
+      "pinyin": "mǎ",
+      "glosses": [
+        "horse"
+      ],
+      "level": 1,
+      "simplerWords": [],
+      "independentlyUsable": true,
+      "frequencyRank": 12
+    },
+    {
+      "simplified": "因为",
+      "pinyin": "yīn wèi",
+      "glosses": [
+        "because"
+      ],
+      "level": 2,
+      "simplerWords": [],
+      "independentlyUsable": true,
+      "frequencyRank": 18
+    },
+    {
+      "simplified": "所以",
+      "pinyin": "suǒ yǐ",
+      "glosses": [
+        "so",
+        "therefore"
+      ],
+      "level": 2,
+      "simplerWords": [],
+      "independentlyUsable": true,
+      "frequencyRank": 19
+    },
+    {
+      "simplified": "离开",
+      "pinyin": "lí kāi",
+      "glosses": [
+        "depart",
+        "leave"
+      ],
+      "level": 2,
+      "simplerWords": [],
+      "independentlyUsable": true,
+      "frequencyRank": 17
+    },
+    {
+      "simplified": "马上",
+      "pinyin": "mǎ shàng",
+      "glosses": [
+        "at once",
+        "right away"
+      ],
+      "level": 2,
+      "simplerWords": [
+        "上"
+      ],
+      "independentlyUsable": true,
+      "frequencyRank": 16
+    },
+    {
+      "simplified": "如果",
+      "pinyin": "rú guǒ",
+      "glosses": [
+        "if"
+      ],
+      "level": 3,
+      "simplerWords": [],
+      "independentlyUsable": true,
+      "frequencyRank": 20
+    },
+    {
+      "simplified": "终于",
+      "pinyin": "zhōng yú",
+      "glosses": [
+        "finally"
+      ],
+      "level": 3,
+      "simplerWords": [],
+      "independentlyUsable": true,
+      "frequencyRank": 21
+    },
+    {
+      "simplified": "复杂",
+      "pinyin": "fù zá",
+      "glosses": [
+        "complex",
+        "complicated"
+      ],
+      "level": 4,
+      "simplerWords": [],
+      "independentlyUsable": true,
+      "frequencyRank": 23
+    },
+    {
+      "simplified": "研究",
+      "pinyin": "yán jiū",
+      "glosses": [
+        "research",
+        "study"
+      ],
+      "level": 4,
+      "simplerWords": [
+        "学习"
+      ],
+      "independentlyUsable": true,
+      "frequencyRank": 22
+    },
+    {
+      "simplified": "改善",
+      "pinyin": "gǎi shàn",
+      "glosses": [
+        "improve"
+      ],
+      "level": 5,
+      "simplerWords": [
+        "好"
+      ],
+      "independentlyUsable": true,
+      "frequencyRank": 24
+    },
+    {
+      "simplified": "立即",
+      "pinyin": "lì jí",
+      "glosses": [
+        "at once",
+        "immediately"
+      ],
+      "level": 5,
+      "simplerWords": [
+        "马上"
+      ],
+      "independentlyUsable": true,
+      "frequencyRank": 25
+    },
+    {
+      "simplified": "前所未有",
+      "pinyin": "qián suǒ wèi yǒu",
+      "glosses": [
+        "unprecedented"
+      ],
+      "level": 6,
+      "simplerWords": [],
+      "independentlyUsable": true,
+      "frequencyRank": 27
+    },
+    {
+      "simplified": "斡旋",
+      "pinyin": "wò xuán",
+      "glosses": [
+        "mediate",
+        "mediation"
+      ],
+      "level": 6,
+      "simplerWords": [
+        "说话"
+      ],
+      "independentlyUsable": true,
+      "frequencyRank": 26
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "kind": "hsk-2.0",
+  "standard": "2.0",
+  "datasetRevision": "project-test-seed-1",
+  "completeness": "test-seed",
+  "source": {
+    "name": "Project-authored HSK control-flow test seed",
+    "url": "project://data/hsk/test-seed-source.tsv",
+    "revision": "1",
+    "sha256": "00e5c5ea1985d25e402ab3452b0aa1d299a788ae45a563747bc58dd062927125"
+  },
+  "licence": {
+    "spdxExpression": "GPL-3.0-only",
+    "url": "project://LICENSE",
+    "attribution": "Project-authored synthetic test seed; not an official HSK vocabulary list.",
+    "redistributionAllowed": true
+  },
+  "expectedEntryCount": 27,
+  "expectedLevelCounts": [15, 4, 2, 2, 2, 2]
+}

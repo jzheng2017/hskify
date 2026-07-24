@@ -1,0 +1,28 @@
+[package]
+name = "hsk-control"
+version.workspace = true
+edition.workspace = true
+description = "Deterministic HSK 2.0 vocabulary control and local Chinese dictionary lookup"
+license.workspace = true
+authors.workspace = true
+readme = "README.md"
+homepage.workspace = true
+repository.workspace = true
+keywords.workspace = true
+publish.workspace = true
+
+[dependencies]
+csv = { workspace = true }
+jieba-rs = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = "0.10"
+thiserror = { workspace = true }
+unicode-normalization = "0.1.25"
+
+# Pure Rust, bundled OpenCC-compatible lexicons. Keep this exact because its
+# dictionaries are part of the normalization/cache revision.
+opencc-fmmseg = "=0.8.0"
+
+[dev-dependencies]
+tempfile = { workspace = true }

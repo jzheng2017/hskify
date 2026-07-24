@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "kind": "cc-cedict",
+  "standard": null,
+  "datasetRevision": "project-test-seed-1",
+  "completeness": "test-seed",
+  "source": {
+    "name": "Project-authored CC-CEDICT-format parser test seed",
+    "url": "project://data/dictionary/test-seed-cedict.u8",
+    "revision": "1",
+    "sha256": "1441004a4398bbe4e8328a7a52df8cba60ba4a8a103aab81b8147a20f931dd7f"
+  },
+  "licence": {
+    "spdxExpression": "GPL-3.0-only",
+    "url": "project://LICENSE",
+    "attribution": "Project-authored parser fixture; no CC-CEDICT entries copied.",
+    "redistributionAllowed": true
+  },
+  "expectedEntryCount": 10,
+  "expectedLevelCounts": null
+}

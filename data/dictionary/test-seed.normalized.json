@@ -1,0 +1,118 @@
+{
+  "schemaVersion": 1,
+  "format": "CC-CEDICT",
+  "datasetRevision": "project-test-seed-1",
+  "completeness": "test-seed",
+  "source": {
+    "name": "Project-authored CC-CEDICT-format parser test seed",
+    "url": "project://data/dictionary/test-seed-cedict.u8",
+    "revision": "1",
+    "sha256": "1441004a4398bbe4e8328a7a52df8cba60ba4a8a103aab81b8147a20f931dd7f"
+  },
+  "licence": {
+    "spdxExpression": "GPL-3.0-only",
+    "url": "project://LICENSE",
+    "attribution": "Project-authored parser fixture; no CC-CEDICT entries copied.",
+    "redistributionAllowed": true
+  },
+  "auditedEntryCount": 10,
+  "entries": [
+    {
+      "traditional": "你",
+      "simplified": "你",
+      "pinyin": "nǐ",
+      "definitions": [
+        "you"
+      ],
+      "frequencyRank": null
+    },
+    {
+      "traditional": "你好",
+      "simplified": "你好",
+      "pinyin": "nǐ hǎo",
+      "definitions": [
+        "hello",
+        "hi"
+      ],
+      "frequencyRank": null
+    },
+    {
+      "traditional": "前所未有",
+      "simplified": "前所未有",
+      "pinyin": "qián suǒ wèi yǒu",
+      "definitions": [
+        "unprecedented"
+      ],
+      "frequencyRank": null
+    },
+    {
+      "traditional": "學習",
+      "simplified": "学习",
+      "pinyin": "xué xí",
+      "definitions": [
+        "to learn",
+        "to study"
+      ],
+      "frequencyRank": null
+    },
+    {
+      "traditional": "小明",
+      "simplified": "小明",
+      "pinyin": "Xiǎo Míng",
+      "definitions": [
+        "Xiaoming (fictional test name)"
+      ],
+      "frequencyRank": null
+    },
+    {
+      "traditional": "斡旋",
+      "simplified": "斡旋",
+      "pinyin": "wò xuán",
+      "definitions": [
+        "mediation",
+        "to mediate"
+      ],
+      "frequencyRank": null
+    },
+    {
+      "traditional": "研究",
+      "simplified": "研究",
+      "pinyin": "yán jiū",
+      "definitions": [
+        "research",
+        "to study"
+      ],
+      "frequencyRank": null
+    },
+    {
+      "traditional": "研究生",
+      "simplified": "研究生",
+      "pinyin": "yán jiū shēng",
+      "definitions": [
+        "graduate student",
+        "postgraduate"
+      ],
+      "frequencyRank": null
+    },
+    {
+      "traditional": "離開",
+      "simplified": "离开",
+      "pinyin": "lí kāi",
+      "definitions": [
+        "to depart",
+        "to leave"
+      ],
+      "frequencyRank": null
+    },
+    {
+      "traditional": "馬上",
+      "simplified": "马上",
+      "pinyin": "mǎ shàng",
+      "definitions": [
+        "at once",
+        "right away"
+      ],
+      "frequencyRank": null
+    }
+  ]
+}

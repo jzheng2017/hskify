@@ -1,0 +1,28 @@
+level	simplified	pinyin	gloss	simpler_words	independently_usable	frequency_rank
+1	我	wǒ	I|me		true	1
+1	你	nǐ	you		true	2
+1	他	tā	he|him		true	3
+1	是	shì	be|is		true	4
+1	不	bù	no|not		true	5
+1	好	hǎo	good|well		true	6
+1	你好	nǐ hǎo	hello|hi		true	7
+1	我们	wǒ men	we|us		true	8
+1	现在	xiàn zài	now|at present		true	9
+1	有	yǒu	have|there is		true	10
+1	个	gè	general measure word		true	11
+1	马	mǎ	horse		true	12
+1	上	shàng	above|on		true	13
+1	学习	xué xí	learn|study		true	14
+1	说话	shuō huà	speak|talk		true	15
+2	马上	mǎ shàng	at once|right away	上	true	16
+2	离开	lí kāi	depart|leave		true	17
+2	因为	yīn wèi	because		true	18
+2	所以	suǒ yǐ	so|therefore		true	19
+3	如果	rú guǒ	if		true	20
+3	终于	zhōng yú	finally		true	21
+4	研究	yán jiū	research|study	学习	true	22
+4	复杂	fù zá	complex|complicated		true	23
+5	改善	gǎi shàn	improve	好	true	24
+5	立即	lì jí	immediately|at once	马上	true	25
+6	斡旋	wò xuán	mediate|mediation	说话	true	26
+6	前所未有	qián suǒ wèi yǒu	unprecedented		true	27
