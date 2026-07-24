@@ -15,6 +15,7 @@ pub mod native_framing;
 pub mod origin;
 mod pipeline_adapter;
 pub mod server;
+mod setup;
 
 pub use contracts::{
     BrowserJobCreated, BrowserJobRequest, BrowserJobResult, BrowserJobStatus, BrowserSetupStatus,
