@@ -121,11 +121,15 @@ progress. The renderer:
 - inserts Chinese only with `textContent`.
 
 Suggested line breaks are represented by real `.hmt-region-line` spans while
-the region's text content remains exactly `displayedChinese`. Polygon fitting
-uses the widest contiguous horizontal interval instead of summing across
-excluded holes. Ties preserve the companion's suggested candidate. After the
-font is loaded, real DOM overflow is measured and the font is reduced in small
-steps when needed.
+the region's text content remains exactly `displayedChinese`. A genuinely
+inset companion safe polygon is preferred. When the companion repeats the
+complete bubble hull as its safe polygon, the renderer instead uses the
+original OCR text polygon so outlines and speech tails cannot be treated as
+text space. Fitting reserves an inner margin, permits up to six legal CJK
+lines, rejects whitespace at line boundaries, and keeps font scaling
+proportional instead of enforcing an eight-pixel floor. After the font is
+loaded, real DOM overflow is measured and the font is reduced in small steps;
+the region clips any residual ink rather than allowing it to spill outside.
 
 An unselected primary click in translated text dispatches exactly one
 non-bubbling click to the original image, preserving direct image listeners.
@@ -165,7 +169,7 @@ npm run lint:extension
 Latest evidence for this branch:
 
 - strict TypeScript/WXT typecheck: passed;
-- Vitest: 80 tests passed across 19 files;
+- Vitest: 82 tests passed across 19 files;
 - Playwright Firefox renderer harness: 6 tests passed;
 - WXT Firefox MV3 production build: passed;
 - production-output fixture-marker scan: no matches;
@@ -175,7 +179,10 @@ Latest evidence for this branch:
   smoke.
 - live Nano Machine chapter 100 page 1: 11 English speech-bubble regions,
   non-bubble sound effects retained, and 11 real selectable Chinese regions
-  rendered with no degraded fit.
+  rendered with no degraded fit. A post-correction replay measured zero DOM
+  overflow, at least 6.9 CSS pixels of inset inside every conservative text
+  region, and reduced the crowded long-bubble fonts from about 50–52 pixels to
+  37–39 pixels.
 - installed packaged-extension E2E: a fresh disposable Firefox profile used a
   trusted click on the real popup, the registered native host, the installed
   daemon, cached clean-image reuse, and HSK 5 correction to finish 11 regions

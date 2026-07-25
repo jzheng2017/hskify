@@ -13,12 +13,12 @@ installed native companion. A pending row is not release evidence.
 | Strict TypeScript/WXT typecheck | Passed | `npm run typecheck` |
 | Firefox MV3 production build | Passed | `npm run build` |
 | Production fixture isolation | Passed | No `data-hmt-fixture`, `hmtFixture`, fixture service, fixture response, or `structuredClone` test marker in `.output/firefox-mv3` |
-| Unit/component suite | Passed | 80 Vitest tests across 19 files |
+| Unit/component suite | Passed | 82 Vitest tests across 19 files |
 | Firefox renderer harness | Passed | 6 Playwright tests |
 | Long raster decode | Passed | Firefox decoded the query-string 900×16,000 WebP |
 | Long-reader discovery | Passed | Exactly 20 chapter images selected among 154 images; cover/comments/avatars excluded |
 | Live Asura page pipeline | Passed | Nano Machine chapter 100 page 1: 11 English bubble regions, non-bubble SFX retained, 217 s, 4.75 GiB peak working set |
-| Live production renderer | Passed | 11 selectable Chinese regions over the actual clean 800×11,470 WebP; zero degraded fits |
+| Live production renderer | Passed | 11 selectable Chinese regions over the actual clean 800×11,470 WebP; zero overflow/degraded fits, minimum 6.9 px conservative inset |
 | Installed packaged-extension E2E | Passed | Fresh disposable Firefox used the real popup, registered native host, installed daemon, cached clean page, and HSK 5 correction; 11 selectable regions, zero degraded fits, 186.7 s |
 | Direct and ancestor click delivery | Passed | Original image listener once and reader ancestor once; selected text suppresses navigation |
 | Corrupt/stale renderer safety | Passed | Decode failure and an awaited stale font path leave the original unchanged |

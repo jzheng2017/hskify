@@ -88,6 +88,15 @@ the original image opacity changed to zero only after completion, and the page
 HUD reported `1 of 1 images translated`. This run did not touch the user's
 normal Firefox profile.
 
+The renderer was subsequently tightened after human review found that using
+the complete bubble hull made several Chinese overlays visually oversized.
+Replaying the actual page now falls back to each original OCR text polygon when
+the supplied safe polygon is identical to the bubble hull, reserves an inner
+margin, and permits proportional shrinking below the old fixed floor. All 11
+regions measured zero DOM overflow and zero degraded fits; the minimum inset
+inside the conservative text regions was 6.9 CSS pixels, and the crowded long
+bubbles dropped from roughly 50–52 pixel fonts to 37–39 pixels.
+
 Acceptance images and chapter bytes remain in the ignored local `.cache`
 directory; no chapter artwork or derived translation is committed.
 

@@ -7,6 +7,7 @@ import {
   RectangleTextFitter,
   horizontalPolygonSpan,
   isLegalLineBreak,
+  minimumFontSizeForImage,
   nearbyLineCandidates,
 } from '../../src/rendering/fitting'
 
@@ -33,6 +34,10 @@ describe('rectangle and polygon-aware text fitting', () => {
     expect(isLegalLineBreak('我们', '现在')).toBe(true)
     const candidates = nearbyLineCandidates('你好，世界！', [])
     expect(candidates.flat().some((line) => line.startsWith('，'))).toBe(false)
+    const spaced = nearbyLineCandidates('面对那 6 个氏族', [])
+    expect(
+      spaced.flat().some((line) => /^\s|\s$/u.test(line)),
+    ).toBe(false)
   })
 
   it('computes usable spans for irregular polygons', () => {
@@ -66,6 +71,68 @@ describe('rectangle and polygon-aware text fitting', () => {
     expect(polygon.fontSize).toBeGreaterThanOrEqual(8)
     expect(rectangle.lines.join('')).toBe(region.displayedChinese)
     expect(polygon.lines.join('')).toBe(region.displayedChinese)
+  })
+
+  it('keeps font sizing proportional below the old eight-pixel floor', () => {
+    const polygon = [
+      { x: 0, y: 0 },
+      { x: 1, y: 0 },
+      { x: 1, y: 1 },
+      { x: 0, y: 1 },
+    ]
+    const region: BrowserRegion = {
+      ...fixtureRegion(),
+      displayedChinese: '中',
+      textPolygon: polygon,
+      bubblePolygon: polygon,
+      layout: {
+        ...fixtureRegion().layout,
+        safePolygon: polygon,
+        suggestedLines: [],
+        fontSizeToImageWidth: 0.02,
+      },
+    }
+
+    const fit = new RectangleTextFitter().fit(region, 160, 160)
+    expect(fit.fontSize).toBeCloseTo(3.2)
+    expect(fit.fontSize).toBeLessThan(8)
+    expect(minimumFontSizeForImage(160)).toBeLessThan(fit.fontSize)
+  })
+
+  it('reserves an inner margin instead of fitting against the bubble outline', () => {
+    const bubble = [
+      { x: 0, y: 0 },
+      { x: 1, y: 0 },
+      { x: 1, y: 1 },
+      { x: 0, y: 1 },
+    ]
+    const textPolygon = [
+      { x: 0.25, y: 0.2 },
+      { x: 0.75, y: 0.2 },
+      { x: 0.75, y: 0.8 },
+      { x: 0.25, y: 0.8 },
+    ]
+    const region: BrowserRegion = {
+      ...fixtureRegion(),
+      displayedChinese: '中'.repeat(35),
+      textPolygon,
+      bubblePolygon: bubble,
+      layout: {
+        ...fixtureRegion().layout,
+        safePolygon: bubble,
+        suggestedLines: [],
+        fontSizeToImageWidth: 0.1,
+      },
+    }
+
+    const fit = new PolygonTextFitter().fit(region, 100, 100)
+    expect(fit.fontSize).toBeLessThan(10)
+    expect(
+      Math.max(...fit.lines.map((line) => [...line].length)) * fit.fontSize,
+    ).toBeLessThanOrEqual(44)
+    expect(
+      fit.lines.length * fit.fontSize * region.style.lineHeight,
+    ).toBeLessThanOrEqual(52.8)
   })
 
   it('supports vertical text without converting all regions to vertical', () => {

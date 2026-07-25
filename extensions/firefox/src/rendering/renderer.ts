@@ -8,7 +8,11 @@ import {
   rectDifference,
   type ImageGeometry,
 } from './geometry'
-import { PolygonTextFitter } from './fitting'
+import {
+  fitPolygonForRegion,
+  minimumFontSizeForImage,
+  PolygonTextFitter,
+} from './fitting'
 import { applyRegionStyle } from './style'
 
 const MAX_LAYOUT_SHIFT_PX = 2
@@ -47,7 +51,7 @@ const RENDERER_CSS = `
   cursor: text;
   display: flex;
   justify-content: center;
-  overflow: visible;
+  overflow: hidden;
   pointer-events: auto;
   position: absolute;
   text-rendering: geometricPrecision;
@@ -175,7 +179,7 @@ function setRect(element: HTMLElement, rect: { left: number; top: number; width:
 }
 
 function setPercentRegion(element: HTMLElement, region: BrowserRegion): void {
-  const points = region.layout.safePolygon ?? region.bubblePolygon ?? region.textPolygon
+  const points = fitPolygonForRegion(region)
   const bounds = polygonBounds(points)
   element.style.left = `${bounds.minX * 100}%`
   element.style.top = `${bounds.minY * 100}%`
@@ -405,7 +409,7 @@ export class RenderedImage {
       }
       const minimumFontSize = Math.min(
         measuredFontSize,
-        Math.max(8, this.geometry.image.width * 0.009),
+        minimumFontSizeForImage(this.geometry.image.width),
       )
       while (
         measuredFontSize > minimumFontSize &&

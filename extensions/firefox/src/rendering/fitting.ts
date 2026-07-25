@@ -3,6 +3,9 @@ import { polygonBounds, type Bounds } from './geometry'
 
 const CLOSING_PUNCTUATION = new Set([...'，。！？；：、）》】」』”’…'])
 const OPENING_PUNCTUATION = new Set([...'（《【「『“‘'])
+const FIT_CONTENT_RATIO = 0.88
+const MINIMUM_FONT_TO_IMAGE_WIDTH = 0.006
+const ABSOLUTE_MINIMUM_FONT_PX = 1
 
 export type TextFit = {
   fontSize: number
@@ -31,6 +34,8 @@ export function isLegalLineBreak(left: string, right: string): boolean {
   const previous = [...left].at(-1)
   const next = [...right][0]
   return !(
+    (previous !== undefined && /\s/u.test(previous)) ||
+    (next !== undefined && /\s/u.test(next)) ||
     (previous !== undefined && OPENING_PUNCTUATION.has(previous)) ||
     (next !== undefined && CLOSING_PUNCTUATION.has(next))
   )
@@ -51,7 +56,7 @@ function breakAtIndices(text: string, indices: readonly number[]): string[] {
 export function nearbyLineCandidates(
   text: string,
   suggested: readonly string[],
-  maximumLines = 4,
+  maximumLines = 6,
 ): string[][] {
   const characters = [...text]
   const candidates: string[][] = []
@@ -120,8 +125,29 @@ export function horizontalPolygonSpan(points: readonly Point[], y: number): numb
   return Math.max(0, span)
 }
 
+function samePolygon(left: readonly Point[], right: readonly Point[]): boolean {
+  return (
+    left.length === right.length &&
+    left.every(
+      (point, index) =>
+        Math.abs(point.x - (right[index]?.x ?? Number.NaN)) < 1e-6 &&
+        Math.abs(point.y - (right[index]?.y ?? Number.NaN)) < 1e-6,
+    )
+  )
+}
+
+export function fitPolygonForRegion(region: BrowserRegion): readonly Point[] {
+  const safe = region.layout.safePolygon
+  const bubble = region.bubblePolygon
+  // The current production companion may use the complete bubble hull as its
+  // "safe" polygon. That includes outlines and tails, so keep translated text
+  // in the original OCR text area until a genuinely inset polygon is supplied.
+  if (safe && (!bubble || !samePolygon(safe, bubble))) return safe
+  return region.textPolygon
+}
+
 function regionBox(region: BrowserRegion, imageWidth: number, imageHeight: number): FitBox {
-  const points = region.layout.safePolygon ?? region.bubblePolygon ?? region.textPolygon
+  const points = fitPolygonForRegion(region)
   const bounds = polygonBounds(points)
   return {
     ...bounds,
@@ -139,11 +165,17 @@ function rectangleFits(
   const lineHeight = fontSize * region.style.lineHeight
   if (region.style.writingMode === 'vertical-rl') {
     const longest = Math.max(...lines.map((line) => [...line].length), 1)
-    return longest * lineHeight <= box.pixelHeight && lines.length * fontSize <= box.pixelWidth
+    return (
+      longest * lineHeight <= box.pixelHeight * FIT_CONTENT_RATIO &&
+      lines.length * fontSize <= box.pixelWidth * FIT_CONTENT_RATIO
+    )
   }
   const width = Math.max(...lines.map(estimatedLineUnits), 0) * fontSize
   const height = lines.length * lineHeight
-  return width <= box.pixelWidth && height <= box.pixelHeight
+  return (
+    width <= box.pixelWidth * FIT_CONTENT_RATIO &&
+    height <= box.pixelHeight * FIT_CONTENT_RATIO
+  )
 }
 
 function polygonFits(
@@ -157,7 +189,7 @@ function polygonFits(
     return rectangleFits(lines, fontSize, box, region)
   }
   const lineHeight = fontSize * region.style.lineHeight
-  if (lines.length * lineHeight > box.pixelHeight) return false
+  if (lines.length * lineHeight > box.pixelHeight * FIT_CONTENT_RATIO) return false
   const topInset = (box.pixelHeight - lines.length * lineHeight) / 2
   return lines.every((line, index) => {
     const normalizedY =
@@ -165,12 +197,19 @@ function polygonFits(
       ((topInset + (index + 0.5) * lineHeight) / Math.max(1, box.pixelHeight)) *
         box.height
     const availablePixels = horizontalPolygonSpan(points, normalizedY) * imageWidthFromBox(box)
-    return estimatedLineUnits(line) * fontSize <= availablePixels * 0.94
+    return estimatedLineUnits(line) * fontSize <= availablePixels * FIT_CONTENT_RATIO
   })
 }
 
 function imageWidthFromBox(box: FitBox): number {
   return box.width > 0 ? box.pixelWidth / box.width : 0
+}
+
+export function minimumFontSizeForImage(imageWidth: number): number {
+  return Math.max(
+    ABSOLUTE_MINIMUM_FONT_PX,
+    imageWidth * MINIMUM_FONT_TO_IMAGE_WIDTH,
+  )
 }
 
 function chooseFit(
@@ -181,10 +220,13 @@ function chooseFit(
 ): TextFit {
   const text = region.displayedChinese
   const box = regionBox(region, imageWidth, imageHeight)
-  const points = region.layout.safePolygon ?? region.bubblePolygon ?? region.textPolygon
+  const points = fitPolygonForRegion(region)
   const candidates = nearbyLineCandidates(text, region.layout.suggestedLines)
-  const initial = Math.max(8, region.layout.fontSizeToImageWidth * imageWidth)
-  const minimum = Math.min(initial, Math.max(8, imageWidth * 0.009))
+  const initial = Math.max(
+    ABSOLUTE_MINIMUM_FONT_PX,
+    region.layout.fontSizeToImageWidth * imageWidth,
+  )
+  const minimum = Math.min(initial, minimumFontSizeForImage(imageWidth))
   let best: TextFit | undefined
   for (const lines of candidates) {
     for (let fontSize = initial; fontSize >= minimum; fontSize -= 0.5) {
@@ -224,12 +266,7 @@ export class RectangleTextFitter {
 }
 
 export class PolygonTextFitter {
-  private readonly rectangle = new RectangleTextFitter()
-
   fit(region: BrowserRegion, imageWidth: number, imageHeight: number): TextFit {
-    const rectangle = this.rectangle.fit(region, imageWidth, imageHeight)
-    const polygon = region.layout.safePolygon ?? region.bubblePolygon
-    if (!polygon) return rectangle
     return chooseFit(region, imageWidth, imageHeight, true)
   }
 }
