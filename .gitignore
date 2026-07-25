@@ -44,9 +44,14 @@ target/
 # model checkpoints
 /models
 .env
+.env.*
+!.env.example
+!.env.*.example
 
 # Python
 .venv/
+__pycache__/
+*.py[cod]
 
 # Tauri
 gen/
@@ -59,6 +64,8 @@ test-results/
 
 # Misc
 AGENTS.md
+Thumbs.db
+Desktop.ini
 
 # Zensical
 site/
