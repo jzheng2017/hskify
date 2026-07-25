@@ -13,7 +13,7 @@ export default defineConfig({
     optional_host_permissions: ['http://*/*', 'https://*/*'],
     browser_specific_settings: {
       gecko: {
-        id: 'hsk-manga-translator@local.mangalations',
+        id: 'hsk-manga-translator@local.hskify',
         strict_min_version: '128.0',
         data_collection_permissions: {
           required: ['none'],

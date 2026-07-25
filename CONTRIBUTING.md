@@ -1,21 +1,38 @@
-# Contributing
+# Contributing to Hskify
 
-Thank you for your interest in contributing to Koharu!
+Thank you for helping improve Hskify.
 
-> [!IMPORTANT]
-> Please read the complete contributing guide on the [website](https://koharu.rs/contribute/introduction/).
+Before making a change, use the [documentation index](docs/README.md) to find
+the relevant design notes. Changes that affect component ownership, browser
+protocols, security checks, resource bounds, upstream Koharu code, or bundled
+data should include corresponding documentation or an architecture decision
+record.
 
-Please check out our [good first issues](https://github.com/mayocream/koharu/contribute) or ask for guidance on [Discord](https://discord.gg/mHvHkxGnUY).
+Useful starting points:
 
-We welcome and appreciate any form of contributions.
+- [Architecture overview](docs/architecture.md)
+- [Maintainer guide](docs/maintainer-guide.md)
+- [Firefox manual test checklist](docs/firefox-manual-test-checklist.md)
+- [Licence inventory](docs/licence-inventory.md)
 
-## AI Usage Policy
+Keep Hskify-specific behavior in the Firefox extension,
+`browser-companion`, or `hsk-control` where possible. Shared pipeline changes
+belong at the nearest Koharu layer and need a regression test. The
+[maintainer guide](docs/maintainer-guide.md) explains how to keep those changes
+reviewable during upstream synchronization.
 
-When using AI tools (including LLMs like ChatGPT, Claude, Copilot, etc.) to contribute to Koharu:
+Production models and language datasets must not be added without an
+item-by-item licence and redistribution review. Do not commit downloaded
+artifacts or reader content.
 
-- **Please disclose AI usage** to reduce maintainer fatigue
-- **You are responsible** for all AI-generated issues or PRs you submit
-- **Low-quality or unreviewed AI content will be closed immediately**
-- **Contributors who submit repeated low-quality ("slop") PRs will be banned without prior warning.** Bans may be lifted if you commit to contributing to Koharu in accordance with this policy. You may request an unban via our [Discord](https://discord.gg/mHvHkxGnUY).
+## AI usage
 
-We encourage the use of AI tools to assist with development, but all contributions must be thoroughly reviewed and tested by the contributor before submission. AI-generated code should be understood, validated, and adapted to meet Koharu's standards.
+AI-assisted contributions are welcome when the contributor:
+
+- discloses material AI use;
+- understands and reviews every submitted change;
+- runs appropriate tests and reports their actual results; and
+- does not submit generated content, code, or claims that have not been
+  validated.
+
+Contributors remain responsible for everything they submit.

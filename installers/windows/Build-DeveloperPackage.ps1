@@ -108,7 +108,7 @@ function Assert-ReplaceableOutputDirectory {
     if (
         $marker.bundleFormatVersion -ne 1 -or
         $marker.product -ne 'HSK Manga Translator' -or
-        $marker.nativeHostName -ne 'local.mangalations.hsk_manga'
+        $marker.nativeHostName -ne 'local.hskify.hsk_manga'
     ) {
         throw "refusing to replace a populated directory with an invalid HSK bundle marker: $Path"
     }
@@ -270,7 +270,7 @@ if ($firefoxManifest.manifest_version -ne 3) {
     throw 'Firefox extension archive must use Manifest V3'
 }
 $extensionId = [string] $firefoxManifest.browser_specific_settings.gecko.id
-if ($extensionId -ne 'hsk-manga-translator@local.mangalations') {
+if ($extensionId -ne 'hsk-manga-translator@local.hskify') {
     throw "Firefox extension archive has the wrong permanent ID: $extensionId"
 }
 
@@ -377,8 +377,8 @@ $bundleManifest = [ordered]@{
     bundleFormatVersion = 1
     product = 'HSK Manga Translator'
     version = [string] $firefoxManifest.version
-    nativeHostName = 'local.mangalations.hsk_manga'
-    firefoxExtensionId = 'hsk-manga-translator@local.mangalations'
+    nativeHostName = 'local.hskify.hsk_manga'
+    firefoxExtensionId = 'hsk-manga-translator@local.hskify'
     standardPackId = $standardPackId
     resources = [ordered]@{
         hskBundled = $hskBundled

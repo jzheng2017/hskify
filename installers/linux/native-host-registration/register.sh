@@ -20,17 +20,17 @@ if [ ! -f "$host_path" ] || [ ! -x "$host_path" ] || [ "$(basename "$host_path")
 fi
 
 manifest_directory="${HOME}/.mozilla/native-messaging-hosts"
-manifest_path="${manifest_directory}/local.mangalations.hsk_manga.json"
+manifest_path="${manifest_directory}/local.hskify.hsk_manga.json"
 escaped_path=$(printf '%s' "$host_path" | sed 's/\\/\\\\/g; s/"/\\"/g')
 umask 077
 mkdir -p "$manifest_directory"
 {
     printf '%s\n' '{'
-    printf '%s\n' '  "name": "local.mangalations.hsk_manga",'
+    printf '%s\n' '  "name": "local.hskify.hsk_manga",'
     printf '%s\n' '  "description": "HSK Manga Translator local browser companion",'
     printf '  "path": "%s",\n' "$escaped_path"
     printf '%s\n' '  "type": "stdio",'
-    printf '%s\n' '  "allowed_extensions": ["hsk-manga-translator@local.mangalations"]'
+    printf '%s\n' '  "allowed_extensions": ["hsk-manga-translator@local.hskify"]'
     printf '%s\n' '}'
 } > "$manifest_path"
 chmod 600 "$manifest_path"

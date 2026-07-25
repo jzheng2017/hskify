@@ -17,8 +17,8 @@ Date: 2026-07-24
   `koharu_app::pipeline::run` path as the application and completed against the
   committed synthetic fixture.
 - The permanent extension ID is
-  `hsk-manga-translator@local.mangalations`; the native host is
-  `local.mangalations.hsk_manga`.
+  `hsk-manga-translator@local.hskify`; the native host is
+  `local.hskify.hsk_manga`.
 
 ## Development-machine audit
 

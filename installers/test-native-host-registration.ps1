@@ -4,7 +4,7 @@ $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $registerScript = Join-Path $repositoryRoot 'installers\windows\native-host-registration\Register-NativeHost.ps1'
 $unregisterScript = Join-Path $repositoryRoot 'installers\windows\native-host-registration\Unregister-NativeHost.ps1'
 $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) ('hsk-manga-registration-' + [Guid]::NewGuid().ToString('N'))
-$testRegistryPath = 'HKCU:\Software\Mangalations\HSKMangaTranslator\Tests\' + [Guid]::NewGuid().ToString('N')
+$testRegistryPath = 'HKCU:\Software\Hskify\HSKMangaTranslator\Tests\' + [Guid]::NewGuid().ToString('N')
 $previousLocalAppData = $env:LOCALAPPDATA
 
 try {

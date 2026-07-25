@@ -24,10 +24,10 @@ pub use contracts::{
 };
 
 /// Permanent Firefox add-on ID frozen by ADR 0001.
-pub const FIREFOX_EXTENSION_ID: &str = "hsk-manga-translator@local.mangalations";
+pub const FIREFOX_EXTENSION_ID: &str = "hsk-manga-translator@local.hskify";
 
 /// Native host name frozen by ADR 0001.
-pub const NATIVE_HOST_NAME: &str = "local.mangalations.hsk_manga";
+pub const NATIVE_HOST_NAME: &str = "local.hskify.hsk_manga";
 
 /// Browser protocol header name.
 pub const PROTOCOL_HEADER: &str = "x-hsk-manga-protocol";

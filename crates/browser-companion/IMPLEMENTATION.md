@@ -45,9 +45,9 @@ UUID still matches.
 ## Security boundary
 
 - The native host accepts only the manifest whose name is
-  `local.mangalations.hsk_manga`, whose executable resolves to the running
+  `local.hskify.hsk_manga`, whose executable resolves to the running
   binary, and whose sole allowed add-on is
-  `hsk-manga-translator@local.mangalations`.
+  `hsk-manga-translator@local.hskify`.
 - Every handshake issues a newly generated, unpadded base64url 256-bit token
   with an explicit expiration. Browser tokens are bound to the exact canonical
   `moz-extension://` origin from that handshake.
@@ -112,7 +112,7 @@ cancellation atomic used by Koharu so a worker cannot revive a cancelled
 state.
 
 Translation resources are loaded lazily from
-`%LOCALAPPDATA%\Mangalations\HSKMangaTranslator\resources`:
+`%LOCALAPPDATA%\Hskify\HSKMangaTranslator\resources`:
 
 ```text
 hsk-2.0.normalized.json

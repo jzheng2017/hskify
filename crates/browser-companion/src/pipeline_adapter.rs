@@ -306,7 +306,7 @@ fn default_resource_root() -> Option<PathBuf> {
         .map(PathBuf::from)
         .or_else(dirs::data_local_dir)
         .map(|root| {
-            root.join("Mangalations")
+            root.join("Hskify")
                 .join("HSKMangaTranslator")
                 .join("resources")
         })

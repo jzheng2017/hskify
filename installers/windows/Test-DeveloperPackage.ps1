@@ -3,7 +3,7 @@ Set-StrictMode -Version Latest
 
 $buildScript = Join-Path $PSScriptRoot 'Build-DeveloperPackage.ps1'
 $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) ('hsk-manga-package-' + [Guid]::NewGuid().ToString('N'))
-$testRegistryPath = 'HKCU:\Software\Mangalations\HSKMangaTranslator\Tests\' + [Guid]::NewGuid().ToString('N')
+$testRegistryPath = 'HKCU:\Software\Hskify\HSKMangaTranslator\Tests\' + [Guid]::NewGuid().ToString('N')
 $previousLocalAppData = $env:LOCALAPPDATA
 
 function Assert-True {
@@ -38,7 +38,7 @@ try {
         version = '0.1.0'
         browser_specific_settings = [ordered]@{
             gecko = [ordered]@{
-                id = 'hsk-manga-translator@local.mangalations'
+                id = 'hsk-manga-translator@local.hskify'
             }
         }
     }
@@ -183,7 +183,7 @@ try {
         -Condition ($bundleManifest.resources.expectedModelSha256 -eq $modelHash) `
         -Message 'bundle recorded the wrong selected model SHA-256'
 
-    $productRoot = Join-Path $env:LOCALAPPDATA 'Mangalations\HSKMangaTranslator'
+    $productRoot = Join-Path $env:LOCALAPPDATA 'Hskify\HSKMangaTranslator'
     & powershell `
         -NoProfile `
         -ExecutionPolicy Bypass `
@@ -209,10 +209,10 @@ try {
         -Condition (Test-Path -LiteralPath $nativeManifestPath -PathType Leaf) `
         -Message 'install did not create the native-host manifest'
     $nativeManifest = Get-Content -LiteralPath $nativeManifestPath -Raw | ConvertFrom-Json
-    Assert-True -Condition ($nativeManifest.name -eq 'local.mangalations.hsk_manga') -Message 'wrong native-host name'
+    Assert-True -Condition ($nativeManifest.name -eq 'local.hskify.hsk_manga') -Message 'wrong native-host name'
     Assert-True -Condition ($nativeManifest.path -eq $installedNativeHost) -Message 'native manifest does not point at the installed host'
     Assert-True `
-        -Condition (@($nativeManifest.allowed_extensions).Count -eq 1 -and $nativeManifest.allowed_extensions[0] -eq 'hsk-manga-translator@local.mangalations') `
+        -Condition (@($nativeManifest.allowed_extensions).Count -eq 1 -and $nativeManifest.allowed_extensions[0] -eq 'hsk-manga-translator@local.hskify') `
         -Message 'native manifest allows the wrong Firefox extension'
 
     $stateCache = Join-Path $productRoot 'browser-companion-v1\browser-cache-v1'

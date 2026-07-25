@@ -5,11 +5,11 @@ The per-user installer runs `Register-NativeHost.ps1` with the absolute path to
 user's local application-data directory and registers its absolute path at:
 
 ```text
-HKCU\Software\Mozilla\NativeMessagingHosts\local.mangalations.hsk_manga
+HKCU\Software\Mozilla\NativeMessagingHosts\local.hskify.hsk_manga
 ```
 
 The manifest permits exactly
-`hsk-manga-translator@local.mangalations`. Uninstall runs
+`hsk-manga-translator@local.hskify`. Uninstall runs
 `Unregister-NativeHost.ps1`; daemon cache/state cleanup belongs to the main
 companion uninstaller.
 

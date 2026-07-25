@@ -6,7 +6,7 @@ import {
 } from '../contracts/browser'
 import type { StorageArea } from './settings'
 
-export const NATIVE_HOST_NAME = 'local.mangalations.hsk_manga'
+export const NATIVE_HOST_NAME = 'local.hskify.hsk_manga'
 export const SESSION_STORAGE_KEY = 'hmt.nativeSession'
 const EXPIRY_SAFETY_WINDOW_MS = 5_000
 

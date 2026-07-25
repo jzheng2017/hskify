@@ -11,7 +11,7 @@
       },
     },
     "extensions/firefox": {
-      "name": "@mangalations/firefox",
+      "name": "@hskify/firefox",
       "version": "0.1.0",
       "devDependencies": {
         "@playwright/test": "1.61.1",
@@ -376,7 +376,7 @@
 
     "@lukeed/csprng": ["@lukeed/csprng@1.1.0", "", {}, "sha512-Z7C/xXCiGWsg0KuKsHTKJxbWhpI3Vs5GwLfOean7MGyVFGqdRgBbAjOCh6u4bbjPc/8MJ2pZmK/0DLdCbivLDA=="],
 
-    "@mangalations/firefox": ["@mangalations/firefox@workspace:extensions/firefox"],
+    "@hskify/firefox": ["@hskify/firefox@workspace:extensions/firefox"],
 
     "@mdn/browser-compat-data": ["@mdn/browser-compat-data@8.0.4", "", {}, "sha512-up6DsNsaPt3jq5d2TGx4UOXIqBKU0D86dxWwcVmmOOEYqP1rFaV1XcAcwHxMvb6bbtMfY5JpjUCszzy/aVc4yA=="],
 

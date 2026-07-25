@@ -83,7 +83,7 @@ pub enum DiscoveryError {
 pub fn default_state_dir() -> Result<PathBuf, DiscoveryError> {
     let base = dirs::data_local_dir().ok_or(DiscoveryError::NoUserDataDirectory)?;
     Ok(base
-        .join("Mangalations")
+        .join("Hskify")
         .join("HSKMangaTranslator")
         .join("browser-companion-v1"))
 }

@@ -879,7 +879,7 @@ mod tests {
         use koharu_runtime::{ComputePolicy, RuntimeManager, default_app_data_root};
 
         let model_path = PathBuf::from(
-            r"C:\Users\Jiankai\Documents\mangalations\.cache\model-benchmark\Qwen3.5-4B-Q4_K_M.gguf",
+            r"C:\Users\Jiankai\Documents\hskify\.cache\model-benchmark\Qwen3.5-4B-Q4_K_M.gguf",
         );
         if !model_path.is_file() {
             bail!("smoke model is missing at `{}`", model_path.display());

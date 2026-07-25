@@ -10,13 +10,13 @@ The existing scripts under `native-host-registration` remain the authority for
 the exact Firefox native host:
 
 ```text
-local.mangalations.hsk_manga
+local.hskify.hsk_manga
 ```
 
 and its one allowed extension:
 
 ```text
-hsk-manga-translator@local.mangalations
+hsk-manga-translator@local.hskify
 ```
 
 ## Build
@@ -84,7 +84,7 @@ dist\hsk-manga-translator-windows\
   native-host-registration\
     Register-NativeHost.ps1
     Unregister-NativeHost.ps1
-    local.mangalations.hsk_manga.json.template
+    local.hskify.hsk_manga.json.template
     README.md
   resources\
     hsk-2.0.normalized.json                 # only when supplied
@@ -109,17 +109,17 @@ powershell -ExecutionPolicy Bypass -File .\dist\hsk-manga-translator-windows\Ins
 The installed application is under:
 
 ```text
-%LOCALAPPDATA%\Mangalations\HSKMangaTranslator\app
+%LOCALAPPDATA%\Hskify\HSKMangaTranslator\app
 ```
 
 The production resource contract is:
 
 ```text
-%LOCALAPPDATA%\Mangalations\HSKMangaTranslator\resources\hsk-2.0.normalized.json
-%LOCALAPPDATA%\Mangalations\HSKMangaTranslator\resources\cc-cedict.normalized.json
-%LOCALAPPDATA%\Mangalations\HSKMangaTranslator\resources\models\Qwen3.5-4B-Q4_K_M.gguf
-%LOCALAPPDATA%\Mangalations\HSKMangaTranslator\resources\fonts\NotoSansSC-VF.ttf
-%LOCALAPPDATA%\Mangalations\HSKMangaTranslator\resources\fonts\NotoSerifSC-VF.ttf
+%LOCALAPPDATA%\Hskify\HSKMangaTranslator\resources\hsk-2.0.normalized.json
+%LOCALAPPDATA%\Hskify\HSKMangaTranslator\resources\cc-cedict.normalized.json
+%LOCALAPPDATA%\Hskify\HSKMangaTranslator\resources\models\Qwen3.5-4B-Q4_K_M.gguf
+%LOCALAPPDATA%\Hskify\HSKMangaTranslator\resources\fonts\NotoSansSC-VF.ttf
+%LOCALAPPDATA%\Hskify\HSKMangaTranslator\resources\fonts\NotoSerifSC-VF.ttf
 ```
 
 The installer verifies staged file hashes, copies the bundle, and invokes the
@@ -129,7 +129,7 @@ the packaged Firefox extension location.
 Uninstall with:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\Mangalations\HSKMangaTranslator\app\Uninstall.ps1"
+powershell -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\Hskify\HSKMangaTranslator\app\Uninstall.ps1"
 ```
 
 Uninstall stops only a recorded daemon whose executable path exactly matches

@@ -1,9 +1,9 @@
 [CmdletBinding()]
 param(
     [string] $BundleRoot,
-    [string] $ProductRoot = (Join-Path $env:LOCALAPPDATA 'Mangalations\HSKMangaTranslator'),
+    [string] $ProductRoot = (Join-Path $env:LOCALAPPDATA 'Hskify\HSKMangaTranslator'),
     [Parameter(DontShow = $true)]
-    [string] $RegistryPath = 'HKCU:\Software\Mozilla\NativeMessagingHosts\local.mangalations.hsk_manga'
+    [string] $RegistryPath = 'HKCU:\Software\Mozilla\NativeMessagingHosts\local.hskify.hsk_manga'
 )
 
 Set-StrictMode -Version Latest
@@ -60,8 +60,8 @@ $bundleManifest = Get-Content -LiteralPath $bundleManifestPath -Raw | ConvertFro
 if (
     $bundleManifest.bundleFormatVersion -ne 1 -or
     $bundleManifest.product -ne 'HSK Manga Translator' -or
-    $bundleManifest.nativeHostName -ne 'local.mangalations.hsk_manga' -or
-    $bundleManifest.firefoxExtensionId -ne 'hsk-manga-translator@local.mangalations'
+    $bundleManifest.nativeHostName -ne 'local.hskify.hsk_manga' -or
+    $bundleManifest.firefoxExtensionId -ne 'hsk-manga-translator@local.hskify'
 ) {
     throw 'the bundle manifest does not identify the frozen HSK Manga Translator product'
 }

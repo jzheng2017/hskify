@@ -30,8 +30,8 @@ contracts and adapters are isolated under `crates/browser-companion` and
 The permanent Firefox extension ID and native host name are:
 
 ```text
-hsk-manga-translator@local.mangalations
-local.mangalations.hsk_manga
+hsk-manga-translator@local.hskify
+local.hskify.hsk_manga
 ```
 
 Protocol version 1 is frozen by the fixtures in `fixtures/contracts`.
@@ -45,3 +45,7 @@ Protocol version 1 is frozen by the fixtures in `fixtures/contracts`.
   layer and covered by a regression test.
 - Model and dataset redistribution still requires a separate item-by-item
   licence audit.
+
+See the [Hskify architecture overview](../architecture.md) and
+[maintainer guide](../maintainer-guide.md) for the current ownership boundary
+and upstream synchronization procedure.

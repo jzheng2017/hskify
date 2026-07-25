@@ -61,7 +61,7 @@ fn native_binary_handshake_uses_prestarted_daemon() {
         thread::sleep(Duration::from_millis(25));
     };
 
-    let manifest_path = directory.path().join("local.mangalations.hsk_manga.json");
+    let manifest_path = directory.path().join("local.hskify.hsk_manga.json");
     std::fs::write(
         &manifest_path,
         serde_json::to_vec(&json!({

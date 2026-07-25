@@ -1,8 +1,8 @@
 [CmdletBinding()]
 param(
-    [string] $ProductRoot = (Join-Path $env:LOCALAPPDATA 'Mangalations\HSKMangaTranslator'),
+    [string] $ProductRoot = (Join-Path $env:LOCALAPPDATA 'Hskify\HSKMangaTranslator'),
     [Parameter(DontShow = $true)]
-    [string] $RegistryPath = 'HKCU:\Software\Mozilla\NativeMessagingHosts\local.mangalations.hsk_manga',
+    [string] $RegistryPath = 'HKCU:\Software\Mozilla\NativeMessagingHosts\local.hskify.hsk_manga',
     [switch] $KeepCache
 )
 
@@ -38,7 +38,7 @@ if ($hasInstalledApp) {
     if (
         $bundleManifest.bundleFormatVersion -ne 1 -or
         $bundleManifest.product -ne 'HSK Manga Translator' -or
-        $bundleManifest.nativeHostName -ne 'local.mangalations.hsk_manga'
+        $bundleManifest.nativeHostName -ne 'local.hskify.hsk_manga'
     ) {
         throw "refusing to remove an application directory with an unexpected marker: $appRoot"
     }

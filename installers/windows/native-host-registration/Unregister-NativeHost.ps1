@@ -1,10 +1,10 @@
 param(
     [Parameter(DontShow = $true)]
-    [string] $RegistryPath = 'HKCU:\Software\Mozilla\NativeMessagingHosts\local.mangalations.hsk_manga'
+    [string] $RegistryPath = 'HKCU:\Software\Mozilla\NativeMessagingHosts\local.hskify.hsk_manga'
 )
 
 $ErrorActionPreference = 'Stop'
-$manifestPath = Join-Path $env:LOCALAPPDATA 'Mangalations\HSKMangaTranslator\native-host\local.mangalations.hsk_manga.json'
+$manifestPath = Join-Path $env:LOCALAPPDATA 'Hskify\HSKMangaTranslator\native-host\local.hskify.hsk_manga.json'
 
 if (Test-Path -LiteralPath $RegistryPath) {
     Remove-Item -LiteralPath $RegistryPath -Force

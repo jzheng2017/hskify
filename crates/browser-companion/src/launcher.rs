@@ -301,7 +301,7 @@ mod tests {
     use serde_json::json;
 
     fn manifest(directory: &Path, executable: &Path) -> PathBuf {
-        let path = directory.join("local.mangalations.hsk_manga.json");
+        let path = directory.join("local.hskify.hsk_manga.json");
         std::fs::write(
             &path,
             serde_json::to_vec(&json!({
