@@ -1,4 +1,10 @@
 import type { LookupRequest, LookupResult } from '../contracts/browser'
+import {
+  MandarinSpeaker,
+  type SpeechState,
+  type SpeechStateListener,
+  type TextSpeaker,
+} from './speech'
 
 export type LookupCallback = (request: LookupRequest) => Promise<LookupResult>
 export type PrimaryClickForwarder = (event: MouseEvent) => void
@@ -18,12 +24,14 @@ export class SelectionController {
   private readonly regions = new Map<HTMLElement, SelectionRegion>()
   private requestRevision = 0
   private destroyed = false
+  private speechOwner: SpeechStateListener | undefined
 
   constructor(
     private readonly root: ShadowRoot,
     private readonly popover: HTMLElement,
     private readonly lookup: LookupCallback,
     private readonly forwardPrimaryClick?: PrimaryClickForwarder,
+    private readonly speaker: TextSpeaker = new MandarinSpeaker(),
   ) {
     root.addEventListener('mouseup', this.onSelectionComplete)
     root.addEventListener('keyup', this.onKeyUp)
@@ -39,7 +47,7 @@ export class SelectionController {
 
   destroy(): void {
     this.destroyed = true
-    this.requestRevision += 1
+    this.dismiss()
     this.root.removeEventListener('mouseup', this.onSelectionComplete)
     this.root.removeEventListener('keyup', this.onKeyUp)
     this.root.removeEventListener('copy', this.onCopy)
@@ -49,6 +57,13 @@ export class SelectionController {
       region.element.removeEventListener('keydown', this.onRegionKeyDown)
     }
     this.regions.clear()
+  }
+
+  dismiss(): void {
+    this.requestRevision += 1
+    this.popover.hidden = true
+    if (this.speechOwner) this.speaker.stop(this.speechOwner)
+    this.speechOwner = undefined
   }
 
   private selectedRegion(): {
@@ -74,7 +89,7 @@ export class SelectionController {
   private readonly onPointerDown = (event: Event): void => {
     const target = event.target
     if (target instanceof Node && !this.popover.contains(target)) {
-      this.popover.hidden = true
+      this.dismiss()
     }
   }
 
@@ -96,11 +111,25 @@ export class SelectionController {
     }
   }
 
-  private readonly onSelectionComplete = (): void => {
+  private readonly onSelectionComplete = (event: Event): void => {
+    const target = nodeElement(event.target instanceof Node ? event.target : null)
+    if (
+      !target ||
+      ![...this.regions.values()].some((region) => region.element.contains(target))
+    ) {
+      return
+    }
     queueMicrotask(() => void this.showSelection())
   }
 
-  private readonly onKeyUp = (): void => {
+  private readonly onKeyUp = (event: Event): void => {
+    const target = nodeElement(event.target instanceof Node ? event.target : null)
+    if (
+      !target ||
+      ![...this.regions.values()].some((region) => region.element.contains(target))
+    ) {
+      return
+    }
     queueMicrotask(() => void this.showSelection())
   }
 
@@ -133,15 +162,24 @@ export class SelectionController {
 
   private async showSelection(): Promise<void> {
     const selected = this.selectedRegion()
-    if (!selected || this.destroyed) return
+    if (!selected || this.destroyed) {
+      if (!this.destroyed) this.dismiss()
+      return
+    }
     const selectedText = this.selectedText(selected).trim()
-    if (!selectedText || [...selectedText].length > 256) return
+    if (!selectedText || [...selectedText].length > 256) {
+      this.dismiss()
+      return
+    }
     const revision = ++this.requestRevision
+    this.speaker.stop()
+    this.speechOwner = undefined
     this.popover.hidden = false
     this.popover.replaceChildren()
+    const heading = this.createSpeechHeading(selectedText)
     const loading = document.createElement('span')
     loading.textContent = 'Looking up…'
-    this.popover.append(loading)
+    this.popover.append(heading, loading)
     const rangeRect = selected.range.getBoundingClientRect()
     const hostRect = this.root.host.getBoundingClientRect()
     this.popover.style.left = `${Math.max(4, rangeRect.left - hostRect.left)}px`
@@ -153,10 +191,12 @@ export class SelectionController {
         regionId: selected.region.regionId,
       })
       if (revision !== this.requestRevision || this.destroyed) return
-      this.renderResult(result)
+      this.renderResult(result, selectedText)
     } catch {
       if (revision !== this.requestRevision || this.destroyed) return
+      const heading = this.popover.querySelector<HTMLElement>('.hmt-lookup-heading')
       this.popover.replaceChildren()
+      if (heading) this.popover.append(heading)
       const message = document.createElement('span')
       message.textContent = 'Dictionary lookup unavailable.'
       this.popover.append(message)
@@ -172,10 +212,79 @@ export class SelectionController {
     return selected.range.cloneContents().textContent ?? selected.selection.toString()
   }
 
-  private renderResult(result: LookupResult): void {
+  private createSpeechHeading(spokenText: string): HTMLElement {
+    const heading = document.createElement('div')
+    heading.className = 'hmt-lookup-heading'
+    const selectedText = document.createElement('strong')
+    selectedText.textContent = spokenText
+    const speak = document.createElement('button')
+    speak.type = 'button'
+    speak.className = 'hmt-speak'
+    const available = this.speaker.isAvailable()
+    speak.textContent = available ? 'Listen' : 'Voice unavailable'
+    speak.disabled = !available
+    speak.setAttribute('aria-pressed', 'false')
+    speak.setAttribute('aria-live', 'polite')
+    speak.setAttribute(
+      'aria-label',
+      available ? 'Listen to Mandarin pronunciation' : 'Mandarin voice unavailable',
+    )
+    speak.title = speak.disabled
+      ? 'Mandarin speech is not available in this Firefox profile.'
+      : 'Play Mandarin pronunciation using the best available local voice.'
+    const updateSpeechState = (state: SpeechState): void => {
+      if (!speak.isConnected) return
+      const active = state === 'loading' || state === 'speaking'
+      const runtimeAvailable = this.speaker.isAvailable()
+      speak.disabled = state === 'unavailable' && !runtimeAvailable
+      speak.textContent =
+        state === 'loading'
+          ? 'Loading…'
+          : state === 'speaking'
+            ? 'Stop'
+            : state === 'unavailable'
+              ? runtimeAvailable
+                ? 'Retry voice'
+                : 'Voice unavailable'
+              : state === 'error'
+                ? 'Try again'
+                : 'Listen'
+      speak.setAttribute('aria-pressed', String(active))
+      speak.setAttribute('aria-busy', String(state === 'loading'))
+      speak.title =
+        state === 'unavailable'
+          ? 'Install or enable a local Simplified Chinese voice, then restart Firefox.'
+          : state === 'error'
+            ? 'Mandarin pronunciation could not play. Click to try again.'
+            : 'Play Mandarin pronunciation using the best available local voice.'
+      speak.setAttribute(
+        'aria-label',
+        state === 'loading'
+          ? 'Loading Mandarin voice; activate to cancel'
+          : state === 'speaking'
+            ? 'Stop Mandarin pronunciation'
+            : state === 'unavailable'
+              ? runtimeAvailable
+                ? 'Retry voice for Mandarin pronunciation'
+                : 'Mandarin voice unavailable'
+              : state === 'error'
+                ? 'Try again: Mandarin pronunciation'
+                : 'Listen to Mandarin pronunciation',
+      )
+    }
+    this.speechOwner = updateSpeechState
+    speak.addEventListener('click', () => {
+      this.speaker.toggle(spokenText, updateSpeechState)
+    })
+    heading.append(selectedText, speak)
+    return heading
+  }
+
+  private renderResult(result: LookupResult, selectedText: string): void {
+    const heading =
+      this.popover.querySelector<HTMLElement>('.hmt-lookup-heading') ??
+      this.createSpeechHeading(selectedText)
     this.popover.replaceChildren()
-    const heading = document.createElement('strong')
-    heading.textContent = result.selectedText
     this.popover.append(heading)
     for (const token of result.tokens) {
       const entry = document.createElement('div')

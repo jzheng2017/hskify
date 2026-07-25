@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { DiscoveredImage } from '../../src/discovery/images'
 import { createFixtureResult } from '../../src/messaging/fixture-service'
 import { SelectableRenderer } from '../../src/rendering/renderer'
+import type { TextSpeaker } from '../../src/selection/speech'
 import { loadedImage, pngHeader } from '../helpers/images'
 
 class TestResizeObserver {
@@ -200,7 +201,7 @@ describe('selectable image renderer', () => {
     const image = loadedImage()
     document.body.append(image)
     const lookup = vi.fn(async (request) => ({
-      selectedText: request.selectedText,
+      selectedText: `untrusted-${request.selectedText}`,
       tokens: [
         {
           simplified: '离开',
@@ -216,10 +217,22 @@ describe('selectable image renderer', () => {
         sourceEnglish: 'We have to leave now!',
       },
     }))
+    let speaking = false
+    const speaker: TextSpeaker = {
+      isAvailable: () => true,
+      toggle: vi.fn((_text, onStateChange) => {
+        speaking = !speaking
+        onStateChange(speaking ? 'speaking' : 'idle')
+      }),
+      stop: vi.fn(() => {
+        speaking = false
+      }),
+    }
     const rendered = await new SelectableRenderer(
       { fetchFont: async () => new ArrayBuffer(0), lookup },
       TestResizeObserver as unknown as typeof ResizeObserver,
       decodeFixtureImage,
+      speaker,
     ).render(candidate(image), fixturePayload())
     const shadow = shadowOf(rendered.wrapper)
     const region = shadow.querySelector<HTMLElement>('.hmt-region')
@@ -242,6 +255,61 @@ describe('selectable image renderer', () => {
     const popover = shadow.querySelector<HTMLElement>('.hmt-lookup')
     await vi.waitFor(() => expect(popover?.textContent).toContain('lí kāi'))
     expect(popover?.textContent).toContain('We have to leave now!')
+    const speak = popover?.querySelector<HTMLButtonElement>('.hmt-speak')
+    expect(speak?.textContent).toBe('Listen')
+    speak?.click()
+    expect(speaker.toggle).toHaveBeenCalledWith('我们', expect.any(Function))
+    expect(popover?.textContent).not.toContain('untrusted-我们')
+    expect(speak?.textContent).toBe('Stop')
+    expect(speak?.getAttribute('aria-pressed')).toBe('true')
+    speak?.click()
+    expect(speak?.textContent).toBe('Listen')
+    expect(speak?.getAttribute('aria-pressed')).toBe('false')
+  })
+
+  it('offers pronunciation while dictionary lookup is pending and keeps it on failure', async () => {
+    const image = loadedImage()
+    document.body.append(image)
+    let rejectLookup!: (reason: unknown) => void
+    const lookup = vi.fn(
+      () =>
+        new Promise<never>((_resolve, reject) => {
+          rejectLookup = reject
+        }),
+    )
+    const speaker: TextSpeaker = {
+      isAvailable: () => true,
+      toggle: vi.fn((_text, onStateChange) => onStateChange('speaking')),
+      stop: vi.fn(),
+    }
+    const rendered = await new SelectableRenderer(
+      { fetchFont: async () => new ArrayBuffer(0), lookup },
+      TestResizeObserver as unknown as typeof ResizeObserver,
+      decodeFixtureImage,
+      speaker,
+    ).render(candidate(image), fixturePayload())
+    const shadow = shadowOf(rendered.wrapper)
+    const region = shadow.querySelector<HTMLElement>('.hmt-region')
+    if (!region) throw new Error('Fixture region missing.')
+    const range = document.createRange()
+    range.selectNodeContents(region)
+    window.getSelection()?.removeAllRanges()
+    window.getSelection()?.addRange(range)
+    region.dispatchEvent(new Event('mouseup', { bubbles: true, composed: true }))
+
+    await vi.waitFor(() => expect(lookup).toHaveBeenCalled())
+    const popover = shadow.querySelector<HTMLElement>('.hmt-lookup')
+    const speak = popover?.querySelector<HTMLButtonElement>('.hmt-speak')
+    expect(popover?.textContent).toContain('Looking up…')
+    speak?.click()
+    expect(speaker.toggle).toHaveBeenCalledWith('我们现在要走！', expect.any(Function))
+
+    rejectLookup(new Error('dictionary offline'))
+    await vi.waitFor(() =>
+      expect(popover?.textContent).toContain('Dictionary lookup unavailable.'),
+    )
+    expect(speak?.isConnected).toBe(true)
+    expect(speak?.textContent).toBe('Stop')
   })
 
   it('refits on resize and restores the exact original node', async () => {

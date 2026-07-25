@@ -138,6 +138,13 @@ Selected text, controls, and the dictionary popover suppress reader navigation.
 Copy reads the selected range's text content so visual line spans add no hidden
 English or layout whitespace.
 
+The lookup popover also has a Listen/Stop control for the exact selected
+Chinese. It uses the Web Speech API with `zh-CN`, preferring a Mainland
+Mandarin voice and then natural/neural voice variants when Firefox exposes
+them. Playback is delegated to Firefox and the operating system, so no speech
+model, service key, extension permission, or companion memory is added. The
+installed voice ultimately determines audio quality.
+
 ## Synthetic browser fixtures
 
 The browser pages use actual generated PNG/WebP assets, not SVG page inputs or
@@ -169,7 +176,7 @@ npm run lint:extension
 Latest evidence for this branch:
 
 - strict TypeScript/WXT typecheck: passed;
-- Vitest: 82 tests passed across 19 files;
+- Vitest: 91 tests passed across 20 files;
 - Playwright Firefox renderer harness: 6 tests passed;
 - WXT Firefox MV3 production build: passed;
 - production-output fixture-marker scan: no matches;

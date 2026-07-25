@@ -29,6 +29,21 @@ test('renders exact selectable Chinese and dictionary context', async ({ page })
   await regions.first().focus()
   await page.keyboard.press('Control+A')
   expect(await page.evaluate(() => window.getSelection()?.toString())).toBe('我们现在要走！')
+
+  const speak = page.locator('.hmt-speak')
+  await expect(speak).toHaveAttribute(
+    'aria-label',
+    'Listen to Mandarin pronunciation',
+  )
+  await speak.click()
+  await expect(speak).toHaveAttribute('aria-pressed', 'true')
+  await expect(speak).toHaveText(/Loading…|Stop/)
+
+  const original = page.locator('.hmt-controls button', { hasText: 'Original' })
+  await original.focus()
+  await page.keyboard.press('Enter')
+  await expect(page.locator('.hmt-lookup')).toBeHidden()
+  await expect(speak).toHaveAttribute('aria-pressed', 'false')
 })
 
 test('keeps reader navigation for clicks and suppresses only selection clicks', async ({

@@ -1,6 +1,7 @@
 import type { BrowserJobResult, BrowserRegion, LookupRequest, LookupResult } from '../contracts/browser'
 import type { DiscoveredImage } from '../discovery/images'
 import { SelectionController } from '../selection/popover'
+import { MandarinSpeaker, type TextSpeaker } from '../selection/speech'
 import { FontLoader, type FontFetcher } from './font-loader'
 import {
   calculateImageGeometry,
@@ -120,6 +121,37 @@ const RENDERER_CSS = `
   z-index: 6;
 }
 .hmt-lookup[hidden] { display: none; }
+.hmt-lookup-heading {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+}
+.hmt-speak {
+  appearance: none;
+  background: #eff6ff;
+  border: 1px solid #93c5fd;
+  border-radius: 999px;
+  color: #1d4ed8;
+  cursor: pointer;
+  flex: none;
+  font: 600 11px/1 system-ui, sans-serif;
+  padding: 6px 9px;
+}
+.hmt-speak[aria-pressed="true"] {
+  background: #1d4ed8;
+  color: #fff;
+}
+.hmt-speak:focus-visible {
+  outline: 2px solid #2563eb;
+  outline-offset: 2px;
+}
+.hmt-speak:disabled {
+  background: #f3f4f6;
+  border-color: #d1d5db;
+  color: #6b7280;
+  cursor: not-allowed;
+}
 .hmt-lookup-entry,
 .hmt-lookup-context {
   border-top: 1px solid #e5e7eb;
@@ -275,6 +307,7 @@ export class RenderedImage {
     shadowRoot: ShadowRoot,
     popover: HTMLElement,
     fontFamilies: Map<string, string>,
+    speaker: TextSpeaker,
     private readonly resizeObserver?: ResizeObserver,
   ) {
     for (const region of payload.result.regions) {
@@ -303,6 +336,7 @@ export class RenderedImage {
       popover,
       callbacks.lookup,
       this.forwardPrimaryClick,
+      speaker,
     )
     for (const view of this.regions) {
       this.selection.register(view.element, payload.result.jobId, view.region.id)
@@ -368,6 +402,7 @@ export class RenderedImage {
 
   setMode(mode: 'chinese' | 'original'): void {
     this.mode = mode
+    if (mode === 'original') this.selection.dismiss()
     this.originalButton.setAttribute('aria-pressed', String(mode === 'original'))
     this.chineseButton.setAttribute('aria-pressed', String(mode === 'chinese'))
     this.applyVisualMode(mode)
@@ -475,6 +510,7 @@ export class SelectableRenderer {
       | typeof ResizeObserver
       | undefined = globalThis.ResizeObserver,
     private readonly cleanImageDecoder: CleanImageDecoder = decodeCleanImage,
+    private readonly speaker: TextSpeaker = new MandarinSpeaker(),
   ) {
     this.fontLoader = new FontLoader(callbacks.fetchFont)
   }
@@ -675,6 +711,7 @@ export class SelectableRenderer {
         shadow,
         popover,
         fontFamilies,
+        this.speaker,
         resizeObserver,
       )
     } catch (error) {

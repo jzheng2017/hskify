@@ -1,6 +1,6 @@
 # Firefox extension manual test checklist
 
-Last updated: 2026-07-24
+Last updated: 2026-07-25
 
 This checklist separates completed automated evidence from checks that require
 an installed Firefox extension, an interactive permission prompt, or the
@@ -13,8 +13,9 @@ installed native companion. A pending row is not release evidence.
 | Strict TypeScript/WXT typecheck | Passed | `npm run typecheck` |
 | Firefox MV3 production build | Passed | `npm run build` |
 | Production fixture isolation | Passed | No `data-hmt-fixture`, `hmtFixture`, fixture service, fixture response, or `structuredClone` test marker in `.output/firefox-mv3` |
-| Unit/component suite | Passed | 82 Vitest tests across 19 files |
+| Unit/component suite | Passed | 91 Vitest tests across 20 files |
 | Firefox renderer harness | Passed | 6 Playwright tests |
+| Mandarin speech control | Passed | Unit coverage for `zh-CN` natural/neural voice preference, utterance settings, Listen/Stop state, completion, replacement, and unavailable speech; renderer harness verifies the accessible control |
 | Long raster decode | Passed | Firefox decoded the query-string 900×16,000 WebP |
 | Long-reader discovery | Passed | Exactly 20 chapter images selected among 154 images; cover/comments/avatars excluded |
 | Live Asura page pipeline | Passed | Nano Machine chapter 100 page 1: 11 English bubble regions, non-bubble SFX retained, 217 s, 4.75 GiB peak working set |
@@ -33,6 +34,20 @@ extension or exercise native messaging. The bounded `web-ext run` smoke proves
 that the built manifest starts; it does not prove the popup/native workflow.
 
 ## Interactive packaged-extension checks
+
+### Mandarin pronunciation quality
+
+Status: **Automated behaviour passed; installed voice-quality check pending**
+
+1. Select a full translated Chinese speech bubble and click **Listen**.
+2. Verify the voice uses natural Mainland Mandarin pronunciation, including
+   tones, punctuation pauses, and sentence rhythm.
+3. Click **Stop**, then play another bubble and verify the first utterance
+   stops immediately.
+4. If the result sounds robotic or uses the wrong regional pronunciation,
+   install or enable a higher-quality Simplified Chinese (`zh-CN`) voice in
+   Windows and restart Firefox. The extension automatically prefers voices
+   labelled Natural, Neural, Premium, or Enhanced.
 
 ### Exact optional permission prompt
 
