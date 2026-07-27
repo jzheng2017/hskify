@@ -22,7 +22,12 @@ export type DiscoveryDecision =
 
 export type DiscoveryEvent =
   | { type: 'added'; candidate: DiscoveredImage }
-  | { type: 'updated'; candidate: DiscoveredImage; previousSourceUrl: string }
+  | {
+      type: 'updated'
+      candidate: DiscoveredImage
+      previousSourceUrl: string
+      previousDomIndex: number
+    }
   | { type: 'removed'; candidate: DiscoveredImage }
   | { type: 'visibility'; candidate: DiscoveredImage }
 
@@ -211,7 +216,9 @@ export class ImageDiscovery {
         if (!(entry.target instanceof HTMLImageElement)) continue
         const candidate = this.candidates.get(entry.target)
         if (!candidate) continue
-        const visible = entry.isIntersecting && entry.intersectionRatio > 0
+        // The observer's 20% root margin is useful as an early prefetch signal,
+        // but it must not promote a near-offscreen image to viewport priority.
+        const visible = isRectVisible(entry.boundingClientRect)
         if (candidate.visible !== visible) {
           candidate.visible = visible
           this.onEvent({ type: 'visibility', candidate })
@@ -267,6 +274,17 @@ export class ImageDiscovery {
             type: 'updated',
             candidate,
             previousSourceUrl: previous.sourceUrl,
+            previousDomIndex: previous.domIndex,
+          })
+        } else if (previous.domIndex !== domIndex) {
+          const previousDomIndex = previous.domIndex
+          previous.domIndex = domIndex
+          previous.owner = imageOwner(image)
+          this.onEvent({
+            type: 'updated',
+            candidate: previous,
+            previousSourceUrl: previous.sourceUrl,
+            previousDomIndex,
           })
         }
         return
@@ -288,12 +306,25 @@ export class ImageDiscovery {
         return
       }
       candidate.visible = previous.visible
-      this.candidates.set(image, candidate)
       if (previous.sourceUrl !== candidate.sourceUrl) {
+        this.candidates.set(image, candidate)
         this.onEvent({
           type: 'updated',
           candidate,
           previousSourceUrl: previous.sourceUrl,
+          previousDomIndex: previous.domIndex,
+        })
+        return
+      }
+      const previousDomIndex = previous.domIndex
+      previous.owner = candidate.owner
+      previous.domIndex = candidate.domIndex
+      if (previousDomIndex !== previous.domIndex) {
+        this.onEvent({
+          type: 'updated',
+          candidate: previous,
+          previousSourceUrl: previous.sourceUrl,
+          previousDomIndex,
         })
       }
     })

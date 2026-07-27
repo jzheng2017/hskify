@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [string]$OutputDirectory = ".cache/ch5-product-audit/latest",
-    [int]$HskLevel = 5
+    [int]$HskLevel = 5,
+    [int[]]$PageOrders = @()
 )
 
 $ErrorActionPreference = "Stop"
@@ -147,9 +148,24 @@ try {
     }
 
     $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+    $selectedImages = @($manifest.images | Sort-Object order)
+    if ($PageOrders.Count -gt 0) {
+        $requested = [Collections.Generic.HashSet[int]]::new()
+        foreach ($order in $PageOrders) {
+            if ($order -lt 1 -or $order -gt [int]$manifest.pageCount) {
+                throw "PageOrders contains out-of-range page $order."
+            }
+            if (-not $requested.Add($order)) {
+                throw "PageOrders contains duplicate page $order."
+            }
+        }
+        $selectedImages = @($selectedImages | Where-Object {
+            $requested.Contains([int]$_.order)
+        })
+    }
     $cases = [System.Collections.Generic.List[object]]::new()
     $totalAccepted = 0
-    foreach ($image in ($manifest.images | Sort-Object order)) {
+    foreach ($image in $selectedImages) {
         $sourcePath = Join-Path $sourceRoot $image.file
         $sourceBytes = [System.IO.File]::ReadAllBytes($sourcePath)
         $metadata = [ordered]@{

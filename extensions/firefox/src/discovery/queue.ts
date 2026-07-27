@@ -50,10 +50,16 @@ export class VisibleFirstQueue<T> {
     return this.enqueue(item)
   }
 
-  reprioritize(id: string, visible: boolean): void {
+  reprioritize(id: string, visible: boolean, order?: number): void {
     const item = this.pending.find((entry) => entry.id === id)
-    if (item) item.visible = visible
-    if (this.active?.item.id === id) this.active.item.visible = visible
+    if (item) {
+      item.visible = visible
+      if (order !== undefined) item.order = order
+    }
+    if (this.active?.item.id === id) {
+      this.active.item.visible = visible
+      if (order !== undefined) this.active.item.order = order
+    }
     this.sort()
     this.preemptOffscreenForVisible()
   }

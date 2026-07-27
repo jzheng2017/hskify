@@ -365,6 +365,9 @@ describe('progressive selectable image renderer', () => {
       sourceWidth: 1200,
       sourceHeight: 1800,
     })
+    expect(image.parentNode).toBe(document.body)
+    expect(document.body.children[1]).toBe(image)
+    expect(rendered.wrapper.parentNode).toBe(document.body)
     await expect(
       rendered.installRegion(fixtureRegions()[0]!, pngHeader()),
     ).rejects.toMatchObject({ code: 'PATCH_DECODE_FAILED' })

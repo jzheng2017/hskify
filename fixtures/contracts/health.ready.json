@@ -5,6 +5,30 @@
   "setupState": "ready",
   "resourceIdentities": [
     {
+      "id": "comic-text-bubble-detector-config",
+      "repository": "ogkalu/comic-text-and-bubble-detector",
+      "repositoryRevision": "16e8a622f91fabc6b5b65c96d32d1183f8843546",
+      "filename": "config.json",
+      "bytes": 2320,
+      "sha256": "b6d707933e12e9593a7025604be1c95add70a6db371fdd1532e8854e2256e072"
+    },
+    {
+      "id": "comic-text-bubble-detector-preprocessor-config",
+      "repository": "ogkalu/comic-text-and-bubble-detector",
+      "repositoryRevision": "16e8a622f91fabc6b5b65c96d32d1183f8843546",
+      "filename": "preprocessor_config.json",
+      "bytes": 470,
+      "sha256": "7e9e2245806aa3ef068a5321f5eebee3116fa4cec560173231954ffaca930eca"
+    },
+    {
+      "id": "comic-text-bubble-detector-weights",
+      "repository": "ogkalu/comic-text-and-bubble-detector",
+      "repositoryRevision": "16e8a622f91fabc6b5b65c96d32d1183f8843546",
+      "filename": "model.safetensors",
+      "bytes": 171543900,
+      "sha256": "037930a861e67870eb345be01b28cc70d7e2b7956528e48ee0ebdb0c093df80d"
+    },
+    {
       "id": "pp-ocr-v5-english-recognizer-config",
       "repository": "PaddlePaddle/en_PP-OCRv5_mobile_rec_onnx",
       "repositoryRevision": "3fafbc3b5dcf93dd72add9f48368be8a3a2cd33b",
@@ -19,14 +43,6 @@
       "filename": "inference.onnx",
       "bytes": 7848423,
       "sha256": "b5f833dfc5d0eb71da397b4efa06ebeee9b431b690a47d6af40d77d8eabc557f"
-    },
-    {
-      "id": "pp-ocr-v5-mobile-detector-model",
-      "repository": "PaddlePaddle/PP-OCRv5_mobile_det_onnx",
-      "repositoryRevision": "e6f4fa85f00e168c862bc462aebca69eef9b3d3d",
-      "filename": "inference.onnx",
-      "bytes": 4826518,
-      "sha256": "a431985659dc921974177a95adcfbb90fd9e51989a5e04d70d0b75f597b6e61d"
     },
     {
       "id": "translation-model",

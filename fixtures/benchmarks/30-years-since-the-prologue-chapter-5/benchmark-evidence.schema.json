@@ -654,7 +654,6 @@
         "cancellationTimingMs",
         "resourceEvidence",
         "residentReuseEvidence",
-        "detectorCorrectness",
         "correctness",
         "jobRequestEvidence",
         "runtimeModelResourceIdentityEvidence",
@@ -700,40 +699,6 @@
         },
         "residentReuseEvidence": {
           "type": "object"
-        },
-        "detectorCorrectness": {
-          "type": "object",
-          "required": [
-            "evidenceFile",
-            "provenance",
-            "metricDefinitions",
-            "totals",
-            "gates",
-            "status"
-          ],
-          "properties": {
-            "evidenceFile": {
-              "type": "object"
-            },
-            "provenance": {
-              "type": "object"
-            },
-            "metricDefinitions": {
-              "type": "object"
-            },
-            "totals": {
-              "type": "object"
-            },
-            "gates": {
-              "type": "array",
-              "items": {
-                "$ref": "#/$defs/gate"
-              }
-            },
-            "status": {
-              "const": "pass"
-            }
-          }
         },
         "correctness": {
           "$ref": "#/$defs/correctness"

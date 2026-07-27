@@ -73,7 +73,7 @@ The script verifies the exact target GPU and driver API, provisions pinned
 portable CMake and CUDA compiler components under `.cache`, and builds only the
 Windows x86_64 MSVC release binaries with the required `cuda` feature. After a
 successful build it writes the ignored
-`target\x86_64-pc-windows-msvc\release\hskify-performance-build-attestation.json`.
+`target\release\hskify-performance-build-attestation.json`.
 That attestation freezes the complete tracked/untracked source-tree identity,
 tool versions, CUDA/llama.cpp configuration, exact hardware identity, and both
 binary hashes. A failed build never produces a new attestation.

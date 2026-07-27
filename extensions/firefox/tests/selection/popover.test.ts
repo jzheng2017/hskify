@@ -27,9 +27,11 @@ function fixture() {
   const root = host.attachShadow({ mode: 'open' })
   const region = document.createElement('span')
   region.textContent = '恩里克，谢尔盖耶维奇，英雄党前小偷。'
+  const outside = document.createElement('span')
+  outside.textContent = 'Untranslated page text'
   const popover = document.createElement('span')
   popover.hidden = true
-  root.append(region, popover)
+  root.append(region, outside, popover)
   vi.spyOn(host, 'getBoundingClientRect').mockReturnValue(rect(100, 0, 720, 1000))
   vi.spyOn(region, 'getBoundingClientRect').mockReturnValue(rect(220, 100, 520, 300))
   vi.spyOn(popover, 'getBoundingClientRect').mockReturnValue(
@@ -44,10 +46,14 @@ function fixture() {
   const range = document.createRange()
   range.setStart(region.firstChild!, 0)
   range.setEnd(region.firstChild!, 3)
+  Object.defineProperty(range, 'getBoundingClientRect', {
+    configurable: true,
+    value: () => rect(240, 150, 120, 24),
+  })
   const selection = window.getSelection()!
   selection.removeAllRanges()
   selection.addRange(range)
-  return { controller, host, lookup, popover, region, selection }
+  return { controller, host, lookup, outside, popover, range, region, selection }
 }
 
 describe('selection popover', () => {
@@ -63,6 +69,21 @@ describe('selection popover', () => {
     item.host.remove()
   })
 
+  it('positions outside the union of the selected range and translated region', async () => {
+    const item = fixture()
+    Object.defineProperty(item.range, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => rect(200, 90, 560, 340),
+    })
+    item.region.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, composed: true }))
+
+    await vi.waitFor(() => expect(item.lookup).toHaveBeenCalledTimes(1))
+    expect(item.popover.style.left).toBe('100px')
+    expect(item.popover.style.top).toBe('438px')
+    item.controller.destroy()
+    item.host.remove()
+  })
+
   it('dismisses when the selection is collapsed', async () => {
     const item = fixture()
     item.region.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, composed: true }))
@@ -71,6 +92,25 @@ describe('selection popover', () => {
     item.selection.removeAllRanges()
     document.dispatchEvent(new Event('selectionchange'))
     await vi.waitFor(() => expect(item.popover.hidden).toBe(true))
+    item.controller.destroy()
+    item.host.remove()
+  })
+
+  it('dismisses and clears the explanation for a cross-boundary selection', async () => {
+    const item = fixture()
+    item.region.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, composed: true }))
+    await vi.waitFor(() => expect(item.popover.hidden).toBe(false))
+
+    const range = document.createRange()
+    range.setStart(item.region.firstChild!, 0)
+    range.setEnd(item.outside.firstChild!, 5)
+    item.selection.removeAllRanges()
+    item.selection.addRange(range)
+    document.dispatchEvent(new Event('selectionchange'))
+
+    await vi.waitFor(() => expect(item.popover.hidden).toBe(true))
+    expect(item.popover.childNodes).toHaveLength(0)
+    expect(item.lookup).toHaveBeenCalledTimes(1)
     item.controller.destroy()
     item.host.remove()
   })

@@ -6,7 +6,7 @@
 
 use std::fmt::Write as _;
 
-pub const DIRECT_HSK_PROMPT_REVISION: &str = "direct-hsk-en-zh-generic-v17-2026-07-27";
+pub const DIRECT_HSK_PROMPT_REVISION: &str = "direct-hsk-en-zh-generic-v19-2026-07-27";
 
 /// Canonical protocol description whose SHA-256 is
 /// [`DIRECT_HSK_PROMPT_HASH`].
@@ -15,8 +15,8 @@ pub const DIRECT_HSK_PROMPT_REVISION: &str = "direct-hsk-en-zh-generic-v17-2026-
 /// the digest so a prompt-semantic change cannot silently reuse cache entries
 /// or benchmark evidence.
 pub const DIRECT_HSK_PROMPT_FINGERPRINT_MATERIAL: &str = "\
-direct-hsk-en-zh-generic-v17-2026-07-27
-primary-system=classify and translate each of exactly {count} numbered OCR sources independently; output reserved [SKIP] only for credits/branding/release or promotion notes/scanner notes/SFX/non-English/gibberish, never for dialogue/thought/narration/story captions/story labels/names/styled emphasis; only supplied preceding translations are reference; translate only meaning explicitly present in that line; preserve sentence and styled-emphasis fragments as fragments; never complete a fragment from another numbered source; response starts 1+tab; exactly {count} non-empty ordered lines 1..{count}; position+one-tab+Chinese-or-[SKIP]; prefer concise natural HSK2.0 level {level}, but accurate natural Chinese wins if simplification changes meaning; preserve every clause/detail, speaker/addressee/participant roles, agency, attachment, causality, modality/certainty/condition, quantities/comparisons, negation, question intent, tone/humour, context-resolved ambiguity, unresolved ambiguity, relationships, pronoun referents, self-corrections in order, and numeric values; follow optional line-local approved-glossary notes only for matching position; no headings/labels/English/explanation/markdown/json/IDs
+    direct-hsk-en-zh-generic-v19-2026-07-27
+primary-system=translate each of exactly {count} numbered OCR sources independently; every source was already accepted as story text by the semantic vision gate, so never classify or skip a line; only supplied preceding translations are reference; translate only meaning explicitly present in that line; preserve sentence and styled-emphasis fragments as fragments; never complete a fragment from another numbered source; response starts 1+tab; exactly {count} non-empty ordered lines 1..{count}; position+one-tab+Chinese; prefer concise natural HSK2.0 level {level}, but accurate natural Chinese wins if simplification changes meaning; preserve every clause/detail, speaker/addressee/participant roles, agency, attachment, causality, modality/certainty/condition, quantities/comparisons, negation, question intent, tone/humour, context-resolved ambiguity, unresolved ambiguity, relationships, pronoun referents, self-corrections in order, and numeric values; follow optional line-local approved-glossary notes only for matching position; no headings/labels/English/explanation/markdown/json/IDs
 primary-user=optional readable preceding-translations heading and dash source=>Chinese reference lines; optional line-specific-note heading with one-based position-tagged notes generated solely from application-supplied approved glossary entries whose exact ASCII English forms occur on that source line, selecting longest nonoverlapping matches; blank separators; English-lines heading; one-based position+tab+untouched-English
 repair-system=one accurate natural HSK2.0 level {level} Chinese line; prefer requested vocabulary unless simplification changes meaning; fix all problems; preserve every clause/detail, roles, agency, causality, modality, quantities/comparisons, negation, question intent, tone/humour, ambiguity, self-corrections, approved-substituted-Chinese-glossary-forms, and numeric values; no position/label/tab/English/explanation/markdown/json/ID
 repair-user=Source/Rejected/Problems/Answer readable fields; matching approved Chinese glossary forms substituted directly in Source
@@ -28,17 +28,17 @@ repair=at-most-one-per-rejected-bubble-no-context-no-primary-retry";
 // Filled from the exact UTF-8 bytes of
 // DIRECT_HSK_PROMPT_FINGERPRINT_MATERIAL.
 pub const DIRECT_HSK_PROMPT_HASH: &str =
-    "sha256:ec287e2d5f7ba898f70f80852b98b67e9d2bc25f9e3b0a1fddf1041baab6ef2a";
+    "sha256:385818e986f0bb21cc78d477a6e76d5c25685de6ea1c9ed2deb53a1988986fc3";
 
 /// Shared identity of numbered-line parsing and deterministic preservation
 /// validation used by production and release evidence.
 pub const DIRECT_HSK_VALIDATOR_FINGERPRINT_MATERIAL: &str = "numbered-tab-or-space-parser|\
 fullwidth-ascii|strict-primary-ascii-repair-trigger|source-guided-final-numeric-value-validation-v3-\
-ignore-letter-adjacent-ocr-digits-v1|no-output-rewrite|\
-deterministically-supported-non-story-skip-marker-v2|names|question-fragment-aware-v2|\
+    ignore-letter-adjacent-ocr-digits-v1|deterministic-question-punctuation-v1|\
+all-skip-markers-rejected-v1|names|question-fragment-aware-v2|\
 excessive-han-expansion-v1";
 pub const DIRECT_HSK_VALIDATOR_HASH: &str =
-    "sha256:ca74f50314d77f0048e0a49a5ef050e3a7a7f4e942c6eb7c7e22da75ada6d7d1";
+    "sha256:f8a05b19ee350f8942fbccf58e129a5eec60091e521523d144ca9fabc4ef79ef";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DirectHskContext<'a> {
@@ -55,14 +55,11 @@ pub struct DirectHskName<'a> {
 #[must_use]
 pub fn primary_system_prompt(level: u8, count: usize) -> String {
     format!(
-        "Classify and translate each of the {count} numbered OCR source lines independently. For \
-dialogue, thoughts, narration, story captions, story labels, character or place names, and styled \
-story emphasis, write concise, natural Simplified Chinese for a reader targeting cumulative HSK \
-2.0 level {level}. Write the exact reserved marker `[SKIP]` only when a line is credits, branding, \
-a release or promotion note, a scanner note, a sound effect, non-English OCR, or OCR gibberish. \
-Never skip story text merely because it is a fragment, a short name, or outside a speech balloon. Use only \
-supplied preceding translations as reference; do not use another numbered source to change a \
-line's meaning. Translate only meaning explicitly present in that numbered line. If it is a \
+        "Translate each of the {count} numbered OCR source lines independently into concise, \
+natural Simplified Chinese for a reader targeting cumulative HSK 2.0 level {level}. Every source \
+was already accepted as story text by the semantic vision gate, so never classify or skip a line. \
+Use only supplied preceding translations as reference; do not use another numbered source to \
+change a line's meaning. Translate only meaning explicitly present in that numbered line. If it is a \
 sentence fragment or styled emphasis fragment, keep it as a fragment and never complete it from \
 another numbered source. Prefer vocabulary at or below the requested level and short grammar, but \
 prioritize accurate, natural Chinese whenever simplification would omit or alter meaning. \
@@ -74,8 +71,7 @@ the ambiguity itself when unresolved; and self-corrections in their original ord
 numeric values. If line-specific approved-glossary notes appear, follow only notes carrying that \
 line's position; never apply a note to another line or output the notes. Your response must start \
 with `1\t` and contain exactly {count} non-empty lines numbered 1 through {count} in order. On \
-every line, write the position, one tab character, and only its Simplified Chinese translation or \
-the exact marker `[SKIP]`. \
+every line, write the position, one tab character, and only its Simplified Chinese translation. \
 Do not write headings, labels, English, explanations, Markdown, JSON, or application IDs."
     )
 }
@@ -298,6 +294,9 @@ mod tests {
         assert!(system.contains("start with `1\t`"));
         assert!(system.contains("exactly 2 non-empty lines"));
         assert!(system.contains("numbered 1 through 2 in order"));
+        assert!(system.contains("already accepted as story text"));
+        assert!(system.contains("never classify or skip a line"));
+        assert!(!system.contains("[SKIP]"));
         assert_eq!(
             user,
             "Previous translations (reference only; do not output):\n\
@@ -376,6 +375,8 @@ English lines:\n\
         assert!(system.contains("Preserve complete meaning"));
         assert!(system.contains("ambiguity itself when unresolved"));
         assert!(material.contains("application-supplied approved glossary entries"));
+        assert!(material.contains("every source was already accepted as story text"));
+        assert!(!material.contains("[SKIP]"));
         assert!(!system.contains("chapter"));
         assert!(!material.contains("chapter"));
     }

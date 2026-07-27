@@ -1646,21 +1646,47 @@ async fn create_job(
     let limits = state.config.limits.clone();
     let validation_request = pipeline_request.clone();
     let validation_state = state.clone();
-    let validated = tokio::task::spawn_blocking(move || {
+    let prepared = tokio::task::spawn_blocking(move || {
         let _admission = admission;
-        validate_image_upload(
+        let format = validate_image_upload_identity(&image, &validation_request, &limits)?;
+        let cached = match validation_state.result_cache.load(&validation_request) {
+            Ok(cached) => cached,
+            Err(_) => {
+                validation_state
+                    .result_cache
+                    .invalidate(&validation_request)
+                    .map_err(|_| ApiError::internal())?;
+                None
+            }
+        };
+        if let Some(cached) = cached {
+            return Ok(PreparedUpload::Cached(cached));
+        }
+        let source = decode_image_upload(
             image,
+            format,
             &validation_request,
             &limits,
             &validation_state.decoded_images,
-        )
+        )?;
+        Ok(PreparedUpload::Source(source))
     })
     .await
     .map_err(|_| ApiError::internal())??;
 
+    let (source, cached) = match prepared {
+        PreparedUpload::Cached(cached) => (None, Some(cached)),
+        PreparedUpload::Source(source) => (Some(source), None),
+    };
     let (job_id, record, sink) =
-        state.reserve_uploaded_job(Some(validated.source), create_request.visible_rects)?;
-    tokio::spawn(run_cleaning_job(state, record, pipeline_request, sink));
+        state.reserve_uploaded_job(source, create_request.visible_rects)?;
+    tokio::spawn(run_cleaning_job(
+        state,
+        record,
+        pipeline_request,
+        sink,
+        cached,
+    ));
 
     Ok((
         StatusCode::ACCEPTED,
@@ -1698,16 +1724,16 @@ async fn read_multipart_field(
 }
 
 #[derive(Debug)]
-struct ValidatedUpload {
-    source: Arc<DynamicImage>,
+enum PreparedUpload {
+    Cached(CachedJob),
+    Source(Arc<DynamicImage>),
 }
 
-fn validate_image_upload(
-    image: Vec<u8>,
+fn validate_image_upload_identity(
+    image: &[u8],
     request: &BrowserJobRequest,
     limits: &ServerLimits,
-    decoded_images: &Mutex<DecodedImageCache>,
-) -> Result<ValidatedUpload, ApiError> {
+) -> Result<ImageFormat, ApiError> {
     if image.is_empty() {
         return Err(ApiError::unsupported_media("The source image is empty."));
     }
@@ -1752,6 +1778,38 @@ fn validate_image_upload(
         ));
     }
 
+    let mut decoder_limits = Limits::default();
+    decoder_limits.max_image_width = Some(limits.max_dimension);
+    decoder_limits.max_image_height = Some(limits.max_dimension);
+    decoder_limits.max_alloc = Some(limits.max_decoded_bytes);
+    let mut reader = ImageReader::new(Cursor::new(image));
+    reader.set_format(format);
+    reader.limits(decoder_limits);
+    let (width, height) = reader.into_dimensions().map_err(|_| {
+        ApiError::unsupported_media(
+            "The source image header could not be decoded within safe limits.",
+        )
+    })?;
+    let pixels = u64::from(width) * u64::from(height);
+    if width != request.natural_width
+        || height != request.natural_height
+        || pixels > limits.max_pixels
+    {
+        return Err(ApiError::bad_request(
+            "IMAGE_DIMENSION_MISMATCH",
+            "Image dimensions do not match the job metadata.",
+        ));
+    }
+    Ok(format)
+}
+
+fn decode_image_upload(
+    image: Vec<u8>,
+    format: ImageFormat,
+    request: &BrowserJobRequest,
+    limits: &ServerLimits,
+    decoded_images: &Mutex<DecodedImageCache>,
+) -> Result<Arc<DynamicImage>, ApiError> {
     if let Some(source) = decoded_images
         .lock()
         .expect("decoded image cache lock poisoned")
@@ -1764,7 +1822,7 @@ fn validate_image_upload(
                 "Decoded dimensions do not match the job metadata.",
             ));
         }
-        return Ok(ValidatedUpload { source });
+        return Ok(source);
     }
 
     let mut decoder_limits = Limits::default();
@@ -1793,7 +1851,7 @@ fn validate_image_upload(
         .lock()
         .expect("decoded image cache lock poisoned")
         .insert(request.source_sha256.clone(), source);
-    Ok(ValidatedUpload { source })
+    Ok(source)
 }
 
 async fn run_cleaning_job(
@@ -1801,51 +1859,13 @@ async fn run_cleaning_job(
     record: Arc<JobRecord>,
     request: BrowserJobRequest,
     sink: JobUpdateSink,
+    cached: Option<CachedJob>,
 ) {
     if record.cancel.load(Ordering::Acquire) {
         finish_active(&state, &record);
         return;
     }
 
-    let cache = state.result_cache.clone();
-    let cache_request = request.clone();
-    let cached = match tokio::task::spawn_blocking(move || match cache.load(&cache_request) {
-        Ok(cached) => Ok::<_, anyhow::Error>(cached),
-        Err(_) => {
-            cache.invalidate(&cache_request)?;
-            Ok::<_, anyhow::Error>(None)
-        }
-    })
-    .await
-    {
-        Ok(Ok(cached)) => cached,
-        Ok(Err(_)) => {
-            fail_job(
-                &state,
-                &record,
-                &sink,
-                CleaningError::new(
-                    "CACHE_FAILED",
-                    "The persistent result cache could not be repaired.",
-                ),
-            );
-            finish_active(&state, &record);
-            return;
-        }
-        Err(_) => {
-            fail_job(
-                &state,
-                &record,
-                &sink,
-                CleaningError::new(
-                    "CACHE_FAILED",
-                    "The persistent result cache task did not complete.",
-                ),
-            );
-            finish_active(&state, &record);
-            return;
-        }
-    };
     if let Some(cached) = cached {
         record.release_source();
         let result = replay_cached_job(&sink, cached);
@@ -2354,8 +2374,9 @@ mod tests {
         let (_, record, sink) = state
             .reserve_uploaded_job(None, create_request.visible_rects)
             .unwrap();
+        let cached = state.result_cache.load(&request).unwrap();
 
-        run_cleaning_job(state, record.clone(), request, sink).await;
+        run_cleaning_job(state, record.clone(), request, sink, cached).await;
 
         assert_eq!(pipeline.runs.load(Ordering::Relaxed), 0);
         assert!(record.is_terminal());
@@ -2402,7 +2423,7 @@ mod tests {
             .reserve_uploaded_job(None, create_request.visible_rects)
             .unwrap();
 
-        run_cleaning_job(state, record.clone(), request, sink).await;
+        run_cleaning_job(state, record.clone(), request, sink, None).await;
 
         assert_eq!(pipeline.runs.load(Ordering::Relaxed), 0);
         assert!(record.replay_after(0).updates.iter().any(|update| {
@@ -2436,7 +2457,7 @@ mod tests {
             .reserve_uploaded_job(Some(source), create_request.visible_rects)
             .unwrap();
 
-        run_cleaning_job(state, record.clone(), request, sink).await;
+        run_cleaning_job(state, record.clone(), request, sink, None).await;
 
         assert_eq!(pipeline.runs.load(Ordering::Relaxed), 1);
         let updates = record.replay_after(0).updates;

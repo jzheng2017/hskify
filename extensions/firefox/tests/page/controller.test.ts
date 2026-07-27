@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { DiscoveredImage, DiscoveryEvent } from '../../src/discovery/images'
+import type { VisibleFirstQueue } from '../../src/discovery/queue'
 import { PageTranslationController } from '../../src/page/controller'
 import {
   SelectableRenderer,
@@ -13,6 +14,28 @@ type ControllerInternals = {
   rendered: Map<HTMLImageElement, RenderedImage>
   processed: Set<HTMLImageElement>
   scope: 'visible' | 'all' | undefined
+  queue: VisibleFirstQueue<unknown>
+  queueIds: Map<HTMLImageElement, string>
+  sourceSnapshot(candidate: DiscoveredImage): {
+    generation: number
+    pageSessionId: string
+    navigationUrl: string
+    sourceUrl: string
+    naturalWidth: number
+    naturalHeight: number
+  }
+  assertCurrent(
+    candidate: DiscoveredImage,
+    snapshot: {
+      generation: number
+      pageSessionId: string
+      navigationUrl: string
+      sourceUrl: string
+      naturalWidth: number
+      naturalHeight: number
+    },
+    signal: AbortSignal,
+  ): void
   onDiscovery(event: DiscoveryEvent): void
   checkNavigation(): void
 }
@@ -161,7 +184,7 @@ describe('page controller terminal restoration', () => {
     addTrackedOverlay(controller, page.first, 0, true)
     addTrackedOverlay(controller, page.second, 1, false)
 
-    expect(page.chapter.querySelectorAll('.hmt-wrapper')).toHaveLength(2)
+    expect(document.querySelectorAll('.hmt-wrapper')).toHaveLength(2)
     expect(document.querySelectorAll('[data-hmt-mode-controls="true"]')).toHaveLength(1)
     controller.cancel()
     expectExactChapter(page, expectedHtml, expectedChildren)
@@ -192,11 +215,33 @@ describe('page controller terminal restoration', () => {
       type: 'updated',
       candidate: candidate(page.first, 0),
       previousSourceUrl: 'https://reader.test/page-1.webp',
+      previousDomIndex: 0,
     })
 
     expectExactChapter(page, expected.innerHTML, expectedChildren)
     expect(page.first.getAttribute('src')).toBe(replacement)
     expect(internals.scope).toBeUndefined()
+    controller.destroy()
+  })
+
+  it('updates queued order for a same-source discovery update without ending the run', () => {
+    const page = fixture()
+    const controller = new PageTranslationController()
+    const internals = controller as unknown as ControllerInternals
+    internals.scope = 'all'
+    internals.queueIds.set(page.second, 'queued-second')
+    const reprioritize = vi.spyOn(internals.queue, 'reprioritize')
+    const reordered = candidate(page.second, 0)
+
+    internals.onDiscovery({
+      type: 'updated',
+      candidate: reordered,
+      previousSourceUrl: reordered.sourceUrl,
+      previousDomIndex: 1,
+    })
+
+    expect(reprioritize).toHaveBeenCalledWith('queued-second', true, 0)
+    expect(internals.scope).toBe('all')
     controller.destroy()
   })
 
@@ -210,9 +255,13 @@ describe('page controller terminal restoration', () => {
     const internals = controller as unknown as ControllerInternals
     internals.scope = 'all'
     const originalUrl = location.href
+    const firstCandidate = candidate(page.first, 0)
+    const sourceSnapshot = internals.sourceSnapshot(firstCandidate)
 
     history.pushState({}, '', `${location.pathname}?same-tab-cleanup=1`)
-    internals.checkNavigation()
+    expect(() =>
+      internals.assertCurrent(firstCandidate, sourceSnapshot, new AbortController().signal),
+    ).toThrowError(expect.objectContaining({ name: 'AbortError' }))
     expectExactChapter(page, expectedHtml, expectedChildren)
     expect(internals.scope).toBeUndefined()
 

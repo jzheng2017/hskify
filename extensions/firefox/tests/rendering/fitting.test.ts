@@ -5,6 +5,7 @@ import { createFixtureRegions } from '../../src/messaging/fixture-service'
 import {
   PolygonTextFitter,
   RectangleTextFitter,
+  horizontalPolygonIntervals,
   horizontalPolygonSpan,
   isLegalLineBreak,
   minimumFontSizeForImage,
@@ -61,6 +62,49 @@ describe('rectangle and polygon-aware text fitting', () => {
       { x: 0, y: 1 },
     ]
     expect(horizontalPolygonSpan(excludedMiddle, 0.8)).toBeCloseTo(0.3)
+    expect(horizontalPolygonIntervals(excludedMiddle, 0.8)).toEqual([
+      { left: 0, right: 0.3 },
+      { left: 0.7, right: 1 },
+    ])
+  })
+
+  it('rejects centered lines that miss asymmetric and concave scanline intervals', () => {
+    const shapes = [
+      [
+        { x: 0, y: 0 },
+        { x: 1, y: 0 },
+        { x: 1, y: 1 },
+      ],
+      [
+        { x: 0, y: 0 },
+        { x: 1, y: 0 },
+        { x: 1, y: 1 },
+        { x: 0.7, y: 1 },
+        { x: 0.7, y: 0.3 },
+        { x: 0.3, y: 0.3 },
+        { x: 0.3, y: 1 },
+        { x: 0, y: 1 },
+      ],
+    ]
+
+    for (const polygon of shapes) {
+      const region: BrowserRegion = {
+        ...fixtureRegion(),
+        displayedChinese: '中',
+        textPolygon: polygon,
+        bubblePolygon: polygon,
+        layout: {
+          ...fixtureRegion().layout,
+          safePolygon: polygon,
+          suggestedLines: ['中'],
+          fontSizeToImageWidth: 0.2,
+        },
+      }
+
+      expect(horizontalPolygonSpan(polygon, 0.5)).toBeGreaterThan(0)
+      expect(new RectangleTextFitter().fit(region, 100, 100).fontSize).toBe(20)
+      expect(new PolygonTextFitter().fit(region, 100, 100).fontSize).toBe(0)
+    }
   })
 
   it('fits the frozen fixture in both rectangle and polygon modes', () => {

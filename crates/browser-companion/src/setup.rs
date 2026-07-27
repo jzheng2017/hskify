@@ -40,7 +40,9 @@ const SERIF_FONT_SHA256: &str = "a4aed9985a5916fbf6690456f8732a9fccd517938e35316
 pub(crate) const TRANSLATION_MODEL_ID: &str = "translation-model";
 pub(crate) const OCR_CONFIG_ID: &str = "pp-ocr-v5-english-recognizer-config";
 pub(crate) const OCR_MODEL_ID: &str = "pp-ocr-v5-english-recognizer-model";
-pub(crate) const DETECTOR_MODEL_ID: &str = "pp-ocr-v5-mobile-detector-model";
+pub(crate) const DETECTOR_CONFIG_ID: &str = "comic-text-bubble-detector-config";
+pub(crate) const DETECTOR_PREPROCESSOR_ID: &str = "comic-text-bubble-detector-preprocessor-config";
+pub(crate) const DETECTOR_WEIGHTS_ID: &str = "comic-text-bubble-detector-weights";
 
 #[derive(Debug, Clone)]
 pub(crate) struct ManagedResourcePaths {
@@ -174,9 +176,11 @@ fn model_resources() -> Result<ModelResources> {
     validate_resource_identities(&identities)
         .map_err(|error| anyhow!("invalid resident resource identities: {error}"))?;
     let required_ids = [
+        DETECTOR_CONFIG_ID,
+        DETECTOR_PREPROCESSOR_ID,
+        DETECTOR_WEIGHTS_ID,
         OCR_CONFIG_ID,
         OCR_MODEL_ID,
-        DETECTOR_MODEL_ID,
         TRANSLATION_MODEL_ID,
     ];
     if identities.len() != required_ids.len()
@@ -185,7 +189,7 @@ fn model_resources() -> Result<ModelResources> {
             .map(|identity| identity.id.as_str())
             .ne(required_ids)
     {
-        bail!("embedded model manifest must contain exactly the four required resource identities");
+        bail!("embedded model manifest must contain exactly the six required resource identities");
     }
 
     for resource in &manifest.resource_identities {
@@ -253,9 +257,11 @@ impl ResidentResourcePaths {
         paths: &BTreeMap<String, PathBuf>,
     ) -> Result<Self> {
         for required_id in [
+            DETECTOR_CONFIG_ID,
+            DETECTOR_PREPROCESSOR_ID,
+            DETECTOR_WEIGHTS_ID,
             OCR_CONFIG_ID,
             OCR_MODEL_ID,
-            DETECTOR_MODEL_ID,
             TRANSLATION_MODEL_ID,
         ] {
             if !paths.contains_key(required_id) {
@@ -861,11 +867,54 @@ mod tests {
                 .map(|identity| identity.id.as_str())
                 .collect::<Vec<_>>(),
             [
+                DETECTOR_CONFIG_ID,
+                DETECTOR_PREPROCESSOR_ID,
+                DETECTOR_WEIGHTS_ID,
                 OCR_CONFIG_ID,
                 OCR_MODEL_ID,
-                DETECTOR_MODEL_ID,
                 TRANSLATION_MODEL_ID,
             ]
+        );
+        let detector_config = model
+            .identities
+            .iter()
+            .find(|identity| identity.id == DETECTOR_CONFIG_ID)
+            .unwrap();
+        assert_eq!(
+            detector_config.repository,
+            "ogkalu/comic-text-and-bubble-detector"
+        );
+        assert_eq!(
+            detector_config.repository_revision,
+            "16e8a622f91fabc6b5b65c96d32d1183f8843546"
+        );
+        assert_eq!(detector_config.filename, "config.json");
+        assert_eq!(detector_config.bytes, 2_320);
+        assert_eq!(
+            detector_config.sha256,
+            "b6d707933e12e9593a7025604be1c95add70a6db371fdd1532e8854e2256e072"
+        );
+        let detector_preprocessor = model
+            .identities
+            .iter()
+            .find(|identity| identity.id == DETECTOR_PREPROCESSOR_ID)
+            .unwrap();
+        assert_eq!(detector_preprocessor.filename, "preprocessor_config.json");
+        assert_eq!(detector_preprocessor.bytes, 470);
+        assert_eq!(
+            detector_preprocessor.sha256,
+            "7e9e2245806aa3ef068a5321f5eebee3116fa4cec560173231954ffaca930eca"
+        );
+        let detector_weights = model
+            .identities
+            .iter()
+            .find(|identity| identity.id == DETECTOR_WEIGHTS_ID)
+            .unwrap();
+        assert_eq!(detector_weights.filename, "model.safetensors");
+        assert_eq!(detector_weights.bytes, 171_543_900);
+        assert_eq!(
+            detector_weights.sha256,
+            "037930a861e67870eb345be01b28cc70d7e2b7956528e48ee0ebdb0c093df80d"
         );
         let ocr_config = model
             .identities
@@ -904,25 +953,6 @@ mod tests {
         assert_eq!(
             ocr_model.sha256,
             "b5f833dfc5d0eb71da397b4efa06ebeee9b431b690a47d6af40d77d8eabc557f"
-        );
-        let detector_model = model
-            .identities
-            .iter()
-            .find(|identity| identity.id == DETECTOR_MODEL_ID)
-            .unwrap();
-        assert_eq!(
-            detector_model.repository,
-            "PaddlePaddle/PP-OCRv5_mobile_det_onnx"
-        );
-        assert_eq!(
-            detector_model.repository_revision,
-            "e6f4fa85f00e168c862bc462aebca69eef9b3d3d"
-        );
-        assert_eq!(detector_model.filename, "inference.onnx");
-        assert_eq!(detector_model.bytes, 4_826_518);
-        assert_eq!(
-            detector_model.sha256,
-            "a431985659dc921974177a95adcfbb90fd9e51989a5e04d70d0b75f597b6e61d"
         );
         let translation = model
             .identities

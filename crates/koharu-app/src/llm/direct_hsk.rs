@@ -52,7 +52,7 @@ pub const fn direct_hsk_validator_hash() -> &'static str {
 const MIN_OUTPUT_TOKENS: usize = 24;
 const MAX_OUTPUT_TOKENS: usize = 256;
 const OUTPUT_TOKENS_PER_UTTERANCE: usize = 4;
-const NON_STORY_SKIP_MARKER: &str = "[SKIP]";
+const INVALID_SKIP_MARKER: &str = "[SKIP]";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -114,18 +114,12 @@ pub struct HskTranslationOutcome {
 
 impl HskTranslationOutcome {
     #[must_use]
-    pub fn is_excluded(&self) -> bool {
-        self.text.is_none() && self.issues.is_empty()
-    }
-
-    #[must_use]
     pub fn is_valid(&self) -> bool {
-        self.is_excluded()
-            || (self.issues.is_empty()
-                && self
-                    .text
-                    .as_deref()
-                    .is_some_and(|text| !text.trim().is_empty()))
+        self.issues.is_empty()
+            && self
+                .text
+                .as_deref()
+                .is_some_and(|text| !text.trim().is_empty())
     }
 
     #[must_use]
@@ -778,7 +772,7 @@ fn parse_repair_output(
             issues: vec![HskTranslationIssue::SourceEcho],
         };
     }
-    if line.trim().eq_ignore_ascii_case(NON_STORY_SKIP_MARKER) {
+    if line.trim().eq_ignore_ascii_case(INVALID_SKIP_MARKER) {
         return outcome_from_lines(expected, vec![ParsedLine::Malformed], protected_names);
     }
     let mut outcome = outcome_from_lines(
@@ -838,22 +832,16 @@ fn outcome_from_lines(
             issues: vec![HskTranslationIssue::EmptyTranslation],
         };
     }
-    if text.eq_ignore_ascii_case(NON_STORY_SKIP_MARKER) {
-        if !source_supports_non_story_skip(expected.source_english) {
-            return HskTranslationOutcome {
-                id: expected.id.to_owned(),
-                text: None,
-                issues: vec![HskTranslationIssue::UnsupportedExclusion],
-            };
-        }
+    if text.eq_ignore_ascii_case(INVALID_SKIP_MARKER) {
         return HskTranslationOutcome {
             id: expected.id.to_owned(),
             text: None,
-            issues: Vec::new(),
+            issues: vec![HskTranslationIssue::UnsupportedExclusion],
         };
     }
 
     normalize_full_width_digits(&mut text);
+    normalize_question_punctuation(expected.source_english, &mut text);
     let issues = preservation_issues(expected.source_english, &text, protected_names, false);
     HskTranslationOutcome {
         id: expected.id.to_owned(),
@@ -960,129 +948,6 @@ fn chinese_character_count(text: &str) -> usize {
             )
         })
         .count()
-}
-
-fn source_supports_non_story_skip(source: &str) -> bool {
-    const METADATA_WORDS: &[&str] = &[
-        "chapter",
-        "chapters",
-        "copyright",
-        "credits",
-        "discord",
-        "edited",
-        "editor",
-        "episode",
-        "episodes",
-        "lettered",
-        "letterer",
-        "patreon",
-        "proofread",
-        "proofreader",
-        "redraw",
-        "redrawer",
-        "release",
-        "releases",
-        "scanlated",
-        "scanlation",
-        "scans",
-        "translated",
-        "translation",
-        "translator",
-        "typeset",
-        "typesetter",
-    ];
-    const STRUCTURAL_WORDS: &[&str] = &[
-        "a", "an", "and", "are", "as", "at", "be", "been", "but", "by", "did", "do", "does", "for",
-        "from", "had", "has", "have", "he", "her", "him", "his", "i", "if", "in", "is", "it", "me",
-        "my", "not", "of", "on", "or", "she", "that", "the", "their", "them", "they", "this", "to",
-        "us", "was", "we", "were", "with", "you", "your",
-    ];
-    const SFX_WORDS: &[&str] = &[
-        "ahem", "bam", "bang", "boom", "clang", "clank", "crack", "crash", "gasp", "hic", "hiss",
-        "kaboom", "pow", "slam", "snap", "splash", "swoosh", "thud", "thump", "ugh", "whew",
-        "wham", "whoosh", "zap",
-    ];
-    let lowercase = source.to_lowercase();
-    if lowercase.contains("http")
-        || lowercase.contains("www.")
-        || lowercase.contains(".com")
-        || lowercase.contains(".net")
-        || lowercase.contains('@')
-    {
-        return true;
-    }
-    let words = lowercase
-        .split(|character: char| !character.is_ascii_alphabetic())
-        .filter(|word| !word.is_empty())
-        .collect::<Vec<_>>();
-    if words.is_empty() {
-        return true;
-    }
-    if words.iter().any(|word| {
-        METADATA_WORDS
-            .iter()
-            .any(|metadata| edit_distance_at_most_one(word, metadata))
-    }) {
-        return true;
-    }
-    if words.iter().all(|word| SFX_WORDS.contains(word)) {
-        return true;
-    }
-    let structural = words
-        .iter()
-        .filter(|word| STRUCTURAL_WORDS.contains(word))
-        .count();
-    let strong_structural = words
-        .iter()
-        .filter(|word| word.len() > 1 && STRUCTURAL_WORDS.contains(word))
-        .count();
-    if strong_structural >= 2 {
-        return false;
-    }
-    let one_character_words = words.iter().filter(|word| word.len() == 1).count();
-    let short_words = words.iter().filter(|word| word.len() <= 3).count();
-    (words.len() >= 3 && structural == 0 && one_character_words >= 1)
-        || (words.len() >= 5 && short_words * 5 >= words.len() * 3)
-}
-
-fn edit_distance_at_most_one(left: &str, right: &str) -> bool {
-    if left == right {
-        return true;
-    }
-    let left = left.as_bytes();
-    let right = right.as_bytes();
-    if left.len().abs_diff(right.len()) > 1 {
-        return false;
-    }
-    if left.len() == right.len() {
-        return left
-            .iter()
-            .zip(right)
-            .filter(|(left, right)| left != right)
-            .take(2)
-            .count()
-            <= 1;
-    }
-    let (shorter, longer) = if left.len() < right.len() {
-        (left, right)
-    } else {
-        (right, left)
-    };
-    let mut short_index = 0;
-    let mut long_index = 0;
-    let mut skipped = false;
-    while short_index < shorter.len() && long_index < longer.len() {
-        if shorter[short_index] == longer[long_index] {
-            short_index += 1;
-            long_index += 1;
-        } else if skipped {
-            return false;
-        } else {
-            skipped = true;
-            long_index += 1;
-        }
-    }
-    true
 }
 
 fn normalize_full_width_digits(text: &mut String) {
@@ -1266,6 +1131,21 @@ fn has_question_intent(source_lower: &str) -> bool {
 
 fn has_chinese_question_intent(text: &str) -> bool {
     text.contains('?') || text.contains('？')
+}
+
+fn normalize_question_punctuation(source_english: &str, chinese: &mut String) {
+    if !has_question_intent(&source_english.to_ascii_lowercase())
+        || has_chinese_question_intent(chinese)
+    {
+        return;
+    }
+
+    let trimmed_len = chinese.trim_end().len();
+    chinese.truncate(trimmed_len);
+    while chinese.ends_with(['.', '!', '。', '！']) {
+        chinese.pop();
+    }
+    chinese.push('？');
 }
 
 fn check_cancelled(cancel: &AtomicBool) -> Result<()> {
@@ -1536,7 +1416,7 @@ mod tests {
     }
 
     #[test]
-    fn parser_rejects_reserved_skip_marker_without_source_evidence() {
+    fn parser_rejects_reserved_skip_marker() {
         let input = request();
         let expected = input
             .utterances
@@ -1556,7 +1436,6 @@ mod tests {
             result.items[0].issues,
             vec![HskTranslationIssue::UnsupportedExclusion]
         );
-        assert!(!result.items[0].is_excluded());
         assert!(!result.items[0].is_valid());
         assert!(
             result.items[1..]
@@ -1566,7 +1445,7 @@ mod tests {
     }
 
     #[test]
-    fn parser_only_accepts_skip_when_deterministic_source_evidence_supports_it() {
+    fn parser_rejects_skip_for_every_preaccepted_story_source() {
         let expected = [
             ExpectedUtterance {
                 id: "release-note",
@@ -1583,18 +1462,9 @@ mod tests {
         ];
         let result = parse_numbered_output("1\t[SKIP]\n2\t[skip]\n3\t[SKIP]", &expected, &[]);
 
-        assert!(result.items[0].is_excluded());
-        assert!(result.items[1].is_excluded());
-        assert_eq!(
-            result.items[2].issues,
-            vec![HskTranslationIssue::UnsupportedExclusion]
-        );
-        assert!(source_supports_non_story_skip(
-            "/ dat a Kea / *- c..owb . ii). i"
-        ));
-        assert!(!source_supports_non_story_skip(
-            "broken marks before the DISCIPLE OF THE HERO'S PARTY."
-        ));
+        assert!(result.items.iter().all(|item| {
+            item.issues == vec![HskTranslationIssue::UnsupportedExclusion] && !item.is_valid()
+        }));
     }
 
     #[test]
@@ -1603,10 +1473,9 @@ mod tests {
             id: "story-region",
             source_english: "A real story line.",
         };
-        let outcome = parse_repair_output(NON_STORY_SKIP_MARKER, &expected, &[]);
+        let outcome = parse_repair_output(INVALID_SKIP_MARKER, &expected, &[]);
 
         assert_eq!(outcome.issues, vec![HskTranslationIssue::MalformedLine]);
-        assert!(!outcome.is_excluded());
     }
 
     #[tokio::test]
@@ -1718,6 +1587,22 @@ mod tests {
                 true,
             )
             .is_empty()
+        );
+    }
+
+    #[test]
+    fn parser_restores_unambiguous_question_punctuation_without_regeneration() {
+        let expected = [ExpectedUtterance {
+            id: "question",
+            source_english: "Where does your loyalty lie?",
+        }];
+        let result = parse_numbered_output("1\t你的忠诚在哪里。", &expected, &[]);
+
+        assert_eq!(result.items[0].text.as_deref(), Some("你的忠诚在哪里？"));
+        assert!(
+            !result.items[0]
+                .issues
+                .contains(&HskTranslationIssue::QuestionIntentMissing)
         );
     }
 
@@ -1879,11 +1764,11 @@ mod tests {
     fn cache_metadata_helpers_are_stable_and_layered() {
         assert_eq!(
             direct_hsk_prompt_hash(),
-            "sha256:ec287e2d5f7ba898f70f80852b98b67e9d2bc25f9e3b0a1fddf1041baab6ef2a"
+            "sha256:385818e986f0bb21cc78d477a6e76d5c25685de6ea1c9ed2deb53a1988986fc3"
         );
         assert_eq!(
             direct_hsk_validator_hash(),
-            "sha256:ca74f50314d77f0048e0a49a5ef050e3a7a7f4e942c6eb7c7e22da75ada6d7d1"
+            "sha256:f8a05b19ee350f8942fbccf58e129a5eec60091e521523d144ca9fabc4ef79ef"
         );
         assert_eq!(HSK_TRANSLATION_MODEL, ModelId::Qwen3_5_4b);
         assert_eq!(

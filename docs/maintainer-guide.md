@@ -24,8 +24,15 @@ are broader.
   OCR remain excluded.
 - Color-agnostic local cleanup; no chapter, phrase, coordinate, URL, hash, hue,
   foreground-color, or background-color allowlists.
+- Proposal and OCR acceptance must work for arbitrary foreground/background
+  colors; cleanup must preserve the accepted region's local color, texture,
+  gradients, contours, and styling outside the erase mask.
 - Direct English-to-HSK Chinese primary generation, with at most one targeted
   invalid-item repair batch.
+- Story inclusion is deterministic before the translation-only LLM; the LLM
+  cannot classify or skip accepted text.
+- Viewport priority controls processing and publication only. Stable
+  `readingOrder` remains document order followed by within-image reading order.
 - No browser projects, history, page-level pipeline markers, or level-change
   retranslation.
 - Local pinyin, dictionary, comparison, and Mandarin speech retained.
@@ -40,6 +47,7 @@ the same change.
 | --- | --- |
 | Route, header, or JSON contract | `browser-contract.md`, Rust/TS fixtures, exact fingerprint decision |
 | Tile, batch, viewport, cache, or patch behavior | `architecture.md`, companion implementation, chapter benchmark fields |
+| Admission limit, cache byte ceiling, or thread limit | Architecture resource table, companion defaults, stress/boundary tests |
 | Model, prompt, validator, HSK, or dictionary revision | Cache-key review, model record, evidence environment |
 | GPU/toolchain/runtime change | Performance-build gate and a new separate benchmark configuration |
 | Reader lookup/comparison/speech change | Architecture, Firefox checklist, accessibility/privacy checks |
@@ -58,8 +66,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\Invoke-PerformanceBuild.ps1
 ```
 
 The command writes binaries and
-`hskify-performance-build-attestation.json` under
-`target\x86_64-pc-windows-msvc\release` only after Cargo succeeds. Run the
+`hskify-performance-build-attestation.json` under `target\release` only after
+Cargo succeeds. Run the
 read-only hardware/source/toolchain gate without compiling via
 `-PrerequisitesOnly`.
 

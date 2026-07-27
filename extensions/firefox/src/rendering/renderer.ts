@@ -11,7 +11,6 @@ import { FontLoader, type FontFetcher } from './font-loader'
 import {
   calculateImageGeometry,
   polygonBounds,
-  rectDifference,
   type ImageGeometry,
 } from './geometry'
 import {
@@ -20,8 +19,8 @@ import {
 } from './fitting'
 import { applyRegionStyle } from './style'
 
-const MAX_LAYOUT_SHIFT_PX = 2
 const MEASUREMENT_SEARCH_STEPS = 16
+const FIT_SAFETY_RATIO = 0.98
 type TranslationMode = 'chinese' | 'original'
 
 const RENDERER_CSS = `
@@ -484,8 +483,6 @@ export class RenderedImage {
     private readonly imageSpace: HTMLElement,
     private readonly patchLayer: HTMLElement,
     private readonly textLayer: HTMLElement,
-    private readonly originalParent: Node,
-    private readonly originalNextSibling: Node | null,
     private readonly callbacks: RendererCallbacks,
     private readonly fontLoader: FontLoader,
     shadowRoot: ShadowRoot,
@@ -503,6 +500,8 @@ export class RenderedImage {
       speaker,
     )
     this.resizeObserver?.observe(candidate.element)
+    candidate.element.ownerDocument.addEventListener('scroll', this.scheduleRefit, true)
+    candidate.element.ownerDocument.defaultView?.addEventListener('resize', this.scheduleRefit)
     this.refit()
   }
 
@@ -523,7 +522,7 @@ export class RenderedImage {
   private readonly forwardPrimaryClick = (event: MouseEvent): void => {
     if (event.button !== 0 || event.defaultPrevented) return
     const forwarded = new MouseEvent('click', {
-      bubbles: false,
+      bubbles: true,
       cancelable: true,
       composed: false,
       view: window,
@@ -694,7 +693,10 @@ export class RenderedImage {
     view.element.style.alignItems =
       view.region.style.writingMode === 'vertical-rl' ? 'flex-start' : 'center'
 
-    let measuredSize = fit.fontSize
+    // Keep a small measured-layout margin so fractional CSS zoom and device
+    // pixel rounding cannot turn an exact fit into a clipped final glyph.
+    let measuredSize = fit.fontSize * FIT_SAFETY_RATIO
+    applyRegionStyle(view.element, view.region, measuredSize, view.fontFamily)
     if (actualOverflow(view.element)) {
       let low = 0
       let high = measuredSize
@@ -722,8 +724,27 @@ export class RenderedImage {
     }
   }
 
+  private refitFrame: number | null = null
+  private readonly scheduleRefit = (): void => {
+    if (this.destroyed || this.refitFrame !== null) return
+    const view = this.candidate.element.ownerDocument.defaultView
+    if (!view) {
+      this.refit()
+      return
+    }
+    this.refitFrame = view.requestAnimationFrame(() => {
+      this.refitFrame = null
+      this.refit()
+    })
+  }
+
   refit(): void {
     if (this.destroyed || !this.candidate.element.isConnected) return
+    const imageRect = this.candidate.element.getBoundingClientRect()
+    this.wrapper.style.left = px(imageRect.left)
+    this.wrapper.style.top = px(imageRect.top)
+    this.wrapper.style.width = px(imageRect.width)
+    this.wrapper.style.height = px(imageRect.height)
     this.geometry = calculateImageGeometry(
       this.candidate.element,
       this.wrapper,
@@ -739,16 +760,16 @@ export class RenderedImage {
     if (this.destroyed) return
     this.destroyed = true
     this.resizeObserver?.disconnect()
+    const documentRef = this.candidate.element.ownerDocument
+    documentRef.removeEventListener('scroll', this.scheduleRefit, true)
+    documentRef.defaultView?.removeEventListener('resize', this.scheduleRefit)
+    if (this.refitFrame !== null) {
+      documentRef.defaultView?.cancelAnimationFrame(this.refitFrame)
+      this.refitFrame = null
+    }
     this.selection.destroy()
     this.candidate.element.removeAttribute('data-hmt-original')
-    if (this.wrapper.parentNode) {
-      const reference =
-        this.originalNextSibling?.parentNode === this.originalParent
-          ? this.originalNextSibling
-          : this.wrapper
-      this.originalParent.insertBefore(this.candidate.owner, reference)
-      this.wrapper.remove()
-    }
+    this.wrapper.remove()
     for (const view of this.regions.values()) URL.revokeObjectURL(view.patchUrl)
     this.regions.clear()
     this.onDestroy?.(this)
@@ -830,36 +851,19 @@ export class SelectableRenderer {
         'The page removed this image before translation started.',
       )
     }
-    const originalNextSibling = candidate.owner.nextSibling
-    const before = candidate.element.getBoundingClientRect()
-    const parentRect =
-      originalParent instanceof Element
-        ? originalParent.getBoundingClientRect()
-        : undefined
     const wrapper = document.createElement('span')
     wrapper.dataset.hmtOwned = 'true'
-    wrapper.className = 'hmt-wrapper'
-    const ownerStyle = getComputedStyle(candidate.owner)
-    wrapper.style.position = 'relative'
-    wrapper.style.display = ownerStyle.display === 'block' ? 'block' : 'inline-block'
-    wrapper.style.width =
-      parentRect && Math.abs(parentRect.width - before.width) <= MAX_LAYOUT_SHIFT_PX
-        ? '100%'
-        : `${before.width}px`
-    wrapper.style.maxWidth = '100%'
-    wrapper.style.verticalAlign = ownerStyle.verticalAlign || 'baseline'
-    guard.validate()
-    originalParent.insertBefore(wrapper, candidate.owner)
-    wrapper.append(candidate.owner)
-    const after = candidate.element.getBoundingClientRect()
-    if (before.width > 0 && rectDifference(before, after) > MAX_LAYOUT_SHIFT_PX) {
-      originalParent.insertBefore(candidate.owner, wrapper)
-      wrapper.remove()
-      throw new RendererError(
-        'UNSUPPORTED_PAGE_LAYOUT',
-        'Wrapping this image changed the page layout, so the original was restored.',
-      )
+    if (candidate.element.dataset.page) {
+      wrapper.dataset.hmtSourcePage = candidate.element.dataset.page
     }
+    wrapper.className = 'hmt-wrapper'
+    wrapper.style.contain = 'layout style'
+    wrapper.style.display = 'block'
+    wrapper.style.pointerEvents = 'none'
+    wrapper.style.position = 'fixed'
+    wrapper.style.zIndex = '2147483000'
+    guard.validate()
+    candidate.element.ownerDocument.body.append(wrapper)
 
     candidate.element.setAttribute('data-hmt-original', 'true')
     const host = document.createElement('span')
@@ -905,8 +909,6 @@ export class SelectableRenderer {
         imageSpace,
         patchLayer,
         textLayer,
-        originalParent,
-        originalNextSibling,
         this.callbacks,
         this.fontLoader,
         shadow,
@@ -920,10 +922,7 @@ export class SelectableRenderer {
     } catch (error) {
       resizeObserver?.disconnect()
       candidate.element.removeAttribute('data-hmt-original')
-      if (wrapper.parentNode) {
-        originalParent.insertBefore(candidate.owner, wrapper)
-        wrapper.remove()
-      }
+      wrapper.remove()
       throw error
     }
     return rendered

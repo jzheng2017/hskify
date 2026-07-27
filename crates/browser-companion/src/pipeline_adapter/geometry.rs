@@ -1,10 +1,13 @@
 use crate::contracts::{NormalizedRect, Point, ReadingDirection};
 
-use super::ppocr_v5_detector::PpOcrTextDetection;
+use koharu_ml::comic_text_bubble_detector::{
+    ComicTextBubbleDetection, DETECTOR_TILE_CONFIDENCE_THRESHOLD,
+};
 
 const TILE_SIDE: u32 = 2_048;
 const TILE_OVERLAP: u32 = 410;
-const MIN_DETECTOR_SCORE: f32 = 0.50;
+const MIN_DETECTOR_SCORE: f32 = DETECTOR_TILE_CONFIDENCE_THRESHOLD;
+const NORMALIZED_SERIALIZATION_EDGE_GUARD: f32 = 0.000_000_1;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct PixelRect {
@@ -88,7 +91,7 @@ impl PixelRect {
         }
     }
 
-    fn overlap_over_smaller(self, other: Self) -> f32 {
+    pub(super) fn overlap_over_smaller(self, other: Self) -> f32 {
         let smaller = self.area().min(other.area());
         if smaller <= 0.0 {
             return 0.0;
@@ -99,11 +102,25 @@ impl PixelRect {
     pub(super) fn normalized(self, image_width: u32, image_height: u32) -> NormalizedRect {
         let width = image_width.max(1) as f32;
         let height = image_height.max(1) as f32;
+        let x0 = (self.x0 / width).clamp(0.0, 1.0);
+        let y0 = (self.y0 / height).clamp(0.0, 1.0);
+        let x1 = (self.x1 / width).clamp(x0, 1.0);
+        let y1 = (self.y1 / height).clamp(y0, 1.0);
+        let normalized_width = if x1 == 1.0 {
+            (x1 - x0 - NORMALIZED_SERIALIZATION_EDGE_GUARD).max(0.0)
+        } else {
+            x1 - x0
+        };
+        let normalized_height = if y1 == 1.0 {
+            (y1 - y0 - NORMALIZED_SERIALIZATION_EDGE_GUARD).max(0.0)
+        } else {
+            y1 - y0
+        };
         NormalizedRect {
-            x: (self.x0 / width).clamp(0.0, 1.0),
-            y: (self.y0 / height).clamp(0.0, 1.0),
-            width: (self.width() / width).clamp(0.0, 1.0),
-            height: (self.height() / height).clamp(0.0, 1.0),
+            x: x0,
+            y: y0,
+            width: normalized_width,
+            height: normalized_height,
         }
     }
 
@@ -200,6 +217,7 @@ impl Tile {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum CandidateKind {
     StoryText,
+    FreeText,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -296,29 +314,49 @@ pub(super) fn prioritize_tiles(
 }
 
 pub(super) fn candidates_for_tile(
-    detections: &[PpOcrTextDetection],
+    detection: &ComicTextBubbleDetection,
     tile: &Tile,
     image_width: u32,
     image_height: u32,
 ) -> Vec<Candidate> {
-    let lines = detections
+    let bubbles = detection
+        .detections
         .iter()
+        .filter(|detection| detection.is_bubble())
+        .filter_map(|detection| PixelRect::from_local_bounds(detection.bbox, tile))
+        .collect::<Vec<_>>();
+    let lines = detection
+        .detections
+        .iter()
+        .filter(|detection| detection.is_text())
         .filter(|detection| detection.score.is_finite() && detection.score >= MIN_DETECTOR_SCORE)
         .filter_map(|detection| {
-            let rect = PixelRect::from_local_bounds(detection.bounds, tile)?;
+            let rect = PixelRect::from_local_bounds(detection.bbox, tile)?;
             let (center_x, center_y) = rect.center();
+            let kind = if detection.label_id == 1
+                || bubbles.iter().any(|bubble| {
+                    (center_x >= bubble.x0
+                        && center_x <= bubble.x1
+                        && center_y >= bubble.y0
+                        && center_y <= bubble.y1)
+                        || rect.overlap_over_smaller(*bubble) >= 0.10
+                }) {
+                CandidateKind::StoryText
+            } else {
+                CandidateKind::FreeText
+            };
             tile.owns(center_x, center_y)
-                .then_some((rect, detection.score))
+                .then_some((rect, detection.score, kind))
         })
         .collect::<Vec<_>>();
     lines
         .into_iter()
-        .map(|(text_rect, detector_confidence)| {
+        .map(|(text_rect, detector_confidence, kind)| {
             let layout_padding =
                 (text_rect.height().min(text_rect.width()) * 0.22).clamp(6.0, 28.0);
             let layout_rect = text_rect.expand(layout_padding, image_width, image_height);
             Candidate {
-                kind: CandidateKind::StoryText,
+                kind,
                 text_rect,
                 bubble_rect: layout_rect,
                 confirmed_bubble_rect: layout_rect,
@@ -333,9 +371,13 @@ pub(super) fn spatially_dedupe(
     seen_text_blocks: &[PixelRect],
 ) -> Vec<Candidate> {
     candidates.sort_by(|left, right| {
-        right
-            .detector_confidence
-            .total_cmp(&left.detector_confidence)
+        candidate_kind_priority(right.kind)
+            .cmp(&candidate_kind_priority(left.kind))
+            .then_with(|| {
+                right
+                    .detector_confidence
+                    .total_cmp(&left.detector_confidence)
+            })
             .then_with(|| left.text_rect.y0.total_cmp(&right.text_rect.y0))
     });
     let mut accepted = Vec::<Candidate>::new();
@@ -354,6 +396,13 @@ pub(super) fn spatially_dedupe(
     accepted
 }
 
+fn candidate_kind_priority(kind: CandidateKind) -> u8 {
+    match kind {
+        CandidateKind::StoryText => 1,
+        CandidateKind::FreeText => 0,
+    }
+}
+
 pub(super) fn text_candidate_is_confirmed(candidate: &Candidate) -> bool {
     candidate.detector_confidence.is_finite()
         && candidate.detector_confidence >= MIN_DETECTOR_SCORE
@@ -366,15 +415,7 @@ pub(super) fn ocr_crop_rect(
     image_width: u32,
     image_height: u32,
 ) -> PixelRect {
-    let padding = (candidate
-        .text_rect
-        .height()
-        .min(candidate.text_rect.width())
-        * 0.10)
-        .clamp(3.0, 12.0);
-    candidate
-        .text_rect
-        .expand(padding, image_width, image_height)
+    candidate.text_rect.expand(3.0, image_width, image_height)
 }
 
 pub(super) fn reading_order_key(
@@ -406,6 +447,31 @@ fn normalized_rects_intersect(left: &NormalizedRect, right: &NormalizedRect) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use koharu_ml::comic_text_bubble_detector::ComicTextBubbleRegion;
+
+    fn comic_region(label_id: usize, bbox: [f32; 4], score: f32) -> ComicTextBubbleRegion {
+        ComicTextBubbleRegion {
+            label_id,
+            label: match label_id {
+                0 => "bubble",
+                1 => "text_bubble",
+                2 => "text_free",
+                _ => "unknown",
+            }
+            .to_owned(),
+            score,
+            bbox,
+        }
+    }
+
+    fn comic_detection(detections: Vec<ComicTextBubbleRegion>) -> ComicTextBubbleDetection {
+        ComicTextBubbleDetection {
+            image_width: TILE_SIDE,
+            image_height: TILE_SIDE,
+            detections,
+            text_blocks: Vec::new(),
+        }
+    }
 
     #[test]
     fn long_image_uses_fixed_overlapping_square_tiles() {
@@ -445,11 +511,12 @@ mod tests {
             .iter()
             .filter(|tile| {
                 let local_y = global_y - tile.y as f32;
-                let detections = [PpOcrTextDetection {
-                    bounds: [100.0, local_y, 300.0, local_y + 40.0],
-                    score: 0.95,
-                }];
-                !candidates_for_tile(&detections, tile, 900, 2_000).is_empty()
+                let detection = comic_detection(vec![comic_region(
+                    1,
+                    [100.0, local_y, 300.0, local_y + 40.0],
+                    0.95,
+                )]);
+                !candidates_for_tile(&detection, tile, 900, 2_000).is_empty()
             })
             .count();
         assert_eq!(emitted, 1);
@@ -458,17 +525,45 @@ mod tests {
     #[test]
     fn detector_lines_remain_independent_candidates() {
         let tile = overlapping_tiles(900, 1_024)[0];
-        let detections = [
-            PpOcrTextDetection {
-                bounds: [100.0, 100.0, 300.0, 130.0],
-                score: 0.9,
-            },
-            PpOcrTextDetection {
-                bounds: [120.0, 140.0, 280.0, 170.0],
-                score: 0.8,
-            },
-        ];
-        assert_eq!(candidates_for_tile(&detections, &tile, 900, 1_024).len(), 2);
+        let detection = comic_detection(vec![
+            comic_region(1, [100.0, 100.0, 300.0, 130.0], 0.9),
+            comic_region(2, [120.0, 140.0, 280.0, 170.0], 0.8),
+            comic_region(0, [50.0, 50.0, 350.0, 220.0], 0.99),
+        ]);
+        assert_eq!(candidates_for_tile(&detection, &tile, 900, 1_024).len(), 2);
+    }
+
+    #[test]
+    fn ocr_crop_uses_only_a_small_fixed_guard() {
+        let candidate = Candidate {
+            kind: CandidateKind::StoryText,
+            text_rect: PixelRect::new(100.0, 200.0, 700.0, 500.0).unwrap(),
+            bubble_rect: PixelRect::new(80.0, 180.0, 720.0, 520.0).unwrap(),
+            confirmed_bubble_rect: PixelRect::new(80.0, 180.0, 720.0, 520.0).unwrap(),
+            detector_confidence: 0.99,
+        };
+
+        assert_eq!(
+            ocr_crop_rect(&candidate, 900, 1_000),
+            PixelRect::new(97.0, 197.0, 703.0, 503.0).unwrap()
+        );
+    }
+
+    #[test]
+    fn normalized_pixel_bounds_never_round_past_the_image_edge() {
+        let rect = PixelBounds {
+            x: 700,
+            y: 15_900,
+            width: 200,
+            height: 100,
+        }
+        .normalized(900, 16_000);
+
+        assert!(rect.x + rect.width <= 1.0);
+        assert!(rect.y + rect.height <= 1.0);
+        let json = serde_json::to_value(rect).unwrap();
+        assert!(json["x"].as_f64().unwrap() + json["width"].as_f64().unwrap() <= 1.0);
+        assert!(json["y"].as_f64().unwrap() + json["height"].as_f64().unwrap() <= 1.0);
     }
 
     #[test]

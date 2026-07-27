@@ -30,7 +30,6 @@ import {
   requestedZoomApplied,
   selectViewportPlan,
   validateBenchmarkManifest,
-  validateDetectorEvidence,
   validateExpectedResourceIdentities,
 } from './Chapter5.Firefox.mjs'
 
@@ -159,7 +158,7 @@ test('committed chapter gold has a deterministic real viewport', () => {
 
   const plan = selectViewportPlan(manifest, goldPages)
 
-  assert.ok(plan.expectedVisibleRegionCount >= 1)
+  assert.ok(plan.expectedVisibleRegionCount >= 3)
   assert.ok(plan.expectedVisibleRegionCount <= 6)
   assert.equal(plan.expectedVisibleRegionIds.length, plan.expectedVisibleRegionCount)
 })
@@ -283,8 +282,9 @@ test('punctuation-only gold stays untouched and outside translation correctness'
   })
   const modified = buildQualityEvidence(input.routes, input.gold)
   assert.equal(modified.totals.matchedEnglishTargetCount, 1)
-  assert.equal(modified.totals.ocrUnmatchedInsertionErrors, 4)
-  assert.equal(modified.totals.englishOcrCer, 0.8)
+  assert.equal(modified.totals.ocrUnmatchedInsertionErrors, 0)
+  assert.equal(modified.totals.englishOcrCer, 0)
+  assert.equal(modified.totals.falseTranslationNumerator, 1)
   assert.equal(modified.totals.untouchedExclusions, 0)
   assert.equal(modified.totals.modifiedExclusions, 1)
   assert.equal(
@@ -294,7 +294,7 @@ test('punctuation-only gold stays untouched and outside translation correctness'
   )
 })
 
-test('OCR CER counts substitutions, missing references, and unmatched insertions', () => {
+test('OCR CER measures recognition only after spatial matching', () => {
   const ocr = fixture('Hxllo')
   const ocrEvidence = buildQualityEvidence(ocr.routes, ocr.gold)
   assert.equal(ocrEvidence.totals.ocrCharacterErrorNumerator, 1)
@@ -309,11 +309,13 @@ test('OCR CER counts substitutions, missing references, and unmatched insertions
   const geometryEvidence = buildQualityEvidence(geometry.routes, geometry.gold)
   assert.equal(geometryEvidence.totals.missingEnglishTargetCount, 1)
   assert.equal(geometryEvidence.totals.unmatchedAcceptedTranslationCount, 1)
-  assert.equal(geometryEvidence.totals.ocrMissingCharacterErrors, 5)
-  assert.equal(geometryEvidence.totals.ocrUnmatchedInsertionErrors, 5)
-  assert.equal(geometryEvidence.totals.englishOcrCer, 2)
+  assert.equal(geometryEvidence.totals.ocrMissingCharacterErrors, 0)
+  assert.equal(geometryEvidence.totals.ocrUnmatchedInsertionErrors, 0)
+  assert.equal(geometryEvidence.totals.ocrReferenceCharacterDenominator, 0)
+  assert.equal(geometryEvidence.totals.englishOcrCer, 1)
   assert.equal(
-    geometryEvidence.gates.find((gate) => gate.id === 'english-ocr-cer')?.status,
+    geometryEvidence.gates.find((gate) => gate.id === 'story-region-publication-recall')
+      ?.status,
     'fail',
   )
   assert.equal(
@@ -324,7 +326,7 @@ test('OCR CER counts substitutions, missing references, and unmatched insertions
   )
 })
 
-test('English OCR CER accepts exactly three percent and charges a missing output as full deletion', () => {
+test('English OCR CER accepts exactly three percent and recall charges missing output', () => {
   const reference = 'a'.repeat(100)
   const atLimit = fixture(`${'b'.repeat(3)}${'a'.repeat(97)}`)
   atLimit.gold[0].regions[0].sourceEnglish = reference
@@ -339,15 +341,57 @@ test('English OCR CER accepts exactly three percent and charges a missing output
   missing.gold[0].regions[0].sourceEnglish = reference
   missing.routes.jobs[0].updates = []
   const missingEvidence = buildQualityEvidence(missing.routes, missing.gold)
-  assert.equal(missingEvidence.totals.ocrMissingCharacterErrors, 100)
-  assert.equal(missingEvidence.totals.ocrReferenceCharacterDenominator, 100)
+  assert.equal(missingEvidence.totals.ocrMissingCharacterErrors, 0)
+  assert.equal(missingEvidence.totals.ocrReferenceCharacterDenominator, 0)
   assert.equal(missingEvidence.totals.englishOcrCer, 1)
+  assert.equal(missingEvidence.totals.storyRegionRecall, 0)
   assert.equal(missingEvidence.totals.falseTranslationDenominator, 0)
   assert.equal(missingEvidence.totals.falseTranslationRate, 0)
   assert.equal(
-    missingEvidence.gates.find((gate) => gate.id === 'english-ocr-cer')?.status,
+    missingEvidence.gates.find((gate) => gate.id === 'story-region-publication-recall')
+      ?.status,
     'fail',
   )
+})
+
+test('spatial components tolerate OCR splits and merges without hiding text errors', () => {
+  const input = fixture()
+  input.gold[0].regions.push({
+    id: 'gold-2',
+    kind: 'dialogue',
+    sourceEnglish: 'world',
+    textPolygon: polygon(0.3, 0.1, 0.5, 0.2),
+  })
+  input.routes.jobs[0].updates = [
+    {
+      type: 'regionReady',
+      region: region('observed-merged', 'Hello world', polygon(0.1, 0.1, 0.5, 0.2)),
+    },
+  ]
+
+  const merged = buildQualityEvidence(input.routes, input.gold)
+  assert.equal(merged.totals.matchedEnglishTargetCount, 2)
+  assert.equal(merged.totals.storyRegionRecall, 1)
+  assert.equal(merged.totals.englishOcrCer, 0)
+  assert.equal(merged.components.length, 1)
+  assert.deepEqual(merged.components[0].expectedRegionIds, ['gold-1', 'gold-2'])
+  assert.deepEqual(merged.components[0].observedRegionIds, ['observed-merged'])
+
+  input.routes.jobs[0].updates = [
+    {
+      type: 'regionReady',
+      region: region('observed-left', 'Hello', polygon(0.1, 0.1, 0.3, 0.2)),
+    },
+    {
+      type: 'regionReady',
+      region: region('observed-right', 'wurld', polygon(0.3, 0.1, 0.5, 0.2)),
+    },
+  ]
+  const split = buildQualityEvidence(input.routes, input.gold)
+  assert.equal(split.totals.matchedEnglishTargetCount, 2)
+  assert.equal(split.totals.storyRegionRecall, 1)
+  assert.equal(split.totals.ocrCharacterErrorNumerator, 1)
+  assert.equal(split.totals.englishOcrCer, 0.1)
 })
 
 test('false translation rate is unmatched accepted output over all accepted output', () => {
@@ -392,175 +436,6 @@ test('false translation rate is unmatched accepted output over all accepted outp
   )
 })
 
-function detectorEvidence({
-  gold = SYNTHETIC_MANIFEST.totalExpectedDialogueBubbleCount,
-  predictions = SYNTHETIC_MANIFEST.totalExpectedDialogueBubbleCount + 1,
-  matched = SYNTHETIC_MANIFEST.totalExpectedDialogueBubbleCount,
-  status = 'pass',
-} = {}) {
-  const pageGold = Array.from({ length: PAGE_COUNT }, (_, index) => (index === 0 ? gold : 0))
-  const pagePredictions = [...pageGold]
-  pagePredictions[0] += predictions - gold
-  const pageMatched = [...pageGold]
-  pageMatched[PAGE_COUNT - 1] -= gold - matched
-  const precision = predictions > 0 ? matched / predictions : 0
-  const recall = matched / gold
-  return {
-    schemaVersion: 2,
-    benchmarkId: BENCHMARK_ID,
-    status,
-    recordedAtUtc: '2026-07-26T00:00:00Z',
-    fixture: {
-      manifest: {},
-      annotationSchema: {},
-      annotations: [],
-      pageCount: PAGE_COUNT,
-      regionCount: SYNTHETIC_MANIFEST.totalExpectedRegionCount,
-      goldBubbleCount: gold,
-      narrationRegionCount: SYNTHETIC_MANIFEST.totalExpectedNarrationCount,
-      englishTranslationTargetCount:
-        SYNTHETIC_MANIFEST.totalExpectedEnglishTranslationTargetCount,
-      punctuationOnlyNonTranslationTargetCount:
-        SYNTHETIC_MANIFEST.totalExpectedUntouchedExclusionCount,
-    },
-    predictions: {
-      bubbleLabelId: 0,
-      dialogueTextLabelId: 1,
-      minimumScore: 0.3,
-      files: Array.from({ length: PAGE_COUNT }, (_, index) => ({
-        page: index + 1,
-        file: `${String(index + 1).padStart(3, '0')}.json`,
-        bytes: 1,
-        sha256: 'a'.repeat(64),
-      })),
-    },
-    matcher: {
-      minimumIou: 0.5,
-      assignment: 'descending-IoU one-to-one greedy assignment per page',
-    },
-    sources: {
-      decoder: 'Pillow 12.0',
-      files: [],
-    },
-    postprocessing: {
-      minimumJointConfidence: 0.4,
-      darkCardMaximumLuma: 32,
-      darkCardMinimumDarkPixelRatio: 0.7,
-    },
-    protocolBoundary: {
-      browserJobUpdatesRead: false,
-      regionReadyUsed: false,
-      nonAcceptedRegionsPublishedToBrowser: false,
-      evidenceSource: 'standalone detector CLI JSON plus exact manifest source WebPs',
-    },
-    pages: pageGold.map((pageGoldCount, index) => ({
-      page: index + 1,
-      goldBubbleCount: pageGoldCount,
-      bubblePredictionCount: pagePredictions[index],
-      matchedBubbleCount: pageMatched[index],
-    })),
-    totals: {
-      goldBubbleCount: gold,
-      bubblePredictionCount: predictions,
-      matchedBubbleCount: matched,
-      falsePositiveCount: predictions - matched,
-      falseNegativeCount: gold - matched,
-      precision,
-      recall,
-    },
-    gates: [
-      { status },
-      { status },
-      { status },
-    ],
-  }
-}
-
-test('standalone detector evidence gates manifest-declared gold bubbles without using regionReady', () => {
-  const validated = validateDetectorEvidence(detectorEvidence(), SYNTHETIC_MANIFEST)
-  assert.equal(
-    validated.totals.goldBubbleCount,
-    SYNTHETIC_MANIFEST.totalExpectedDialogueBubbleCount,
-  )
-  assert.equal(
-    validated.gates[1].numerator,
-    SYNTHETIC_MANIFEST.totalExpectedDialogueBubbleCount,
-  )
-  assert.equal(
-    validated.gates[1].denominator,
-    SYNTHETIC_MANIFEST.totalExpectedDialogueBubbleCount + 1,
-  )
-  assert.equal(
-    validated.gates[2].numerator,
-    SYNTHETIC_MANIFEST.totalExpectedDialogueBubbleCount,
-  )
-  assert.equal(
-    validated.gates[2].denominator,
-    SYNTHETIC_MANIFEST.totalExpectedDialogueBubbleCount,
-  )
-  assert.ok(validated.gates.every((gate) => gate.status === 'pass'))
-
-  assert.throws(
-    () =>
-      validateDetectorEvidence(
-        detectorEvidence({ gold: 140, predictions: 140, matched: 140 }),
-        SYNTHETIC_MANIFEST,
-      ),
-    /manifest-declared fixture totals/u,
-  )
-})
-
-test('standalone detector evidence rejects stale schema and source-image provenance', () => {
-  const evidence = detectorEvidence()
-  const evidenceSchema = {
-    file: 'detector-benchmark-evidence.schema.json',
-    bytes: 123,
-    sha256: 'b'.repeat(64),
-  }
-  const source = {
-    page: 1,
-    file: '001.webp',
-    bytes: 456,
-    sha256: 'c'.repeat(64),
-    url: 'https://example.invalid/001.webp',
-    width: 800,
-    height: 1200,
-  }
-  evidence.evidenceSchema = { ...evidenceSchema }
-  evidence.sources.files = [{ ...source }]
-
-  assert.doesNotThrow(() =>
-    validateDetectorEvidence(evidence, SYNTHETIC_MANIFEST, {
-      evidenceSchema,
-      sources: [source],
-    }),
-  )
-  assert.throws(
-    () =>
-      validateDetectorEvidence(evidence, SYNTHETIC_MANIFEST, {
-        evidenceSchema: {
-          ...evidenceSchema,
-          sha256: 'd'.repeat(64),
-        },
-        sources: [source],
-      }),
-    /Detector evidence schema identity mismatch/u,
-  )
-  assert.throws(
-    () =>
-      validateDetectorEvidence(evidence, SYNTHETIC_MANIFEST, {
-        evidenceSchema,
-        sources: [
-          {
-            ...source,
-            url: 'https://example.invalid/stale.webp',
-          },
-        ],
-      }),
-    /source metadata does not match the manifest/u,
-  )
-})
-
 function patchFixture(alphaRows) {
   const goldRegion = {
     id: 'gold-1',
@@ -574,7 +449,7 @@ function patchFixture(alphaRows) {
     sourceGlyphs: [
       {
         page: 1,
-        id: 'gold-1',
+        id: 'observed-1',
         originX: 1,
         originY: 1,
         width: 2,
@@ -589,8 +464,8 @@ function patchFixture(alphaRows) {
     matches: [
       {
         page: 1,
-        expectedRegionId: 'gold-1',
-        observedRegionId: 'observed-1',
+        expectedRegionIds: ['gold-1'],
+        observedRegionIds: ['observed-1'],
       },
     ],
     routes: {
@@ -628,7 +503,7 @@ function patchFixture(alphaRows) {
   }
 }
 
-test('decoded fetched PNG alpha covers source glyphs and stays inside the allowed erase mask', () => {
+test('decoded fetched PNG alpha covers source glyphs and stays in its accepted region', () => {
   const input = patchFixture([
     { y: 0, runs: [[0, 2]] },
     { y: 1, runs: [[0, 2]] },
@@ -642,10 +517,23 @@ test('decoded fetched PNG alpha covers source glyphs and stays inside the allowe
   assert.equal(evidence.totals.eraseMaskPixelDenominator, 4)
   assert.equal(evidence.totals.coveredEraseMaskPixelNumerator, 4)
   assert.equal(evidence.totals.coveredGlyphPixelNumerator, 4)
-  assert.equal(evidence.totals.alphaOutsideAllowedEraseMaskPixels, 0)
-  assert.equal(evidence.totals.alphaOutsideObservedBubblePixels, 0)
+  assert.equal(evidence.totals.alphaOutsideAcceptedRegionPixels, 0)
   assert.ok(evidence.gates.every((gate) => gate.status === 'pass'))
 
+  input.routes.jobs[0].patches[0].textPolygon =
+    input.routes.jobs[0].patches[0].bubblePolygon
+  delete input.routes.jobs[0].patches[0].bubblePolygon
+  const freeText = buildPatchQualityEvidence(
+    input.routes,
+    input.goldPages,
+    input.matches,
+    input.sourceGlyphs,
+  )
+  assert.equal(freeText.totals.alphaOutsideAcceptedRegionPixels, 0)
+  assert.ok(freeText.gates.every((gate) => gate.status === 'pass'))
+
+  input.routes.jobs[0].patches[0].bubblePolygon =
+    input.routes.jobs[0].patches[0].textPolygon
   input.routes.jobs[0].patches[0].width = 3
   input.routes.jobs[0].patches[0].rect.width = 0.3
   input.routes.jobs[0].patches[0].alphaRows = [
@@ -659,15 +547,54 @@ test('decoded fetched PNG alpha covers source glyphs and stays inside the allowe
     input.matches,
     input.sourceGlyphs,
   )
-  assert.equal(outside.totals.alphaOutsideAllowedEraseMaskPixels, 2)
-  assert.equal(outside.totals.alphaOutsideObservedBubblePixels, 2)
+  assert.equal(outside.totals.alphaOutsideAcceptedRegionPixels, 2)
   assert.equal(
     outside.gates.find(
-      (gate) => gate.id === 'patch-changes-outside-runtime-confirmed-bubble',
+      (gate) => gate.id === 'patch-changes-outside-runtime-accepted-region',
     )
       ?.status,
     'fail',
   )
+
+  const split = patchFixture([
+    { y: 0, runs: [[0, 1]] },
+    { y: 1, runs: [[0, 1]] },
+  ])
+  const left = split.routes.jobs[0].patches[0]
+  left.rect.width = 0.1
+  left.width = 1
+  left.bubblePolygon = polygon(0.1, 0.1, 0.2, 0.3)
+  left.alphaNonZeroPixelCount = 2
+  const right = structuredClone(left)
+  right.patchId = 'patch-2'
+  right.regionId = 'observed-2'
+  right.rect.x = 0.2
+  right.bubblePolygon = polygon(0.2, 0.1, 0.3, 0.3)
+  split.routes.jobs[0].patches.push(right)
+  split.matches[0].observedRegionIds.push('observed-2')
+  split.sourceGlyphs[0] = {
+    ...split.sourceGlyphs[0],
+    width: 1,
+    pixels: 2,
+    rows: [
+      { y: 0, runs: [[0, 1]] },
+      { y: 1, runs: [[0, 1]] },
+    ],
+  }
+  split.sourceGlyphs.push({
+    ...split.sourceGlyphs[0],
+    id: 'observed-2',
+    originX: 2,
+  })
+  const splitEvidence = buildPatchQualityEvidence(
+    split.routes,
+    split.goldPages,
+    split.matches,
+    split.sourceGlyphs,
+  )
+  assert.equal(splitEvidence.totals.patchRegionCount, 2)
+  assert.equal(splitEvidence.totals.coveredGlyphPixelNumerator, 4)
+  assert.ok(splitEvidence.gates.every((gate) => gate.status === 'pass'))
 })
 
 test('Chinese DOM ordering requires the corresponding decoded patch installation first', () => {
@@ -747,14 +674,14 @@ test('missing measurements cannot be asserted as passing evidence', () => {
       assertRequiredGates(
         [
           {
-            id: 'peak-process-vram',
+            id: 'peak-vram',
             status: 'missing',
             reason: 'process VRAM unavailable',
           },
         ],
         'resource',
       ),
-    /peak-process-vram: process VRAM unavailable/u,
+    /peak-vram: process VRAM unavailable/u,
   )
   assert.deepEqual(BENCHMARK_LIMITS, {
     hudAcknowledgementMs: 100,
@@ -769,8 +696,7 @@ test('missing measurements cannot be asserted as passing evidence', () => {
     installedColdAllImagesCompleteMs: 120_000,
   })
   assert.deepEqual(BENCHMARK_QUALITY_LIMITS, {
-    detectorPrecision: 0.99,
-    detectorRecall: 0.95,
+    storyRegionRecall: 0.95,
     englishOcrCer: 0.03,
     falseTranslationRate: 0.01,
   })
@@ -1039,7 +965,7 @@ test('benchmark evidence schema compiles in strict draft-2020-12 mode', () => {
   )
   assert.ok(schema.$defs.correctness.required.includes('patchPng'))
   assert.ok(schema.$defs.correctness.required.includes('commitOrdering'))
-  assert.ok(schema.$defs.summary.required.includes('detectorCorrectness'))
+  assert.ok(!schema.$defs.summary.required.includes('detectorCorrectness'))
   assert.equal(
     schema.$defs.correctness.properties.totals.properties.expectedRegionCount.const,
     manifest.totalExpectedRegionCount,
@@ -1052,33 +978,6 @@ test('benchmark evidence schema compiles in strict draft-2020-12 mode', () => {
     !schema.$defs.jobRequests.required.includes('expectedProperNameGlossary'),
   )
 
-  const detectorSchema = JSON.parse(
-    readFileSync(
-      new URL('detector-benchmark-evidence.schema.json', fixtureRoot),
-      'utf8',
-    ),
-  )
-  assert.doesNotThrow(() =>
-    new Ajv2020({
-      strict: true,
-      allErrors: true,
-      formats: { uri: true },
-    }).compile(detectorSchema),
-  )
-  assert.ok(detectorSchema.required.includes('protocolBoundary'))
-  assert.ok(detectorSchema.required.includes('evidenceSchema'))
-  assert.equal(
-    detectorSchema.$defs.totals.properties.goldBubbleCount.const,
-    manifest.totalExpectedDialogueBubbleCount,
-  )
-  assert.equal(
-    detectorSchema.properties.fixture.properties.regionCount.const,
-    manifest.totalExpectedRegionCount,
-  )
-  assert.equal(
-    detectorSchema.$defs.totals.properties.thoughtGoldCount.const,
-    66,
-  )
 })
 
 test('chapter-5 fixture has 36 manifest-counted pages and canonical region IDs', () => {

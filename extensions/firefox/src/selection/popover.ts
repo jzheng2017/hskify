@@ -104,6 +104,7 @@ export class SelectionController {
   dismiss(): void {
     this.requestRevision += 1
     this.popover.hidden = true
+    this.popover.replaceChildren()
     if (this.speechOwner) this.speaker.stop(this.speechOwner)
     this.speechOwner = undefined
   }
@@ -114,15 +115,14 @@ export class SelectionController {
     range: Range
   } | null {
     const selection = window.getSelection()
-    if (!selection || selection.isCollapsed || selection.rangeCount === 0) return null
-    const anchor = nodeElement(selection.anchorNode)
-    const focus = nodeElement(selection.focusNode)
+    if (!selection || selection.isCollapsed || selection.rangeCount !== 1) return null
+    const range = selection.getRangeAt(0)
     for (const region of this.regions.values()) {
       if (
-        (anchor && region.element.contains(anchor)) ||
-        (focus && region.element.contains(focus))
+        region.element.contains(range.startContainer) &&
+        region.element.contains(range.endContainer)
       ) {
-        return { region, selection, range: selection.getRangeAt(0) }
+        return { region, selection, range }
       }
     }
     return null
@@ -247,7 +247,7 @@ export class SelectionController {
     const loading = document.createElement('span')
     loading.textContent = 'Looking up…'
     this.popover.append(heading, loading)
-    this.positionPopover(selected.region.element)
+    this.positionPopover(selected.region.element, selected.range)
     try {
       const result = await this.lookup({
         selectedText,
@@ -256,7 +256,7 @@ export class SelectionController {
       })
       if (revision !== this.requestRevision || this.destroyed) return
       this.renderResult(result, selectedText)
-      this.positionPopover(selected.region.element)
+      this.positionPopover(selected.region.element, selected.range)
     } catch {
       if (revision !== this.requestRevision || this.destroyed) return
       const heading = this.popover.querySelector<HTMLElement>('.hmt-lookup-heading')
@@ -265,7 +265,7 @@ export class SelectionController {
       const message = document.createElement('span')
       message.textContent = 'Dictionary lookup unavailable.'
       this.popover.append(message)
-      this.positionPopover(selected.region.element)
+      this.positionPopover(selected.region.element, selected.range)
     }
   }
 
@@ -279,11 +279,21 @@ export class SelectionController {
     )
   }
 
-  private positionPopover(region: HTMLElement): void {
+  private positionPopover(region: HTMLElement, range: Range): void {
     const gap = 8
     const edge = 4
     const hostRect = this.root.host.getBoundingClientRect()
     const regionRect = region.getBoundingClientRect()
+    const selectedRect = range.getBoundingClientRect()
+    const hasSelectedRect = selectedRect.width > 0 && selectedRect.height > 0
+    const obstruction = hasSelectedRect
+      ? {
+          left: Math.min(regionRect.left, selectedRect.left),
+          top: Math.min(regionRect.top, selectedRect.top),
+          right: Math.max(regionRect.right, selectedRect.right),
+          bottom: Math.max(regionRect.bottom, selectedRect.bottom),
+        }
+      : regionRect
     const popoverRect = this.popover.getBoundingClientRect()
     const popoverWidth = popoverRect.width || this.popover.offsetWidth
     const popoverHeight = popoverRect.height || this.popover.offsetHeight
@@ -291,23 +301,23 @@ export class SelectionController {
     const maximumLeft = Math.max(edge, viewportRight - hostRect.left - popoverWidth)
     const left = Math.min(
       maximumLeft,
-      Math.max(edge, regionRect.left - hostRect.left),
+      Math.max(edge, obstruction.left - hostRect.left),
     )
-    const below = regionRect.bottom - hostRect.top + gap
-    const belowSpace = Math.max(0, window.innerHeight - edge - regionRect.bottom - gap)
-    const aboveSpace = Math.max(0, regionRect.top - edge - gap)
+    const below = obstruction.bottom - hostRect.top + gap
+    const belowSpace = Math.max(0, window.innerHeight - edge - obstruction.bottom - gap)
+    const aboveSpace = Math.max(0, obstruction.top - edge - gap)
     const placeBelow = popoverHeight === 0 || belowSpace >= popoverHeight || belowSpace >= aboveSpace
     const availableHeight = Math.max(1, placeBelow ? belowSpace : aboveSpace)
     const renderedHeight = Math.min(popoverHeight || availableHeight, availableHeight)
     const top = placeBelow
       ? below
-      : regionRect.top - hostRect.top - gap - renderedHeight
+      : obstruction.top - hostRect.top - gap - renderedHeight
 
     this.popover.style.left = `${left}px`
     this.popover.style.maxHeight = `${availableHeight}px`
-    // The whole translated region is the obstruction. If the panel cannot fit
-    // at its natural height, it scrolls in the larger outside space instead of
-    // covering any translated lettering.
+    // Treat both the translated region and the full selected range as the
+    // obstruction. If the panel cannot fit at its natural height, it scrolls
+    // in the larger outside space instead of covering selected lettering.
     this.popover.style.top = `${Math.max(edge - hostRect.top, top)}px`
   }
 

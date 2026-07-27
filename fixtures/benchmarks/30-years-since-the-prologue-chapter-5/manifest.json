@@ -32,13 +32,8 @@
   "evidenceSchemas": [
     {
       "path": "benchmark-evidence.schema.json",
-      "bytes": 19596,
-      "sha256": "b342fd4926499af14fc9a34f2d931cc5d26ada05275e6453ee13aa777e7b5648"
-    },
-    {
-      "path": "detector-benchmark-evidence.schema.json",
-      "bytes": 16336,
-      "sha256": "84f81e41152e70209f5ecc994f78722d48b61950e1f4f2b1bb5d38712a756a04"
+      "bytes": 18749,
+      "sha256": "890bbe40f7d428146a71c7ffb6426eac45f79748335d3e7fb33ce19dedd72f10"
     }
   ],
   "annotationPolicy": {

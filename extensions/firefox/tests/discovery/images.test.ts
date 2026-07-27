@@ -15,6 +15,20 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
+function viewportRect(top: number, bottom: number): DOMRect {
+  return {
+    x: 0,
+    y: top,
+    left: 0,
+    top,
+    right: 720,
+    bottom,
+    width: 720,
+    height: bottom - top,
+    toJSON: () => ({}),
+  }
+}
+
 describe('conservative image discovery', () => {
   it('accepts a loaded manga-sized image and preserves picture ownership', () => {
     const picture = document.createElement('picture')
@@ -136,6 +150,118 @@ describe('conservative image discovery', () => {
     expect(visibleFirst(candidates).map((candidate) => candidate.domIndex)).toEqual([1, 5, 2])
   })
 
+  it('does not treat a root-margin prefetch intersection as true viewport visibility', () => {
+    const events: DiscoveryEvent[] = []
+    let intersectionCallback: IntersectionObserverCallback = () => undefined
+    const factories: ObserverFactories = {
+      mutation: () => ({ observe: vi.fn(), disconnect: vi.fn() }),
+      intersection(callback) {
+        intersectionCallback = callback
+        return {
+          observe: vi.fn(),
+          unobserve: vi.fn(),
+          disconnect: vi.fn(),
+        }
+      },
+    }
+    const visibleImage = loadedImage('https://reader.test/visible.png')
+    const nearOffscreenImage = loadedImage('https://reader.test/near-offscreen.png')
+    document.body.append(visibleImage, nearOffscreenImage)
+    const discovery = new ImageDiscovery((event) => events.push(event), document, factories)
+    discovery.start()
+    events.splice(0)
+
+    intersectionCallback(
+      [
+        {
+          target: visibleImage,
+          isIntersecting: true,
+          intersectionRatio: 1,
+          boundingClientRect: viewportRect(0, 400),
+        } as unknown as IntersectionObserverEntry,
+        {
+          target: nearOffscreenImage,
+          isIntersecting: true,
+          intersectionRatio: 0.25,
+          boundingClientRect: viewportRect(window.innerHeight + 1, window.innerHeight + 401),
+        } as unknown as IntersectionObserverEntry,
+      ],
+      {} as IntersectionObserver,
+    )
+
+    expect(events).toHaveLength(1)
+    expect(events[0]?.type).toBe('visibility')
+    expect(
+      discovery.current().map((candidate) => ({
+        element: candidate.element,
+        visible: candidate.visible,
+      })),
+    ).toEqual([
+      { element: visibleImage, visible: true },
+      { element: nearOffscreenImage, visible: false },
+    ])
+
+    intersectionCallback(
+      [
+        {
+          target: nearOffscreenImage,
+          isIntersecting: true,
+          intersectionRatio: 0.25,
+          boundingClientRect: viewportRect(window.innerHeight - 1, window.innerHeight + 399),
+        } as unknown as IntersectionObserverEntry,
+      ],
+      {} as IntersectionObserver,
+    )
+
+    expect(discovery.current().every((candidate) => candidate.visible)).toBe(true)
+    discovery.stop()
+  })
+
+  it('publishes same-source DOM-order changes on rescan', () => {
+    const events: DiscoveryEvent[] = []
+    let mutationCallback: MutationCallback = () => undefined
+    const factories: ObserverFactories = {
+      mutation(callback) {
+        mutationCallback = callback
+        return { observe: vi.fn(), disconnect: vi.fn() }
+      },
+      intersection: () => undefined,
+    }
+    const first = loadedImage('https://reader.test/first.png')
+    const second = loadedImage('https://reader.test/second.png')
+    document.body.append(first, second)
+    const discovery = new ImageDiscovery((event) => events.push(event), document, factories)
+    discovery.start()
+    events.splice(0)
+
+    document.body.prepend(second)
+    mutationCallback(
+      [{ type: 'childList' } as MutationRecord],
+      {} as MutationObserver,
+    )
+
+    const updates = events.filter(
+      (event): event is Extract<DiscoveryEvent, { type: 'updated' }> =>
+        event.type === 'updated',
+    )
+    expect(
+      updates.map((event) => ({
+        element: event.candidate.element,
+        previousDomIndex: event.previousDomIndex,
+        domIndex: event.candidate.domIndex,
+        sameSource: event.previousSourceUrl === event.candidate.sourceUrl,
+      })),
+    ).toEqual([
+      { element: second, previousDomIndex: 1, domIndex: 0, sameSource: true },
+      { element: first, previousDomIndex: 0, domIndex: 1, sameSource: true },
+    ])
+    expect(discovery.current().map((candidate) => candidate.element)).toEqual([
+      second,
+      first,
+    ])
+    discovery.stop()
+  })
+
   it('observes lazy additions, visibility, source replacement, and removal', () => {
     const events: DiscoveryEvent[] = []
     let mutationCallback: MutationCallback = () => undefined
@@ -170,6 +296,7 @@ describe('conservative image discovery', () => {
           target: image,
           isIntersecting: false,
           intersectionRatio: 0,
+          boundingClientRect: viewportRect(10_000, 10_400),
         } as unknown as IntersectionObserverEntry,
       ],
       {} as IntersectionObserver,

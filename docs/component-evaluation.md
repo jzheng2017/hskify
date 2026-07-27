@@ -11,31 +11,41 @@ rendering.
 
 | Component | Decision | Production role |
 | --- | --- | --- |
-| PaddlePaddle PP-OCRv5 mobile detector | Retained | CUDA-batched text-line detection |
+| `ogkalu/comic-text-and-bubble-detector` RT-DETR-v2 R50 | Retained | CUDA-batched `text_bubble` and `text_free` proposals |
 | PaddlePaddle English PP-OCRv5 mobile recognizer | Retained | CUDA-batched English recognition |
-| `paddle-ocr-rs` preprocessing and DB postprocessing | Retained as an implementation reference | Apache-2.0 reference behavior adapted to the workspace's exact ONNX Runtime build |
 | Qwen3.5 4B Q4_K_M | Retained | Resident direct English-to-HSK-Chinese generation |
 
-The two Paddle model revisions and hashes are frozen in
-`data/model-packs/manifest.v1.json`. Hskify adds viewport scheduling,
-spatial deduplication, color-aware line grouping, English/story-role gates,
-local erase masks, direct HSK translation, and the browser overlay. Those
-product-specific stages are not available as one maintained drop-in package.
+The detector, Paddle recognizer, and translation model revisions and hashes are
+frozen in `data/model-packs/manifest.v1.json`. Hskify adds viewport scheduling,
+spatial deduplication, English/story-role gates, color-aware local erase masks,
+direct HSK translation, and the browser overlay. Those product-specific stages
+are not available as one maintained drop-in package.
+
+The retained RT-DETR model comes from the established Comic Translate work,
+but Hskify does not embed that application's page pipeline or project model.
+A complete drop-in translator was not selected because the candidates produce
+reconstructed pages, assume their own job/project lifecycle, or cannot publish
+patch-before-text regions in viewport priority. Reusing their full pipeline
+would therefore remove required behavior rather than replace custom code.
 
 ## Evaluated and rejected
 
 | Candidate | Reason it was not used |
 | --- | --- |
+| PaddlePaddle PP-OCRv5 mobile detector | Its general-purpose DB proposals missed too much colored, stylized, and low-contrast chapter-5 story text even at larger and multiscale inputs |
 | `manga-image-translator-rust` detector paths | Useful reference project, but its full pipeline and data model do not match the progressive live-image contract; its alternate DBNet/CTD candidates missed too much varied story text in visual review |
-| Older comic RT-DETR detector | Missed colored, stylized, and unballooned story text needed by chapter 5 |
 | Kiuyha Manga-Bubble-YOLO | Balloon-only detection did not solve narration/unballooned text and missed visually diverse regions |
 | Qwen3.5 2B Q4_K_M | Faster, but the controlled chapter-5 comparison did not qualify it as a naturalness/meaning-equivalent replacement |
 | Hy-MT2 1.8B Q4_K_M | Faster, but lower structured success and more critical proxy failures disqualified it |
 
-Preliminary detector counts produced before the final geometry audit are not
-release evidence and are intentionally not quoted here. The authoritative
-correctness result must come from the packaged chapter-5 benchmark against the
-corrected committed annotations.
+At the production threshold, the retained RT-DETR `text_bubble` plus
+`text_free` proposals provide the strongest reviewed coverage of the varied
+chapter-5 story regions among the evaluated candidates. Raw proposal precision
+is intentionally not a product gate: recognition and the story-role filter must
+reject non-English text, SFX, credits, and branding. The authoritative
+accepted-region precision, OCR, rendering, and performance results come from
+the packaged browser benchmark, whose retained evidence records the exact
+threshold, build, and source hashes.
 
 Rejected model/runtime directories, superseded detector bundles, superseded
 benchmark runs, and incomplete experiment outputs are local cache artifacts

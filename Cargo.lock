@@ -923,6 +923,7 @@ dependencies = [
  "imageproc",
  "koharu-app",
  "koharu-core",
+ "koharu-ml",
  "koharu-runtime",
  "libc",
  "ort",

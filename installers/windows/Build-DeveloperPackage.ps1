@@ -14,7 +14,7 @@ param(
     [string] $SerifFontPath,
     [Parameter(DontShow = $true)]
     [string] $ModelManifestPath,
-    [switch] $SkipNpmInstall,
+    [switch] $SkipPnpmInstall,
     [switch] $Force
 )
 
@@ -175,8 +175,12 @@ if (
 ) {
     throw 'BuildAttestationPath is required with explicitly supplied native binaries'
 }
-if ([string]::IsNullOrWhiteSpace($HskArtifactPath) -ne [string]::IsNullOrWhiteSpace($DictionaryArtifactPath)) {
-    throw 'HskArtifactPath and DictionaryArtifactPath must be supplied together'
+if (
+    [string]::IsNullOrWhiteSpace($HskArtifactPath) -or
+    [string]::IsNullOrWhiteSpace($DictionaryArtifactPath) -or
+    [string]::IsNullOrWhiteSpace($ModelPath)
+) {
+    throw 'HskArtifactPath, DictionaryArtifactPath, and ModelPath are required; installable bundles are always self-contained'
 }
 
 $resolvedModelManifest = Resolve-LeafFile -Path $ModelManifestPath -Label 'ModelManifestPath'
@@ -208,14 +212,16 @@ if ([string] $modelManifest.translationModelId -cne 'qwen3.5-4b') {
     throw "the mandatory translation model must be qwen3.5-4b, found '$($modelManifest.translationModelId)'"
 }
 $requiredResourceIds = @(
+    'comic-text-bubble-detector-config',
+    'comic-text-bubble-detector-preprocessor-config',
+    'comic-text-bubble-detector-weights',
     'pp-ocr-v5-english-recognizer-config',
     'pp-ocr-v5-english-recognizer-model',
-    'pp-ocr-v5-mobile-detector-model',
     'translation-model'
 )
 $resourceIdentities = @($modelManifest.resourceIdentities)
 if ($resourceIdentities.Count -ne $requiredResourceIds.Count) {
-    throw 'the model manifest must contain exactly four resident resource identities'
+    throw 'the model manifest must contain exactly six resident resource identities'
 }
 $expectedIdentityFields = @('bytes', 'filename', 'id', 'repository', 'repositoryRevision', 'sha256', 'url')
 for ($index = 0; $index -lt $resourceIdentities.Count; $index++) {
@@ -249,7 +255,7 @@ if ($expectedModelSha256 -notmatch '^[0-9a-f]{64}$') {
 }
 
 if (-not (Test-Path -LiteralPath $ResidentModelsDirectory -PathType Container)) {
-    throw "ResidentModelsDirectory must contain the three pinned detector/OCR resources: $ResidentModelsDirectory"
+    throw "ResidentModelsDirectory must contain the five pinned detector/OCR resources: $ResidentModelsDirectory"
 }
 $resolvedResidentModelsDirectory = (Resolve-Path -LiteralPath $ResidentModelsDirectory).Path
 $resolvedResidentResources = @(
@@ -342,26 +348,19 @@ $resolvedResidentRuntimeFiles = @(
     }
 )
 
-$resolvedModel = $null
-if (-not [string]::IsNullOrWhiteSpace($ModelPath)) {
-    $resolvedModel = Resolve-LeafFile -Path $ModelPath -Label 'ModelPath'
-    $actualModelSha256 = Get-Sha256 -Path $resolvedModel
-    if ($actualModelSha256 -ne $expectedModelSha256) {
-        throw "model SHA-256 mismatch: expected $expectedModelSha256, got $actualModelSha256"
-    }
-    if ([uint64] (Get-Item -LiteralPath $resolvedModel).Length -ne [uint64] $translationModel.bytes) {
-        throw "model byte count mismatch: expected $($translationModel.bytes), got $((Get-Item -LiteralPath $resolvedModel).Length)"
-    }
+$resolvedModel = Resolve-LeafFile -Path $ModelPath -Label 'ModelPath'
+$actualModelSha256 = Get-Sha256 -Path $resolvedModel
+if ($actualModelSha256 -ne $expectedModelSha256) {
+    throw "model SHA-256 mismatch: expected $expectedModelSha256, got $actualModelSha256"
+}
+if ([uint64] (Get-Item -LiteralPath $resolvedModel).Length -ne [uint64] $translationModel.bytes) {
+    throw "model byte count mismatch: expected $($translationModel.bytes), got $((Get-Item -LiteralPath $resolvedModel).Length)"
 }
 
-$resolvedHskArtifact = $null
-$resolvedDictionaryArtifact = $null
-if (-not [string]::IsNullOrWhiteSpace($HskArtifactPath)) {
-    $resolvedHskArtifact = Resolve-LeafFile -Path $HskArtifactPath -Label 'HskArtifactPath'
-    $resolvedDictionaryArtifact = Resolve-LeafFile -Path $DictionaryArtifactPath -Label 'DictionaryArtifactPath'
-    Assert-ExactArtifact -Path $resolvedHskArtifact -Label 'hsk-2.0.normalized.json' -ExpectedBytes 1219917 -ExpectedSha256 'e603244c49d6a231426e9696574e98bd1e76fbea68f56e76ea98695d26ce478f'
-    Assert-ExactArtifact -Path $resolvedDictionaryArtifact -Label 'cc-cedict.normalized.json' -ExpectedBytes 28604488 -ExpectedSha256 '4011f023d27e576559ae0f2afe6fd0cc4458f96d225baa80f0ddbc9bb0344f33'
-}
+$resolvedHskArtifact = Resolve-LeafFile -Path $HskArtifactPath -Label 'HskArtifactPath'
+$resolvedDictionaryArtifact = Resolve-LeafFile -Path $DictionaryArtifactPath -Label 'DictionaryArtifactPath'
+Assert-ExactArtifact -Path $resolvedHskArtifact -Label 'hsk-2.0.normalized.json' -ExpectedBytes 1219917 -ExpectedSha256 'e603244c49d6a231426e9696574e98bd1e76fbea68f56e76ea98695d26ce478f'
+Assert-ExactArtifact -Path $resolvedDictionaryArtifact -Label 'cc-cedict.normalized.json' -ExpectedBytes 28604488 -ExpectedSha256 '4011f023d27e576559ae0f2afe6fd0cc4458f96d225baa80f0ddbc9bb0344f33'
 
 if ([string]::IsNullOrWhiteSpace($NativeHostPath)) {
     if ([string]::IsNullOrWhiteSpace($env:CARGO_TARGET_DIR)) {
@@ -436,16 +435,14 @@ $extensionRoot = Join-Path $repositoryRoot 'extensions\firefox'
 if ([string]::IsNullOrWhiteSpace($FirefoxExtensionZipPath)) {
     Push-Location $extensionRoot
     try {
-        if (-not $SkipNpmInstall) {
-            Invoke-CheckedCommand -FilePath 'npm' -Arguments @(
+        if (-not $SkipPnpmInstall) {
+            Invoke-CheckedCommand -FilePath 'pnpm' -Arguments @(
                 'install',
-                '--no-package-lock',
-                '--no-audit',
-                '--no-fund'
+                '--frozen-lockfile'
             )
         }
-        Invoke-CheckedCommand -FilePath 'npm' -Arguments @('run', 'build')
-        Invoke-CheckedCommand -FilePath 'npm' -Arguments @('run', 'zip')
+        Invoke-CheckedCommand -FilePath 'pnpm' -Arguments @('build')
+        Invoke-CheckedCommand -FilePath 'pnpm' -Arguments @('zip')
     }
     finally {
         Pop-Location
@@ -571,38 +568,28 @@ $fileEntries += @($stagedOnnxRuntimeProviderFiles | ForEach-Object {
     }
 })
 
-$hskBundled = $false
-$dictionaryBundled = $false
-if ($null -ne $resolvedHskArtifact) {
-    $stagedHsk = Join-Path $resourceDirectory 'hsk-2.0.normalized.json'
-    $stagedDictionary = Join-Path $resourceDirectory 'cc-cedict.normalized.json'
-    Copy-Item -LiteralPath $resolvedHskArtifact -Destination $stagedHsk
-    Copy-Item -LiteralPath $resolvedDictionaryArtifact -Destination $stagedDictionary
-    $fileEntries += [ordered]@{
-        role = 'hsk-data'
-        path = 'resources\hsk-2.0.normalized.json'
-        sha256 = Get-Sha256 -Path $stagedHsk
-    }
-    $fileEntries += [ordered]@{
-        role = 'dictionary-data'
-        path = 'resources\cc-cedict.normalized.json'
-        sha256 = Get-Sha256 -Path $stagedDictionary
-    }
-    $hskBundled = $true
-    $dictionaryBundled = $true
+$stagedHsk = Join-Path $resourceDirectory 'hsk-2.0.normalized.json'
+$stagedDictionary = Join-Path $resourceDirectory 'cc-cedict.normalized.json'
+Copy-Item -LiteralPath $resolvedHskArtifact -Destination $stagedHsk
+Copy-Item -LiteralPath $resolvedDictionaryArtifact -Destination $stagedDictionary
+$fileEntries += [ordered]@{
+    role = 'hsk-data'
+    path = 'resources\hsk-2.0.normalized.json'
+    sha256 = Get-Sha256 -Path $stagedHsk
+}
+$fileEntries += [ordered]@{
+    role = 'dictionary-data'
+    path = 'resources\cc-cedict.normalized.json'
+    sha256 = Get-Sha256 -Path $stagedDictionary
 }
 
-$modelBundled = $false
-if ($null -ne $resolvedModel) {
-    [IO.Directory]::CreateDirectory($modelDirectory) | Out-Null
-    $stagedModel = Join-Path $modelDirectory 'Qwen3.5-4B-Q4_K_M.gguf'
-    Copy-Item -LiteralPath $resolvedModel -Destination $stagedModel
-    $fileEntries += [ordered]@{
-        role = 'translation-model'
-        path = 'resources\models\Qwen3.5-4B-Q4_K_M.gguf'
-        sha256 = $expectedModelSha256
-    }
-    $modelBundled = $true
+[IO.Directory]::CreateDirectory($modelDirectory) | Out-Null
+$stagedModel = Join-Path $modelDirectory 'Qwen3.5-4B-Q4_K_M.gguf'
+Copy-Item -LiteralPath $resolvedModel -Destination $stagedModel
+$fileEntries += [ordered]@{
+    role = 'translation-model'
+    path = 'resources\models\Qwen3.5-4B-Q4_K_M.gguf'
+    sha256 = $expectedModelSha256
 }
 
 foreach ($resource in $resolvedResidentResources) {
@@ -652,10 +639,10 @@ $bundleManifest = [ordered]@{
     }
     modelId = [string] $modelManifest.translationModelId
     resources = [ordered]@{
-        hskBundled = $hskBundled
-        dictionaryBundled = $dictionaryBundled
-        modelBundled = $modelBundled
-        residentModelsBundled = $resolvedResidentResources.Count -eq 3
+        hskBundled = $true
+        dictionaryBundled = $true
+        modelBundled = $true
+        residentModelsBundled = $resolvedResidentResources.Count -eq 5
         residentModelCount = $resolvedResidentResources.Count
         residentRuntimeBundled = $resolvedResidentRuntimeFiles.Count -eq $expectedResidentRuntimeFiles.Count
         residentRuntimeFileCount = $resolvedResidentRuntimeFiles.Count

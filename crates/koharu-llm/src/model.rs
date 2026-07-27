@@ -20,9 +20,9 @@ use crate::safe::token::LlamaToken;
 use crate::{Language, ModelId};
 
 const DEFAULT_GPU_LAYERS: u32 = 1000;
-const RESIDENT_CONTEXT_TOKENS: u32 = 4096;
+const RESIDENT_CONTEXT_TOKENS: u32 = 1280;
 const RESIDENT_PROMPT_BATCH_TOKENS: usize = RESIDENT_CONTEXT_TOKENS as usize;
-const MAX_UBATCH: u32 = 512;
+const MAX_UBATCH: u32 = 256;
 const SAKURA_QWEN_CORRECT_EOS_ID: i32 = 151645;
 static NEVER_CANCELLED: AtomicBool = AtomicBool::new(false);
 
@@ -693,7 +693,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("exceeding Hskify's permanent 4096-token llama context")
+                .contains("exceeding Hskify's permanent 1280-token llama context")
         );
     }
 

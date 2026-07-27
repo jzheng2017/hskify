@@ -179,6 +179,30 @@ describe('visible-first page queue', () => {
     expect(order).toEqual(['first', 'second'])
   })
 
+  it('updates queued document order without weakening visible-first priority', async () => {
+    const gate = deferred()
+    const order: string[] = []
+    const queue = new VisibleFirstQueue<string>(async (item) => {
+      order.push(item.id)
+      if (item.id === 'active') await gate.promise
+    })
+
+    queue.enqueue({ id: 'active', value: 'active', visible: true, order: 0 })
+    queue.enqueue({ id: 'offscreen-first', value: 'first', visible: false, order: 1 })
+    queue.enqueue({ id: 'visible-later', value: 'visible', visible: true, order: 5 })
+    queue.enqueue({ id: 'offscreen-moved', value: 'moved', visible: false, order: 4 })
+    queue.reprioritize('offscreen-moved', false, 0)
+
+    gate.resolve()
+    await vi.waitFor(() => expect(queue.size).toBe(0))
+    expect(order).toEqual([
+      'active',
+      'visible-later',
+      'offscreen-moved',
+      'offscreen-first',
+    ])
+  })
+
   it('does not automatically re-enqueue a failed item and requires explicit retry', async () => {
     let attempts = 0
     const failures: string[] = []

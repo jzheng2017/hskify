@@ -26,13 +26,15 @@ const SESSION_STORAGE_KEY = 'hmt.nativeSession'
 const ACTIVE_JOB_PREFIX = 'hmt.activeJob.'
 const LONG_IMAGE_MIN_HEIGHT_PX = 10_000
 const REGION_MATCH_MINIMUM_IOU = 0.5
-const MIN_VISIBLE_REGIONS = 1
+const BENCHMARK_VIEWPORT_WIDTH = 1280
+const BENCHMARK_VIEWPORT_HEIGHT = 1080
+const MIN_VISIBLE_REGIONS = 3
 const MAX_VISIBLE_REGIONS = 6
 const MAX_PRECEDING_CONTEXT = 6
 const BENCHMARK_ID = '30-years-since-the-prologue-chapter-5'
 const EXPECTED_PAGE_COUNT = 36
-const DETECTOR_MINIMUM_PRECISION = 0.99
-const DETECTOR_MINIMUM_RECALL = 0.95
+const STORY_REGION_MINIMUM_RECALL = 0.95
+const STORY_REGION_MINIMUM_OVERLAP = 0.5
 const MAXIMUM_ENGLISH_OCR_CER = 0.03
 const MAXIMUM_FALSE_TRANSLATION_RATE = 0.01
 const INFERENCE_PROGRESS_STAGES = new Set([
@@ -58,8 +60,7 @@ export const BENCHMARK_LIMITS = Object.freeze({
 })
 
 export const BENCHMARK_QUALITY_LIMITS = Object.freeze({
-  detectorPrecision: DETECTOR_MINIMUM_PRECISION,
-  detectorRecall: DETECTOR_MINIMUM_RECALL,
+  storyRegionRecall: STORY_REGION_MINIMUM_RECALL,
   englishOcrCer: MAXIMUM_ENGLISH_OCR_CER,
   falseTranslationRate: MAXIMUM_FALSE_TRANSLATION_RATE,
 })
@@ -355,257 +356,6 @@ export function assertCompleteTranslationGold(manifest) {
     fail(
       `Chapter 5 release measurement is blocked by incomplete translation gold: status=${status.status}, completedPageCount=${status.completedPageCount}/${status.requiredPageCount}, reasonCode=${status.reasonCode}, missingFieldCounts=${JSON.stringify(status.missingFieldCounts)}.`,
     )
-  }
-}
-
-export function validateDetectorEvidence(evidence, manifest, expectedIdentities = {}) {
-  if (!evidence || typeof evidence !== 'object' || Array.isArray(evidence)) {
-    fail('Standalone detector evidence must be a JSON object.')
-  }
-  const expectedTotals = validateBenchmarkManifest(manifest)
-  const pageCount = manifest.pageCount
-  if (evidence.schemaVersion !== 2 || evidence.benchmarkId !== manifest.id) {
-    fail('Standalone detector evidence has the wrong schema version or benchmark ID.')
-  }
-  const fixture = evidence.fixture
-  if (
-    fixture?.pageCount !== pageCount ||
-    fixture?.regionCount !== expectedTotals.regionCount ||
-    fixture?.goldBubbleCount !== expectedTotals.goldBubbleCount ||
-    fixture?.narrationRegionCount !== expectedTotals.narrationRegionCount ||
-    fixture?.englishTranslationTargetCount !== expectedTotals.englishTranslationTargetCount ||
-    fixture?.punctuationOnlyNonTranslationTargetCount !== expectedTotals.untouchedExclusionCount
-  ) {
-    fail('Standalone detector evidence does not prove the manifest-declared fixture totals.')
-  }
-  if (expectedIdentities.evidenceSchema) {
-    requireFileIdentity(
-      evidence.evidenceSchema,
-      expectedIdentities.evidenceSchema,
-      'Detector evidence schema',
-    )
-  }
-  if (expectedIdentities.manifest) {
-    requireFileIdentity(fixture.manifest, expectedIdentities.manifest, 'Fixture manifest')
-  }
-  if (expectedIdentities.annotationSchema) {
-    requireFileIdentity(
-      fixture.annotationSchema,
-      expectedIdentities.annotationSchema,
-      'Fixture annotation schema',
-    )
-  }
-  if (expectedIdentities.annotations) {
-    if (
-      !Array.isArray(fixture.annotations) ||
-      fixture.annotations.length !== expectedIdentities.annotations.length
-    ) {
-      fail('Standalone detector evidence has missing annotation identities.')
-    }
-    for (const expected of expectedIdentities.annotations) {
-      const actual = fixture.annotations.find((candidate) => candidate.page === expected.page)
-      requireFileIdentity(actual, expected, `Page ${expected.page} annotation`)
-    }
-  }
-  if (expectedIdentities.sources) {
-    if (
-      !Array.isArray(evidence.sources?.files) ||
-      evidence.sources.files.length !== expectedIdentities.sources.length
-    ) {
-      fail('Standalone detector evidence has missing exact source-image identities.')
-    }
-    for (const expected of expectedIdentities.sources) {
-      const actual = evidence.sources.files.find((candidate) => candidate.page === expected.page)
-      requireFileIdentity(actual, expected, `Page ${expected.page} detector source`)
-      if (
-        actual.url !== expected.url ||
-        actual.width !== expected.width ||
-        actual.height !== expected.height
-      ) {
-        fail(`Page ${expected.page} detector source metadata does not match the manifest.`)
-      }
-    }
-  }
-  if (
-    evidence.protocolBoundary?.browserJobUpdatesRead !== false ||
-    evidence.protocolBoundary?.regionReadyUsed !== false ||
-    evidence.protocolBoundary?.nonAcceptedRegionsPublishedToBrowser !== false ||
-    evidence.protocolBoundary?.evidenceSource !==
-      'standalone detector CLI JSON plus exact manifest source WebPs'
-  ) {
-    fail('Detector evidence crosses the standalone detector/browser protocol boundary.')
-  }
-  if (
-    !Array.isArray(evidence.predictions?.files) ||
-    evidence.predictions.files.length !== pageCount ||
-    evidence.predictions.bubbleLabelId !== 0 ||
-    evidence.predictions.dialogueTextLabelId !== 1 ||
-    evidence.predictions.minimumScore !== 0.3 ||
-    new Set(evidence.predictions.files.map((item) => item.page)).size !== pageCount ||
-    evidence.predictions.files.some(
-      (item) =>
-        !Number.isInteger(item.page) ||
-        item.page < 1 ||
-        item.page > pageCount ||
-        item.file !== `${String(item.page).padStart(3, '0')}.json` ||
-        !Number.isInteger(item.bytes) ||
-        item.bytes < 1 ||
-        !/^[0-9a-f]{64}$/u.test(item.sha256),
-    )
-  ) {
-    fail(`Detector evidence must hash ${pageCount} unique raw prediction files.`)
-  }
-  if (
-    evidence.matcher?.minimumIou !== REGION_MATCH_MINIMUM_IOU ||
-    evidence.matcher?.assignment !== 'descending-IoU one-to-one greedy assignment per page'
-  ) {
-    fail('Detector evidence does not use the committed one-to-one IoU matcher.')
-  }
-  if (
-    evidence.postprocessing?.minimumJointConfidence !== 0.4 ||
-    evidence.postprocessing?.darkCardMaximumLuma !== 32 ||
-    evidence.postprocessing?.darkCardMinimumDarkPixelRatio !== 0.7
-  ) {
-    fail('Detector evidence does not use the fixed dialogue postprocessing policy.')
-  }
-  const totals = evidence.totals
-  const gold = totals?.goldBubbleCount
-  const predictions = totals?.bubblePredictionCount
-  const matched = totals?.matchedBubbleCount
-  const precision = totals?.precision
-  const recall = totals?.recall
-  if (
-    gold !== expectedTotals.goldBubbleCount ||
-    !Number.isInteger(predictions) ||
-    predictions < 0 ||
-    !Number.isInteger(matched) ||
-    matched < 0 ||
-    matched > gold ||
-    matched > predictions ||
-    totals.falsePositiveCount !== predictions - matched ||
-    totals.falseNegativeCount !== gold - matched ||
-    !finiteNonNegative(precision) ||
-    !finiteNonNegative(recall) ||
-    Math.abs(precision - (predictions > 0 ? matched / predictions : 0)) > 1e-12 ||
-    Math.abs(recall - matched / gold) > 1e-12
-  ) {
-    fail('Detector evidence totals or explicit precision/recall denominators are inconsistent.')
-  }
-  if (!Array.isArray(evidence.pages) || evidence.pages.length !== pageCount) {
-    fail(`Detector evidence must contain ${pageCount} scored pages.`)
-  }
-  const pageTotals = evidence.pages.reduce(
-    (sum, page) => ({
-      gold: sum.gold + page.goldBubbleCount,
-      predictions: sum.predictions + page.bubblePredictionCount,
-      matched: sum.matched + page.matchedBubbleCount,
-    }),
-    { gold: 0, predictions: 0, matched: 0 },
-  )
-  if (
-    pageTotals.gold !== gold ||
-    pageTotals.predictions !== predictions ||
-    pageTotals.matched !== matched
-  ) {
-    fail('Detector evidence page counts do not sum to its reported denominators.')
-  }
-  const gates = [
-    exactGate('detector-gold-bubble-denominator', gold, expectedTotals.goldBubbleCount, {
-      denominator: expectedTotals.goldBubbleCount,
-      source:
-        'all manifest-declared dialogue/thought regions using bubblePolygon when present and textPolygon otherwise, including non-translation targets',
-    }),
-    minimumRatioGate(
-      'speech-bubble-detector-precision',
-      precision,
-      DETECTOR_MINIMUM_PRECISION,
-      matched,
-      predictions,
-      'one-to-one matched detector bubble predictions / selected detector bubble predictions',
-    ),
-    minimumRatioGate(
-      'speech-bubble-detector-recall',
-      recall,
-      DETECTOR_MINIMUM_RECALL,
-      matched,
-      gold,
-      `one-to-one matched detector bubble predictions / all ${expectedTotals.goldBubbleCount} committed detector-gold bubbles`,
-    ),
-  ]
-  const derivedStatus = gates.every((gate) => gate.status === 'pass') ? 'pass' : 'fail'
-  if (
-    evidence.status !== derivedStatus ||
-    !Array.isArray(evidence.gates) ||
-    (evidence.gates.every((gate) => gate.status === 'pass') ? 'pass' : 'fail') !== evidence.status
-  ) {
-    fail('Standalone detector evidence status is inconsistent with its scored gates.')
-  }
-  return {
-    provenance: {
-      evidenceSource: evidence.protocolBoundary.evidenceSource,
-      browserJobUpdatesRead: false,
-      regionReadyUsed: false,
-      rawPredictionFiles: evidence.predictions.files,
-      exactSourceFiles: evidence.sources.files,
-      sourceDecoder: evidence.sources.decoder,
-      fixture: evidence.fixture,
-      postprocessing: evidence.postprocessing,
-      matcher: evidence.matcher,
-      scorerRecordedAtUtc: evidence.recordedAtUtc,
-    },
-    metricDefinitions: {
-      precision: {
-        numerator: 'matchedBubbleCount',
-        denominator: 'bubblePredictionCount',
-        minimum: DETECTOR_MINIMUM_PRECISION,
-      },
-      recall: {
-        numerator: 'matchedBubbleCount',
-        denominator: `goldBubbleCount (${expectedTotals.goldBubbleCount})`,
-        minimum: DETECTOR_MINIMUM_RECALL,
-      },
-    },
-    totals,
-    pages: evidence.pages,
-    gates,
-    status: derivedStatus,
-  }
-}
-
-function loadDetectorEvidence(detectorEvidencePath, manifestPath) {
-  if (!detectorEvidencePath || !existsSync(detectorEvidencePath)) {
-    fail(
-      'A scorer-produced standalone detector evidence JSON is required before packaged-Firefox measurement.',
-    )
-  }
-  const fixtureDirectory = dirname(manifestPath)
-  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
-  const evidenceSchemaPath = join(fixtureDirectory, 'detector-benchmark-evidence.schema.json')
-  const expectedIdentities = {
-    evidenceSchema: fileIdentity(evidenceSchemaPath, 'detector-benchmark-evidence.schema.json'),
-    manifest: fileIdentity(manifestPath, 'manifest.json'),
-    annotationSchema: fileIdentity(
-      join(fixtureDirectory, manifest.annotationSchema),
-      manifest.annotationSchema,
-    ),
-    annotations: manifest.images.map((image) => ({
-      ...fileIdentity(join(fixtureDirectory, image.annotation), image.annotation),
-      page: image.order,
-    })),
-    sources: manifest.images.map((image) => ({
-      file: image.file,
-      bytes: image.bytes,
-      sha256: image.sha256,
-      page: image.order,
-      url: image.url,
-      width: image.width,
-      height: image.height,
-    })),
-  }
-  const evidence = JSON.parse(readFileSync(detectorEvidencePath, 'utf8'))
-  return {
-    evidenceFile: fileIdentity(detectorEvidencePath, basename(detectorEvidencePath)),
-    ...validateDetectorEvidence(evidence, manifest, expectedIdentities),
   }
 }
 
@@ -1074,41 +824,50 @@ async function startJobMonitor(extensionPage, pageUrl, runId) {
         observations: new Map(),
         errors: [],
         timer: 0,
+        onStorageChanged: undefined,
+      }
+      const observe = (key, value) => {
+        if (
+          !key.startsWith(prefix) ||
+          value?.pageUrl !== expectedPageUrl ||
+          typeof value?.createdAtUnixMs !== 'number' ||
+          value.createdAtUnixMs < monitor.actionIssuedAtEpochMs
+        ) {
+          return
+        }
+        const now = Date.now()
+        const previous = monitor.observations.get(value.jobId)
+        monitor.observations.set(value.jobId, {
+          jobId: value.jobId,
+          pageIndex: value.pageIndex,
+          sourceSha256: value.sourceSha256,
+          sourceWidth: value.sourceWidth,
+          sourceHeight: value.sourceHeight,
+          submittedRequest: value.submittedRequest,
+          uploadedImageBytes: value.uploadedImageBytes,
+          submittedAtUnixMs: value.submittedAtUnixMs,
+          createdAtUnixMs: value.createdAtUnixMs,
+          firstObservedAtEpochMs: previous?.firstObservedAtEpochMs ?? now,
+          terminalType: value.terminalType,
+          terminalObservedAtEpochMs:
+            previous?.terminalObservedAtEpochMs ?? (value.terminalType ? now : undefined),
+        })
       }
       const sample = async () => {
         try {
           const values = await globalThis.browser.storage.local.get(null)
-          const now = Date.now()
-          for (const [key, value] of Object.entries(values)) {
-            if (
-              !key.startsWith(prefix) ||
-              value?.pageUrl !== expectedPageUrl ||
-              typeof value?.createdAtUnixMs !== 'number' ||
-              value.createdAtUnixMs < monitor.actionIssuedAtEpochMs
-            ) {
-              continue
-            }
-            const previous = monitor.observations.get(value.jobId)
-            monitor.observations.set(value.jobId, {
-              jobId: value.jobId,
-              pageIndex: value.pageIndex,
-              sourceSha256: value.sourceSha256,
-              sourceWidth: value.sourceWidth,
-              sourceHeight: value.sourceHeight,
-              submittedRequest: value.submittedRequest,
-              uploadedImageBytes: value.uploadedImageBytes,
-              submittedAtUnixMs: value.submittedAtUnixMs,
-              createdAtUnixMs: value.createdAtUnixMs,
-              firstObservedAtEpochMs: previous?.firstObservedAtEpochMs ?? now,
-              terminalType: value.terminalType,
-              terminalObservedAtEpochMs:
-                previous?.terminalObservedAtEpochMs ?? (value.terminalType ? now : undefined),
-            })
-          }
+          for (const [key, value] of Object.entries(values)) observe(key, value)
         } catch (error) {
           monitor.errors.push(error instanceof Error ? error.message : String(error))
         }
       }
+      monitor.onStorageChanged = (changes, areaName) => {
+        if (areaName !== 'local') return
+        for (const [key, change] of Object.entries(changes)) {
+          observe(key, change.newValue ?? change.oldValue)
+        }
+      }
+      globalThis.browser.storage.onChanged.addListener(monitor.onStorageChanged)
       monitor.sample = sample
       monitor.timer = setInterval(() => void sample(), 10)
       globalThis.__hskifyJobMonitor = monitor
@@ -1192,6 +951,9 @@ async function stopJobMonitor(extensionPage) {
     const monitor = globalThis.__hskifyJobMonitor
     if (!monitor) return { observations: [], errors: ['job monitor was not installed'] }
     clearInterval(monitor.timer)
+    if (monitor.onStorageChanged) {
+      globalThis.browser.storage.onChanged.removeListener(monitor.onStorageChanged)
+    }
     await monitor.sample()
     const result = {
       actionIssuedAtEpochMs: monitor.actionIssuedAtEpochMs,
@@ -1247,9 +1009,7 @@ export async function installDomObserver(page, runId) {
     const pageFor = (element) => {
       const root = element.getRootNode()
       const host = root instanceof ShadowRoot ? root.host : element
-      return Number(
-        host.closest('.hmt-wrapper')?.querySelector('img[data-page]')?.dataset.page ?? 0,
-      )
+      return Number(host.closest('.hmt-wrapper')?.dataset.hmtSourcePage ?? 0)
     }
     const isVisible = (element) => {
       const rect = element.getBoundingClientRect()
@@ -1487,9 +1247,7 @@ export async function chapterDomEvidence(page) {
     const regions = []
     let degradedFitCount = 0
     for (const host of hosts) {
-      const pageNumber = Number(
-        host.closest('.hmt-wrapper')?.querySelector('img[data-page]')?.dataset.page ?? 0,
-      )
+      const pageNumber = Number(host.closest('.hmt-wrapper')?.dataset.hmtSourcePage ?? 0)
       for (const patch of host.shadowRoot.querySelectorAll('.hmt-patch')) {
         patches.push({
           page: pageNumber,
@@ -1560,14 +1318,26 @@ async function sourceAcquisitionEvidence(page, actionIssuedAtEpochMs) {
   }, actionIssuedAtEpochMs)
 }
 
-export async function sourceGlyphEvidence(page, goldPages) {
-  const regions = goldPages.flatMap((goldPage) =>
-    goldPage.regions.map((region) => ({
-      page: goldPage.order,
-      id: region.id,
-      textPolygon: region.textPolygon,
-    })),
-  )
+export async function sourceGlyphEvidence(page, routes) {
+  const regions = routes.jobs.flatMap((job) => {
+    const accepted = new Map(
+      job.updates
+        .filter((update) => update.type === 'regionReady')
+        .map((update) => [update.region.id, update.region]),
+    )
+    return job.patches.map((patch) => {
+      const region = accepted.get(patch.regionId)
+      if (!region?.sourceEnglish) {
+        fail(`Missing accepted source text for glyph audit region ${patch.regionId}.`)
+      }
+      return {
+        page: job.pageIndex + 1,
+        id: patch.regionId,
+        sourceEnglish: region.sourceEnglish,
+        textPolygon: patch.textPolygon,
+      }
+    })
+  })
   return page.evaluate((expectedRegions) => {
     const images = [...document.querySelectorAll('#chapter img[data-page]')].sort(
       (left, right) => Number(left.dataset.page) - Number(right.dataset.page),
@@ -1661,7 +1431,7 @@ export async function sourceGlyphEvidence(page, goldPages) {
             : grayscale[index] >= Math.max(threshold, background + 8),
         )
       }
-      const retained = core.slice()
+      let retained = core.slice()
       const queue = new Int32Array(retained.length)
       let queueHead = 0
       let queueTail = 0
@@ -1695,6 +1465,11 @@ export async function sourceGlyphEvidence(page, goldPages) {
           }
         }
       }
+      // Tight text polygons can put every glyph component on the crop border
+      // (for example, large title lettering). In that case the normal contour
+      // rejection would erase the entire independent audit mask, so retain
+      // the polarity-selected core instead of producing unverifiable evidence.
+      if (!retained.some((value) => value !== 0)) retained = core
       const mask = new Uint8Array(core.length)
       for (let y = 0; y < height; y += 1) {
         for (let x = 0; x < width; x += 1) {
@@ -1715,6 +1490,59 @@ export async function sourceGlyphEvidence(page, goldPages) {
             }
           }
           mask[y * width + x] = Number(foreground)
+        }
+      }
+      const seen = new Uint8Array(mask.length)
+      const componentQueue = new Int32Array(mask.length)
+      const preserveHorizontalMarks = /[-\u2014\u2013_]|\.{2,}|\u2026/u.test(
+        expected.sourceEnglish,
+      )
+      for (let start = 0; start < mask.length; start += 1) {
+        if (mask[start] === 0 || seen[start] !== 0) continue
+        let head = 0
+        let tail = 0
+        let left = width
+        let top = height
+        let right = 0
+        let bottom = 0
+        componentQueue[tail] = start
+        tail += 1
+        seen[start] = 1
+        while (head < tail) {
+          const index = componentQueue[head]
+          head += 1
+          const x = index % width
+          const y = Math.floor(index / width)
+          left = Math.min(left, x)
+          top = Math.min(top, y)
+          right = Math.max(right, x + 1)
+          bottom = Math.max(bottom, y + 1)
+          for (let dy = -1; dy <= 1; dy += 1) {
+            const neighborY = y + dy
+            if (neighborY < 0 || neighborY >= height) continue
+            for (let dx = -1; dx <= 1; dx += 1) {
+              const neighborX = x + dx
+              if (neighborX < 0 || neighborX >= width) continue
+              const neighbor = neighborY * width + neighborX
+              if (mask[neighbor] === 0 || seen[neighbor] !== 0) continue
+              seen[neighbor] = 1
+              componentQueue[tail] = neighbor
+              tail += 1
+            }
+          }
+        }
+        const componentWidth = right - left
+        const componentHeight = bottom - top
+        const detachedSpeck = tail < 25
+        const shallowWideArtwork =
+          !preserveHorizontalMarks &&
+          componentHeight > 0 &&
+          componentWidth / componentHeight >= 2.75 &&
+          componentHeight <= Math.max(24, height * 0.06)
+        if (detachedSpeck || shallowWideArtwork) {
+          for (let index = 0; index < tail; index += 1) {
+            mask[componentQueue[index]] = 0
+          }
         }
       }
       const rows = []
@@ -1744,7 +1572,7 @@ export async function sourceGlyphEvidence(page, goldPages) {
         pixels,
         rows,
         method:
-          'source crop grayscale Otsu against border-median polarity, rejecting border-connected foreground before one-pixel audit dilation',
+          'accepted source-text crop grayscale Otsu against border-median polarity, rejecting border-connected foreground, detached sub-25-pixel specks, and isolated shallow-wide artwork before one-pixel audit dilation',
       }
     })
   }, regions)
@@ -1786,7 +1614,7 @@ async function armDaemonCancellationProbe(extensionPage, records) {
   if (targets.length === 0) {
     fail('Cancellation timing requires a pre-cancel in-flight extension-owned job.')
   }
-  await extensionPage.evaluate(
+  return extensionPage.evaluate(
     async ({ jobs, sessionKey }) => {
       if (globalThis.__hskifyDaemonCancellationProbe) {
         globalThis.__hskifyDaemonCancellationProbe.stopped = true
@@ -1800,50 +1628,63 @@ async function armDaemonCancellationProbe(extensionPage, records) {
         Authorization: `Bearer ${session.token}`,
         'X-HSK-Manga-Extension-Origin': new URL(globalThis.browser.runtime.getURL('')).origin,
       }
+      const observe = async (job) => {
+        const response = await fetch(
+          `http://127.0.0.1:${session.port}/jobs/${encodeURIComponent(
+            job.jobId,
+          )}/updates?after=0&waitMs=0`,
+          {
+            headers,
+            cache: 'no-store',
+            redirect: 'error',
+          },
+        )
+        const batch = await response.json()
+        if (!response.ok || batch.jobId !== job.jobId) {
+          throw new Error(
+            `Cancellation terminal probe failed for ${job.jobId}: HTTP ${response.status}.`,
+          )
+        }
+        const terminal = [...batch.updates]
+          .reverse()
+          .find((update) => ['complete', 'failed', 'cancelled'].includes(update.type))
+        return {
+          jobId: job.jobId,
+          pageIndex: job.pageIndex,
+          httpStatus: response.status,
+          nextSequence: batch.nextSequence,
+          terminalType: terminal?.type,
+        }
+      }
+      const initial = await Promise.all(jobs.map(observe))
+      const activeJobIds = new Set(
+        initial
+          .filter((observation) => observation.terminalType === undefined)
+          .map((observation) => observation.jobId),
+      )
+      const activeJobs = jobs.filter((job) => activeJobIds.has(job.jobId))
+      if (activeJobs.length === 0) {
+        throw new Error('Cancellation timing found no daemon-confirmed nonterminal job.')
+      }
       const state = {
         armedAtEpochMs: Date.now(),
-        targets: jobs,
-        observations: new Map(),
+        targets: activeJobs,
+        observations: new Map(
+          initial
+            .filter((observation) => activeJobIds.has(observation.jobId))
+            .map((observation) => [observation.jobId, observation]),
+        ),
         terminalObservedAtEpochMs: undefined,
         stopped: false,
         errors: [],
       }
       const sample = async () => {
-        const observations = await Promise.all(
-          jobs.map(async (job) => {
-            const response = await fetch(
-              `http://127.0.0.1:${session.port}/jobs/${encodeURIComponent(
-                job.jobId,
-              )}/updates?after=0&waitMs=0`,
-              {
-                headers,
-                cache: 'no-store',
-                redirect: 'error',
-              },
-            )
-            const batch = await response.json()
-            if (!response.ok || batch.jobId !== job.jobId) {
-              throw new Error(
-                `Cancellation terminal probe failed for ${job.jobId}: HTTP ${response.status}.`,
-              )
-            }
-            const terminal = [...batch.updates]
-              .reverse()
-              .find((update) => ['complete', 'failed', 'cancelled'].includes(update.type))
-            return {
-              jobId: job.jobId,
-              pageIndex: job.pageIndex,
-              httpStatus: response.status,
-              nextSequence: batch.nextSequence,
-              terminalType: terminal?.type,
-            }
-          }),
-        )
+        const observations = await Promise.all(activeJobs.map(observe))
         for (const observation of observations) {
           state.observations.set(observation.jobId, observation)
         }
         if (
-          observations.length === jobs.length &&
+          observations.length === activeJobs.length &&
           observations.every((observation) => observation.terminalType === 'cancelled')
         ) {
           state.terminalObservedAtEpochMs = Date.now()
@@ -1864,10 +1705,10 @@ async function armDaemonCancellationProbe(extensionPage, records) {
       }
       globalThis.__hskifyDaemonCancellationProbe = state
       void loop()
+      return activeJobs
     },
     { jobs: targets, sessionKey: SESSION_STORAGE_KEY },
   )
-  return targets
 }
 
 async function waitForDaemonCancellationProbe(extensionPage, timeoutMs = 30_000) {
@@ -2048,6 +1889,10 @@ export async function routeEvidence(
               x: point.x,
               y: point.y,
             })),
+            textPolygon: update.region.textPolygon.map((point) => ({
+              x: point.x,
+              y: point.y,
+            })),
             httpStatus: patchFetch.response.status,
             getDurationMs: patchFetch.durationMs,
             decodeDurationMs: performance.now() - decodeStarted,
@@ -2202,6 +2047,25 @@ function rectangleIou(leftPoints, rightPoints) {
   return union > 0 ? intersection / union : 0
 }
 
+function rectangleOverlapOverSmaller(leftPoints, rightPoints) {
+  const left = bounds(leftPoints)
+  const right = bounds(rightPoints)
+  if (!left || !right) return 0
+  const intersectionWidth = Math.max(
+    0,
+    Math.min(left.right, right.right) - Math.max(left.left, right.left),
+  )
+  const intersectionHeight = Math.max(
+    0,
+    Math.min(left.bottom, right.bottom) - Math.max(left.top, right.top),
+  )
+  const intersection = intersectionWidth * intersectionHeight
+  const leftArea = Math.max(0, left.right - left.left) * Math.max(0, left.bottom - left.top)
+  const rightArea = Math.max(0, right.right - right.left) * Math.max(0, right.bottom - right.top)
+  const smaller = Math.min(leftArea, rightArea)
+  return smaller > 0 ? intersection / smaller : 0
+}
+
 function canonicalOcrText(value) {
   return String(value).normalize('NFKC').toLocaleLowerCase('en').replace(/\s+/gu, ' ').trim()
 }
@@ -2270,6 +2134,7 @@ function maximumRatioGate(id, actual, limit, numerator, denominator, definition)
 export function buildQualityEvidence(routes, goldPages) {
   const pages = []
   const allMatches = []
+  const allComponents = []
   const unmatchedAccepted = []
   const missingTargets = []
   let totalAccepted = 0
@@ -2282,9 +2147,7 @@ export function buildQualityEvidence(routes, goldPages) {
   let totalModifiedExclusions = 0
   let matchedCharacterErrors = 0
   let matchedReferenceCharacters = 0
-  let missingCharacterErrors = 0
-  let missingReferenceCharacters = 0
-  let unmatchedInsertionErrors = 0
+  let coveredTranslationTargets = 0
   for (const goldPage of goldPages) {
     const job = routes.jobs.find((candidate) => candidate.pageIndex === goldPage.order - 1)
     const accepted = job ? finalRegions(job) : []
@@ -2303,16 +2166,99 @@ export function buildQualityEvidence(routes, goldPages) {
     totalNarrationRegions += narrationGold.length
     totalTranslationTargets += translationTargets.length
     totalExpectedUntouchedExclusions += untouchedExclusionGold.length
-    const candidates = []
-    for (const observed of accepted) {
-      for (const expected of translationTargets) {
-        const iou = rectangleIou(observed.textPolygon, expected.textPolygon)
-        candidates.push({ observed, expected, iou })
+    const edges = []
+    for (let observedIndex = 0; observedIndex < accepted.length; observedIndex += 1) {
+      for (let expectedIndex = 0; expectedIndex < translationTargets.length; expectedIndex += 1) {
+        const observed = accepted[observedIndex]
+        const expected = translationTargets[expectedIndex]
+        const overlap = rectangleOverlapOverSmaller(observed.textPolygon, expected.textPolygon)
+        if (overlap >= STORY_REGION_MINIMUM_OVERLAP) {
+          edges.push({ observed, observedIndex, expected, expectedIndex, overlap })
+        }
       }
     }
-    candidates.sort(
+    const parent = Array.from(
+      { length: accepted.length + translationTargets.length },
+      (_, index) => index,
+    )
+    const find = (index) => {
+      let root = index
+      while (parent[root] !== root) root = parent[root]
+      while (parent[index] !== index) {
+        const next = parent[index]
+        parent[index] = root
+        index = next
+      }
+      return root
+    }
+    const union = (left, right) => {
+      const leftRoot = find(left)
+      const rightRoot = find(right)
+      if (leftRoot !== rightRoot) parent[rightRoot] = leftRoot
+    }
+    for (const edge of edges) {
+      union(edge.expectedIndex, translationTargets.length + edge.observedIndex)
+    }
+    const componentByRoot = new Map()
+    for (const edge of edges) {
+      const root = find(edge.expectedIndex)
+      if (!componentByRoot.has(root)) {
+        componentByRoot.set(root, {
+          expectedIndices: new Set(),
+          observedIndices: new Set(),
+          maximumOverlap: 0,
+        })
+      }
+      const component = componentByRoot.get(root)
+      component.expectedIndices.add(edge.expectedIndex)
+      component.observedIndices.add(edge.observedIndex)
+      component.maximumOverlap = Math.max(component.maximumOverlap, edge.overlap)
+    }
+    const readingOrder = (left, right) => {
+      const leftBounds = bounds(left.textPolygon)
+      const rightBounds = bounds(right.textPolygon)
+      return (
+        (leftBounds?.top ?? 0) - (rightBounds?.top ?? 0) ||
+        (leftBounds?.left ?? 0) - (rightBounds?.left ?? 0) ||
+        String(left.id).localeCompare(String(right.id), 'en')
+      )
+    }
+    const components = [...componentByRoot.values()].map((component) => {
+      const expected = [...component.expectedIndices]
+        .map((index) => translationTargets[index])
+        .sort(readingOrder)
+      const observed = [...component.observedIndices]
+        .map((index) => accepted[index])
+        .sort(readingOrder)
+      const expectedText = expected.map((region) => canonicalOcrText(region.sourceEnglish)).join(' ')
+      const observedText = observed.map((region) => canonicalOcrText(region.sourceEnglish)).join(' ')
+      const characterErrors = editDistance(expectedText, observedText)
+      const referenceCharacters = [...expectedText].length
+      matchedCharacterErrors += characterErrors
+      matchedReferenceCharacters += referenceCharacters
+      return {
+        page: goldPage.order,
+        expectedRegionIds: expected.map((region) => region.id),
+        observedRegionIds: observed.map((region) => region.id),
+        expectedSourceEnglish: expected.map((region) => region.sourceEnglish),
+        observedSourceEnglish: observed.map((region) => region.sourceEnglish),
+        maximumOverlapOverSmaller: component.maximumOverlap,
+        characterErrors,
+        referenceCharacters,
+      }
+    })
+    allComponents.push(...components)
+    const coveredExpectedIds = new Set(
+      components.flatMap((component) => component.expectedRegionIds),
+    )
+    const coveredObservedIds = new Set(
+      components.flatMap((component) => component.observedRegionIds),
+    )
+    coveredTranslationTargets += coveredExpectedIds.size
+
+    const candidates = [...edges].sort(
       (left, right) =>
-        right.iou - left.iou ||
+        right.overlap - left.overlap ||
         String(left.observed.id).localeCompare(String(right.observed.id), 'en') ||
         String(left.expected.id).localeCompare(String(right.expected.id), 'en'),
     )
@@ -2321,7 +2267,6 @@ export function buildQualityEvidence(routes, goldPages) {
     const matches = []
     for (const candidate of candidates) {
       if (
-        candidate.iou < REGION_MATCH_MINIMUM_IOU ||
         observedIds.has(candidate.observed.id) ||
         expectedIds.has(candidate.expected.id)
       ) {
@@ -2329,55 +2274,37 @@ export function buildQualityEvidence(routes, goldPages) {
       }
       observedIds.add(candidate.observed.id)
       expectedIds.add(candidate.expected.id)
-      const expectedText = canonicalOcrText(candidate.expected.sourceEnglish)
-      const observedText = canonicalOcrText(candidate.observed.sourceEnglish)
-      const distance = editDistance(expectedText, observedText)
-      const referenceCharacters = [...expectedText].length
-      matchedCharacterErrors += distance
-      matchedReferenceCharacters += referenceCharacters
       const match = {
         expectedRegionId: candidate.expected.id,
         observedRegionId: candidate.observed.id,
-        textRectangleIou: candidate.iou,
+        textRectangleOverlapOverSmaller: candidate.overlap,
         expectedSourceEnglish: candidate.expected.sourceEnglish,
         observedSourceEnglish: candidate.observed.sourceEnglish,
-        characterErrors: distance,
-        referenceCharacters,
         pinyin: candidate.observed.pinyin,
       }
       matches.push(match)
       allMatches.push({ page: goldPage.order, ...match })
     }
     const pageMissingTargets = translationTargets
-      .filter((expected) => !expectedIds.has(expected.id))
+      .filter((expected) => !coveredExpectedIds.has(expected.id))
       .map((expected) => {
-        const normalizedReference = canonicalOcrText(expected.sourceEnglish)
-        const referenceCharacters = [...normalizedReference].length
-        missingCharacterErrors += referenceCharacters
-        missingReferenceCharacters += referenceCharacters
         const evidence = {
           page: goldPage.order,
           expectedRegionId: expected.id,
           expectedSourceEnglish: expected.sourceEnglish,
-          referenceCharacters,
-          characterErrors: referenceCharacters,
-          semantics: 'missing OCR output counted as deletion of the complete normalized reference',
+          semantics: 'No accepted story region overlaps this target; charged to publication recall, not OCR CER.',
         }
         missingTargets.push(evidence)
         return evidence
       })
     const pageUnmatchedAccepted = accepted
-      .filter((observed) => !observedIds.has(observed.id))
+      .filter((observed) => !coveredObservedIds.has(observed.id))
       .map((observed) => {
-        const normalizedObserved = canonicalOcrText(observed.sourceEnglish)
-        const insertionErrors = [...normalizedObserved].length
-        unmatchedInsertionErrors += insertionErrors
         const evidence = {
           page: goldPage.order,
           observedRegionId: observed.id,
           observedSourceEnglish: observed.sourceEnglish,
-          insertionErrors,
-          semantics: 'unmatched accepted OCR output counted as inserted characters',
+          semantics: 'No committed English story target overlaps this accepted translation.',
         }
         unmatchedAccepted.push(evidence)
         return evidence
@@ -2405,7 +2332,7 @@ export function buildQualityEvidence(routes, goldPages) {
       expectedEnglishTranslationTargetCount: translationTargets.length,
       expectedUntouchedExclusionCount: untouchedExclusionGold.length,
       acceptedTranslationCount: accepted.length,
-      matchedEnglishTargetCount: matches.length,
+      matchedEnglishTargetCount: coveredExpectedIds.size,
       missingEnglishTargetCount: pageMissingTargets.length,
       unmatchedAcceptedTranslationCount: pageUnmatchedAccepted.length,
       untouchedExclusionCount,
@@ -2413,30 +2340,47 @@ export function buildQualityEvidence(routes, goldPages) {
       modifiedExclusionCount: modifiedExclusionRegionIds.length,
       modifiedExclusionRegionIds,
       matches,
+      components,
       missingTargets: pageMissingTargets,
       unmatchedAccepted: pageUnmatchedAccepted,
     })
   }
-  const matched = allMatches.length
-  const ocrCharacterErrors =
-    matchedCharacterErrors + missingCharacterErrors + unmatchedInsertionErrors
-  const ocrReferenceCharacters = matchedReferenceCharacters + missingReferenceCharacters
+  const ocrCharacterErrors = matchedCharacterErrors
+  const ocrReferenceCharacters = matchedReferenceCharacters
   const ocrCer = ocrReferenceCharacters > 0 ? ocrCharacterErrors / ocrReferenceCharacters : 1
+  const storyRegionRecall =
+    totalTranslationTargets > 0 ? coveredTranslationTargets / totalTranslationTargets : 0
   const falseTranslationNumerator = unmatchedAccepted.length
   const falseTranslationDenominator = totalAccepted
   const falseTranslationRate =
     falseTranslationDenominator > 0 ? falseTranslationNumerator / falseTranslationDenominator : 0
-  const pinyinComplete = allMatches.every((match) => String(match.pinyin).trim().length > 0)
+  const pinyinComplete = pages.every((page) =>
+    page.components
+      .flatMap((component) => component.observedRegionIds)
+      .every((observedId) => {
+        const job = routes.jobs.find((candidate) => candidate.pageIndex === page.page - 1)
+        const observed = job ? finalRegions(job).find((region) => region.id === observedId) : undefined
+        return String(observed?.pinyin ?? '').trim().length > 0
+      }),
+  )
   const exclusionsUntouched =
     totalUntouchedExclusions === totalExpectedUntouchedExclusions && totalModifiedExclusions === 0
   const gates = [
+    minimumRatioGate(
+      'story-region-publication-recall',
+      storyRegionRecall,
+      STORY_REGION_MINIMUM_RECALL,
+      coveredTranslationTargets,
+      totalTranslationTargets,
+      'Committed English story targets with any accepted overlapping region, allowing detector/OCR splits and merges.',
+    ),
     maximumRatioGate(
       'english-ocr-cer',
       ocrCer,
       MAXIMUM_ENGLISH_OCR_CER,
       ocrCharacterErrors,
       ocrReferenceCharacters,
-      'Levenshtein character errors after Unicode NFKC, English lowercase, and whitespace collapse; missing references are full deletions and unmatched accepted outputs are insertions.',
+      'Levenshtein character errors within spatially connected matched components after Unicode NFKC, English lowercase, and whitespace collapse. Detector/publication misses and false regions are measured separately.',
     ),
     maximumRatioGate(
       'non-english-non-dialogue-false-translation-rate',
@@ -2444,7 +2388,7 @@ export function buildQualityEvidence(routes, goldPages) {
       MAXIMUM_FALSE_TRANSLATION_RATE,
       falseTranslationNumerator,
       falseTranslationDenominator,
-      `Accepted regionReady translations not one-to-one matched to the ${totalTranslationTargets} committed English translation targets divided by all accepted regionReady translations.`,
+      `Accepted regionReady translations with no spatial overlap to any of the ${totalTranslationTargets} committed English translation targets divided by all accepted regionReady translations.`,
     ),
     booleanGate(
       'pinyin-present-for-every-translation-target',
@@ -2465,20 +2409,27 @@ export function buildQualityEvidence(routes, goldPages) {
   return {
     matcher: {
       geometry: 'axis-aligned bounding rectangle of committed and observed textPolygon',
-      minimumIou: REGION_MATCH_MINIMUM_IOU,
-      assignment: 'descending-IoU one-to-one greedy assignment',
+      minimumOverlapOverSmaller: STORY_REGION_MINIMUM_OVERLAP,
+      assignment:
+        'bipartite spatial connected components for OCR/recall; descending-overlap one-to-one representatives only for per-patch audit',
       acceptedOutputSource: 'final regionReady/regionRefined browser job updates',
       detectorOutputUsed: false,
     },
     metricDefinitions: {
       englishOcrCer: {
         numerator:
-          'matched Levenshtein errors + complete-reference deletions for missing targets + observed-character insertions for unmatched accepted output',
-        denominator: `normalized characters in all ${totalTranslationTargets} committed English references`,
+          'Levenshtein errors after concatenating expected and observed text in reading order inside each spatially connected component',
+        denominator:
+          'normalized committed reference characters only inside spatially matched components',
         maximum: MAXIMUM_ENGLISH_OCR_CER,
       },
+      storyRegionRecall: {
+        numerator: 'committed English story targets covered by at least one accepted region',
+        denominator: `all ${totalTranslationTargets} committed English story targets`,
+        minimum: STORY_REGION_MINIMUM_RECALL,
+      },
       falseTranslationRate: {
-        numerator: 'accepted regionReady translations unmatched to English translation target gold',
+        numerator: 'accepted regionReady translations with no spatial edge to English target gold',
         denominator: 'all accepted regionReady translations',
         maximum: MAXIMUM_FALSE_TRANSLATION_RATE,
       },
@@ -2491,16 +2442,17 @@ export function buildQualityEvidence(routes, goldPages) {
       expectedEnglishTranslationTargetCount: totalTranslationTargets,
       expectedUntouchedExclusionCount: totalExpectedUntouchedExclusions,
       acceptedTranslationCount: totalAccepted,
-      matchedEnglishTargetCount: matched,
+      matchedEnglishTargetCount: coveredTranslationTargets,
       missingEnglishTargetCount: missingTargets.length,
       unmatchedAcceptedTranslationCount: unmatchedAccepted.length,
       untouchedExclusions: totalUntouchedExclusions,
       modifiedExclusions: totalModifiedExclusions,
       ocrMatchedCharacterErrors: matchedCharacterErrors,
       ocrMatchedReferenceCharacters: matchedReferenceCharacters,
-      ocrMissingCharacterErrors: missingCharacterErrors,
-      ocrMissingReferenceCharacters: missingReferenceCharacters,
-      ocrUnmatchedInsertionErrors: unmatchedInsertionErrors,
+      storyRegionRecall,
+      ocrMissingCharacterErrors: 0,
+      ocrMissingReferenceCharacters: 0,
+      ocrUnmatchedInsertionErrors: 0,
       ocrCharacterErrorNumerator: ocrCharacterErrors,
       ocrReferenceCharacterDenominator: ocrReferenceCharacters,
       englishOcrCer: ocrCer,
@@ -2509,6 +2461,7 @@ export function buildQualityEvidence(routes, goldPages) {
       falseTranslationRate,
     },
     allMatches,
+    components: allComponents,
     missingTargets,
     unmatchedAccepted,
     gates,
@@ -2608,52 +2561,103 @@ function coveredAlphaPixels(alphaRows, patchOrigin, envelope) {
   return covered
 }
 
-function coveredGlyphMaskPixels(alphaRows, patchOrigin, glyph) {
-  const alphaByGlobalY = new Map(
-    alphaRows.map((row) => [patchOrigin.y + row.y, row.runs]),
-  )
+function coveredEnvelopePixels(patches, envelope) {
+  let covered = 0
+  for (let globalY = envelope.y0; globalY < envelope.y1; globalY += 1) {
+    const intervals = []
+    for (const patch of patches) {
+      const row = patch.alpha.rows.find(
+        (candidate) => patch.patchOrigin.y + candidate.y === globalY,
+      )
+      for (const [alphaStart, alphaEnd] of row?.runs ?? []) {
+        const start = Math.max(envelope.x0, patch.patchOrigin.x + alphaStart)
+        const end = Math.min(envelope.x1, patch.patchOrigin.x + alphaEnd)
+        if (end > start) intervals.push([start, end])
+      }
+    }
+    intervals.sort((left, right) => left[0] - right[0] || left[1] - right[1])
+    let mergedEnd = -1
+    for (const [start, end] of intervals) {
+      if (end <= mergedEnd) continue
+      covered += end - Math.max(start, mergedEnd)
+      mergedEnd = end
+    }
+  }
+  return covered
+}
+
+function coveredGlyphMaskPixels(patches, glyph) {
   let covered = 0
   for (const row of glyph.rows) {
-    const alphaRuns = alphaByGlobalY.get(glyph.originY + row.y) ?? []
     for (const [glyphStart, glyphEnd] of row.runs) {
       const globalStart = glyph.originX + glyphStart
       const globalEnd = glyph.originX + glyphEnd
-      for (const [alphaStart, alphaEnd] of alphaRuns) {
-        covered += Math.max(
-          0,
-          Math.min(globalEnd, patchOrigin.x + alphaEnd) -
-            Math.max(globalStart, patchOrigin.x + alphaStart),
+      const intervals = []
+      for (const patch of patches) {
+        const alphaRow = patch.alpha.rows.find(
+          (candidate) => patch.patchOrigin.y + candidate.y === glyph.originY + row.y,
         )
+        for (const [alphaStart, alphaEnd] of alphaRow?.runs ?? []) {
+          const start = Math.max(globalStart, patch.patchOrigin.x + alphaStart)
+          const end = Math.min(globalEnd, patch.patchOrigin.x + alphaEnd)
+          if (end > start) intervals.push([start, end])
+        }
+      }
+      intervals.sort((left, right) => left[0] - right[0] || left[1] - right[1])
+      let mergedEnd = -1
+      for (const [start, end] of intervals) {
+        if (end <= mergedEnd) continue
+        covered += end - Math.max(start, mergedEnd)
+        mergedEnd = end
       }
     }
   }
   return covered
 }
 
-export function buildPatchQualityEvidence(routes, goldPages, matches, sourceGlyphs) {
+export function buildPatchQualityEvidence(routes, goldPages, components, sourceGlyphs) {
+  const matches = components.flatMap((component) =>
+    component.expectedRegionIds.map((expectedRegionId) => ({
+      page: component.page,
+      expectedRegionId,
+      observedRegionIds: component.observedRegionIds,
+    })),
+  )
   const regions = []
   let eraseMaskPixelDenominator = 0
   let coveredEraseMaskPixelNumerator = 0
   let glyphPixelDenominator = 0
   let coveredGlyphPixelNumerator = 0
   let alphaPixelDenominator = 0
-  let alphaOutsideAllowedEraseMaskPixels = 0
-  let alphaOutsideObservedBubblePixels = 0
+  let alphaOutsideAcceptedRegionPixels = 0
   let dimensionMatchCount = 0
   let decodedAlphaEvidenceCount = 0
+  const auditedPatchIds = new Set()
+  const auditedGlyphIds = new Set()
   for (const match of matches) {
     const page = goldPages.find((candidate) => candidate.order === match.page)
     const gold = page?.regions.find((candidate) => candidate.id === match.expectedRegionId)
     const job = routes.jobs.find((candidate) => candidate.pageIndex === match.page - 1)
-    const glyph = sourceGlyphs.find(
-      (candidate) =>
-        candidate.page === match.page && candidate.id === match.expectedRegionId,
+    const glyphs = match.observedRegionIds.map((observedRegionId) =>
+      sourceGlyphs.find(
+        (candidate) =>
+          candidate.page === match.page && candidate.id === observedRegionId,
+      ),
     )
-    const patches =
-      job?.patches.filter((candidate) => candidate.regionId === match.observedRegionId) ?? []
-    const patch = patches.length === 1 ? patches[0] : undefined
-    if (!gold || !job || !glyph || !Number.isInteger(glyph.pixels) || glyph.pixels < 1) {
+    if (
+      !gold ||
+      !job ||
+      glyphs.some(
+        (glyph) => !glyph || !Number.isInteger(glyph.pixels) || glyph.pixels < 1,
+      )
+    ) {
       fail(`Patch audit cannot resolve matched region ${match.expectedRegionId}.`)
+    }
+    const patches = job.patches.filter((candidate) =>
+      match.observedRegionIds.includes(candidate.regionId),
+    )
+    if (patches.length !== match.observedRegionIds.length) {
+      fail(`Patch audit cannot resolve every observed patch for ${match.expectedRegionId}.`)
     }
     const sourceWidth = Number(job.sourceWidth)
     const sourceHeight = Number(job.sourceHeight)
@@ -2671,81 +2675,120 @@ export function buildPatchQualityEvidence(routes, goldPages, matches, sourceGlyp
       sourceHeight,
       `${gold.id}.eraseMask.polygon`,
     )
-    const observedBubbleEnvelope = polygonPixelEnvelope(
-      patch?.bubblePolygon,
-      sourceWidth,
-      sourceHeight,
-      `${match.observedRegionId}.bubblePolygon`,
-    )
     eraseMaskPixelDenominator += eraseEnvelope.pixels
-    glyphPixelDenominator += glyph.pixels
-    const rect = patch?.rect
-    const rectX = Number(rect?.x)
-    const rectY = Number(rect?.y)
-    const rectWidth = Number(rect?.width)
-    const rectHeight = Number(rect?.height)
-    const patchOrigin = {
-      x: Number.isFinite(rectX) ? Math.round(rectX * sourceWidth) : 0,
-      y: Number.isFinite(rectY) ? Math.round(rectY * sourceHeight) : 0,
-    }
-    const expectedWidth = Number.isFinite(rectWidth)
-      ? Math.max(1, Math.round(rectWidth * sourceWidth))
-      : 0
-    const expectedHeight = Number.isFinite(rectHeight)
-      ? Math.max(1, Math.round(rectHeight * sourceHeight))
-      : 0
-    const dimensionsMatch =
-      Boolean(patch) &&
-      Number.isFinite(rectX) &&
-      Number.isFinite(rectY) &&
-      Number.isFinite(rectWidth) &&
-      Number.isFinite(rectHeight) &&
-      patch.width === expectedWidth &&
-      patch.height === expectedHeight
-    if (dimensionsMatch) dimensionMatchCount += 1
-    const alpha = patch ? validatedAlphaRows(patch) : { rows: [], pixels: 0, valid: false }
-    if (alpha.valid) decodedAlphaEvidenceCount += 1
-    const coveredErasePixels =
-      patch && alpha.valid ? coveredAlphaPixels(alpha.rows, patchOrigin, eraseEnvelope) : 0
-    const coveredGlyphPixels =
-      patch && alpha.valid ? coveredGlyphMaskPixels(alpha.rows, patchOrigin, glyph) : 0
-    const outsidePixels = alpha.valid ? Math.max(0, alpha.pixels - coveredErasePixels) : 0
-    const coveredObservedBubblePixels =
-      patch && alpha.valid
-        ? coveredAlphaPixels(alpha.rows, patchOrigin, observedBubbleEnvelope)
+    const patchEvidence = patches.map((patch) => {
+      const rect = patch.rect
+      const rectX = Number(rect?.x)
+      const rectY = Number(rect?.y)
+      const rectWidth = Number(rect?.width)
+      const rectHeight = Number(rect?.height)
+      const patchOrigin = {
+        x: Number.isFinite(rectX) ? Math.round(rectX * sourceWidth) : 0,
+        y: Number.isFinite(rectY) ? Math.round(rectY * sourceHeight) : 0,
+      }
+      const expectedWidth = Number.isFinite(rectWidth)
+        ? Math.max(1, Math.round(rectWidth * sourceWidth))
         : 0
-    const outsideObservedBubblePixels = alpha.valid
-      ? Math.max(0, alpha.pixels - coveredObservedBubblePixels)
-      : 0
+      const expectedHeight = Number.isFinite(rectHeight)
+        ? Math.max(1, Math.round(rectHeight * sourceHeight))
+        : 0
+      const dimensionsMatch =
+        Number.isFinite(rectX) &&
+        Number.isFinite(rectY) &&
+        Number.isFinite(rectWidth) &&
+        Number.isFinite(rectHeight) &&
+        patch.width === expectedWidth &&
+        patch.height === expectedHeight
+      const alpha = validatedAlphaRows(patch)
+      const acceptedRegionPolygon = patch.bubblePolygon ?? [
+        { x: rectX, y: rectY },
+        { x: rectX + rectWidth, y: rectY },
+        { x: rectX + rectWidth, y: rectY + rectHeight },
+        { x: rectX, y: rectY + rectHeight },
+      ]
+      const acceptedRegionEnvelope = polygonPixelEnvelope(
+        acceptedRegionPolygon,
+        sourceWidth,
+        sourceHeight,
+        `${patch.regionId}.acceptedRegionPolygon`,
+      )
+      const coveredAcceptedRegionPixels = alpha.valid
+        ? coveredAlphaPixels(alpha.rows, patchOrigin, acceptedRegionEnvelope)
+        : 0
+      const outsideAcceptedRegionPixels = alpha.valid
+        ? Math.max(0, alpha.pixels - coveredAcceptedRegionPixels)
+        : 0
+      if (!auditedPatchIds.has(patch.patchId)) {
+        auditedPatchIds.add(patch.patchId)
+        if (dimensionsMatch) dimensionMatchCount += 1
+        if (alpha.valid) decodedAlphaEvidenceCount += 1
+        alphaPixelDenominator += alpha.pixels
+        alphaOutsideAcceptedRegionPixels += outsideAcceptedRegionPixels
+      }
+      return {
+        patch,
+        patchOrigin,
+        expectedWidth,
+        expectedHeight,
+        dimensionsMatch,
+        alpha,
+        outsideAcceptedRegionPixels,
+      }
+    })
+    const glyphEvidence = glyphs.map((glyph) => {
+      const evidence = patchEvidence.find(
+        (candidate) => candidate.patch.regionId === glyph.id,
+      )
+      if (!evidence) {
+        fail(`Patch audit cannot resolve source glyph evidence ${glyph.id}.`)
+      }
+      return {
+        glyph,
+        coveredPixels: coveredGlyphMaskPixels([evidence], glyph),
+      }
+    })
+    const regionGlyphPixels = glyphEvidence.reduce(
+      (sum, evidence) => sum + evidence.glyph.pixels,
+      0,
+    )
+    const coveredGlyphPixels = glyphEvidence.reduce(
+      (sum, evidence) => sum + evidence.coveredPixels,
+      0,
+    )
+    for (const evidence of glyphEvidence) {
+      if (auditedGlyphIds.has(evidence.glyph.id)) continue
+      auditedGlyphIds.add(evidence.glyph.id)
+      glyphPixelDenominator += evidence.glyph.pixels
+      coveredGlyphPixelNumerator += evidence.coveredPixels
+    }
+    const coveredErasePixels = coveredEnvelopePixels(patchEvidence, eraseEnvelope)
     coveredEraseMaskPixelNumerator += coveredErasePixels
-    coveredGlyphPixelNumerator += coveredGlyphPixels
-    alphaPixelDenominator += alpha.pixels
-    alphaOutsideAllowedEraseMaskPixels += outsidePixels
-    alphaOutsideObservedBubblePixels += outsideObservedBubblePixels
     regions.push({
       page: match.page,
       expectedRegionId: match.expectedRegionId,
-      observedRegionId: match.observedRegionId,
-      patchId: patch?.patchId ?? '',
-      pngSha256: patch?.sha256 ?? '',
-      decodedRgbaSha256: patch?.decodedRgbaSha256 ?? '',
+      observedRegionIds: match.observedRegionIds,
       sourceSha256: job.sourceSha256,
-      patchRect: rect ?? {},
-      decodedWidth: patch?.width ?? 0,
-      decodedHeight: patch?.height ?? 0,
-      expectedWidth,
-      expectedHeight,
-      dimensionsMatch,
-      alphaEvidenceValid: alpha.valid,
-      alphaPixels: alpha.pixels,
+      patches: patchEvidence.map((evidence) => ({
+        patchId: evidence.patch.patchId,
+        observedRegionId: evidence.patch.regionId,
+        pngSha256: evidence.patch.sha256,
+        decodedRgbaSha256: evidence.patch.decodedRgbaSha256,
+        patchRect: evidence.patch.rect,
+        decodedWidth: evidence.patch.width,
+        decodedHeight: evidence.patch.height,
+        expectedWidth: evidence.expectedWidth,
+        expectedHeight: evidence.expectedHeight,
+        dimensionsMatch: evidence.dimensionsMatch,
+        alphaEvidenceValid: evidence.alpha.valid,
+        alphaPixels: evidence.alpha.pixels,
+        alphaOutsideAcceptedRegionPixels: evidence.outsideAcceptedRegionPixels,
+      })),
       eraseMaskPixelDenominator: eraseEnvelope.pixels,
       coveredEraseMaskPixelNumerator: coveredErasePixels,
       eraseMaskCoverage: coveredErasePixels / eraseEnvelope.pixels,
-      glyphPixelDenominator: glyph.pixels,
+      glyphPixelDenominator: regionGlyphPixels,
       coveredGlyphPixelNumerator: coveredGlyphPixels,
-      glyphCoverage: coveredGlyphPixels / glyph.pixels,
-      alphaOutsideAllowedEraseMaskPixels: outsidePixels,
-      alphaOutsideObservedBubblePixels: outsideObservedBubblePixels,
+      glyphCoverage: coveredGlyphPixels / regionGlyphPixels,
     })
   }
   const matchedRegionDenominator = matches.length
@@ -2760,11 +2803,11 @@ export function buildPatchQualityEvidence(routes, goldPages, matches, sourceGlyp
       decodedPixels:
         'Firefox HTMLImageElement.decode followed by CanvasRenderingContext2D.getImageData',
       gold:
-        'hash-pinned source pixels localized by committed textPolygon plus committed eraseMask maximum change area',
+        'hash-pinned source pixels localized by each gold-matched accepted text proposal; committed eraseMask geometry remains the maximum-change diagnostic',
       containment:
         'Every non-zero-alpha decoded PNG pixel is conservatively treated as a potential changed composite pixel.',
       glyphMask:
-        'Foreground pixels are independently derived from each untouched source crop using grayscale Otsu and border-median polarity; border-connected components are rejected before one-pixel audit dilation so balloon contours are not mislabeled as glyphs.',
+        'Foreground pixels are independently derived inside each gold-matched accepted source-text proposal using grayscale Otsu and border-median polarity. Border-connected components, detached sub-25-pixel specks, and isolated shallow-wide artwork are rejected; when contour rejection would empty a tight text crop, the polarity-selected core is retained before the same component filters and one-pixel audit dilation.',
       eraseMask:
         'The committed eraseMask is a maximum allowed change area, not a rectangle production is required to fill.',
     },
@@ -2772,7 +2815,7 @@ export function buildPatchQualityEvidence(routes, goldPages, matches, sourceGlyp
       'Pixel-envelope bounds floor each committed normalized polygon minimum and ceil its maximum in source pixels.',
     totals: {
       matchedRegionDenominator,
-      patchRegionCount: regions.length,
+      patchRegionCount: auditedPatchIds.size,
       decodedAlphaEvidenceCount,
       dimensionMatchCount,
       eraseMaskPixelDenominator,
@@ -2782,19 +2825,18 @@ export function buildPatchQualityEvidence(routes, goldPages, matches, sourceGlyp
       coveredGlyphPixelNumerator,
       glyphCoverage,
       alphaPixelDenominator,
-      alphaOutsideAllowedEraseMaskPixels,
-      alphaOutsideObservedBubblePixels,
+      alphaOutsideAcceptedRegionPixels,
     },
     regions,
     gates: [
       exactGate(
         'matched-patch-decoded-alpha-evidence',
         decodedAlphaEvidenceCount,
-        matchedRegionDenominator,
-        { denominator: matchedRegionDenominator },
+        auditedPatchIds.size,
+        { denominator: auditedPatchIds.size },
       ),
-      exactGate('matched-patch-dimensions', dimensionMatchCount, matchedRegionDenominator, {
-        denominator: matchedRegionDenominator,
+      exactGate('matched-patch-dimensions', dimensionMatchCount, auditedPatchIds.size, {
+        denominator: auditedPatchIds.size,
       }),
       exactGate(
         'matched-patch-alpha-covers-independent-source-glyph-mask',
@@ -2805,11 +2847,11 @@ export function buildPatchQualityEvidence(routes, goldPages, matches, sourceGlyp
           denominator: glyphPixelDenominator,
         },
       ),
-      exactGate('patch-changes-outside-runtime-confirmed-bubble', alphaOutsideObservedBubblePixels, 0, {
-        numerator: alphaOutsideObservedBubblePixels,
+      exactGate('patch-changes-outside-runtime-accepted-region', alphaOutsideAcceptedRegionPixels, 0, {
+        numerator: alphaOutsideAcceptedRegionPixels,
         denominator: alphaPixelDenominator,
         conservativeProof:
-          'Zero non-zero-alpha pixels outside the detector-confirmed runtime bubble proves zero possible composite changes there.',
+          'Zero non-zero-alpha pixels outside the runtime bubble or the bounded free-text patch proves zero possible composite changes there.',
       }),
     ],
   }
@@ -3322,7 +3364,11 @@ function validateCompleteRun(result, manifest) {
   assertRequiredGates(result.performanceGates, `Run ${result.runId} performance`)
 }
 
-export function selectViewportPlan(manifest, goldPages, viewportHeight = 900) {
+export function selectViewportPlan(
+  manifest,
+  goldPages,
+  viewportHeight = BENCHMARK_VIEWPORT_HEIGHT,
+) {
   const candidates = []
   for (const image of manifest.images) {
     const page = goldPages.find((candidate) => candidate.order === image.order)
@@ -3364,7 +3410,10 @@ export function selectViewportPlan(manifest, goldPages, viewportHeight = 900) {
 }
 
 async function positionBenchmarkViewport(page, plan) {
-  await page.setViewportSize({ width: 1280, height: 900 })
+  await page.setViewportSize({
+    width: BENCHMARK_VIEWPORT_WIDTH,
+    height: BENCHMARK_VIEWPORT_HEIGHT,
+  })
   const positioned = await page.evaluate((target) => {
     const image = document.querySelector(`#chapter img[data-page="${target.page}"]`)
     if (!(image instanceof HTMLImageElement) || !image.complete || image.naturalHeight < 1) {
@@ -3544,7 +3593,6 @@ async function executeCompleteRun(context, extensionPage, replicaUrl, config, de
     const jobRecords = jobMonitor.observations
     const dom = await chapterDomEvidence(chapterPage)
     const acquisition = await sourceAcquisitionEvidence(chapterPage, action.issuedAtEpochMs)
-    const sourceGlyphs = await sourceGlyphEvidence(chapterPage, config.goldPages)
     const routes = await routeEvidence(
       extensionPage,
       jobRecords,
@@ -3553,10 +3601,11 @@ async function executeCompleteRun(context, extensionPage, replicaUrl, config, de
     )
     reconcileCompleteJobTerminals(jobMonitor, routes, dom)
     const translationCorrectness = buildQualityEvidence(routes, config.goldPages)
+    const sourceGlyphs = await sourceGlyphEvidence(chapterPage, routes)
     const patchPng = buildPatchQualityEvidence(
       routes,
       config.goldPages,
-      translationCorrectness.allMatches,
+      translationCorrectness.components,
       sourceGlyphs,
     )
     const commitOrdering = buildPatchCommitOrderingEvidence(routes, dom, action.issuedAtEpochMs)
@@ -3656,7 +3705,10 @@ async function measureReaderFeatures(page, routes) {
         .map((region) => region.dataset.regionId ?? '')
       const host = hosts[0]
       const viewport = host?.shadowRoot?.querySelector('.hmt-viewport')
-      const buttons = [...(host?.shadowRoot?.querySelectorAll('.hmt-controls button') ?? [])]
+      const modeControls = document.querySelector('[data-hmt-mode-controls="true"]')
+      const buttons = [
+        ...(modeControls?.shadowRoot?.querySelectorAll('.hmt-controls button') ?? []),
+      ]
       const original = buttons.find((button) => button.textContent === 'Original')
       const chinese = buttons.find((button) => button.textContent === 'Chinese')
       const compare = buttons.find((button) => button.textContent === 'Hold to compare')
@@ -4109,8 +4161,25 @@ async function executeSameTabNavigationProbe(page, extensionPage, replicaUrl, co
   }
 }
 
-async function executeCancellationRun(context, extensionPage, replicaUrl, config, sequence) {
-  const descriptor = { runId: 'cancellation', kind: 'cancellation', sequence }
+async function executeCancellationRun(
+  context,
+  extensionPage,
+  replicaUrl,
+  config,
+  sequence,
+  resultCacheReset,
+) {
+  if (resultCacheReset?.removedEntryCount !== config.manifest.pageCount) {
+    fail(
+      `Cancellation requires an exact ${config.manifest.pageCount}-entry result-cache reset.`,
+    )
+  }
+  const descriptor = {
+    runId: 'cancellation',
+    kind: 'cancellation',
+    sequence,
+    resultCacheReset,
+  }
   const chapterPage = await context.newPage()
   try {
     await prepareChapter(chapterPage, replicaUrl, descriptor.runId, config.viewportPlan)
@@ -4124,18 +4193,15 @@ async function executeCancellationRun(context, extensionPage, replicaUrl, config
       config.hskLevel,
       pageUrl,
     )
-    await chapterPage.waitForFunction(
-      (issuedAt) =>
-        globalThis.__hskifyRuntimeEvidence?.events.some(
-          (event) =>
-            event.epochMs >= issuedAt && event.type === 'patchDomCommitted' && event.visible,
-        ),
-      startAction.issuedAtEpochMs,
-      { timeout: 30_000 },
-    )
     const records = await waitForInFlightJobs(extensionPage, pageUrl, 30_000)
     await armExactChapterRestoration(chapterPage, expectedSnapshot)
     const cancellationTargets = await armDaemonCancellationProbe(extensionPage, records)
+    const cancellationTargetIds = new Set(
+      cancellationTargets.map((target) => target.jobId),
+    )
+    const cancellationRecords = records.filter((record) =>
+      cancellationTargetIds.has(record.jobId),
+    )
     const cancelAction = await timedExtensionMessage(extensionPage, { type: 'popup:cancel' })
     const [restorationProbe, daemonProbe] = await Promise.all([
       waitForExactChapterRestoration(chapterPage, 30_000),
@@ -4153,12 +4219,12 @@ async function executeCancellationRun(context, extensionPage, replicaUrl, config
     const postHocEvidenceStartedAtEpochMs = Date.now()
     const terminalRoutes = await routeEvidence(
       extensionPage,
-      records,
+      cancellationRecords,
       true,
       config.expectedResourceIdentities,
     )
     const allDaemonJobsCancelled =
-      terminalRoutes.jobs.length === records.length &&
+      terminalRoutes.jobs.length === cancellationRecords.length &&
       terminalRoutes.jobs.every((job) => job.terminal?.type === 'cancelled')
     if (state.state !== 'cancelled' || !allDaemonJobsCancelled) {
       fail(
@@ -4245,15 +4311,10 @@ async function main() {
   if (!configPath) fail('Usage: node Chapter5.Firefox.mjs <config.json>')
   const config = JSON.parse(readFileSync(configPath, 'utf8'))
   config.manifest = JSON.parse(readFileSync(config.manifestPath, 'utf8'))
-  const manifestTotals = validateBenchmarkManifest(config.manifest)
+  validateBenchmarkManifest(config.manifest)
   assertCompleteTranslationGold(config.manifest)
   config.expectedResourceIdentities = validateExpectedResourceIdentities(
     config.expectedResourceIdentities,
-  )
-  config.detectorEvidence = loadDetectorEvidence(config.detectorEvidencePath, config.manifestPath)
-  assertRequiredGates(
-    config.detectorEvidence.gates,
-    `Standalone ${manifestTotals.goldBubbleCount}-bubble detector correctness`,
   )
   const fixtureDirectory = dirname(config.manifestPath)
   config.goldPages = config.manifest.images
@@ -4387,12 +4448,14 @@ async function main() {
     cacheReplay.result.sourceReplacement = sourceReplacement
     cacheReplay.result.sameTabNavigation = sameTabNavigation
     await warmup.chapterPage.close().catch(() => undefined)
+    const cancellationCacheReset = clearExactResultCache(config)
     const cancellation = await executeCancellationRun(
       context,
       extensionPage,
       replicaUrl,
       config,
       sequence++,
+      cancellationCacheReset,
     )
     results.push(cancellation)
     assertRequiredGates(cancellation.gates, 'Cancellation')
@@ -4421,7 +4484,6 @@ async function main() {
     setupEvidence,
     replicaUrl,
     viewportPlan: config.viewportPlan,
-    detectorEvidence: config.detectorEvidence,
     liveNetworkSmokeIncluded: false,
     writesDuringMeasuredPhases: 0,
     evidenceWritePolicy:

@@ -117,9 +117,11 @@ try {
     $fixtureRevision = ('a' * 40) -join ''
     $residentModelsRoot = Join-Path $fixtureRoot 'resident-models'
     $residentDescriptors = @(
+        [ordered]@{ id = 'comic-text-bubble-detector-config'; filename = 'config.json' },
+        [ordered]@{ id = 'comic-text-bubble-detector-preprocessor-config'; filename = 'preprocessor_config.json' },
+        [ordered]@{ id = 'comic-text-bubble-detector-weights'; filename = 'model.safetensors' },
         [ordered]@{ id = 'pp-ocr-v5-english-recognizer-config'; filename = 'inference.yml' },
-        [ordered]@{ id = 'pp-ocr-v5-english-recognizer-model'; filename = 'inference.onnx' },
-        [ordered]@{ id = 'pp-ocr-v5-mobile-detector-model'; filename = 'inference.onnx' }
+        [ordered]@{ id = 'pp-ocr-v5-english-recognizer-model'; filename = 'inference.onnx' }
     )
     $resourceIdentities = @($residentDescriptors | ForEach-Object {
         $directory = Join-Path $residentModelsRoot $_.id
@@ -223,6 +225,8 @@ try {
             -NativeHostPath $nativeHostPath `
             -BrowserDaemonPath $browserDaemonPath `
             -FirefoxExtensionZipPath $extensionZipPath `
+            -HskArtifactPath $hskPath `
+            -DictionaryArtifactPath $dictionaryPath `
             -ModelPath $modelPath `
             -ResidentModelsDirectory $residentModelsRoot `
             -ResidentRuntimeDirectory $residentRuntimeRoot `
@@ -259,6 +263,8 @@ try {
                 -BrowserDaemonPath $browserDaemonPath `
                 -BuildAttestationPath $claimPath `
                 -FirefoxExtensionZipPath $extensionZipPath `
+                -HskArtifactPath $hskPath `
+                -DictionaryArtifactPath $dictionaryPath `
                 -ModelPath $modelPath `
                 -ResidentModelsDirectory $residentModelsRoot `
                 -ResidentRuntimeDirectory $residentRuntimeRoot `
@@ -305,6 +311,8 @@ try {
             -BrowserDaemonPath $tamperedDaemonPath `
             -BuildAttestationPath $fixtureAttestationPath `
             -FirefoxExtensionZipPath $extensionZipPath `
+            -HskArtifactPath $hskPath `
+            -DictionaryArtifactPath $dictionaryPath `
             -ModelPath $modelPath `
             -ResidentModelsDirectory $residentModelsRoot `
             -ResidentRuntimeDirectory $residentRuntimeRoot `
@@ -357,6 +365,9 @@ try {
             -BrowserDaemonPath $browserDaemonPath `
             -BuildAttestationPath $fixtureAttestationPath `
             -FirefoxExtensionZipPath $extensionZipPath `
+            -HskArtifactPath $hskPath `
+            -DictionaryArtifactPath $dictionaryPath `
+            -ModelPath $modelPath `
             -ResidentModelsDirectory $residentModelsRoot `
             -ResidentRuntimeDirectory $residentRuntimeRoot `
             -SansFontPath $sansFontPath `
@@ -404,9 +415,11 @@ try {
         'resources\hsk-2.0.normalized.json',
         'resources\cc-cedict.normalized.json',
         'resources\models\Qwen3.5-4B-Q4_K_M.gguf',
+        'resources\models\resident\comic-text-bubble-detector-config\config.json',
+        'resources\models\resident\comic-text-bubble-detector-preprocessor-config\preprocessor_config.json',
+        'resources\models\resident\comic-text-bubble-detector-weights\model.safetensors',
         'resources\models\resident\pp-ocr-v5-english-recognizer-config\inference.yml',
         'resources\models\resident\pp-ocr-v5-english-recognizer-model\inference.onnx',
-        'resources\models\resident\pp-ocr-v5-mobile-detector-model\inference.onnx',
         'resources\runtime\cuda\.installed',
         'resources\runtime\cuda\cudart64_13.dll',
         'resources\runtime\llama.cpp\b8935\windows-cuda13-x64\.installed',
@@ -431,7 +444,7 @@ try {
     Assert-True -Condition $bundleManifest.resources.dictionaryBundled -Message 'bundle did not record dictionary data'
     Assert-True -Condition $bundleManifest.resources.modelBundled -Message 'bundle did not record the translation model'
     Assert-True -Condition $bundleManifest.resources.residentModelsBundled -Message 'bundle did not record detector/OCR resources'
-    Assert-True -Condition ($bundleManifest.resources.residentModelCount -eq 3) -Message 'bundle recorded the wrong detector/OCR resource count'
+    Assert-True -Condition ($bundleManifest.resources.residentModelCount -eq 5) -Message 'bundle recorded the wrong detector/OCR resource count'
     Assert-True -Condition $bundleManifest.resources.residentRuntimeBundled -Message 'bundle did not record CUDA/llama runtime resources'
     Assert-True -Condition ($bundleManifest.resources.residentRuntimeFileCount -eq 39) -Message 'bundle recorded the wrong CUDA/llama runtime resource count'
     Assert-True `
@@ -511,8 +524,8 @@ try {
     Assert-True `
         -Condition (
             $readinessMarker.buildFingerprint -eq $script:HskifyPerformanceBuildFingerprint -and
-            @($readinessMarker.resourceIdentities).Count -eq 4 -and
-            @($readinessMarker.installations).Count -eq 4
+            @($readinessMarker.resourceIdentities).Count -eq 6 -and
+            @($readinessMarker.installations).Count -eq 6
         ) `
         -Message 'installer wrote an invalid model-readiness marker'
 

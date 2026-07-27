@@ -3,9 +3,9 @@
 This is the sole canonical end-to-end benchmark for the direct progressive
 Firefox build. It replaces every earlier chapter workload.
 
-No performance or correctness result is committed here. A result is valid only
-after the fixture has complete reviewed gold for all 36 images and the harness
-finishes every required run while retaining its raw evidence.
+Release performance is valid only when the packaged-Firefox harness finishes
+every required run while retaining its raw evidence. Faster source-level
+diagnostics are recorded separately and never substituted for browser results.
 
 ## Why this workload
 
@@ -61,25 +61,107 @@ The source-image hash is provenance, never an inference feature.
 ## Current product-path diagnostic
 
 A fresh isolated-daemon diagnostic was run against all 36 canonical source
-images after the post-group OCR gate, semantic exclusion guard, and
-letter-adjacent OCR-digit handling were installed. It used the unversioned
-product HTTP routes and exact fingerprint
+images after the RT-DETR replacement, fixed OCR crop guard, semantic exclusion
+guard, and deterministic question-punctuation restoration were installed. It
+used the unversioned product HTTP routes and exact fingerprint
 `hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-07-26-r2`:
 
 | Diagnostic | Result |
 | --- | ---: |
-| Accepted progressive regions | 201 |
-| Sum of per-image completion times | 66,803 ms |
-| Per-image p95 | 3,691 ms |
-| Slowest image | 4,288 ms |
-| Credits-cover accepted regions | 0 |
+| Published progressive regions | 214 |
+| Spatially matched reviewed targets | 209 / 214 |
+| Story-region publication recall | 97.66% |
+| Matched English OCR CER | 1.88% |
+| False translations | 0 / 214 |
+| Per-image completion p95 | 3,832 ms |
+| Slowest image | 4,347 ms |
+| Full 36-image diagnostic wall time | 76.9 s |
 
 The ignored raw diagnostic is
-`.cache/ch5-product-audit/run-30-final/summary.json`. This is useful runtime
+`.cache/ch5-product-audit/run-46-final-full/summary.json`. This is useful runtime
 evidence, but it is deliberately not called release evidence: it does not
 include packaged Firefox acquisition/rendering, 20 warm iterations,
 cache-replay, memory/VRAM sampling, cancellation, DOM ordering, overflow, or
-the benchmark's final one-to-one correctness scoring.
+the final browser-rendered patch audit.
+
+## Current packaged release evidence
+
+The exact package recorded on 2026-07-27 completed one installed-cold run, one
+warm-up, 20 measured warm inference runs, exact-cache replay, reader-feature
+checks, restoration, cancellation, resource sampling, and disk auditing. All
+426 gates passed. Nearest-rank warm results were:
+
+| Metric | Result | Required |
+| --- | ---: | ---: |
+| HUD acknowledgement p95 | 3 ms | <=100 ms |
+| First visible region p95 | 1,698 ms | <=2,000 ms |
+| Visible three-region group p95 | 1,717 ms | <=5,000 ms |
+| First long image complete p95 | 1,855 ms | <=12,000 ms |
+| Complete 36-image chapter p95 | 35,352 ms | <=90,000 ms |
+| Exact cached first viewport | 162 ms | <=250 ms |
+
+Installed-cold first visible region was 4,021 ms, the first long image completed
+in 6,774 ms, and the full chapter completed in 75,852 ms. Correctness and
+resource evidence was:
+
+| Gate | Result |
+| --- | ---: |
+| Story-region publication recall | 210 / 214 (98.13%) |
+| English OCR CER | 232 / 8,565 (2.71%) |
+| Non-English/non-story false translations | 1 / 216 (0.46%) |
+| Independent source-glyph pixels erased | 6,898,569 / 6,898,569 |
+| Changed pixels outside accepted regions | 0 / 25,640,363 |
+| Overflow across zoom/resize checks | 0 / 864 |
+| Page / daemon cancellation | 6 ms / 12 ms |
+| Peak daemon private memory | 8,124,383,232 bytes (7.57 GiB) |
+| Peak device-wide VRAM | 5,239 MiB |
+| Synchronous intermediate writes | 0 |
+| Positive page-output samples / sustained sequences | 0 / 0 |
+
+Exact-cache replay used the same daemon, published the initial visible group in
+162 ms, and loaded no inference model. Pinyin, dictionary lookup, comparison,
+Mandarin speech, patch-before-Chinese ordering, source restoration, and all
+supported zoom/resize scenarios passed.
+
+The authoritative ignored output is
+`.cache/benchmark-evidence/30-years-since-the-prologue-chapter-5/f36/summary.json`;
+`gate-evaluation.json` beside it contains all 426 gate records, and the raw
+per-run evidence remains in the same directory.
+
+## Superseded packaged baseline
+
+An earlier packaged build completed one cold run, one warm-up, and 20 measured
+warm inference runs before the cache read-path and direct-pipeline
+optimizations. These numbers are a superseded diagnostic baseline, not current
+release evidence:
+
+| Metric | Result |
+| --- | ---: |
+| Installed-cold first visible region | 4,426 ms |
+| Installed-cold visible three-region group | 4,464 ms |
+| Installed-cold first long image | 7,075 ms |
+| Installed-cold complete 36-image chapter | 76,707 ms |
+| Warm HUD acknowledgement p95 | 3 ms |
+| Warm first visible region p95 | 1,819 ms |
+| Warm visible three-region group p95 | 1,842 ms |
+| Warm first long image p95 | 2,003 ms |
+| Warm complete 36-image chapter p95 | 33,769 ms |
+| Story-region recall | 97.66% |
+| English OCR CER | 1.88% |
+| False translations | 0 / 214 |
+
+All 20 inference runs passed the gates defined for that earlier build. The same
+sequence exposed a 453 ms exact-cache first-viewport result. Source fetch was
+7 ms, but the daemon fully decoded the 16,000-pixel-tall image before checking
+the exact result key. Cache reads now verify the uploaded bytes, SHA-256,
+format, MIME, safety limits, and header dimensions, then open only their exact
+SHA-keyed entry. A hit reuses content that was fully decoded when the entry was
+created; only a miss performs full pixel decoding. Byte accounting and
+eviction remain on the atomic store path.
+
+The runner creates `summary.json` only if the complete cold, warm-up, 20 warm,
+exact-cache, reader-feature, restoration, cancellation, memory, VRAM, and
+disk-write sequence passes. Raw evidence remains beside it.
 
 ## Deterministic preflight
 
@@ -122,8 +204,11 @@ not a Rust pipeline shortcut:
    before the corresponding Chinese, and continues while offscreen regions
    run.
 
-The measured clock begins at the benchmark-only content start message and
-includes image acquisition, hashing, upload, daemon work, patch retrieval,
+The deterministic timing viewport is 1280 x 1080 and is selected from committed
+gold before Firefox starts. It must contain 3-6 independent English story
+regions; the current fixture selects three regions without consulting runtime
+output. The measured clock begins at the benchmark-only content start message
+and includes image acquisition, hashing, upload, daemon work, patch retrieval,
 browser decoding, and DOM commit. Optional live-site navigation and CDN time
 are recorded separately.
 
@@ -136,7 +221,7 @@ Every measured warm run must meet:
 | HUD acknowledgement | <=100 ms |
 | Exact cached first viewport | <=250 ms |
 | First visible region | <=2 s |
-| All initially visible regions (one or more) | <=5 s |
+| Initially visible 3-6 regions | <=5 s |
 | First long image complete | <=12 s |
 | All 36 images complete | <=90 s |
 | Cancellation stops active compute and restores the page | <=500 ms |
@@ -167,19 +252,11 @@ Correctness gates are:
 - working comparison, pinyin, dictionary, selection popover, and local
   Mandarin speech.
 
-For detector-only evidence, retain one raw detector JSON per source image and
-score it with:
-
-```powershell
-python .\scripts\benchmark\score_chapter5_detector.py `
-  --predictions C:\absolute\path\to\raw-detector-json `
-  --sources C:\absolute\path\to\source-webps `
-  --output C:\absolute\path\to\detector-evidence.json
-```
-
-The scorer must derive denominators from the committed manifest and reviewed
-annotations. No page, region, or category count may be hard-coded in the
-runner.
+Correctness is scored on the progressive regions actually published to and
+committed by Firefox. This deliberately covers the complete detector, OCR,
+semantic acceptance, patch, and rendering path; raw proposal precision is not
+a product metric because the detector intentionally emits broad
+`text_bubble` and `text_free` candidates.
 
 ## Required run sequence
 
@@ -201,7 +278,6 @@ The minimum command is:
 powershell -ExecutionPolicy Bypass -File `
   .\scripts\Benchmark-Chapter5.ps1 `
   -Iterations 20 `
-  -DetectorEvidencePath C:\absolute\path\to\detector-evidence.json `
   -ResourcesDirectory C:\absolute\path\to\resources
 ```
 

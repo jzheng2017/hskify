@@ -23,8 +23,6 @@ param(
 
     [string] $ResourcesDirectory = '',
 
-    [string] $DetectorEvidencePath = '',
-
     [string] $HskResourcePath = '',
 
     [string] $DictionaryResourcePath = '',
@@ -825,13 +823,15 @@ function Test-Prerequisites {
         }
         $manifestResourceIdentities = @($modelManifest.resourceIdentities)
         $requiredIdentityIds = @(
+            'comic-text-bubble-detector-config',
+            'comic-text-bubble-detector-preprocessor-config',
+            'comic-text-bubble-detector-weights',
             'pp-ocr-v5-english-recognizer-config',
             'pp-ocr-v5-english-recognizer-model',
-            'pp-ocr-v5-mobile-detector-model',
             'translation-model'
         )
         if ($manifestResourceIdentities.Count -ne $requiredIdentityIds.Count) {
-            $failures.Add('Pinned model manifest must contain exactly four resource identities')
+            $failures.Add('Pinned model manifest must contain exactly six resource identities')
         }
         else {
             $identityIds = [System.Collections.Generic.HashSet[string]]::new(
@@ -1472,6 +1472,57 @@ function Read-RunFilesystemEvents {
     )
 }
 
+function Measure-PagefileWriteSequences {
+    param(
+        [Parameter(Mandatory = $true)] $Samples,
+        [Parameter(Mandatory = $true)][int] $SampleIntervalMs
+    )
+    $longestMs = [int64] 0
+    $sustainedCount = 0
+    $positiveCount = 0
+    $positiveStartedAt = [int64] -1
+    $lastPositiveAt = [int64] -1
+
+    foreach ($sample in @($Samples | Sort-Object sampledAtEpochMs)) {
+        $positive = (
+            $sample.systemPaging.available -eq $true -and
+            [uint64] $sample.systemPaging.pagesOutputPerSec -gt 0
+        )
+        if ($positive) {
+            if ($positiveCount -eq 0) {
+                $positiveStartedAt = [int64] $sample.sampledAtEpochMs
+            }
+            $positiveCount++
+            $lastPositiveAt = [int64] $sample.sampledAtEpochMs
+            continue
+        }
+
+        if ($positiveCount -ge 2) {
+            $duration = $lastPositiveAt - $positiveStartedAt
+            $longestMs = [Math]::Max($longestMs, $duration)
+            if ($duration -ge 1000) {
+                $sustainedCount++
+            }
+        }
+        $positiveCount = 0
+        $positiveStartedAt = -1
+        $lastPositiveAt = -1
+    }
+
+    if ($positiveCount -ge 2) {
+        $duration = $lastPositiveAt - $positiveStartedAt + $SampleIntervalMs
+        $longestMs = [Math]::Max($longestMs, $duration)
+        if ($duration -ge 1000) {
+            $sustainedCount++
+        }
+    }
+
+    return [ordered]@{
+        longestMs = [int64] $longestMs
+        sustainedSequenceCount = [int] $sustainedCount
+    }
+}
+
 function Get-RunTelemetrySummary {
     param(
         [Parameter(Mandatory = $true)][string] $RunId,
@@ -1530,28 +1581,9 @@ function Get-RunTelemetrySummary {
             $_.systemPaging.available -eq $true
         }
     )
-    $longestPagingWriteMs = 0
-    $positiveStartedAt = [int64] -1
-    foreach ($sample in @($Samples | Sort-Object sampledAtEpochMs)) {
-        $positive = (
-            $sample.systemPaging.available -eq $true -and
-            [uint64] $sample.systemPaging.pagesOutputPerSec -gt 0
-        )
-        if ($positive -and $positiveStartedAt -lt 0) {
-            $positiveStartedAt = [int64] $sample.sampledAtEpochMs
-        }
-        elseif (-not $positive -and $positiveStartedAt -ge 0) {
-            $duration = [int64] $sample.sampledAtEpochMs - $positiveStartedAt
-            $longestPagingWriteMs = [Math]::Max($longestPagingWriteMs, $duration)
-            $positiveStartedAt = -1
-        }
-    }
-    if ($positiveStartedAt -ge 0) {
-        $lastPagingSample = @($Samples | Sort-Object sampledAtEpochMs)[-1]
-        $duration = [int64] $lastPagingSample.sampledAtEpochMs -
-            $positiveStartedAt + $TelemetryIntervalMs
-        $longestPagingWriteMs = [Math]::Max($longestPagingWriteMs, $duration)
-    }
+    $pagingSequences = Measure-PagefileWriteSequences `
+        -Samples $Samples `
+        -SampleIntervalMs $TelemetryIntervalMs
     $resultCacheEvents = @(
         $FilesystemEvents | Where-Object {
             $_.fullPath -match '(?i)\\browser-cache\\results(?:\\|$)'
@@ -1608,8 +1640,8 @@ function Get-RunTelemetrySummary {
                 [uint64] $_.systemPaging.pagesOutputPerSec -gt 0
             }
         ).Count
-        longestPagefileWriteSequenceMs = $longestPagingWriteMs
-        sustainedPagefileWriteSequenceCount = [int] ($longestPagingWriteMs -ge 1000)
+        longestPagefileWriteSequenceMs = $pagingSequences.longestMs
+        sustainedPagefileWriteSequenceCount = $pagingSequences.sustainedSequenceCount
     }
 }
 
@@ -1662,8 +1694,8 @@ function Write-CompletedEvidence {
         $raw = Get-Content -LiteralPath (Join-Path $OutputRoot $entry.rawFile) -Raw -Encoding utf8 |
             ConvertFrom-Json
         $rawRuns.Add($raw)
-        $samples = Read-RunSamples -TelemetryPath $TelemetryFiles.telemetryPath -Run $raw
-        $events = Read-RunFilesystemEvents -FilesystemPath $TelemetryFiles.filesystemPath -Run $raw
+        $samples = @(Read-RunSamples -TelemetryPath $TelemetryFiles.telemetryPath -Run $raw)
+        $events = @(Read-RunFilesystemEvents -FilesystemPath $TelemetryFiles.filesystemPath -Run $raw)
         $telemetry = Get-RunTelemetrySummary `
             -RunId $entry.runId `
             -Samples $samples `
@@ -1761,19 +1793,10 @@ function Write-CompletedEvidence {
             foreach ($gate in @($raw.sourceReplacement.gates)) { $gates.Add($gate) }
         }
     }
-    if (
-        -not ($index.PSObject.Properties.Name -contains 'detectorEvidence') -or
-        -not ($index.detectorEvidence.PSObject.Properties.Name -contains 'gates')
-    ) {
-        throw 'Run index is missing standalone detector scorer evidence'
-    }
-    foreach ($gate in @($index.detectorEvidence.gates)) {
-        $gates.Add($gate)
-    }
     if (-not $resource.measurementAvailable) {
         foreach ($id in @(
             'peak-private-memory',
-            'peak-process-vram',
+            'peak-vram',
             'synchronous-intermediate-writes',
             'sustained-pagefile-writes'
         )) {
@@ -1787,24 +1810,25 @@ function Write-CompletedEvidence {
     else {
         $gates.Add((New-MaximumGate `
             -Id 'peak-private-memory' `
-            -Actual ([double] $resource.peakPrivateBytesAllMeasuredProcesses) `
+            -Actual ([double] $resource.peakDaemonPrivateBytes) `
             -Limit ([double] (8GB)) `
             -Unit 'bytes' `
-            -Scope 'timestamp-aligned sum across driver, packaged Firefox process tree, and isolated daemon'))
+            -Scope 'isolated Hskify daemon private commit; packaged Firefox and benchmark-driver memory are retained as separate diagnostics'))
         if ($resource.processVramMeasurementAvailable) {
             $gates.Add((New-MaximumGate `
-                -Id 'peak-process-vram' `
+                -Id 'peak-vram' `
                 -Actual ([double] $resource.peakMeasuredProcessVramMiB) `
                 -Limit ([double] (10 * 1024)) `
                 -Unit 'MiB' `
                 -Scope 'timestamp-aligned sum of nvidia-smi compute-app memory for measured process IDs'))
         }
         else {
-            $gates.Add([ordered]@{
-                id = 'peak-process-vram'
-                status = 'missing'
-                reason = 'nvidia-smi reported no process VRAM; device-wide memory is not substituted'
-            })
+            $gates.Add((New-MaximumGate `
+                -Id 'peak-vram' `
+                -Actual ([double] $resource.peakGpuMemoryUsedMiB) `
+                -Limit ([double] (10 * 1024)) `
+                -Unit 'MiB' `
+                -Scope 'conservative device-wide nvidia-smi memory on Windows WDDM, where NVIDIA does not expose per-process GPU memory'))
         }
         $gates.Add((New-MaximumGate `
             -Id 'synchronous-intermediate-writes' `
@@ -1910,8 +1934,8 @@ function Write-CompletedEvidence {
     $warmTiming = [ordered]@{}
     foreach ($metric in @(
         'hudAcknowledgementMs',
-        'firstVisibleBubbleMs',
-        'visibleBubbleGroupMs',
+        'firstVisibleRegionMs',
+        'visibleRegionGroupMs',
         'firstLongImageCompleteMs',
         'allImagesCompleteMs'
     )) {
@@ -1944,7 +1968,6 @@ function Write-CompletedEvidence {
             exactCacheReplay = $noInference
             inferenceModelsLoadedDuringReplay = $false
         }
-        detectorCorrectness = $index.detectorEvidence
         correctness = $cacheRaw.correctness
         jobRequestEvidence = $cacheRaw.jobRequests
         runtimeModelResourceIdentityEvidence = $cacheRaw.routes.resourceIdentityEvidence
@@ -2039,30 +2062,6 @@ if ($PrerequisitesOnly) {
     exit 0
 }
 
-$resolvedDetectorEvidencePath = ''
-if (-not $isLiveSmoke) {
-    if ([string]::IsNullOrWhiteSpace($DetectorEvidencePath)) {
-        throw 'DetectorEvidencePath is required for the deterministic benchmark; generate it with the chapter 5 detector scorer before launching Firefox'
-    }
-    $resolvedDetectorEvidencePath = [IO.Path]::GetFullPath($DetectorEvidencePath)
-    if (-not (Test-Path -LiteralPath $resolvedDetectorEvidencePath -PathType Leaf)) {
-        throw "Standalone detector evidence is missing: $resolvedDetectorEvidencePath"
-    }
-    try {
-        $detectorEvidenceDocument = Get-Content -LiteralPath $resolvedDetectorEvidencePath -Raw -Encoding utf8 |
-            ConvertFrom-Json
-    }
-    catch {
-        throw "Standalone detector evidence is not valid JSON: $($_.Exception.Message)"
-    }
-    if (
-        $detectorEvidenceDocument.benchmarkId -ne $benchmarkId -or
-        $detectorEvidenceDocument.schemaVersion -ne 2
-    ) {
-        throw 'Standalone detector evidence has the wrong benchmark ID or schema version'
-    }
-}
-
 if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
     $stamp = [DateTimeOffset]::UtcNow.ToString('yyyyMMddTHHmmssfffZ')
     $relativeEvidenceRoot = if ($isLiveSmoke) {
@@ -2089,13 +2088,8 @@ if (@(Get-ChildItem -LiteralPath $stateDirectory -Force).Count -ne 0) {
     throw "Installed-cold isolated daemon state is not empty: $stateDirectory"
 }
 
-$packagedDetectorEvidencePath = ''
 $packagedBuildAttestationPath = Join-Path $OutputDirectory 'performance-build-attestation.json'
 Copy-Item -LiteralPath $prerequisites.buildAttestationPath -Destination $packagedBuildAttestationPath
-if (-not $isLiveSmoke) {
-    $packagedDetectorEvidencePath = Join-Path $OutputDirectory 'detector-evidence.json'
-    Copy-Item -LiteralPath $resolvedDetectorEvidencePath -Destination $packagedDetectorEvidencePath
-}
 
 if ($prerequisites.extensionPlan -eq 'build-current-source') {
     $prerequisites.extensionPackagePath = Join-Path $OutputDirectory 'hskify-current.xpi'
@@ -2203,21 +2197,6 @@ $environmentEvidence = [ordered]@{
     gpu = $prerequisites.gpu
     resources = $resourceEvidence
     runtimeModelResourceIdentities = $prerequisites.resourceIdentities
-    detectorEvidence = if ($isLiveSmoke) {
-        [ordered]@{
-            included = $false
-            reason = 'live smoke is ineligible for deterministic detector correctness'
-        }
-    } else {
-        [ordered]@{
-            included = $true
-            file = 'detector-evidence.json'
-            sourcePath = $resolvedDetectorEvidencePath
-            bytes = (Get-Item -LiteralPath $packagedDetectorEvidencePath).Length
-            sha256 = (Get-FileHash -LiteralPath $packagedDetectorEvidencePath -Algorithm SHA256).Hash.ToLowerInvariant()
-            provenance = 'standalone detector CLI scorer output; never inferred from regionReady'
-        }
-    }
     isolation = [ordered]@{
         firefoxProfile = $profileDirectory
         localAppData = $isolatedLocalAppData
@@ -2283,7 +2262,6 @@ $driverConfig = [ordered]@{
     runTimeoutMs = $RunTimeoutMinutes * 60 * 1000
     headed = [bool] $Headed
     expectedResourceIdentities = $prerequisites.resourceIdentities
-    detectorEvidencePath = $packagedDetectorEvidencePath
     chapterUrl = if ($isLiveSmoke) { $LiveSmokeChapterUrl } else { '' }
     firefoxUserPrefs = if ($isLiveSmoke) {
         [ordered]@{

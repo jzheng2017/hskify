@@ -645,12 +645,15 @@ export class PageTranslationController {
     snapshot: SourceSnapshot,
     signal: AbortSignal,
   ): void {
+    if (this.navigationUrl !== location.href) {
+      this.checkNavigation()
+      throw abortError()
+    }
     throwIfAborted(signal)
     if (
       snapshot.generation !== this.generation ||
       snapshot.pageSessionId !== this.sessionId ||
       snapshot.navigationUrl !== this.navigationUrl ||
-      this.navigationUrl !== location.href ||
       !candidate.owner.isConnected ||
       !candidate.element.isConnected ||
       currentSourceUrl(candidate.element) !== snapshot.sourceUrl ||
@@ -923,7 +926,13 @@ export class PageTranslationController {
     const image = event.candidate.element
     if (event.type === 'visibility') {
       const id = this.queueIds.get(image)
-      if (id) this.queue.reprioritize(id, event.candidate.visible)
+      if (id) {
+        this.queue.reprioritize(
+          id,
+          event.candidate.visible,
+          event.candidate.domIndex,
+        )
+      }
       if (
         !this.cancelledState &&
         this.scope === 'visible' &&
@@ -942,6 +951,18 @@ export class PageTranslationController {
       return
     }
     if (event.type === 'updated') {
+      if (event.previousSourceUrl === event.candidate.sourceUrl) {
+        const id = this.queueIds.get(image)
+        if (id) {
+          this.queue.reprioritize(
+            id,
+            event.candidate.visible,
+            event.candidate.domIndex,
+          )
+        }
+        this.refreshPrefetch()
+        return
+      }
       if (this.scope === undefined) {
         this.removeTracked(image)
         return

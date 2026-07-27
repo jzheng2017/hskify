@@ -113,7 +113,6 @@ impl ResultCache {
     }
 
     pub(crate) fn load(&self, request: &BrowserJobRequest) -> Result<Option<CachedJob>> {
-        self.prune_to_limit(None)?;
         let pipeline_fingerprint = pipeline_fingerprint()?;
         let key = Self::key_with_pipeline_fingerprint(request, &pipeline_fingerprint)?;
         let path = self.entry_path(&key);
@@ -583,14 +582,14 @@ mod tests {
     }
 
     #[test]
-    fn load_prunes_the_cache_even_when_the_requested_entry_is_absent() -> Result<()> {
+    fn load_miss_does_not_scan_or_mutate_unrelated_entries() -> Result<()> {
         let directory = tempfile::tempdir()?;
         let orphan = directory.path().join("orphan.json");
         fs::write(&orphan, b"oversized")?;
         let cache = ResultCache::with_limit(directory.path().to_path_buf(), 4);
 
         assert!(cache.load(&request()?)?.is_none());
-        assert!(!orphan.exists());
+        assert!(orphan.exists());
         Ok(())
     }
 

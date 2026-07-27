@@ -25,6 +25,7 @@ imageproc = { workspace = true }
 hsk-control = { path = "../hsk-control" }
 koharu-app = { workspace = true }
 koharu-core = { workspace = true }
+koharu-ml = { workspace = true }
 koharu-runtime = { workspace = true }
 ort = { workspace = true }
 rayon = { workspace = true }
@@ -39,7 +40,7 @@ uuid = { workspace = true }
 
 [features]
 default = ["cuda"]
-cuda = ["koharu-app/cuda", "ort/cuda"]
+cuda = ["koharu-app/cuda", "koharu-ml/cuda", "ort/cuda"]
 
 [dev-dependencies]
 serde_json = { workspace = true }

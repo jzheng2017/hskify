@@ -135,9 +135,9 @@ components, and sets `CUDA_COMPUTE_CAP=89`.
 
 The adapter lazily initializes two `OnceCell` values:
 
-- the official PP-OCRv5 CUDA text detector, selected batched English
-  recognizer, resident `RuntimeManager`, and local Qwen3.5 4B application
-  state; and
+- the pinned CUDA RT-DETR-v2 comic text detector, batched English PP-OCRv5
+  recognizer, resident `RuntimeManager`, and local Qwen3.5 4B application state;
+  and
 - complete `hsk-control` data.
 
 The detector/translator runtime uses `ComputePolicy::CudaRequired`. The English
@@ -157,7 +157,9 @@ Default resource discovery is:
   hsk-2.0.normalized.json
   cc-cedict.normalized.json
   models\Qwen3.5-4B-Q4_K_M.gguf
-  models\resident\pp-ocr-v5-mobile-detector-model\inference.onnx
+  models\resident\comic-text-bubble-detector-config\config.json
+  models\resident\comic-text-bubble-detector-preprocessor-config\preprocessor_config.json
+  models\resident\comic-text-bubble-detector-weights\model.safetensors
   models\resident\pp-ocr-v5-english-recognizer-config\inference.yml
   models\resident\pp-ocr-v5-english-recognizer-model\inference.onnx
   fonts\NotoSansSC-VF.ttf
@@ -165,7 +167,7 @@ Default resource discovery is:
 ```
 
 The detector is frozen to
-`PaddlePaddle/PP-OCRv5_mobile_det_onnx@e6f4fa85f00e168c862bc462aebca69eef9b3d3d`
+`ogkalu/comic-text-and-bubble-detector@16e8a622f91fabc6b5b65c96d32d1183f8843546`
 and the recognizer to
 `PaddlePaddle/en_PP-OCRv5_mobile_rec_onnx@3fafbc3b5dcf93dd72add9f48368be8a3a2cd33b`;
 setup verifies their exact byte counts and SHA-256 identities before the
@@ -178,24 +180,23 @@ The explicit overrides are `HSK_MANGA_RESOURCES_DIR`,
 ## Viewport-first region pipeline
 
 1. Split the decoded page into 2,048-pixel tiles with 410-pixel overlap and
-   letterbox detector input to at most 1,280 pixels.
+   resize detector input to the model's trained 640-pixel dimensions.
 2. Before each detector batch, reprioritize remaining tiles against the current
    `visibleRects` and active state.
-3. Run the official PP-OCRv5 mobile text detector in true CUDA batches of at
-   most six tiles.
-4. Convert tile-local line geometry to source coordinates, enforce tile ownership,
-   and spatially deduplicate overlapping candidates.
+3. Run RT-DETR-v2 in true CUDA batches of at most six tiles and retain its
+   `text_bubble` and `text_free` classes. Do not require a detected balloon.
+4. Convert tile-local text geometry to source coordinates, enforce tile
+   ownership, and spatially deduplicate overlapping candidates.
 5. Run PP-OCRv5 English line recognition in batches of at most eight, and yield
    after each candidate chunk so newly visible translation work can overtake
    off-screen OCR.
-6. Accept OCR lines at confidence 0.45 or higher, group adjacent lines by
-   geometry and inferred foreground color, then apply the Latin-English,
-   story-text, SFX, credit, branding, metadata, and ambiguity gates to the
-   complete group. Keep differently colored emphasis and separated balloons
-   independent. When a tile has explicit credit/release context, reject its
-   isolated uppercase credit-name labels without applying that rule to normal
-   story tiles.
-7. Construct one region-local cleanup patch from the grouped line masks and compute deterministic
+6. Accept OCR at confidence 0.45 or higher and keep each RT-DETR text proposal
+   as one semantic region candidate. Then apply the Latin-English, story-text,
+   SFX, credit, branding, metadata, and ambiguity gates. This keeps differently
+   colored emphasis and separated balloons independent. When a tile has
+   explicit credit/release context, reject its isolated uppercase credit-name
+   labels without applying that rule to normal story tiles.
+7. Construct one region-local cleanup patch from the proposal mask and compute deterministic
    reading order plus visibility.
 8. Queue accepted regions for translation and reprioritize visible work at
    every OCR or detector boundary. Ready batches begin at three pending
@@ -215,8 +216,11 @@ region, the adapter:
 
 - expands a small bounded patch rectangle;
 - combines the recognizer's polarity-independent line masks, attaches
-  punctuation and antialiased edges, dilates the ink locally, and keeps the
-  alpha region bounded to the accepted text geometry;
+  punctuation and antialiased edges, and dilates the ink by a bounded 8-32
+  pixels (18% of the local crop scale);
+- unions that sparse mask with the complete accepted text envelope so detached
+  glyph components cannot survive, then clips every alpha pixel to the
+  confirmed bubble or accepted free-story-text geometry;
 - propagates surrounding known colors into masked pixels, with a median-color
   fast path for flat regions and local multiscale diffusion for gradients; and
 - encodes a PNG whose alpha is 255 only at masked pixels and 0 elsewhere.
@@ -237,13 +241,12 @@ directly to Qwen3.5 4B with the requested cumulative HSK 2.0 level and at most
 six preceding dialogue utterances. It does not generate a page-wide faithful
 translation and then rewrite it.
 
-The primary numbered-line protocol permits `[SKIP]` for credits, branding,
-release or scanner notes, SFX, non-English OCR, and gibberish. The parser
-accepts that marker only when deterministic source evidence independently
-supports exclusion. A marker on ordinary prose, including prose containing
-OCR substitutions such as `WH4`, is rejected and the item is repaired.
-Standalone numbers remain exact-preservation requirements; digits embedded in
-Latin OCR tokens do not.
+The semantic vision/OCR gate excludes credits, branding, release or scanner
+notes, SFX, non-English OCR, and ambiguous regions before translation. Every
+region passed to Qwen is therefore already accepted story text; the language
+model only translates it and cannot classify or skip it. Any `[SKIP]` output
+is rejected and the item is repaired. Standalone numbers remain
+exact-preservation requirements; digits embedded in Latin OCR tokens do not.
 
 `hsk-control` validates each returned story item. Items that already pass are
 accepted. Rejected items alone may be sent once to the targeted repair call
@@ -265,7 +268,8 @@ longest-match lookup. A progressive region carries:
 
 ## Translation cache
 
-The daemon holds an in-memory direct-translation cache. Its SHA-256 key covers:
+The daemon holds a 64 MiB byte-bounded in-memory direct-translation cache. Its
+SHA-256 key covers:
 
 ```text
 schema
@@ -288,8 +292,13 @@ The separate 2 GiB persistent result cache stores only complete per-image
 regions and their patch PNGs. Its key covers the strict request, build
 fingerprint, source identity, and all output-affecting resource identities.
 Each entry is installed with one atomic rename after visible processing
-finishes; no tile, detector, OCR, translation, or patch intermediate is
-persisted.
+finishes. Size accounting and eviction occur on that store path. A replay
+computes the exact key and opens only that entry; it does not scan all cached
+chapter images before every hit. The upload's bytes, SHA-256, format, MIME,
+limits, and header dimensions are still checked before lookup. Because a hit
+identifies content that was fully decoded when the entry was created, only a
+miss performs full pixel decoding. No tile, detector, OCR, translation, or
+patch intermediate is persisted.
 
 ## Retained reader tools
 
@@ -306,6 +315,9 @@ voice; neither comparison nor speech adds a daemon result endpoint.
 | Authenticated in-flight requests | 64 |
 | Retained jobs | 128 |
 | Retained source and patch bytes | 256 MiB |
+| Decoded-image LRU | 512 MiB |
+| In-memory translation cache | 64 MiB |
+| Persistent completed-result cache | 2 GiB |
 | One patch | 16 MiB |
 | One font | 32 MiB |
 | Visible rectangles | 64 |
@@ -321,11 +333,14 @@ there are no admitted requests and no active jobs.
 ## Evidence status
 
 Architecture claims above are traced to the current code and contract
-fixtures. No end-to-end latency, memory, VRAM, throughput, quality, or
-packaged-Firefox result has yet been recorded for this direct progressive
-build. The sole canonical workload is the 36-image *30 Years Since the
+fixtures. The sole canonical workload is the 36-image *30 Years Since the
 Prologue* chapter 5 fixture. Its 218-region geometry review and 214-target
-translation, pinyin, and token-level HSK gold are complete. Follow
-[the benchmark evidence method](../../docs/chapter-5-benchmark.md), keep raw
-outputs, and do not add chapter-specific tuning or reuse measurements from a
-different workload or the retired page-result pipeline.
+translation, pinyin, and token-level HSK gold are complete. Release claims
+require the complete packaged-Firefox run sequence in
+[the benchmark evidence method](../../docs/chapter-5-benchmark.md); source-only
+diagnostics are labeled separately. The current exact package passed all 426
+gates across one installed-cold run and 20 measured warm runs; the benchmark
+document records the timings, quality, memory, VRAM, cache, cancellation, and
+disk evidence. Keep raw outputs, do not add chapter-specific tuning, and never
+reuse measurements from a different workload or the retired page-result
+pipeline.

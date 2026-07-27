@@ -70,16 +70,19 @@ credential, or remote translation path is mounted.
    allocation checks occur before the job begins.
 2. The source is decoded once. The adapter divides it into 2,048-pixel tiles
    with 410-pixel overlap and reprioritizes remaining tiles whenever the
-   viewport changes. Detector input is letterboxed to at most 1,280 pixels.
-3. The official PP-OCRv5 mobile text detector processes true CUDA batches of
-   up to six tiles. Line candidates are spatially deduplicated.
-4. PP-OCRv5 English recognition runs in batches of eight. Adjacent lines with
-   compatible geometry and inferred color are grouped into story regions;
-   differently colored emphasis and separated balloons stay independent. A
-   region is accepted only after grouping, when it meets the 0.45 confidence
-   and English/story-text gates. On a tile with explicit credit/release
-   context, isolated uppercase name labels are excluded; the same form on a
-   normal story tile remains eligible.
+   viewport changes.
+3. The pinned RT-DETR-v2 comic detector processes true CUDA batches of up to
+   six tiles at its trained 640-pixel input size. Both `text_bubble` and
+   `text_free` proposals continue to recognition; bubble rectangles are not a
+   prerequisite. This covers dialogue, thoughts, captions, and unballooned
+   story text while leaving the final semantic decision to OCR. Text proposals
+   are spatially deduplicated at tile overlaps.
+4. PP-OCRv5 English recognition runs in batches of eight. Each RT-DETR text
+   proposal remains one semantic story-region candidate; this avoids merging
+   neighboring balloons or differently colored emphasis. A region is accepted
+   only when it meets the 0.45 confidence and English/story-text gates. On a
+   tile with explicit credit/release context, isolated uppercase name labels
+   are excluded; the same form on a normal story tile remains eligible.
    Sound effects, credits, scanlation promotion, branding, non-English text,
    and ambiguous OCR do not enter translation or cleanup.
 5. A small transparent PNG is constructed for the accepted text geometry.
@@ -87,19 +90,19 @@ credential, or remote translation path is mounted.
    a fixed palette. Only the erase/glyph mask has alpha; pixels outside it
    remain transparent, and cleanup preserves local color, gradients, texture,
    contours, and styling instead of whitening the region.
-6. Visible accepted regions jump ahead of off-screen work. Translation batches
-   contain up to six regions and normally flush once three are pending; a
-   visible arrival flushes immediately.
+6. Visible accepted regions jump ahead of off-screen work at every batch
+   boundary. Translation batches contain up to six regions and normally flush
+   once three are pending; an undersized visible tail waits no longer than
+   75 ms so visibility changes do not create one-item GPU calls.
 7. Qwen3.5 4B translates English directly to HSK 2.0-targeted Simplified
-   Chinese in one primary generation. The same line can return a reserved
-   non-story marker, but the daemon honors it only when deterministic source
-   evidence supports credits, release metadata, SFX, non-English OCR, or
-   fragmented gibberish. Unsupported exclusions enter the single targeted
-   repair instead of disappearing. `hsk-control` validates vocabulary; the
-   direct protocol validator checks protected names, standalone numbers,
-   question intent, and output structure. Digits embedded in Latin OCR tokens
-   such as `IDENTIT4` are not treated as semantic numbers. Only rejected items
-   may enter one targeted repair batch.
+   Chinese in one primary generation. Deterministic vision, OCR, language, and
+   story-role gates decide inclusion before translation; Qwen cannot classify
+   or skip an accepted item. A returned `[SKIP]` marker is invalid and may enter
+   the single targeted repair. `hsk-control` validates vocabulary; the direct
+   protocol validator checks protected names, standalone numbers, question
+   intent, and output structure. Digits embedded in Latin OCR tokens such as
+   `IDENTIT4` are not treated as semantic numbers. Only rejected items may
+   enter one targeted repair batch.
    This is not a page-wide faithful pass followed by an HSK rewrite.
 8. For each completed region, the daemon stores the patch blob first and then
    appends `regionReady`, which carries the patch descriptor, geometry, source
@@ -112,16 +115,31 @@ credential, or remote translation path is mounted.
 Completion is a terminal event in the same log. It does not unlock a separate
 result representation.
 
+## Live-page rendering
+
+The renderer never reparents, replaces, hides, or rewrites the reader's source
+`img`. One fixed-position shadow-DOM portal follows the image's viewport
+geometry and contains only transparent patch and selectable-text layers.
+Scroll, resize, responsive layout, and source replacement trigger a refit.
+Cancellation or navigation removes the portal and leaves the untouched source
+DOM in place.
+
+The original/Chinese/hold-to-compare controls live in a separate fixed
+shadow-DOM host at the viewport edge, so they remain reachable while reading a
+long chapter. Dictionary lookup is anchored outside the selected glyphs when
+space permits, clamped to the viewport, repositioned on scroll/resize, and
+dismissed when the selection collapses or leaves a translated region.
+
 ## Scheduling and cache identity
 
 The daemon stays warm for a 30-minute idle window and uses four Tokio workers,
 at most eight general blocking threads, one serialized priority CUDA
 scheduler, and one dedicated six-thread Rayon pool for browser image
-preprocessing. The detector, OCR model, local LLM
+preprocessing. The comic detector, OCR recognizer, local LLM
 application state, and HSK control data are lazy `OnceCell` residents, so later
 jobs reuse loaded state.
 
-The in-memory translation cache is keyed by:
+The 64 MiB byte-bounded in-memory translation cache is keyed by:
 
 - normalized OCR text;
 - up to six preceding dialogue utterances;
@@ -142,7 +160,13 @@ results and PNG patches also have a byte-bounded
 source hash, exact build fingerprint, and a fingerprint of every
 output-affecting model, prompt, validator, dictionary, and pipeline resource.
 Entries are atomically installed only after visible processing completes.
-No detector, OCR, translation, or patch intermediate is written to disk.
+Stores enforce the 2 GiB bound and perform eviction once; reads open the exact
+SHA-keyed entry directly instead of rescanning the cache directory for every
+image. Every upload still validates its byte limit, SHA-256, encoded format,
+MIME, declared limits, and header dimensions. An exact hit then reuses the
+previously fully decoded/validated result; full pixel decoding occurs only on
+a miss. No detector, OCR, translation, or patch intermediate is written to
+disk.
 
 The job log is append-only, starts at sequence 1, rejects regressive overall
 progress, rejects duplicate region publication, and permits one terminal
@@ -160,6 +184,9 @@ second status/result model.
 | Decoded pixels | 25,000,000 |
 | Either dimension | 16,384 px |
 | Decoder allocation | 128 MiB |
+| Decoded-image LRU | 512 MiB |
+| In-memory translation cache | 64 MiB |
+| Persistent completed-result cache | 2 GiB |
 | One patch blob | 16 MiB |
 | Retained jobs | 128 |
 | Retained sources and patches | 256 MiB |
@@ -190,6 +217,11 @@ The progressive architecture preserves:
 - original/Chinese/hold-to-compare controls; and
 - local-only Mandarin pronunciation using an eligible Firefox/OS voice.
 
+These browser tools do not delay offscreen inference. Region order is stable
+page order followed by within-page reading order, while current-viewport work
+may overtake queued offscreen work at detector, OCR, and translation batch
+boundaries.
+
 See [the browser contract](browser-contract.md) for exact routes and event
 shapes and [the Chapter 5 evidence plan](chapter-5-benchmark.md) for the
-complete 36-image gold corpus and the packaged measurements still to be run.
+complete 36-image gold corpus and the passing packaged release measurements.

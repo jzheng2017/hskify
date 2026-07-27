@@ -35,9 +35,11 @@ $identityFields = @(
     'url'
 )
 $requiredResourceIds = @(
+    'comic-text-bubble-detector-config',
+    'comic-text-bubble-detector-preprocessor-config',
+    'comic-text-bubble-detector-weights',
     'pp-ocr-v5-english-recognizer-config',
     'pp-ocr-v5-english-recognizer-model',
-    'pp-ocr-v5-mobile-detector-model',
     'translation-model'
 )
 $resourceIdentities = @($manifest.resourceIdentities)
@@ -53,7 +55,7 @@ for ($index = 0; $index -lt $resourceIdentities.Count; $index++) {
         throw "resource identity has unexpected fields: $($identity.id)"
     }
     if ([string] $identity.id -cne $expectedId) {
-        throw "resourceIdentities must contain the four required identities in ordinal id order; expected $expectedId"
+        throw "resourceIdentities must contain the six required identities in ordinal id order; expected $expectedId"
     }
     if (
         ([string] $identity.repository).Length -gt 256 -or

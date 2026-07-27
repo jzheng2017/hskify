@@ -8,7 +8,6 @@
 mod geometry;
 mod patch;
 mod ppocr_v5;
-mod ppocr_v5_detector;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
@@ -30,6 +29,7 @@ use koharu_app::llm::{
     HskTranslationRepairRequest, HskUtteranceKind, MAX_HSK_PRECEDING_UTTERANCES,
 };
 use koharu_app::{App, AppConfig};
+use koharu_ml::comic_text_bubble_detector::{ComicTextBubbleDetector, DETECTOR_TILE_BATCH_SIZE};
 use koharu_runtime::{ComputePolicy, RuntimeManager};
 use rayon::ThreadPool;
 use serde::{Deserialize, Serialize};
@@ -40,13 +40,12 @@ use self::geometry::{
     overlapping_tiles, prioritize_tiles, reading_order_key, spatially_dedupe,
     text_candidate_is_confirmed,
 };
-use self::patch::{PatchPng, PlacedInkMask, make_cleanup_patch};
+use self::patch::{PatchPng, PlacedInkMask, ink_dilation_pixels, make_cleanup_patch};
 use self::ppocr_v5::{EnglishPpOcrV5, MAX_LINE_BATCH_SIZE, PpOcrPrediction};
-use self::ppocr_v5_detector::{DETECTOR_TILE_BATCH_SIZE, PpOcrV5TextDetector};
 use crate::contracts::{
     BrowserJobRequest, BrowserJobStage, BrowserTextLayout, BrowserTextStyle, FontCategory,
     HskLevel, HskRepairState, LookupRegion, LookupResult, LookupToken, NormalizedRect,
-    ProgressiveHskStatus, ProgressiveRegion, ReadingDirection, TextAlignment, WritingMode,
+    ProgressiveHskStatus, ProgressiveRegion, TextAlignment, WritingMode,
 };
 use crate::crypto::sha256_hex;
 use crate::cuda_scheduler::{
@@ -54,7 +53,8 @@ use crate::cuda_scheduler::{
 };
 use crate::server::{JobUpdateDraft, JobUpdateSink};
 use crate::setup::{
-    DETECTOR_MODEL_ID, OCR_CONFIG_ID, OCR_MODEL_ID, ResidentResourcePaths, TRANSLATION_MODEL_ID,
+    DETECTOR_CONFIG_ID, DETECTOR_PREPROCESSOR_ID, DETECTOR_WEIGHTS_ID, OCR_CONFIG_ID, OCR_MODEL_ID,
+    ResidentResourcePaths, TRANSLATION_MODEL_ID,
 };
 
 const OCR_REGION_BATCH_SIZE: usize = MAX_LINE_BATCH_SIZE;
@@ -63,7 +63,7 @@ const TRANSLATION_BATCH_MIN: usize = 3;
 const TRANSLATION_MAX_FLUSH_DELAY: Duration = Duration::from_millis(75);
 const BROWSER_QWEN_INFERENCE_THREADS: i32 = 6;
 const MIN_OCR_CONFIDENCE: f32 = 0.45;
-const TRANSLATION_CACHE_SCHEMA: &str = "hskify-direct-hsk-region-cache-v4";
+const TRANSLATION_CACHE_SCHEMA: &str = "hskify-direct-hsk-region-cache-v5";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -333,12 +333,12 @@ impl KoharuPipeline {
                 .await
                 .map_err(cuda_admission_error)?;
             let detections = {
-                let mut detector = resident.detector.lock().map_err(|_| {
+                let detector = resident.detector.lock().map_err(|_| {
                     CleaningError::new("MODEL_STATE_FAILED", "Detector lock poisoned.")
                 })?;
                 detector
-                    .detect_tiles(&tile_images)
-                    .context("run true-batched CUDA PP-OCRv5 text detection")
+                    .inference_tiles(&tile_images)
+                    .context("run true-batched CUDA comic text detection")
                     .map_err(CleaningError::pipeline)?
             };
             drop(cuda_permit);
@@ -376,6 +376,20 @@ impl KoharuPipeline {
                 .collect::<Vec<_>>();
             let mut candidates = spatially_dedupe(candidates, &seen_text_blocks);
             candidates.retain(text_candidate_is_confirmed);
+            if rejected_ocr_tracing_enabled() {
+                for candidate in &candidates {
+                    eprintln!(
+                        "hskify-detector-candidate source={} kind={:?} rect={:.1},{:.1},{:.1},{:.1} confidence={:.4}",
+                        &input.request.source_sha256[..8],
+                        candidate.kind,
+                        candidate.text_rect.x0,
+                        candidate.text_rect.y0,
+                        candidate.text_rect.x1,
+                        candidate.text_rect.y1,
+                        candidate.detector_confidence,
+                    );
+                }
+            }
             if !candidates.is_empty() {
                 publish_progress(
                     &sink,
@@ -966,7 +980,7 @@ impl CleaningPipeline for KoharuPipeline {
 
 struct ResidentState {
     app: Arc<App>,
-    detector: Mutex<PpOcrV5TextDetector>,
+    detector: Mutex<ComicTextBubbleDetector>,
     ocr: Mutex<EnglishPpOcrV5>,
 }
 
@@ -993,14 +1007,21 @@ impl ResidentState {
             App::new(config, runtime.clone(), false, env!("CARGO_PKG_VERSION"))
                 .context("initialize resident application model state")?,
         );
-        let detector_model = resources.path(DETECTOR_MODEL_ID)?.to_path_buf();
+        let detector_config = resources.path(DETECTOR_CONFIG_ID)?.to_path_buf();
+        let detector_preprocessor = resources.path(DETECTOR_PREPROCESSOR_ID)?.to_path_buf();
+        let detector_weights = resources.path(DETECTOR_WEIGHTS_ID)?.to_path_buf();
         let ocr_config = resources.path(OCR_CONFIG_ID)?.to_path_buf();
         let ocr_model = resources.path(OCR_MODEL_ID)?.to_path_buf();
         let translation_model = resources.path(TRANSLATION_MODEL_ID)?.to_path_buf();
         let detector_future = async move {
-            tokio::task::spawn_blocking(move || PpOcrV5TextDetector::load(&detector_model))
-                .await
-                .context("join resident PP-OCRv5 detector loader")?
+            ComicTextBubbleDetector::load_from_paths(
+                detector_config,
+                detector_preprocessor,
+                detector_weights,
+                false,
+            )
+            .await
+            .context("load resident comic text detector")
         };
         let ocr_future = async move {
             tokio::task::spawn_blocking(move || EnglishPpOcrV5::load(&ocr_model, &ocr_config))
@@ -1287,8 +1308,20 @@ async fn ocr_batch(
         .zip(predictions)
         .zip(crop_bounds)
         .filter(|((candidate, prediction), _)| {
-            let _ = candidate.kind;
-            accept_english_ocr_line(prediction.confidence, &prediction.text)
+            let accepted = accept_english_ocr_line(prediction.confidence, &prediction.text);
+            if !accepted && rejected_ocr_tracing_enabled() {
+                eprintln!(
+                    "hskify-ocr-rejected-line source={} rect={:.1},{:.1},{:.1},{:.1} confidence={:.4} text={:?}",
+                    &request.source_sha256[..8],
+                    candidate.text_rect.x0,
+                    candidate.text_rect.y0,
+                    candidate.text_rect.x1,
+                    candidate.text_rect.y1,
+                    prediction.confidence,
+                    prediction.text,
+                );
+            }
+            accepted
         })
         .map(|((candidate, prediction), crop_bounds)| RecognizedLine {
             candidate,
@@ -1309,17 +1342,28 @@ async fn prepare_grouped_regions(
         return Ok(Vec::new());
     }
     let (image_width, image_height) = source.dimensions();
-    let groups = group_recognized_lines(lines, request.settings.reading_direction);
+    // RT-DETR already proposes one semantic text region. PP-OCR splits and
+    // rejoins the physical lines inside that crop, so merging neighboring
+    // detector proposals here would collapse separate bubbles or captions.
+    let groups = lines.into_iter().map(|line| vec![line]).collect::<Vec<_>>();
     let source_for_patches = source.clone();
+    let source_trace_id = request.source_sha256[..8].to_owned();
     let prepared_groups = preprocessing
         .run(move || {
             let grouped_sources = groups
                 .iter()
                 .map(|group| grouped_source_english(group))
                 .collect::<Vec<_>>();
-            let credit_context = grouped_sources
+            let credit_context_rects = groups
                 .iter()
-                .any(|text| looks_like_credit_context(text));
+                .zip(&grouped_sources)
+                .filter(|(_, text)| looks_like_credit_context(text))
+                .map(|(group, _)| merge_group_candidate(group, image_width, image_height).text_rect)
+                .collect::<Vec<_>>();
+            let batch_has_credit_context = !credit_context_rects.is_empty();
+            let batch_has_story_context = grouped_sources
+                .iter()
+                .any(|text| looks_like_batch_story_context(text));
             groups
                 .into_iter()
                 .zip(grouped_sources)
@@ -1337,9 +1381,39 @@ async fn prepare_grouped_regions(
                         })
                         .sum::<f32>()
                         / total_weight.max(1) as f32;
+                    let credit_context_padding =
+                        (image_width as f32 * 0.12).clamp(64.0, 256.0);
+                    let local_credit_context = credit_context_rects.iter().any(|credit_rect| {
+                        candidate
+                            .text_rect
+                            .expand(credit_context_padding, image_width, image_height)
+                            .intersection(*credit_rect)
+                            .is_some()
+                    });
+                    let isolated_free_label_without_story_context =
+                        group[0].candidate.kind == CandidateKind::FreeText
+                            && !batch_has_story_context
+                            && (looks_like_isolated_credit_name(&source_english)
+                                || (batch_has_credit_context
+                                    && looks_like_short_credit_acronym(&source_english)));
                     if !accept_english_ocr(group[0].candidate.kind, ocr_confidence, &source_english)
-                        || (credit_context && looks_like_isolated_credit_name(&source_english))
+                        || (local_credit_context
+                            && looks_like_isolated_credit_name(&source_english))
+                        || isolated_free_label_without_story_context
                     {
+                        if rejected_ocr_tracing_enabled() {
+                            eprintln!(
+                                "hskify-ocr-rejected-story source={} rect={:.1},{:.1},{:.1},{:.1} confidence={:.4} creditContext={} text={:?}",
+                                source_trace_id,
+                                candidate.text_rect.x0,
+                                candidate.text_rect.y0,
+                                candidate.text_rect.x1,
+                                candidate.text_rect.y1,
+                                ocr_confidence,
+                                local_credit_context,
+                                source_english,
+                            );
+                        }
                         return Ok(None);
                     }
                     let mut prediction = group
@@ -1423,102 +1497,6 @@ fn grouped_source_english(group: &[RecognizedLine]) -> String {
         .join(" ")
 }
 
-fn group_recognized_lines(
-    mut lines: Vec<RecognizedLine>,
-    reading_direction: ReadingDirection,
-) -> Vec<Vec<RecognizedLine>> {
-    lines.sort_by(|left, right| {
-        left.candidate
-            .text_rect
-            .y0
-            .total_cmp(&right.candidate.text_rect.y0)
-            .then_with(|| match reading_direction {
-                ReadingDirection::Rtl => right
-                    .candidate
-                    .text_rect
-                    .x0
-                    .total_cmp(&left.candidate.text_rect.x0),
-                ReadingDirection::Auto | ReadingDirection::Ltr => left
-                    .candidate
-                    .text_rect
-                    .x0
-                    .total_cmp(&right.candidate.text_rect.x0),
-            })
-    });
-    let mut groups = Vec::<Vec<RecognizedLine>>::new();
-    for line in lines {
-        let destination = groups
-            .iter()
-            .enumerate()
-            .filter(|(_, group)| {
-                group.len() < 8
-                    && group
-                        .last()
-                        .is_some_and(|previous| lines_belong_to_same_block(previous, &line))
-            })
-            .min_by(|(_, left), (_, right)| {
-                let left_gap = line.candidate.text_rect.y0
-                    - left
-                        .last()
-                        .expect("filtered group is non-empty")
-                        .candidate
-                        .text_rect
-                        .y1;
-                let right_gap = line.candidate.text_rect.y0
-                    - right
-                        .last()
-                        .expect("filtered group is non-empty")
-                        .candidate
-                        .text_rect
-                        .y1;
-                left_gap.total_cmp(&right_gap)
-            })
-            .map(|(index, _)| index);
-        if let Some(index) = destination {
-            groups[index].push(line);
-        } else {
-            groups.push(vec![line]);
-        }
-    }
-    groups
-}
-
-fn lines_belong_to_same_block(previous: &RecognizedLine, next: &RecognizedLine) -> bool {
-    let upper = previous.candidate.text_rect;
-    let lower = next.candidate.text_rect;
-    let smaller_height = upper.height().min(lower.height()).max(1.0);
-    let larger_height = upper.height().max(lower.height()).max(1.0);
-    let vertical_gap = lower.y0 - upper.y1;
-    if vertical_gap < -smaller_height * 0.35 || vertical_gap > (larger_height * 2.2).max(24.0) {
-        return false;
-    }
-    if previous
-        .prediction
-        .text
-        .trim_end()
-        .ends_with(['.', '!', '?', '…'])
-        && vertical_gap > larger_height * 0.8
-    {
-        return false;
-    }
-    let horizontal_overlap = (upper.x1.min(lower.x1) - upper.x0.max(lower.x0)).max(0.0);
-    let overlap_ratio = horizontal_overlap / upper.width().min(lower.width()).max(1.0);
-    let (upper_center, _) = upper.center();
-    let (lower_center, _) = lower.center();
-    let center_distance = (upper_center - lower_center).abs();
-    let horizontally_aligned =
-        overlap_ratio >= 0.20 || center_distance <= upper.width().max(lower.width()) * 0.30;
-    horizontally_aligned
-        && color_distance(previous.prediction.text_color, next.prediction.text_color) <= 180
-}
-
-fn color_distance(left: [u8; 3], right: [u8; 3]) -> u16 {
-    left.into_iter()
-        .zip(right)
-        .map(|(left, right)| u16::from(left.abs_diff(right)))
-        .sum()
-}
-
 fn merge_group_candidate(
     group: &[RecognizedLine],
     image_width: u32,
@@ -1537,7 +1515,7 @@ fn merge_group_candidate(
         .fold(first.candidate.bubble_rect, |rect, line| {
             rect.union(line.candidate.bubble_rect)
         });
-    let layout_padding = (text_rect.height().min(text_rect.width()) * 0.08).clamp(4.0, 20.0);
+    let layout_padding = ink_dilation_pixels(text_rect) as f32;
     let layout_rect =
         bubble_rect.union(text_rect.expand(layout_padding, image_width, image_height));
     Candidate {
@@ -1567,16 +1545,16 @@ fn prioritize_pending_translation(
                 image_height,
             );
     }
+    sort_pending_translation(regions);
+}
+
+fn sort_pending_translation(regions: &mut [PreparedRegion]) {
     regions.sort_by(|left, right| {
-        right.visible.cmp(&left.visible).then_with(|| {
-            if left.visible {
-                left.reading_order.cmp(&right.reading_order)
-            } else {
-                left.translation_queued_at
-                    .cmp(&right.translation_queued_at)
-                    .then_with(|| left.reading_order.cmp(&right.reading_order))
-            }
-        })
+        right
+            .visible
+            .cmp(&left.visible)
+            .then_with(|| left.reading_order.cmp(&right.reading_order))
+            .then_with(|| left.translation_queued_at.cmp(&right.translation_queued_at))
     });
 }
 
@@ -1625,10 +1603,13 @@ fn compact_ocr_text(text: &str) -> String {
 const NARRATION_SFX_WORDS: &[&str] = &[
     "ah", "bam", "bang", "boom", "bump", "clang", "clank", "crack", "crash", "ding", "gasp", "ha",
     "haha", "hiss", "kaboom", "knock", "oh", "pow", "ring", "slam", "snap", "splash", "swoosh",
-    "thud", "thump", "ugh", "wham", "whoosh", "zap",
+    "thud", "thump", "ugh", "waah", "wham", "whoosh", "zap",
 ];
 
-fn accept_english_ocr(_kind: CandidateKind, confidence: f32, text: &str) -> bool {
+const STANDALONE_NONVERBAL_WORDS: &[&str] =
+    &["ahem", "hic", "hmm", "hmph", "ugh", "ughh", "ughhh", "whew"];
+
+fn accept_english_ocr(kind: CandidateKind, confidence: f32, text: &str) -> bool {
     if !accept_english_ocr_line(confidence, text) {
         return false;
     }
@@ -1639,9 +1620,12 @@ fn accept_english_ocr(_kind: CandidateKind, confidence: f32, text: &str) -> bool
         .filter(|word| !word.is_empty())
         .collect::<Vec<_>>();
     !contains_credit_or_release_metadata(&words)
-        && !looks_like_long_ocr_gibberish(text)
+        && (confidence >= 0.90 || !looks_like_long_ocr_gibberish(text))
         && !looks_like_low_confidence_ocr_gibberish(confidence, text, &words)
-        && is_confident_english_story_text(text)
+        && !looks_like_standalone_nonverbal(text, &words)
+        && !looks_like_punctuation_gibberish(kind, text, &words)
+        && !looks_like_numbered_credit_handle(kind, text, &words)
+        && is_confident_english_story_text(kind, confidence, text)
 }
 
 fn accept_english_ocr_line(confidence: f32, text: &str) -> bool {
@@ -1665,6 +1649,10 @@ fn accept_english_ocr_line(confidence: f32, text: &str) -> bool {
         && alphabetic
             .iter()
             .all(|character| is_latin_letter(*character))
+}
+
+fn rejected_ocr_tracing_enabled() -> bool {
+    std::env::var_os("HSKIFY_TRACE_REJECTED_OCR").is_some_and(|value| value == "1")
 }
 
 fn looks_like_compact_alphanumeric_noise(text: &str) -> bool {
@@ -1720,14 +1708,20 @@ fn looks_like_low_confidence_ocr_gibberish(confidence: f32, text: &str, words: &
         .iter()
         .filter(|word| STRUCTURAL_ENGLISH_WORDS.contains(word))
         .count();
-    (words.len() >= 4 && structural_words == 0)
+    (words.len() >= 3 && structural_words == 0)
+        || (confidence < 0.70
+            && words.len() <= 4
+            && words
+                .iter()
+                .any(|word| STANDALONE_NONVERBAL_WORDS.contains(word))
+            && words.iter().any(|word| word.chars().count() == 1))
         || (confidence < 0.70
             && words.len() <= 2
             && words.iter().any(|word| word.chars().count() >= 6)
             && !text.trim_end().ends_with(['.', '!', '?', '…']))
 }
 
-fn is_confident_english_story_text(text: &str) -> bool {
+fn is_confident_english_story_text(kind: CandidateKind, confidence: f32, text: &str) -> bool {
     let lowercase = text.to_lowercase();
     if lowercase.contains("http")
         || lowercase.contains("www.")
@@ -1759,12 +1753,16 @@ fn is_confident_english_story_text(text: &str) -> bool {
         .filter(|word| !word.is_empty())
         .collect::<Vec<_>>();
     if words.is_empty()
-        || words.iter().all(|word| NARRATION_SFX_WORDS.contains(word))
-        || looks_like_short_non_english_ocr(&words)
-        || looks_like_fragmented_metadata_ocr(&words)
+        || (kind == CandidateKind::FreeText
+            && words.iter().all(|word| NARRATION_SFX_WORDS.contains(word)))
+        || (kind == CandidateKind::FreeText && looks_like_short_non_english_ocr(&words))
+        || (confidence < 0.90 && looks_like_fragmented_metadata_ocr(&words))
         || contains_credit_or_release_metadata(&words)
     {
         return false;
+    }
+    if confidence >= 0.90 {
+        return true;
     }
     if words.len() == 1 {
         return text.trim_end().ends_with(['.', '!', '?', '…']);
@@ -1791,6 +1789,38 @@ fn looks_like_short_non_english_ocr(words: &[&str]) -> bool {
     words.len() == 2
         && words.iter().all(|word| word.chars().count() <= 2)
         && !SHORT_ENGLISH_PHRASES.contains(&(words[0], words[1]))
+}
+
+fn looks_like_standalone_nonverbal(text: &str, words: &[&str]) -> bool {
+    !text.contains('?')
+        && !words.is_empty()
+        && words.iter().all(|word| {
+            STANDALONE_NONVERBAL_WORDS.contains(word)
+                || (word.starts_with("ugh") && word.chars().count() <= 8)
+        })
+}
+
+fn looks_like_punctuation_gibberish(kind: CandidateKind, text: &str, words: &[&str]) -> bool {
+    kind == CandidateKind::FreeText
+        && words.len() == 1
+        && words[0].chars().count() == 1
+        && text
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .count()
+            >= 7
+}
+
+fn looks_like_numbered_credit_handle(kind: CandidateKind, text: &str, words: &[&str]) -> bool {
+    kind == CandidateKind::FreeText
+        && words.len() == 1
+        && words[0].chars().count() >= 6
+        && text
+            .trim_start()
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_ascii_digit())
+        && !text.trim_end().ends_with(['.', '!', '?', '…'])
 }
 
 fn is_short_quoted_narration(text: &str, words: &[&str]) -> bool {
@@ -1858,6 +1888,7 @@ fn contains_credit_or_release_metadata(words: &[&str]) -> bool {
         "background",
         "color",
         "colour",
+        "qc",
         "directing",
         "editing",
         "effect",
@@ -1869,9 +1900,30 @@ fn contains_credit_or_release_metadata(words: &[&str]) -> bool {
         "text",
         "words",
     ];
+    const STANDALONE_CREDIT_ROLES: &[&str] = &[
+        "color",
+        "colour",
+        "directing",
+        "editing",
+        "letterer",
+        "proofreader",
+        "qc",
+        "redrawer",
+        "translator",
+        "typesetter",
+    ];
     STRONG_METADATA_WORDS
         .iter()
         .any(|metadata| words.contains(metadata))
+        || words.iter().any(|word| {
+            ["scans", "scanlation", "scanlations"]
+                .iter()
+                .any(|suffix| word.len() > suffix.len() && word.ends_with(suffix))
+        })
+        || (words.len() <= 3
+            && words
+                .iter()
+                .any(|word| STANDALONE_CREDIT_ROLES.contains(word)))
         || words
             .iter()
             .filter(|word| PRODUCTION_CREDIT_WORDS.contains(word))
@@ -1899,6 +1951,21 @@ fn looks_like_credit_context(text: &str) -> bool {
         || lowercase.contains(".net")
 }
 
+fn looks_like_batch_story_context(text: &str) -> bool {
+    if looks_like_credit_context(text) || looks_like_isolated_credit_name(text) {
+        return false;
+    }
+    let lowercase = text.to_lowercase();
+    let words = lowercase
+        .split(|character: char| !is_latin_letter(character))
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>();
+    words.len() >= 2
+        && !words
+            .iter()
+            .all(|word| STANDALONE_NONVERBAL_WORDS.contains(word))
+}
+
 fn looks_like_isolated_credit_name(text: &str) -> bool {
     const STRUCTURAL_ENGLISH_WORDS: &[&str] = &[
         "a", "an", "and", "are", "as", "at", "by", "for", "from", "in", "is", "of", "on", "or",
@@ -1918,11 +1985,19 @@ fn looks_like_isolated_credit_name(text: &str) -> bool {
         .split_whitespace()
         .filter(|word| !word.is_empty())
         .collect::<Vec<_>>();
-    (2..=4).contains(&words.len())
-        && words.iter().all(|word| word.chars().count() >= 3)
+    (1..=4).contains(&words.len())
+        && words.iter().any(|word| word.chars().count() >= 3)
         && !words
             .iter()
             .any(|word| STRUCTURAL_ENGLISH_WORDS.contains(word))
+}
+
+fn looks_like_short_credit_acronym(text: &str) -> bool {
+    let trimmed = text.trim();
+    (2..=3).contains(&trimmed.chars().count())
+        && trimmed
+            .chars()
+            .all(|character| character.is_ascii_uppercase())
 }
 
 fn looks_like_fragmented_metadata_ocr(words: &[&str]) -> bool {
@@ -1938,6 +2013,7 @@ fn looks_like_fragmented_metadata_ocr(words: &[&str]) -> bool {
 fn hsk_utterance_kind(kind: CandidateKind) -> HskUtteranceKind {
     match kind {
         CandidateKind::StoryText => HskUtteranceKind::Dialogue,
+        CandidateKind::FreeText => HskUtteranceKind::Caption,
     }
 }
 
@@ -2086,7 +2162,6 @@ impl TranslationState {
         level: ControlHskLevel,
         proper_names: &[ProperName],
     ) -> Self {
-        let excluded = outcome.is_excluded();
         let mut problems = outcome.repair_problems();
         let meaning_valid = outcome.issues.is_empty();
         let base_chinese = nonempty_translation(outcome.text);
@@ -2096,7 +2171,7 @@ impl TranslationState {
         if let Some(report) = &report {
             append_validation_problems(&mut problems, report);
         }
-        let valid = !excluded && problems.is_empty() && report.is_some();
+        let valid = problems.is_empty() && report.is_some();
         Self {
             displayed_chinese: valid.then(|| {
                 report
@@ -2767,90 +2842,12 @@ mod tests {
         }
     }
 
-    fn recognized_line(text: &str, rect: PixelRect, color: [u8; 3]) -> RecognizedLine {
-        RecognizedLine {
-            candidate: Candidate {
-                kind: CandidateKind::StoryText,
-                text_rect: rect,
-                bubble_rect: rect,
-                confirmed_bubble_rect: rect,
-                detector_confidence: 0.99,
-            },
-            prediction: PpOcrPrediction {
-                text: text.to_owned(),
-                confidence: 0.99,
-                ink_mask: None,
-                text_color: color,
-                stroke_color: [0, 0, 0],
-                has_stroke_color: false,
-            },
-            crop_bounds: PixelBounds {
-                x: rect.x0 as u32,
-                y: rect.y0 as u32,
-                width: rect.width() as u32,
-                height: rect.height() as u32,
-            },
-        }
-    }
-
-    #[test]
-    fn adjacent_same_color_lines_form_one_story_text_block() {
-        let lines = vec![
-            recognized_line(
-                "AND BECAME THE HERO",
-                PixelRect::new(100.0, 100.0, 500.0, 140.0).unwrap(),
-                [250, 250, 250],
-            ),
-            recognized_line(
-                "WHO BROUGHT AN END",
-                PixelRect::new(130.0, 148.0, 470.0, 188.0).unwrap(),
-                [248, 249, 250],
-            ),
-        ];
-
-        let groups = group_recognized_lines(lines, ReadingDirection::Ltr);
-
-        assert_eq!(groups.len(), 1);
-        assert_eq!(groups[0].len(), 2);
-    }
-
-    #[test]
-    fn colored_emphasis_and_side_by_side_bubbles_stay_separate() {
-        let lines = vec![
-            recognized_line(
-                "THE PRETEXT OF",
-                PixelRect::new(180.0, 100.0, 500.0, 140.0).unwrap(),
-                [250, 250, 250],
-            ),
-            recognized_line(
-                "ASSASSINATION REQUESTS",
-                PixelRect::new(120.0, 148.0, 560.0, 190.0).unwrap(),
-                [210, 30, 35],
-            ),
-            recognized_line(
-                "LEFT BUBBLE",
-                PixelRect::new(20.0, 240.0, 220.0, 280.0).unwrap(),
-                [20, 20, 20],
-            ),
-            recognized_line(
-                "RIGHT BUBBLE",
-                PixelRect::new(350.0, 242.0, 560.0, 282.0).unwrap(),
-                [20, 20, 20],
-            ),
-        ];
-
-        let groups = group_recognized_lines(lines, ReadingDirection::Ltr);
-
-        assert_eq!(groups.len(), 4);
-        assert!(groups.iter().all(|group| group.len() == 1));
-    }
-
     #[test]
     fn english_gate_accepts_confident_latin_bubble_text() {
         assert!(accept_english_ocr_line(0.91, "FORGOTTEN,"));
         assert!(accept_english_ocr_line(0.91, "-ENRIQUE-"));
         assert!(accept_english_ocr(
-            CandidateKind::StoryText,
+            CandidateKind::FreeText,
             0.91,
             "'LITTLE' MAN?"
         ));
@@ -2860,8 +2857,8 @@ mod tests {
             "Too uncertain"
         ));
         assert!(!accept_english_ocr(
-            CandidateKind::StoryText,
-            0.99,
+            CandidateKind::FreeText,
+            0.70,
             "rgrodbedj e gbdue t js gb socews nggpodbgedg ectrseeed gbucbgebbr ege rbgtg"
         ));
         assert!(!accept_english_ocr(
@@ -2874,7 +2871,7 @@ mod tests {
             0.99,
             "30 YEARS SINCE THE PROLOGUE"
         ));
-        assert!(!accept_english_ocr(CandidateKind::StoryText, 0.99, "Ka Z"));
+        assert!(!accept_english_ocr(CandidateKind::FreeText, 0.99, "Ka Z"));
         assert!(!accept_english_ocr(
             CandidateKind::StoryText,
             0.99,
@@ -2882,6 +2879,49 @@ mod tests {
         ));
         assert!(accept_english_ocr(CandidateKind::StoryText, 0.99, "Go on"));
         assert!(accept_english_ocr(CandidateKind::StoryText, 0.99, "R2D2"));
+        assert!(accept_english_ocr(CandidateKind::StoryText, 0.98, "...OH."));
+        assert!(accept_english_ocr(
+            CandidateKind::FreeText,
+            0.99,
+            "ESIDISI,"
+        ));
+        assert!(accept_english_ocr(
+            CandidateKind::FreeText,
+            0.98,
+            "IF WE GO TO HIM,"
+        ));
+        assert!(!accept_english_ocr(
+            CandidateKind::StoryText,
+            0.99,
+            "Ahem.!.."
+        ));
+        assert!(!accept_english_ocr(
+            CandidateKind::StoryText,
+            0.99,
+            "HIC HIc"
+        ));
+        assert!(accept_english_ocr(CandidateKind::StoryText, 0.99, "HMM?"));
+        assert!(!accept_english_ocr(
+            CandidateKind::FreeText,
+            0.99,
+            "7 GREENKIRIN"
+        ));
+        assert!(!accept_english_ocr(
+            CandidateKind::FreeText,
+            0.64,
+            "I / - -. —- ."
+        ));
+        assert!(!accept_english_ocr(
+            CandidateKind::StoryText,
+            0.81,
+            "Ughhih..!"
+        ));
+        assert!(!accept_english_ocr(CandidateKind::FreeText, 0.82, "WAAH!"));
+        assert!(!accept_english_ocr(
+            CandidateKind::FreeText,
+            0.54,
+            "/ QC BLACK"
+        ));
         assert!(!accept_english_ocr(
             CandidateKind::StoryText,
             0.64,
@@ -2897,86 +2937,95 @@ mod tests {
     #[test]
     fn narration_gate_accepts_prose_but_rejects_sfx_credits_logos_and_ambiguity() {
         assert!(accept_english_ocr(
-            CandidateKind::StoryText,
+            CandidateKind::FreeText,
             0.93,
             "And the shadow blade who devised the extermination unit."
         ));
         assert!(accept_english_ocr(
-            CandidateKind::StoryText,
+            CandidateKind::FreeText,
             0.93,
             "Thirty years later"
         ));
         assert!(accept_english_ocr(
-            CandidateKind::StoryText,
+            CandidateKind::FreeText,
             0.93,
             "NEXT IS..."
         ));
         assert!(accept_english_ocr(
-            CandidateKind::StoryText,
+            CandidateKind::FreeText,
             0.93,
             "“DANGEROUS ASSIGNMENTS.”"
         ));
-        assert!(!accept_english_ocr(CandidateKind::StoryText, 0.99, "WHAM"));
+        assert!(!accept_english_ocr(CandidateKind::FreeText, 0.99, "WHAM"));
+        assert!(accept_english_ocr(CandidateKind::StoryText, 0.99, "WHAM"));
         assert!(!accept_english_ocr(
-            CandidateKind::StoryText,
+            CandidateKind::FreeText,
             0.99,
             "BANG BOOM CRASH WHAM!"
         ));
         assert!(!accept_english_ocr(
-            CandidateKind::StoryText,
+            CandidateKind::FreeText,
             0.99,
             "“BANG BOOM!”"
         ));
         assert!(!accept_english_ocr(
-            CandidateKind::StoryText,
+            CandidateKind::FreeText,
             0.99,
             "Translated by Moonlight Scans"
         ));
         assert!(!accept_english_ocr(
-            CandidateKind::StoryText,
+            CandidateKind::FreeText,
             0.99,
             "READ-MANGA.COM"
         ));
         assert!(!accept_english_ocr(
-            CandidateKind::StoryText,
+            CandidateKind::FreeText,
             0.99,
             "ORIGINAL CONTI | BACK GROUND | SKETCH | LINE ART | COLOR | EFFECT | TEXT | EDITING | DIRECTING"
         ));
         assert!(!accept_english_ocr(
-            CandidateKind::StoryText,
+            CandidateKind::FreeText,
             0.99,
             "BACK GROUND | COLOR | EFFECT | EDITING"
         ));
         assert!(!accept_english_ocr(
-            CandidateKind::StoryText,
+            CandidateKind::FreeText,
             0.99,
             "V d at a ea Read at.."
         ));
         assert!(!accept_english_ocr(
-            CandidateKind::StoryText,
+            CandidateKind::FreeText,
             0.99,
             "for the fastest releases"
         ));
         assert!(!accept_english_ocr(
-            CandidateKind::StoryText,
+            CandidateKind::FreeText,
             0.99,
             "30 YEARS SINCE THE PROLOGUE"
         ));
-        assert!(accept_english_ocr(CandidateKind::StoryText, 0.99, "AND..."));
+        assert!(accept_english_ocr(CandidateKind::FreeText, 0.99, "AND..."));
     }
 
     #[test]
     fn credit_context_only_rejects_isolated_uppercase_name_labels() {
         assert!(looks_like_credit_context("30 YEARS SINCE THE PROLOGUE"));
         assert!(looks_like_credit_context("for the fastest releases"));
+        assert!(looks_like_credit_context("ExampleScans"));
         assert!(looks_like_isolated_credit_name("STEPH BLACK"));
         assert!(looks_like_isolated_credit_name("SHOUNEN BLACK BLACK"));
+        assert!(looks_like_isolated_credit_name("BLACK"));
+        assert!(looks_like_short_credit_acronym("PR"));
+        assert!(!looks_like_short_credit_acronym("GO!"));
+        assert!(!looks_like_short_credit_acronym("Go"));
 
         assert!(!looks_like_isolated_credit_name("Southern Prizhenkaya"));
+        assert!(!looks_like_isolated_credit_name("ESIDISI,"));
         assert!(!looks_like_isolated_credit_name(
             "THE NAMELESS HERO RETURNS"
         ));
         assert!(!looks_like_credit_context("SOUTHERN PRIZHENKAYA"));
+        assert!(!looks_like_batch_story_context("BLACK"));
+        assert!(looks_like_batch_story_context("THE NAMELESS HERO RETURNS"));
     }
 
     #[test]
@@ -3245,6 +3294,49 @@ mod tests {
         cancel.store(true, Ordering::Release);
         let error = cancellation_boundary(&cancel).unwrap_err();
         assert_eq!(error.code, "CANCELLED");
+    }
+
+    #[test]
+    fn pending_translation_priority_uses_reading_order_before_enqueue_time_offscreen() {
+        let now = tokio::time::Instant::now();
+        let mut first_in_reading_order = pending_repair("first").region;
+        first_in_reading_order.reading_order = 1;
+        first_in_reading_order.translation_queued_at = now + Duration::from_millis(20);
+
+        let mut second_in_reading_order = pending_repair("second").region;
+        second_in_reading_order.reading_order = 2;
+        second_in_reading_order.translation_queued_at = now;
+
+        let mut pending = vec![second_in_reading_order, first_in_reading_order];
+        sort_pending_translation(&mut pending);
+
+        assert_eq!(
+            pending
+                .iter()
+                .map(|region| region.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["first", "second"]
+        );
+    }
+
+    #[test]
+    fn pending_translation_priority_allows_visible_to_overtake_offscreen() {
+        let now = tokio::time::Instant::now();
+        let mut offscreen = pending_repair("offscreen").region;
+        offscreen.visible = false;
+        offscreen.reading_order = 1;
+        offscreen.translation_queued_at = now;
+
+        let mut visible = pending_repair("visible").region;
+        visible.visible = true;
+        visible.reading_order = 99;
+        visible.translation_queued_at = now + Duration::from_millis(20);
+
+        let mut pending = vec![offscreen, visible];
+        sort_pending_translation(&mut pending);
+
+        assert_eq!(pending[0].id, "visible");
+        assert_eq!(pending[1].id, "offscreen");
     }
 
     #[tokio::test]

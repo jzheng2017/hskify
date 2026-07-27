@@ -20,6 +20,11 @@ export type FitBox = Bounds & {
   pixelHeight: number
 }
 
+export type HorizontalPolygonInterval = {
+  left: number
+  right: number
+}
+
 function charUnits(character: string): number {
   if (/\s/u.test(character)) return 0.3
   if (/[\u3400-\u9fff\uf900-\ufaff]/u.test(character)) return 1
@@ -101,7 +106,10 @@ export function nearbyLineCandidates(
   return candidates
 }
 
-export function horizontalPolygonSpan(points: readonly Point[], y: number): number {
+export function horizontalPolygonIntervals(
+  points: readonly Point[],
+  y: number,
+): HorizontalPolygonInterval[] {
   const intersections: number[] = []
   for (let index = 0; index < points.length; index += 1) {
     const first = points[index]
@@ -114,16 +122,22 @@ export function horizontalPolygonSpan(points: readonly Point[], y: number): numb
     intersections.push(first.x + ratio * (second.x - first.x))
   }
   intersections.sort((left, right) => left - right)
-  let span = 0
+  const intervals: HorizontalPolygonInterval[] = []
   for (let index = 0; index + 1 < intersections.length; index += 2) {
-    // A line cannot jump across a hole or excluded polygon area. Use the
-    // widest contiguous interval instead of summing disjoint spans.
-    span = Math.max(
-      span,
-      (intersections[index + 1] ?? 0) - (intersections[index] ?? 0),
-    )
+    const left = intersections[index]
+    const right = intersections[index + 1]
+    if (left !== undefined && right !== undefined && right > left) {
+      intervals.push({ left, right })
+    }
   }
-  return Math.max(0, span)
+  return intervals
+}
+
+export function horizontalPolygonSpan(points: readonly Point[], y: number): number {
+  return horizontalPolygonIntervals(points, y).reduce(
+    (widest, interval) => Math.max(widest, interval.right - interval.left),
+    0,
+  )
 }
 
 function samePolygon(left: readonly Point[], right: readonly Point[]): boolean {
@@ -192,13 +206,21 @@ function polygonFits(
   const lineHeight = fontSize * region.style.lineHeight
   if (lines.length * lineHeight > box.pixelHeight * FIT_CONTENT_RATIO) return false
   const topInset = (box.pixelHeight - lines.length * lineHeight) / 2
+  const imageWidth = imageWidthFromBox(box)
+  if (imageWidth <= 0) return false
+  const centeredX = box.minX + box.width / 2
   return lines.every((line, index) => {
     const normalizedY =
       box.minY +
       ((topInset + (index + 0.5) * lineHeight) / Math.max(1, box.pixelHeight)) *
         box.height
-    const availablePixels = horizontalPolygonSpan(points, normalizedY) * imageWidthFromBox(box)
-    return estimatedLineUnits(line) * fontSize <= availablePixels * FIT_CONTENT_RATIO
+    const paddedLineWidth =
+      (estimatedLineUnits(line) * fontSize) / imageWidth / FIT_CONTENT_RATIO
+    const lineLeft = centeredX - paddedLineWidth / 2
+    const lineRight = centeredX + paddedLineWidth / 2
+    return horizontalPolygonIntervals(points, normalizedY).some(
+      (interval) => lineLeft >= interval.left && lineRight <= interval.right,
+    )
   })
 }
 

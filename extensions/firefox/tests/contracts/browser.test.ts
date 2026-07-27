@@ -93,7 +93,7 @@ describe('unversioned progressive browser contract', () => {
     )
     expect(parseNativeReadyResponse(sharedFixture('native-ready.valid.json')).type).toBe('ready')
     expect(parseHealthResponse(sharedFixture('health.ready.json')).resourceIdentities).toHaveLength(
-      4,
+      6,
     )
     expect(parseBrowserSetupStatus(sharedFixture('setup.ready.json'))).toMatchObject({
       state: 'ready',
@@ -245,9 +245,11 @@ describe('unversioned progressive browser contract', () => {
       resourceIdentities: pinnedResourceIdentities(),
     }
     expect(parseHealthResponse(health).resourceIdentities.map(({ id }) => id)).toEqual([
+      'comic-text-bubble-detector-config',
+      'comic-text-bubble-detector-preprocessor-config',
+      'comic-text-bubble-detector-weights',
       'pp-ocr-v5-english-recognizer-config',
       'pp-ocr-v5-english-recognizer-model',
-      'pp-ocr-v5-mobile-detector-model',
       'translation-model',
     ])
     expect(() =>
