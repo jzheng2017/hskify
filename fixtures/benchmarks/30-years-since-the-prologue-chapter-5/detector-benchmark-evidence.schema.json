@@ -1,0 +1,673 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hskify.local/schemas/30-years-since-the-prologue-chapter-5-detector-evidence.v2.json",
+  "title": "30 Years Since the Prologue chapter 5 postprocessed detector evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "benchmarkId",
+    "status",
+    "recordedAtUtc",
+    "evidenceSchema",
+    "fixture",
+    "sources",
+    "predictions",
+    "postprocessing",
+    "matcher",
+    "protocolBoundary",
+    "pages",
+    "totals",
+    "gates"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 2
+    },
+    "benchmarkId": {
+      "const": "30-years-since-the-prologue-chapter-5"
+    },
+    "status": {
+      "enum": ["pass", "fail"]
+    },
+    "recordedAtUtc": {
+      "type": "string",
+      "pattern": "Z$"
+    },
+    "evidenceSchema": {
+      "$ref": "#/$defs/fileIdentity"
+    },
+    "fixture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "manifest",
+        "annotationSchema",
+        "annotations",
+        "pageCount",
+        "regionCount",
+        "goldBubbleCount",
+        "narrationRegionCount",
+        "englishTranslationTargetCount",
+        "punctuationOnlyNonTranslationTargetCount"
+      ],
+      "properties": {
+        "manifest": {
+          "$ref": "#/$defs/fileIdentity"
+        },
+        "annotationSchema": {
+          "$ref": "#/$defs/fileIdentity"
+        },
+        "annotations": {
+          "type": "array",
+          "minItems": 36,
+          "maxItems": 36,
+          "items": {
+            "$ref": "#/$defs/pageFileIdentity"
+          }
+        },
+        "pageCount": {
+          "const": 36
+        },
+        "regionCount": {
+          "const": 218
+        },
+        "goldBubbleCount": {
+          "const": 165
+        },
+        "narrationRegionCount": {
+          "const": 53
+        },
+        "englishTranslationTargetCount": {
+          "const": 214
+        },
+        "punctuationOnlyNonTranslationTargetCount": {
+          "const": 4
+        }
+      }
+    },
+    "sources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["directory", "format", "decoder", "files"],
+      "properties": {
+        "directory": {
+          "type": "string",
+          "minLength": 1
+        },
+        "format": {
+          "const": "exact source WebP bytes named by fixture manifest"
+        },
+        "decoder": {
+          "type": "string",
+          "pattern": "^Pillow "
+        },
+        "files": {
+          "type": "array",
+          "minItems": 36,
+          "maxItems": 36,
+          "items": {
+            "$ref": "#/$defs/sourceFile"
+          }
+        }
+      }
+    },
+    "predictions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "directory",
+        "format",
+        "bubbleLabelId",
+        "dialogueTextLabelId",
+        "minimumScore",
+        "files"
+      ],
+      "properties": {
+        "directory": {
+          "type": "string",
+          "minLength": 1
+        },
+        "format": {
+          "const": "koharu-ml ComicTextBubbleDetection JSON"
+        },
+        "bubbleLabelId": {
+          "const": 0
+        },
+        "dialogueTextLabelId": {
+          "const": 1
+        },
+        "minimumScore": {
+          "const": 0.3
+        },
+        "files": {
+          "type": "array",
+          "minItems": 36,
+          "maxItems": 36,
+          "items": {
+            "$ref": "#/$defs/predictionFile"
+          }
+        }
+      }
+    },
+    "postprocessing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "minimumJointConfidence",
+        "textAssociation",
+        "duplicateTextMinimumIou",
+        "containedTextMinimumOverlap",
+        "connectedBubbleSplit",
+        "tileDedupeGeometry",
+        "darkCardMaximumLuma",
+        "darkCardMinimumDarkPixelRatio",
+        "luma"
+      ],
+      "properties": {
+        "minimumJointConfidence": {
+          "const": 0.4
+        },
+        "textAssociation": {
+          "const": "smallest fully-containing labelId=0 bbox"
+        },
+        "duplicateTextMinimumIou": {
+          "const": 0.55
+        },
+        "containedTextMinimumOverlap": {
+          "const": 0.78
+        },
+        "connectedBubbleSplit": {
+          "const": "dominant normalized text-center axis with midpoint cuts"
+        },
+        "tileDedupeGeometry": {
+          "const": "labelId=1 text bbox"
+        },
+        "darkCardMaximumLuma": {
+          "const": 32
+        },
+        "darkCardMinimumDarkPixelRatio": {
+          "const": 0.7
+        },
+        "luma": {
+          "const": "floor((2126*R + 7152*G + 722*B) / 10000)"
+        }
+      }
+    },
+    "matcher": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "goldGeometry",
+        "predictionGeometry",
+        "minimumIou",
+        "assignment"
+      ],
+      "properties": {
+        "goldGeometry": {
+          "const": "axis-aligned bounds of normalized bubblePolygon when present, otherwise normalized textPolygon"
+        },
+        "predictionGeometry": {
+          "const": "postprocessed candidate bubble bounds in source pixels"
+        },
+        "minimumIou": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1
+        },
+        "assignment": {
+          "const": "descending-IoU one-to-one greedy assignment per page"
+        }
+      }
+    },
+    "protocolBoundary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "browserJobUpdatesRead",
+        "regionReadyUsed",
+        "nonAcceptedRegionsPublishedToBrowser",
+        "evidenceSource"
+      ],
+      "properties": {
+        "browserJobUpdatesRead": {
+          "const": false
+        },
+        "regionReadyUsed": {
+          "const": false
+        },
+        "nonAcceptedRegionsPublishedToBrowser": {
+          "const": false
+        },
+        "evidenceSource": {
+          "const": "standalone detector CLI JSON plus exact manifest source WebPs"
+        }
+      }
+    },
+    "pages": {
+      "type": "array",
+      "minItems": 36,
+      "maxItems": 36,
+      "items": {
+        "$ref": "#/$defs/page"
+      }
+    },
+    "totals": {
+      "$ref": "#/$defs/totals"
+    },
+    "gates": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": {
+        "$ref": "#/$defs/gate"
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "ratio": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "bounds": {
+      "type": "array",
+      "prefixItems": [
+        {"type": "number"},
+        {"type": "number"},
+        {"type": "number"},
+        {"type": "number"}
+      ],
+      "items": false,
+      "minItems": 4,
+      "maxItems": 4
+    },
+    "fileIdentity": {
+      "type": "object",
+      "required": ["file", "bytes", "sha256"],
+      "properties": {
+        "file": {
+          "type": "string",
+          "minLength": 1
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "pageFileIdentity": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/fileIdentity"
+        },
+        {
+          "type": "object",
+          "required": ["page"],
+          "properties": {
+            "page": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 36
+            }
+          }
+        }
+      ]
+    },
+    "sourceFile": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/pageFileIdentity"
+        },
+        {
+          "type": "object",
+          "required": ["url", "width", "height"],
+          "properties": {
+            "url": {
+              "type": "string",
+              "format": "uri"
+            },
+            "width": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "height": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      ]
+    },
+    "predictionFile": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/pageFileIdentity"
+        },
+        {
+          "type": "object",
+          "required": [
+            "rawDetectionCount",
+            "bubblePredictionCount",
+            "rawBubbleDetectionCount",
+            "rawDialogueTextDetectionCount",
+            "lowConfidenceRejectedCount",
+            "notFullyContainedRejectedCount",
+            "unassociatedTextRejectedCount",
+            "withinBubbleDuplicateRejectedCount",
+            "tileDuplicateRejectedCount",
+            "darkCardRejectedCount",
+            "confirmedCandidateCount"
+          ],
+          "properties": {
+            "rawDetectionCount": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "bubblePredictionCount": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "rawBubbleDetectionCount": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "rawDialogueTextDetectionCount": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "lowConfidenceRejectedCount": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "notFullyContainedRejectedCount": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "unassociatedTextRejectedCount": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "withinBubbleDuplicateRejectedCount": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "tileDuplicateRejectedCount": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "darkCardRejectedCount": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "confirmedCandidateCount": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        }
+      ]
+    },
+    "match": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "goldRegionId",
+        "goldKind",
+        "translationTarget",
+        "goldGeometrySource",
+        "predictionIndex",
+        "bubbleDetectionIndex",
+        "textDetectionIndex",
+        "predictionScore",
+        "intersectionOverUnion",
+        "goldRegionBounds",
+        "predictionBounds",
+        "textBounds",
+        "darkPixelRatio"
+      ],
+      "properties": {
+        "goldRegionId": {
+          "type": "string",
+          "pattern": "^30ysp-ch5-p[0-9]{3}-r[0-9]{2}$"
+        },
+        "goldKind": {
+          "enum": ["dialogue", "thought"]
+        },
+        "translationTarget": {
+          "type": "boolean"
+        },
+        "goldGeometrySource": {
+          "enum": ["bubblePolygon", "textPolygon"]
+        },
+        "predictionIndex": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "bubbleDetectionIndex": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "textDetectionIndex": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "predictionScore": {
+          "$ref": "#/$defs/ratio"
+        },
+        "intersectionOverUnion": {
+          "$ref": "#/$defs/ratio"
+        },
+        "goldRegionBounds": {
+          "$ref": "#/$defs/bounds"
+        },
+        "predictionBounds": {
+          "$ref": "#/$defs/bounds"
+        },
+        "textBounds": {
+          "$ref": "#/$defs/bounds"
+        },
+        "darkPixelRatio": {
+          "$ref": "#/$defs/ratio"
+        }
+      }
+    },
+    "page": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "page",
+        "sourceFile",
+        "predictionFile",
+        "goldBubbleCount",
+        "bubblePredictionCount",
+        "matchedBubbleCount",
+        "falsePositiveCount",
+        "falseNegativeCount",
+        "precision",
+        "recall",
+        "matches",
+        "falsePositivePredictionIndexes",
+        "missedGoldRegionIds"
+      ],
+      "properties": {
+        "page": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 36
+        },
+        "sourceFile": {
+          "type": "string",
+          "pattern": "^[0-9]{3}\\.webp$"
+        },
+        "predictionFile": {
+          "type": "string",
+          "pattern": "^[0-9]{3}\\.json$"
+        },
+        "goldBubbleCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "bubblePredictionCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "matchedBubbleCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "falsePositiveCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "falseNegativeCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "precision": {
+          "$ref": "#/$defs/ratio"
+        },
+        "recall": {
+          "$ref": "#/$defs/ratio"
+        },
+        "matches": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/match"
+          }
+        },
+        "falsePositivePredictionIndexes": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "missedGoldRegionIds": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^30ysp-ch5-p[0-9]{3}-r[0-9]{2}$"
+          }
+        }
+      }
+    },
+    "totals": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "goldBubbleCount",
+        "bubblePredictionCount",
+        "matchedBubbleCount",
+        "falsePositiveCount",
+        "falseNegativeCount",
+        "precision",
+        "recall",
+        "dialogueGoldCount",
+        "matchedDialogueCount",
+        "dialogueRecall",
+        "thoughtGoldCount",
+        "matchedThoughtCount",
+        "thoughtRecall",
+        "punctuationOnlyGoldCount",
+        "matchedPunctuationOnlyCount",
+        "punctuationOnlyRecall"
+      ],
+      "properties": {
+        "goldBubbleCount": {
+          "const": 165
+        },
+        "bubblePredictionCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "matchedBubbleCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "falsePositiveCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "falseNegativeCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "precision": {
+          "$ref": "#/$defs/ratio"
+        },
+        "recall": {
+          "$ref": "#/$defs/ratio"
+        },
+        "dialogueGoldCount": {
+          "const": 99
+        },
+        "matchedDialogueCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 99
+        },
+        "dialogueRecall": {
+          "$ref": "#/$defs/ratio"
+        },
+        "thoughtGoldCount": {
+          "const": 66
+        },
+        "matchedThoughtCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 66
+        },
+        "thoughtRecall": {
+          "$ref": "#/$defs/ratio"
+        },
+        "punctuationOnlyGoldCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "matchedPunctuationOnlyCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "punctuationOnlyRecall": {
+          "$ref": "#/$defs/ratio"
+        }
+      }
+    },
+    "gate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "status", "actual", "operator", "required"],
+      "properties": {
+          "id": {
+            "enum": [
+            "all-manifest-gold-bubbles-loaded",
+            "speech-thought-bubble-precision",
+            "speech-thought-bubble-recall"
+          ]
+        },
+        "status": {
+          "enum": ["pass", "fail"]
+        },
+        "actual": {
+          "type": "number",
+          "minimum": 0
+        },
+        "operator": {
+          "enum": ["equal", "atLeast"]
+        },
+        "required": {
+          "type": "number",
+          "minimum": 0
+        }
+      }
+    }
+  }
+}

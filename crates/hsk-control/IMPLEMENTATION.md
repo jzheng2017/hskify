@@ -43,7 +43,7 @@ entry; silent opt-in to compound decomposition is rejected.
 
 `HskControl::cache_revision()` is a SHA-256 identity over the normalized HSK
 and dictionary contents plus the normalization, Jieba segmentation, compound
-guard, lookup, correction-preservation, and dependency revisions. It changes
+guard, lookup, and dependency revisions. It changes
 deterministically when any of those inputs changes. Output-affecting lexical
 dependencies are exactly pinned in the crate manifest. The cache input records
 `jieba-rs` 0.10.1 plus SHA-256
@@ -134,32 +134,10 @@ are marked only when the caller explicitly protects them; dictionary wording
 never silently creates an HSK exception.
 
 `lookup_with_region_context()` is an additive pure API that carries an optional
-`LookupRegionContext` (`displayedChinese`, `faithfulChinese`, and
+`LookupRegionContext` (`displayedChinese`, `baseChinese`, and
 `sourceEnglish`) alongside the lookup. It gives the adapter everything needed
 to populate the already-frozen browser response without importing or changing
 the shared protocol definitions.
-
-## Bounded correction support
-
-`HskControl::correction_loop()` validates the initial rewrite and permits at
-most two subsequent correction requests. Feedback includes exact HSK
-violations plus deterministic preservation failures for:
-
-- numeric forms;
-- every occurrence of each protected name present in the faithful reference;
-- the ordered sequence and multiplicity of Chinese negation markers.
-
-Negation is extracted from Jieba lexical tokens and contextual marker prefixes,
-not reduced to a sentence-level boolean. Diagnostics return the expected and
-actual ordered marker sequences, so removed, added, replaced, and reordered
-units are actionable. `没` and `没有` share one marker identity, as do `非`,
-`并非`, and `绝非`; the remaining marker identities stay distinct. Real `不`,
-`没`/`没有`, `别`, `未`, `非`, and `莫` units remain protected, while
-lexicalized words such as `非常`, `不错`, `未来`, and `别人` do not create
-spurious additions/removals. The preservation revision is cache-keyed.
-
-After the third invalid evaluation it returns `Failed`; later evaluations return
-`Terminated`. The crate never initiates or owns a model request.
 
 ## Reproducible import
 

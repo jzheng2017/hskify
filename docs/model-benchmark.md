@@ -1,123 +1,103 @@
-# Local translation model benchmark
+# Direct HSK model benchmark record
 
-Status: **bootstrap execution complete; awaiting representative corpus and
-fluent-reader review**
+## Frozen comparison protocol
 
-This document is the benchmark protocol and audit record. It contains measured
-machine results but no invented human quality scores, and it does not select a
-production model.
+Every candidate must use the same generic direct English-to-HSK-Chinese
+protocol:
 
-## Licence filter
+```text
+revision: direct-hsk-en-zh-generic-v15-2026-07-26
+prompt SHA-256: 8faf04bf2c4e5a1d2b43be426f93c157cd62ce1dc18676aee79d22b678bb396f
+validator SHA-256: 81c581cc7af0c97f2672ad2624135d983eb01a22d64ab8322dc64f7b957a461d
+decoding: greedy, unpenalized
+repair: at most one targeted repair per rejected item
+```
 
-The exact GGUF artifacts in `data/model-packs/manifest.v1.json` were inspected
-before download:
+The prompt contains only generic meaning-preservation instructions and
+application-supplied glossary entries. It must not contain chapter-specific
+terms, translations, source phrases, character names, coordinates, colors,
+URLs, hashes, or trigger rules.
 
-| Candidate | Koharu model ID | Size | Licence disposition |
-| --- | --- | ---: | --- |
-| Qwen3.5 4B Q4_K_M | `qwen3.5-4b` | 2,740,937,888 bytes | Apache-2.0; eligible for benchmark |
-| Qwen3.5 2B Q4_K_M | `qwen3.5-2b` | 1,280,835,840 bytes | Apache-2.0; eligible for benchmark |
-| Hunyuan-MT 7B Q4_K_M | `hunyuan-mt-7b` | 4,702,111,200 bytes | excluded: inherited Tencent terms exclude use in the EU, UK, and South Korea |
-| LFM2.5 1.2B Q4_K_M | `lfm2.5-1.2b-instruct` | 730,895,168 bytes | conditional commercial licence; excluded from an unrestricted default pending legal/product decision |
+The production protocol has since advanced to
+`direct-hsk-en-zh-generic-v17-2026-07-27` with prompt hash
+`sha256:ec287e2d5f7ba898f70f80852b98b67e9d2bc25f9e3b0a1fddf1041baab6ef2a`
+and validator hash
+`sha256:ca74f50314d77f0048e0a49a5ef050e3a7a7f4e942c6eb7c7e22da75ada6d7d1`.
+That revision adds generic non-story classification plus deterministic
+exclusion support and OCR-digit validation; it contains no Chapter 5 phrase,
+name, coordinate, color, URL, or hash trigger. The controlled three-model
+record below remains the translation-quality selection record for the 214
+story targets, while product-path exclusion behavior is verified separately.
 
-The Hunyuan exclusion is material for this development environment in the
-Netherlands. A model-card metadata label is not treated as overriding the
-repository's actual `License.txt`.
+## Canonical comparison workload
 
-## Fixed evaluation protocol
+The sole release comparison workload is the reviewed English target set from
+the 36-image *30 Years Since the Prologue* chapter 5 fixture:
 
-Every eligible candidate must receive the same ordered full-image region
-payload and prompt revision. Each run records:
+```text
+fixtures/benchmarks/30-years-since-the-prologue-chapter-5/
+```
 
-- repository revision, exact filename, SHA-256, and quantization;
-- runtime/Koharu revision and compute backend;
-- prompt revision and decoding configuration;
-- structured-output success and retry count;
-- name, pronoun, number, and negation preservation;
-- first-pass and corrected HSK compliance;
-- wall-clock latency, peak process RAM, and peak VRAM;
-- all raw outputs needed to create the blinded packet.
+That workload was chosen for its varied dialogue, thought, narration,
+lettering, foreground colors, backgrounds, and visual styles. The diversity is
+a regression challenge, not permission to tune a model or prompt to one
+chapter.
 
-The faithful pass and HSK rewrite are scored separately. No candidate sees a
-different source order or additional context.
+The committed manifest contains reviewed geometry for all 36 pages and 218
+story regions. All 214 translation targets have approved Chinese, pinyin, and
+token-level HSK annotations. The final automated comparison used the corrected
+reading order and all 214 targets.
 
-## Bootstrap execution
+## Candidates and qualification
 
-Both eligible Qwen artifacts were downloaded from the exact revision URLs in
-the manifest. Their local byte counts and SHA-256 digests matched before either
-was loaded:
+When gold is complete, compare these candidates in one controlled GPU sequence:
 
-| Candidate | Verified bytes | Verified SHA-256 |
-| --- | ---: | --- |
-| Qwen3.5 4B Q4_K_M | 2,740,937,888 | `00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4` |
-| Qwen3.5 2B Q4_K_M | 1,280,835,840 | `aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223` |
+1. Qwen3.5 4B Q4_K_M
+2. Qwen3.5 2B Q4_K_M
+3. Hy-MT2 1.8B Q4_K_M
 
-The first frozen request is
-`fixtures/golden-evaluation/prompts/benchmark-en-zh-v1.json`. It sends all
-three dialogue regions from the synthetic page in one ordered request.
-Generation used the pinned Koharu revision, llama.cpp tag `b8935`, a 2,048
-token context, a fixed seed of `299792458`, disabled thinking, and greedy
-sampling through Koharu's local GGUF executable.
+Each candidate must receive exactly the same ordered target rows, batching,
+preceding context, glossary, prompt, validator, decoding settings, warm-up,
+and resource monitoring. Raw evidence must preserve model hashes, commands,
+environment, per-row outputs, timing samples, and failure classifications.
 
-Two defects in that executable were found and fixed before recording results:
-the runtime bindings were prepared but not initialized, and `--disable-gpu`
-left llama.cpp's auto-offload default enabled. The latter now explicitly sets
-zero GPU layers, matching the production `Llm` path.
+A smaller model qualifies only if it:
 
-Machine: Windows, Ryzen-class `zen4` runtime build, 32 GiB RAM, RTX 4080 SUPER
-16 GiB. Values below are warm single-process runs of the same short prompt.
-Peak process memory came from Windows process counters sampled during the run.
-WDDM does not expose per-process VRAM, so GPU memory is only an approximate
-global `nvidia-smi` delta over the immediately sampled baseline.
+- adds no critical meaning errors under human review;
+- preserves protected names and numbers at least 99%;
+- matches the 4B model's naturalness under blinded fluent-reader review; and
+- satisfies the structural and deterministic validation gates.
 
-| Candidate/backend | Wall | Load | Decode | Peak working set | Peak private bytes | Approx. GPU delta |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Qwen3.5 2B / CUDA | 1.91 s | 0.86 s | 67 tokens at 207.38 t/s | 1,938,345,984 | 3,924,303,872 | 2,043 MiB |
-| Qwen3.5 4B / CUDA | 3.26 s | 2.03 s | 68 tokens at 131.54 t/s | 3,403,534,336 | 5,472,055,296 | 3,502 MiB |
-| Qwen3.5 2B / CPU-only | 4.46 s | 1.40 s | 68 tokens at 28.65 t/s | 1,565,274,112 | 1,736,404,992 | not used |
-| Qwen3.5 4B / CPU-only | 7.80 s | 1.75 s | 68 tokens at 13.00 t/s | 3,077,185,536 | 1,914,425,344 | not used |
+Automated checks for output structure, names, numbers, negation, and question
+intent are useful diagnostics. They are not substitutes for critical-meaning
+and naturalness review.
 
-Both candidates returned valid JSON with every requested region ID exactly
-once and no unknown IDs. The outputs are stored only under randomized labels
-in `fixtures/golden-evaluation/blinded-review`; the identity key remains
-ignored until a fluent reader completes the score sheet.
+## Final automated comparison
 
-These numbers are an engineering smoke result, not pack thresholds. The
-bootstrap set has one synthetic page, no names, no numbers, no negation, and no
-HSK rewrite pass. The raw harness also tests prompt-only JSON compliance; Gate
-4 still requires llama.cpp-compatible grammar/schema-constrained decoding.
+The controlled run completed on the RTX 4080 SUPER with no sustained paging:
 
-## Human rubric
+| Candidate | Warm total | Batch p50 | Batch p95 | Structured | Critical proxy items | Character unigram F1 | Character bigram F1 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Qwen3.5 4B Q4_K_M | 18.54 s | 506 ms | 694 ms | 214/214 | 1 | 0.612 | 0.427 |
+| Qwen3.5 2B Q4_K_M | 10.13 s | 281 ms | 373 ms | 214/214 | 4 | 0.519 | 0.327 |
+| Hy-MT2 1.8B Q4_K_M | 14.26 s | 286 ms | 849 ms | 203/214 | 13 | 0.447 | 0.336 |
 
-At least one fluent Chinese reader scores anonymized outputs from 1 to 5:
+The run peaked at 4.81 GiB private bytes and 4,313 MiB device-wide VRAM use.
+The complete ignored evidence is
+`.cache/translation-model-benchmark/runs/chapter5-final-20260726-r2`;
+`benchmark.json` is 887,954 bytes with SHA-256
+`cf8b97cf489b1c2231bbc6222d9c571df9749b76dae535cece87ae6cfed7f90d`.
 
-1. meaning preservation;
-2. natural Chinese manga dialogue;
-3. character voice, tone, and humour;
-4. names and pronouns;
-5. number and negation fidelity.
+The fixture contains no approved source-English-to-Chinese proper-name
+glossary and no ASCII-number preservation cases, so the nominal empty-set
+preservation rates are not treated as a 99% qualification result. Human
+naturalness review is also not invented.
 
-A score of 1 means unusable or meaning-changing; 3 means understandable with
-noticeable editing; 5 means fluent and faithful. Reviewers also mark any
-critical meaning reversal. The candidate key remains separate until all score
-sheets are complete.
+## Selection
 
-Automated checks may reject a candidate, but they do not choose the winner.
-The aggregation report includes count, mean, median, per-sample minimum,
-critical failures, structured success rate, HSK success rate, latency, and
-memory. Ties are resolved by human meaning/naturalness first, then resource
-cost.
-
-## Selection record
-
-| Output | State |
-| --- | --- |
-| Standard model pack | `standard-v1`: Qwen3.5 4B Q4_K_M |
-| Low-memory model pack | none in the normal UI |
-| Hardware thresholds | 8 GiB minimum RAM; 16 GiB recommended RAM |
-| Translation prompt revision | `benchmark-en-zh-v1` (evaluation only) |
-| Bootstrap machine execution | complete for eligible 2B and 4B artifacts |
-| Blinded bootstrap outputs | generated under randomized labels |
-| Human score sheets | deferred; the user prioritized a functional end-to-end build |
-
-The installable manifest deliberately exposes one normal choice. The 2B
-artifact remains available for diagnostics but is not another setup decision.
+Neither smaller model qualifies: both add critical proxy failures, both score
+materially below the 4B reference, Hy-MT2 also fails structure on 11 items, and
+the required human naturalness/name-number evidence is absent. The plan's
+fallback therefore applies directly: Qwen3.5 4B Q4_K_M is the production
+model. The rejected model files are not packaged and are removed from the
+local evaluation cache after this evidence is retained.

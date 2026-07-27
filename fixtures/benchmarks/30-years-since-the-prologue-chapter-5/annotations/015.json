@@ -1,0 +1,568 @@
+{
+  "schemaVersion": 1,
+  "page": {
+    "order": 15,
+    "file": "015.webp",
+    "width": 900,
+    "height": 3513,
+    "sourceSha256": "9c990aebc42037b70aa654266e7684446ffb44d7e37d647e61992baa768bba8f"
+  },
+  "policy": {
+    "included": "English story text: dialogue, thoughts, narration, captions, and unbubbled spoken lines, including punctuation-only reactions and silent ellipses",
+    "excluded": "sound effects, credits, scanlation promotion, translator notes, series branding, decorative labels, ambiguous OCR, and non-English text",
+    "detectorUse": "proposal only; every region and omission was manually gated against the source image"
+  },
+  "regions": [
+    {
+      "id": "30ysp-ch5-p015-r00",
+      "kind": "thought",
+      "containerStyle": "thought",
+      "readingOrder": 0,
+      "sourceEnglish": "ENRIQUE...",
+      "normalizedEnglish": "ENRIQUE...",
+      "textPolygon": [
+        [
+          0.31770834,
+          0.18003443
+        ],
+        [
+          0.6767361,
+          0.18003443
+        ],
+        [
+          0.6767361,
+          0.20389669
+        ],
+        [
+          0.31770834,
+          0.20389669
+        ]
+      ],
+      "eraseMask": {
+        "encoding": "normalized-polygon-v1",
+        "polygon": [
+          [
+            0.32555556,
+            0.18246514
+          ],
+          [
+            0.66888889,
+            0.18246514
+          ],
+          [
+            0.66888889,
+            0.20267579
+          ],
+          [
+            0.32555556,
+            0.20267579
+          ]
+        ],
+        "operation": "erase every English glyph, outline, punctuation mark, and antialiased edge inside the polygon; preserve every pixel outside the erase mask"
+      },
+      "geometryAudit": "detector-adjusted",
+      "reviewProvenance": {
+        "type": "acceptedProposal",
+        "uncertainty": "low",
+        "proposalIndex": 3,
+        "reviewRegionId": "9c990aeb-region-825bc3f7f307ab5c"
+      },
+      "bubblePolygon": [
+        [
+          0.24184027,
+          0.12996371
+        ],
+        [
+          0.75815976,
+          0.12996371
+        ],
+        [
+          0.75815976,
+          0.25254413
+        ],
+        [
+          0.24184027,
+          0.25254413
+        ]
+      ],
+      "productionMatch": {
+        "stableRegionId": "9c990aeb-region-825bc3f7f307ab5c",
+        "method": "stable-region-id-and-text-geometry",
+        "textGeometryIou": 1.0
+      },
+      "simplifiedChinese": "恩里克。。。。。。",
+      "pinyin": "ēn Lǐ / lǐ Kè / kè / kēi",
+      "hskValidation": {
+        "requestedLevel": 5,
+        "strictlyValid": false,
+        "aboveLevelTokens": [
+          "恩里克",
+          "恩"
+        ],
+        "repairState": "rejected"
+      },
+      "hskTokens": [
+        {
+          "text": "恩",
+          "startChar": 0,
+          "endChar": 1,
+          "pinyin": "ēn",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "里",
+          "startChar": 1,
+          "endChar": 2,
+          "pinyin": "Lǐ / lǐ",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "克",
+          "startChar": 2,
+          "endChar": 3,
+          "pinyin": "Kè / kè / kēi",
+          "classification": "hsk",
+          "hskLevel": 5,
+          "aboveRequestedLevel": false
+        }
+      ]
+    },
+    {
+      "id": "30ysp-ch5-p015-r01",
+      "kind": "thought",
+      "containerStyle": "thought",
+      "readingOrder": 1,
+      "sourceEnglish": "WHAT AM I PLOTTING..?",
+      "normalizedEnglish": "WHAT AM I PLOTTING..?",
+      "textPolygon": [
+        [
+          0.13211806,
+          0.42639393
+        ],
+        [
+          0.5581597,
+          0.42639393
+        ],
+        [
+          0.5581597,
+          0.46379963
+        ],
+        [
+          0.13211806,
+          0.46379963
+        ]
+      ],
+      "eraseMask": {
+        "encoding": "normalized-polygon-v1",
+        "polygon": [
+          [
+            0.13111112,
+            0.42727014
+          ],
+          [
+            0.56555558,
+            0.42727014
+          ],
+          [
+            0.56555558,
+            0.46399089
+          ],
+          [
+            0.13111112,
+            0.46399089
+          ]
+        ],
+        "operation": "erase every English glyph, outline, punctuation mark, and antialiased edge inside the polygon; preserve every pixel outside the erase mask"
+      },
+      "geometryAudit": "detector-adjusted",
+      "reviewProvenance": {
+        "type": "acceptedProposal",
+        "uncertainty": "low",
+        "proposalIndex": 1,
+        "reviewRegionId": "9c990aeb-region-3f23d2dbbb6befc0"
+      },
+      "bubblePolygon": [
+        [
+          0.06267361,
+          0.37953672
+        ],
+        [
+          0.6185764,
+          0.37953672
+        ],
+        [
+          0.6185764,
+          0.5046079
+        ],
+        [
+          0.06267361,
+          0.5046079
+        ]
+      ],
+      "productionMatch": {
+        "stableRegionId": "9c990aeb-region-3f23d2dbbb6befc0",
+        "method": "stable-region-id-and-text-geometry",
+        "textGeometryIou": 1.0
+      },
+      "simplifiedChinese": "我在想什幺？",
+      "pinyin": "wǒ zài xiǎng shén me",
+      "hskValidation": {
+        "requestedLevel": 5,
+        "strictlyValid": true,
+        "aboveLevelTokens": [],
+        "repairState": "not-needed"
+      },
+      "hskTokens": [
+        {
+          "text": "我",
+          "startChar": 0,
+          "endChar": 1,
+          "pinyin": "wǒ",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "在",
+          "startChar": 1,
+          "endChar": 2,
+          "pinyin": "zài",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "想",
+          "startChar": 2,
+          "endChar": 3,
+          "pinyin": "xiǎng",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "什幺",
+          "startChar": 3,
+          "endChar": 5,
+          "pinyin": "shén me",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        }
+      ]
+    },
+    {
+      "id": "30ysp-ch5-p015-r02",
+      "kind": "thought",
+      "containerStyle": "thought",
+      "readingOrder": 2,
+      "sourceEnglish": "HOW MUCH AM I SUPPOSED TO TELL HER?",
+      "normalizedEnglish": "HOW MUCH AM I SUPPOSED TO TELL HER?",
+      "textPolygon": [
+        [
+          0.4486111,
+          0.49923497
+        ],
+        [
+          0.8972222,
+          0.49923497
+        ],
+        [
+          0.8972222,
+          0.54744875
+        ],
+        [
+          0.4486111,
+          0.54744875
+        ]
+      ],
+      "eraseMask": {
+        "encoding": "normalized-polygon-v1",
+        "polygon": [
+          [
+            0.4422222,
+            0.49729577
+          ],
+          [
+            0.90666666,
+            0.49729577
+          ],
+          [
+            0.90666666,
+            0.54824937
+          ],
+          [
+            0.4422222,
+            0.54824937
+          ]
+        ],
+        "operation": "erase every English glyph, outline, punctuation mark, and antialiased edge inside the polygon; preserve every pixel outside the erase mask"
+      },
+      "geometryAudit": "detector-adjusted",
+      "reviewProvenance": {
+        "type": "acceptedProposal",
+        "uncertainty": "low",
+        "proposalIndex": 2,
+        "reviewRegionId": "9c990aeb-region-e8b0ae07d1289838"
+      },
+      "bubblePolygon": [
+        [
+          0.38802084,
+          0.4548018
+        ],
+        [
+          0.95920146,
+          0.4548018
+        ],
+        [
+          0.95920146,
+          0.5909924
+        ],
+        [
+          0.38802084,
+          0.5909924
+        ]
+      ],
+      "productionMatch": {
+        "stableRegionId": "9c990aeb-region-e8b0ae07d1289838",
+        "method": "stable-region-id-and-text-geometry",
+        "textGeometryIou": 1.0
+      },
+      "simplifiedChinese": "我该告诉她多少？",
+      "pinyin": "wǒ gāi gào su / gào sù tā duō shao / duō shǎo",
+      "hskValidation": {
+        "requestedLevel": 5,
+        "strictlyValid": false,
+        "aboveLevelTokens": [
+          "我该",
+          "该"
+        ],
+        "repairState": "pending"
+      },
+      "hskTokens": [
+        {
+          "text": "我",
+          "startChar": 0,
+          "endChar": 1,
+          "pinyin": "wǒ",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "该",
+          "startChar": 1,
+          "endChar": 2,
+          "pinyin": "gāi",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "告诉",
+          "startChar": 2,
+          "endChar": 4,
+          "pinyin": "gào su / gào sù",
+          "classification": "hsk",
+          "hskLevel": 2,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "她",
+          "startChar": 4,
+          "endChar": 5,
+          "pinyin": "tā",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "多少",
+          "startChar": 5,
+          "endChar": 7,
+          "pinyin": "duō shao / duō shǎo",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        }
+      ]
+    },
+    {
+      "id": "30ysp-ch5-p015-r03",
+      "kind": "narration",
+      "containerStyle": "narration",
+      "readingOrder": 3,
+      "sourceEnglish": "Four years after the Demon King's death, the Kingdom of Krasilof seemed peaceful on the surface,",
+      "normalizedEnglish": "Four years after the Demon King's death, the Kingdom of Krasilof seemed peaceful on the surface,",
+      "textPolygon": [
+        [
+          0.14444444,
+          0.81041845
+        ],
+        [
+          0.85222222,
+          0.81041845
+        ],
+        [
+          0.85222222,
+          0.91801879
+        ],
+        [
+          0.14444444,
+          0.91801879
+        ]
+      ],
+      "eraseMask": {
+        "encoding": "normalized-polygon-v1",
+        "polygon": [
+          [
+            0.14111111,
+            0.80956448
+          ],
+          [
+            0.85555555,
+            0.80956448
+          ],
+          [
+            0.85555555,
+            0.91887276
+          ],
+          [
+            0.14111111,
+            0.91887276
+          ]
+        ],
+        "operation": "erase every English glyph, outline, punctuation mark, and antialiased edge inside the polygon; preserve every pixel outside the erase mask"
+      },
+      "geometryAudit": "manual",
+      "reviewProvenance": {
+        "type": "missedStoryTextRegion",
+        "uncertainty": "low",
+        "missedIndex": 1
+      },
+      "simplifiedChinese": "魔王死后的第四年，克拉西洛夫王国表面上看似和平，",
+      "pinyin": "Mówáng sǐ hòu de dì sì nián, Kèlāxīluòfū Wángguó biǎomiàn shàng kàn sì hépíng,",
+      "hskTokens": [
+        {
+          "text": "魔王",
+          "startChar": 0,
+          "endChar": 2,
+          "pinyin": "mó wáng",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "死后",
+          "startChar": 2,
+          "endChar": 4,
+          "pinyin": "sǐ hòu",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "的",
+          "startChar": 4,
+          "endChar": 5,
+          "pinyin": "de / dì / dí / dī",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "第",
+          "startChar": 5,
+          "endChar": 6,
+          "pinyin": "dì",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "四",
+          "startChar": 6,
+          "endChar": 7,
+          "pinyin": "sì",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "年",
+          "startChar": 7,
+          "endChar": 8,
+          "pinyin": "Nián / nián",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "克拉",
+          "startChar": 9,
+          "endChar": 11,
+          "pinyin": "kè lā",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "西",
+          "startChar": 11,
+          "endChar": 12,
+          "pinyin": "Xī / xī",
+          "classification": "hsk",
+          "hskLevel": 3,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "洛",
+          "startChar": 12,
+          "endChar": 13,
+          "pinyin": "Luò / luò",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "夫",
+          "startChar": 13,
+          "endChar": 14,
+          "pinyin": "fú / fū",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "王国",
+          "startChar": 14,
+          "endChar": 16,
+          "pinyin": "wáng guó",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "表面上",
+          "startChar": 16,
+          "endChar": 19,
+          "pinyin": "biǎo miàn shang",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "看似",
+          "startChar": 19,
+          "endChar": 21,
+          "pinyin": "kàn sì",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "和平",
+          "startChar": 21,
+          "endChar": 23,
+          "pinyin": "hé píng",
+          "classification": "hsk",
+          "hskLevel": 5,
+          "aboveRequestedLevel": false
+        }
+      ]
+    }
+  ]
+}

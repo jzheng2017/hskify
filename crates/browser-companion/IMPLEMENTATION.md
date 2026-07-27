@@ -1,312 +1,331 @@
-# Browser companion: secure Koharu-backed production pipeline
+# Browser companion implementation
 
-Status: production browser companion with real local speech-bubble/text
-detection, English OCR, dialogue-only cleanup, full-page faithful translation,
-HSK rewrite/validation, packaged fonts, and dictionary lookup.
+Status: direct progressive performance path. This note describes the current
+Rust implementation, not the retired project-backed page pipeline.
 
-## Delivered shape
+## Executables and lifetime
 
-The crate builds two executables:
+The crate builds:
 
-- `hsk-manga-native-host`: validates Firefox's manifest-path and permanent
-  add-on-ID arguments, reads one bounded little-endian native frame, discovers
-  or launches the daemon, asks it for a fresh browser session, writes one
-  bounded response frame, and exits.
-- `hsk-manga-browser-daemon`: holds a per-user exclusive lock, binds literally
-  to `127.0.0.1:0`, publishes a control-secret-protected discovery record,
-  serves only the browser router, and exits after two idle minutes with no
-  active jobs or admitted authenticated requests. Its Tokio runtime uses two
-  workers and four blocking threads. On Windows it runs below normal priority
-  and defaults to half the available CPUs with a six-core cap;
-  `KOHARU_INFERENCE_THREADS` provides an explicit override.
+- `hsk-manga-native-host`, a one-shot Firefox native-messaging process that
+  validates the manifest path, permanent add-on ID, manifest executable, and
+  one bounded little-endian JSON frame; and
+- `hsk-manga-browser-daemon`, a detached per-user process that owns the
+  loopback HTTP service and resident CUDA models.
 
-Windows detached creation requests `CREATE_BREAKAWAY_FROM_JOB`,
-`CREATE_NEW_PROCESS_GROUP`, and `CREATE_NO_WINDOW`. Unix creation calls
-`setsid()` in the child before exec. Standard streams are detached from the
-native host in both cases.
-
-The per-user state root contains:
+The daemon takes an exclusive per-user lock, binds literally to
+`127.0.0.1:0`, writes a control-secret-protected discovery record, and uses a
+30-minute idle window. Its Tokio runtime has four workers and at most eight
+blocking threads. Windows detached creation requests
+`CREATE_BREAKAWAY_FROM_JOB`, `CREATE_NEW_PROCESS_GROUP`, and
+`CREATE_NO_WINDOW`; Unix uses `setsid()`.
 
 ```text
-daemon-v1.lock
-daemon-state-v1.json
-browser-cache-v1/
-  koharu-data/
-  cleaning-projects-v1/<source-sha256>.khrproj/
+browser-companion/
+  daemon.lock
+  daemon-state.json
+  browser-cache/
+    browser-runtime/
+    results/
 ```
 
-On Unix, the directories are mode 0700 and the state/lock files are mode 0600.
-On Windows they inherit the current user's profile ACL. The state record has a
-version, instance UUID, PID, random loopback port, start timestamp, and an
-independent 256-bit control secret. Stale records are replaced only while
-holding the daemon lock, and shutdown removes a record only when its instance
-UUID still matches.
+The cache contains runtime/model state. There are no hidden translation
+projects, page-history records, cleaned-page blobs, or versioned pipeline
+markers.
 
-## Security boundary
+## Exact build contract
 
-- The native host accepts only the manifest whose name is
-  `local.hskify.hsk_manga`, whose executable resolves to the running
-  binary, and whose sole allowed add-on is
-  `hsk-manga-translator@local.hskify`.
-- Every handshake issues a newly generated, unpadded base64url 256-bit token
-  with an explicit expiration. Browser tokens are bound to the exact canonical
-  `moz-extension://` origin from that handshake.
-- The internal session endpoint uses the separate discovery control secret.
-  It is not CORS-enabled and is never returned to Firefox.
-- Browser middleware verifies the exact `127.0.0.1:<bound-port>` Host, an
-  active extension origin, protocol header `1`, and bearer token before a
-  handler or body extractor runs. Secret comparison uses constant-time byte
-  equality.
-- CORS permits only an active extension origin, methods GET/POST/DELETE, and
-  headers Authorization, Content-Type, X-HSK-Manga-Extension-Origin, and
-  X-HSK-Manga-Protocol. The explicit origin header covers privileged extension
-  fetches that omit the standard `Origin` header. No wildcard origins,
-  credentials, or permissive fallback are present.
-- `/api/v1`, `/mcp`, UI assets, and all non-browser namespaces return 404 and
-  are not mounted.
-- There is no telemetry, remote fetch, cloud credential, URL-fetch endpoint,
-  or manga egress path.
-
-## Koharu cleaning and translation adapter
-
-`POST /browser/v1/jobs` now retains the validated source under the existing
-daemon bounds and runs the production `koharu_app::pipeline::run` path. The
-cleaning spec runs Koharu's sliced joint comic text/bubble detector first,
-rejects text without meaningful speech-bubble overlap, OCRs only that reduced
-geometry, and then rejects OCR that is not English. A distinct-ID bubble mask
-and accepted dialogue boxes form the erase mask. Koharu's
-`dialogue-bubble-fill` engine fills only those pixels with the median
-background colour of their own bubble; pixels outside the accepted erase mask,
-including sound effects, are never changed. The cleaned page then runs one
-full-page faithful English-to-Simplified-Chinese request through the local
-Qwen model, followed by an HSK-targeted rewrite through that same loaded model.
-
-Each source hash owns a persistent Koharu project. Successful runs compact the
-project and write a versioned pipeline marker; a later identical upload can
-package the cached detector/OCR/mask/inpaint artifacts without initializing
-the ML runtime. The browser result contains the real Koharu inpainted PNG/WebP,
-OCR text and confidence, normalized text geometry, and bubble/safe polygons
-derived from Koharu's distinct-ID bubble mask. Region IDs hash the source and
-normalized text geometry, so cache hits preserve IDs. OCR confidence below
-0.60 emits a region-scoped `LOW_OCR_CONFIDENCE` warning.
-
-Every HSK candidate is checked by `hsk-control`. Only invalid regions are sent
-back with exact vocabulary and preservation feedback, and the loop stops after
-the initial rewrite plus at most two corrections. Numbers, explicit protected
-names, and negation markers are preservation requirements. Results carry the
-faithful Chinese, normalized displayed Chinese, pinyin, strict-vocabulary
-status, explicit proper-name exceptions, and a visible
-`HSK_REWRITE_FAILED` warning when the bounded loop cannot produce a strict
-candidate.
-
-`POST /browser/v1/jobs/{jobId}/retranslate` retains the clean blob and
-detection/OCR/inpaint cache entries. A changed HSK level reruns only the HSK
-rewrite and validator; an identical level and dialogue context is a translation
-cache hit. `POST /browser/v1/lookup` uses the same complete HSK and dictionary
-resources for longest-match pinyin, definitions, HSK overlay, and optional
-region context.
-
-Jobs remain daemon-owned while Firefox backgrounds suspend, progress
-monotonically, can be polled with a refreshed session, and share the same
-cancellation atomic used by Koharu so a worker cannot revive a cancelled
-state.
-
-Translation resources are loaded lazily from
-`%LOCALAPPDATA%\Hskify\HSKMangaTranslator\resources`:
+Rust and TypeScript compile the same fingerprint:
 
 ```text
-hsk-2.0.normalized.json
-cc-cedict.normalized.json
-models/Qwen3.5-4B-Q4_K_M.gguf
+hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-07-26-r2
 ```
 
-`HSK_MANGA_RESOURCES_DIR`, `HSK_MANGA_HSK_PATH`,
-`HSK_MANGA_DICTIONARY_PATH`, and `HSK_MANGA_QWEN_MODEL_PATH` provide explicit
-local path overrides. Handshake, health, and setup status report missing
-resources until all three files are present.
+The native handshake request/response, health response, job metadata, and job
+creation response validate or echo that exact value. Mismatch is rejected.
+There is no protocol-number header, compatibility range, downgrade, migration
+adapter, or legacy response parser.
 
-## Limits
-
-Default limits are:
-
-- 20 MiB image field;
-- 64 KiB metadata field;
-- 21 MiB complete multipart body;
-- 25,000,000 decoded pixels;
-- 16,384 pixels on either dimension;
-- 128 MiB decoder allocation budget;
-- 64 MiB clean blob;
-- 128 retained jobs and 256 MiB retained source/clean blobs;
-- four concurrent authenticated requests, including response-body transfer;
-- one active cleaning/retranslation pipeline; and
-- bounded detector/model threads, with the browser daemon's two-minute idle
-  shutdown releasing loaded model memory.
-
-Multipart fields are streamed against their individual limits. The daemon
-recomputes SHA-256, matches declared/multipart/sniffed MIME types, checks
-declared dimensions, decodes under resource limits, and compares decoded
-dimensions before retaining bytes.
-
-Authentication and protocol checks run before a request can acquire one of the
-four global permits or poll its body. Saturation returns retryable HTTP 429 with
-`REQUEST_CAPACITY_EXHAUSTED`. A permit remains owned through multipart
-consumption and safe image decode even if the HTTP task is cancelled,
-and complete response-body transfer. Idle shutdown uses the same synchronized
-admission state, latches only when both admitted requests and active jobs are
-zero, and refuses new admission after latching.
-
-Koharu output is rejected before retention if it exceeds the configured clean
-blob cap. Blob GET bodies retain the stored `Arc<[u8]>` through
-`Bytes::from_owner`, avoiding a per-request copy of up to 64 MiB; the response
-holds its global permit until the body is consumed or dropped. Tall narrow
-reader images remain accepted when they fit the byte, dimension, pixel,
-decoder-allocation, and output limits.
-
-Retention is deterministic and admission-driven. Each accepted job receives a
-monotonic daemon-local sequence. When either retention bound is under pressure,
-the daemon evicts the oldest inactive terminal job until the new job fits.
-Running jobs are never eviction candidates. An evicted job's clean blob is
-removed only after the last retained job reference disappears. Completed and
-cancelled jobs therefore remain queryable until later admission pressure
-reclaims them, after which their job endpoint (and any now-orphaned blob
-endpoint) returns 404.
-
-Clean PNG/WebP payloads are deduplicated by SHA-256, MIME type, and exact byte
-equality. Identical uploads and equivalent cleaned inputs share one blob
-allocation. Capacity can still return a retryable 429 while all reclaimable
-space is held by active jobs, but terminal history can no longer leave a
-long-lived daemon permanently saturated.
-
-The font endpoint serves the installed, hash-verified Noto Sans SC and Noto
-Serif SC variable font bytes from the developer package. Unknown font IDs and
-missing resources fail closed; browser fallback remains available if a
-supported font cannot be loaded.
-
-## Koharu reuse boundary
-
-The browser companion reuses `ProjectSession` and its content-addressed `BlobStore`,
-`RuntimeManager`, Koharu's engine registry, and
-`koharu_app::pipeline::run`. The browser layer only adapts progress,
-cancellation, scene artifacts, stable protocol geometry, warnings, and bounded
-blob retention. The speech-bubble filter and deterministic dialogue fill are
-registered Koharu pipeline engines and artifacts, not a parallel browser-only
-image stack.
-
-Faithful and HSK prompts share Koharu's in-process local model state.
-Vocabulary validation and lookup reuse `hsk-control`; no parallel tokenizer or
-dictionary implementation exists in the browser crate. Production font bytes
-are served from the same installed resource pack used by setup verification.
-
-## Registration assets
-
-`installers/{windows,linux,macos}/native-host-registration` contains exact-ID
-manifest templates plus per-user register/unregister scripts. They accept only
-an absolute regular/leaf executable with the frozen native-host filename and do
-not expose ports or manual server configuration. The Unix scripts reject ASCII
-control bytes while accepting valid non-ASCII UTF-8 path bytes; the generated
-JSON retains the UTF-8 executable path.
-
-## Verification
-
-Run from the repository root:
+The permanent identities are:
 
 ```text
-cargo fmt --all -- --check
-cargo test -p browser-companion --all-targets -j 1
-cargo test -p koharu-app --all-targets -j 1
-cargo test -p koharu-llm --all-targets -j 1
-cargo test -p hsk-control --all-targets -j 1
-cargo clippy -p browser-companion -p koharu-app -p koharu-llm \
-  --all-targets -j 1 -- -D warnings
-sh -n installers/linux/native-host-registration/register.sh \
-  installers/linux/native-host-registration/unregister.sh \
-  installers/macos/native-host-registration/register.sh \
-  installers/macos/native-host-registration/unregister.sh \
-  installers/test-native-host-registration.sh
-sh installers/test-native-host-registration.sh
-powershell -File installers/test-native-host-registration.ps1
+native host: local.hskify.hsk_manga
+Firefox ID:  hsk-manga-translator@local.hskify
 ```
 
-Coverage includes framing bounds and endianness, native caller validation, an
-end-to-end native binary handshake against a deliberately prestarted daemon,
-fresh/expired tokens, constant-time authentication use, pre-body rejection,
-Host/origin/protocol/CORS restrictions, every required route, SHA-256/MIME/
-byte/pixel limits, progress/result/blob/font transfer, cancellation races,
-authenticated high-concurrency saturation before body polling, stalled-request
-idle exclusion, clean-output bounds, zero-copy/budgeted blob transfer, active
-saturation, oldest-terminal eviction, exact-byte SHA deduplication,
-completion/cancellation orphan cleanup, shared blob references,
-duplicate locks, stale state replacement, random IPv4 loopback binding, and
-idle cleanup. A 256 by 4096 synthetic webtoon scene verifies stable IDs,
-normalized OCR geometry, instance-mask-derived bubble/safe polygons,
-low-confidence warnings, identity translation fields, cache flags, cleaned
-image dimensions, and whole-result protocol validation. The prestarted-daemon
-handshake test covers framing, caller validation, and authenticated session
-issuance; it does not exercise launcher spawn or download production models.
+## Loopback routes
 
-### Evidence captured 2026-07-24
+The browser surface is unversioned:
 
-On the Windows Codex development harness:
+```text
+GET    /health
+GET    /setup
+POST   /setup/models
+POST   /jobs
+DELETE /jobs/{job_id}
+PUT    /jobs/{job_id}/viewport
+GET    /jobs/{job_id}/updates
+POST   /lookup
+GET    /blobs/{patch_id}
+GET    /fonts/{font_id}
+```
 
-- `cargo test -p browser-companion --all-targets -j 1` passed 54 library
-  tests, the daemon resource test, 7 contract-fixture tests, the native
-  handshake test, and the non-breakaway lifecycle test. The production
-  breakaway probe remained explicitly ignored.
-- `cargo test -p koharu-app --all-targets -j 1` passed 64 tests, including the
-  joint bubble-mask and deterministic dialogue-fill regressions; the opt-in
-  real-model smoke remained ignored.
-- `cargo test -p koharu-llm --all-targets -j 1` passed 30 runtime tests; tests
-  requiring initialized native runtime fixtures remained explicitly ignored.
-- `cargo test -p hsk-control --all-targets -j 1` passed all unit,
-  remediation, reproducibility, and workstream tests; only the explicit
-  full-scale performance smoke remained ignored.
-- `cargo fmt --all`, `git diff --check`, and `cargo clippy -p
-  browser-companion -p koharu-app -p koharu-llm --all-targets -j 1 -- -D
-  warnings` passed with the Visual Studio 2019 developer environment, the
-  repository's verified LLVM 22.1.0 cache, and AWS-LC's prebuilt NASM path.
-- A release daemon processed Nano Machine chapter 100 page 1 in 217 seconds,
-  producing 11 English speech-bubble regions. Peak working set was 4.75 GiB;
-  Korean and non-bubble English sound effects remained unchanged, and the real
-  Firefox renderer reported 11 selectable regions with zero degraded fits.
-- The packaged extension was temporarily installed in a fresh disposable
-  Firefox profile and exercised through its real popup. The registered native
-  host launched the installed daemon, which reused the cached clean image and
-  completed HSK 5 correction for all 11 regions in 186.7 seconds with zero
-  degraded fits.
-- Git Bash `sh -n` passed for both Unix register/unregister pairs and the
-  registration regression script. `sh
-  installers/test-native-host-registration.sh` passed both Linux and macOS
-  layouts using `翻訳ツール/hsk-manga-native-host`, and verified that a newline
-  in the path is rejected specifically as a control character, directories are
-  rejected, and unregister removes the isolated manifest. Its temporary `HOME`
-  prevents writes to the real Firefox profile.
-- PowerShell's parser reported zero syntax errors for both Windows registration
-  scripts and their regression script.
-  `installers/test-native-host-registration.ps1` passed isolated
-  register/unregister and directory-rejection checks.
-- The explicitly requested production probe,
-  `cargo test -p browser-companion --test windows_lifecycle
-  production_breakaway_launch_probe_covers_detached_lifecycle -- --ignored
-  --exact --nocapture`, failed immediately with Win32 error 5 (`Access is
-  denied`) after verifying that the parent process is in a Windows job. This
-  outer job does not grant `JOB_OBJECT_LIMIT_BREAKAWAY_OK`; the test no longer
-  falls back to an in-job child or reports detached coverage. On a permitting
-  parent it additionally requires `IsProcessInJob` to report that the spawned
-  child escaped every Windows job.
+`POST /browser-internal/session` is control-secret protected and called only
+by the native launcher. It is not CORS-enabled or part of the browser contract.
+No general application API, MCP, UI, page-result, cleaned-image, or
+retranslation route is mounted.
 
-### Remaining platform smoke requirements
+All browser routes require the exact loopback `Host`, an active canonical
+extension origin, and its bearer token before handler/body extraction. The
+explicit `X-HSK-Manga-Extension-Origin` header covers privileged Firefox
+requests that omit `Origin`. Preflight permits only GET, POST, PUT, and DELETE
+plus Authorization, Content-Type, and that extension-origin header.
 
-- **Windows / real Firefox:** the installed native host and daemon completed a
-  real popup-triggered Firefox translation after the one-shot host returned.
-  Dedicated duplicate-daemon, idle-cleanup, and forced reconnect probes remain.
-  The Codex outer job and the direct ignored probe still cannot substitute for
-  explicit breakaway coverage on every supported Firefox/Windows combination.
-- **Linux / real Firefox:** run the registration regression plus an actual
-  per-user install from a non-ASCII UTF-8 path, invoke it from Firefox, verify
-  manifest permissions and origin/ID enforcement, and confirm the `setsid()`
-  daemon survives native-host exit before idle cleanup.
-- **macOS / real Firefox:** repeat the non-ASCII registration and Firefox
-  native-message launch against the packaged, signed/notarized binaries; verify
-  the manifest under `~/Library/Application
-  Support/Mozilla/NativeMessagingHosts`, executable/quarantine behavior,
-  `setsid()` survival, and idle cleanup.
+## Job storage and progressive log
+
+An accepted upload reserves:
+
+- the immutable source bytes until its active job finishes;
+- an atomic cancellation flag;
+- the current viewport revision;
+- a bounded append-only `Vec<JobUpdate>`;
+- the region IDs already published;
+- adapter-native region context for dictionary lookup; and
+- job-owned PNG blobs.
+
+Every update is assigned the next sequence while holding the job-log lock.
+Sequence 0 is invalid. Overall progress may not regress. A region ID can be
+published once; refinement requires an existing region. `complete`, `failed`,
+and `cancelled` are terminal, and publication after terminal state is rejected.
+The maximum is 10,000 updates per job.
+
+`GET /jobs/{job_id}/updates` replays entries strictly after `after`. It rejects
+a cursor beyond the latest sequence, long-polls for no more than 20 seconds,
+and returns an empty batch without advancing the cursor on timeout. This single
+log replaces separate progress, status, and result representations.
+
+Terminal inactive jobs remain available until job-count or retained-byte
+admission needs space. Eviction is deterministic oldest-first. Active jobs are
+not evictable, and evicting a job removes its owned patch blobs.
+
+## Upload and decode boundary
+
+`POST /jobs` accepts exactly `image` and `request` multipart fields. The request
+field must be JSON. Before source retention, the server validates:
+
+- exact build fingerprint and semantic request contract;
+- supported English-to-Simplified-Chinese/HSK 2.0 settings;
+- sound-effect translation disabled;
+- multipart, declared, and sniffed MIME agreement;
+- declared SHA-256;
+- non-zero declared and decoded dimensions;
+- 20 MiB image, 64 KiB metadata, and 21 MiB complete-body limits;
+- 25,000,000 pixels and 16,384 pixels on either dimension; and
+- a 128 MiB decoder allocation budget.
+
+The direct adapter decodes the retained source once more for inference and
+rechecks that its dimensions match job metadata.
+
+## Resident CUDA path
+
+The browser-companion crate enables its `cuda` feature by default. The
+performance build script accepts only an NVIDIA GeForce RTX 4080 SUPER with at
+least 16,000 MiB and compute capability 8.9, installs pinned CUDA 13.1 compiler
+components, and sets `CUDA_COMPUTE_CAP=89`.
+
+The adapter lazily initializes two `OnceCell` values:
+
+- the official PP-OCRv5 CUDA text detector, selected batched English
+  recognizer, resident `RuntimeManager`, and local Qwen3.5 4B application
+  state; and
+- complete `hsk-control` data.
+
+The detector/translator runtime uses `ComputePolicy::CudaRequired`. The English
+recognizer uses `ort = 2.0.0-rc.12` with a mandatory CUDA execution provider,
+fatal provider-registration errors, and environment providers disabled. ONNX
+Runtime may place unsupported shape/control nodes on its built-in CPU provider;
+disabling that normal fallback makes the selected PP-OCRv5 graph impossible to
+load. Its warmed session, zero-copy input buffer, and caller-owned dynamic output
+allocations are reused across jobs.
+Output allocations use an LRU capped at four shapes and 32 MiB of host memory;
+least-recent shapes are evicted and no GPU output memory remains cached.
+
+Default resource discovery is:
+
+```text
+%LOCALAPPDATA%\Hskify\resources\
+  hsk-2.0.normalized.json
+  cc-cedict.normalized.json
+  models\Qwen3.5-4B-Q4_K_M.gguf
+  models\resident\pp-ocr-v5-mobile-detector-model\inference.onnx
+  models\resident\pp-ocr-v5-english-recognizer-config\inference.yml
+  models\resident\pp-ocr-v5-english-recognizer-model\inference.onnx
+  fonts\NotoSansSC-VF.ttf
+  fonts\NotoSerifSC-VF.ttf
+```
+
+The detector is frozen to
+`PaddlePaddle/PP-OCRv5_mobile_det_onnx@e6f4fa85f00e168c862bc462aebca69eef9b3d3d`
+and the recognizer to
+`PaddlePaddle/en_PP-OCRv5_mobile_rec_onnx@3fafbc3b5dcf93dd72add9f48368be8a3a2cd33b`;
+setup verifies their exact byte counts and SHA-256 identities before the
+resident session is created.
+
+The explicit overrides are `HSK_MANGA_RESOURCES_DIR`,
+`HSK_MANGA_HSK_PATH`, `HSK_MANGA_DICTIONARY_PATH`, and
+`HSK_MANGA_QWEN_MODEL_PATH`.
+
+## Viewport-first region pipeline
+
+1. Split the decoded page into 2,048-pixel tiles with 410-pixel overlap and
+   letterbox detector input to at most 1,280 pixels.
+2. Before each detector batch, reprioritize remaining tiles against the current
+   `visibleRects` and active state.
+3. Run the official PP-OCRv5 mobile text detector in true CUDA batches of at
+   most six tiles.
+4. Convert tile-local line geometry to source coordinates, enforce tile ownership,
+   and spatially deduplicate overlapping candidates.
+5. Run PP-OCRv5 English line recognition in batches of at most eight, and yield
+   after each candidate chunk so newly visible translation work can overtake
+   off-screen OCR.
+6. Accept OCR lines at confidence 0.45 or higher, group adjacent lines by
+   geometry and inferred foreground color, then apply the Latin-English,
+   story-text, SFX, credit, branding, metadata, and ambiguity gates to the
+   complete group. Keep differently colored emphasis and separated balloons
+   independent. When a tile has explicit credit/release context, reject its
+   isolated uppercase credit-name labels without applying that rule to normal
+   story tiles.
+7. Construct one region-local cleanup patch from the grouped line masks and compute deterministic
+   reading order plus visibility.
+8. Queue accepted regions for translation and reprioritize visible work at
+   every OCR or detector boundary. Ready batches begin at three pending
+   regions, contain at most six, and an undersized tail becomes eligible when
+   its hard 75 ms batching deadline expires (or at the final forced drain).
+   Boundary checks never sleep, and no page-wide translation call exists.
+
+Sound effects, punctuation-only OCR, non-Latin text, credits, branding,
+promotion, metadata, and low-confidence OCR are excluded before translation
+and patch publication. Eligible narration and other story text outside a
+balloon remain in scope.
+
+## Region-local cleanup
+
+Cleanup does not reconstruct or encode the source page. For one accepted story
+region, the adapter:
+
+- expands a small bounded patch rectangle;
+- combines the recognizer's polarity-independent line masks, attaches
+  punctuation and antialiased edges, dilates the ink locally, and keeps the
+  alpha region bounded to the accepted text geometry;
+- propagates surrounding known colors into masked pixels, with a median-color
+  fast path for flat regions and local multiscale diffusion for gradients; and
+- encodes a PNG whose alpha is 255 only at masked pixels and 0 elsewhere.
+
+The server validates the PNG and its normalized rectangle, enforces a 16 MiB
+per-patch limit and 256 MiB total retained source/patch budget, stores it under
+the owning job, and returns a blob descriptor.
+
+`publish_region` calls `store_patch_png` before appending `regionReady`.
+Firefox then fetches and validates the patch, decodes it, inserts it into the
+patch layer, and inserts selectable text synchronously afterward. This ordering
+prevents Chinese text from appearing over uncleaned English.
+
+## Direct HSK translation
+
+The primary generation request sends up to six English dialogue utterances
+directly to Qwen3.5 4B with the requested cumulative HSK 2.0 level and at most
+six preceding dialogue utterances. It does not generate a page-wide faithful
+translation and then rewrite it.
+
+The primary numbered-line protocol permits `[SKIP]` for credits, branding,
+release or scanner notes, SFX, non-English OCR, and gibberish. The parser
+accepts that marker only when deterministic source evidence independently
+supports exclusion. A marker on ordinary prose, including prose containing
+OCR substitutions such as `WH4`, is rejected and the item is repaired.
+Standalone numbers remain exact-preservation requirements; digits embedded in
+Latin OCR tokens do not.
+
+`hsk-control` validates each returned story item. Items that already pass are
+accepted. Rejected items alone may be sent once to the targeted repair call
+with their rejected Chinese and exact deterministic problems. The repair is
+bounded to one batch; it is not a second general translation pass and never
+restarts the page.
+
+Pinyin is derived after the accepted/rejected final state by local
+longest-match lookup. A progressive region carries:
+
+- source English;
+- the direct generation as `baseChinese`;
+- the displayed post-validation/repair Chinese;
+- pinyin;
+- OCR confidence and reading order;
+- normalized text/bubble/patch geometry;
+- browser-safe style and layout; and
+- requested level, strict validity, above-level tokens, and repair state.
+
+## Translation cache
+
+The daemon holds an in-memory direct-translation cache. Its SHA-256 key covers:
+
+```text
+schema
+OCR text
+last six preceding utterances
+HSK level
+model ID
+model revision
+prompt hash
+validator hash
+HSK/dictionary control revision
+proper-name glossary
+```
+
+The key prevents reuse when dialogue context, level, model bytes/revision,
+prompt behavior, validation logic, or language data changes. The cache is not a
+project, browser history, persistent page artifact, or retranslation facility.
+
+The separate 2 GiB persistent result cache stores only complete per-image
+regions and their patch PNGs. Its key covers the strict request, build
+fingerprint, source identity, and all output-affecting resource identities.
+Each entry is installed with one atomic rename after visible processing
+finishes; no tile, detector, OCR, translation, or patch intermediate is
+persisted.
+
+## Retained reader tools
+
+`POST /lookup` uses the same local `hsk-control` instance for longest-match
+tokens, pinyin, definitions, HSK level overlay, proper-name state, and optional
+region context. The extension owns the original/Chinese comparison control.
+Mandarin speech is also extension-only and uses an eligible local Web Speech
+voice; neither comparison nor speech adds a daemon result endpoint.
+
+## Default bounds
+
+| Limit | Value |
+| --- | ---: |
+| Authenticated in-flight requests | 64 |
+| Retained jobs | 128 |
+| Retained source and patch bytes | 256 MiB |
+| One patch | 16 MiB |
+| One font | 32 MiB |
+| Visible rectangles | 64 |
+| Preceding context entries accepted by contract | 6 |
+| Preceding entries used by direct translation/cache | 6 |
+| Update long-poll | 20 s |
+| Idle lifetime | 30 min |
+
+The authenticated request permit is retained through response-body transfer,
+so stalled blob/font consumers remain counted. Idle shutdown latches only when
+there are no admitted requests and no active jobs.
+
+## Evidence status
+
+Architecture claims above are traced to the current code and contract
+fixtures. No end-to-end latency, memory, VRAM, throughput, quality, or
+packaged-Firefox result has yet been recorded for this direct progressive
+build. The sole canonical workload is the 36-image *30 Years Since the
+Prologue* chapter 5 fixture. Its 218-region geometry review and 214-target
+translation, pinyin, and token-level HSK gold are complete. Follow
+[the benchmark evidence method](../../docs/chapter-5-benchmark.md), keep raw
+outputs, and do not add chapter-specific tuning or reuse measurements from a
+different workload or the retired page-result pipeline.

@@ -1,98 +1,89 @@
-//! Thin browser adapter over Koharu's production cleaning and local translation
-//! pipeline.
+//! Direct, progressive browser pipeline.
+//!
+//! The browser path deliberately does not create Koharu projects or materialize
+//! whole cleaned images. It decodes the upload once, runs resident CUDA models
+//! over overlapping tiles, and publishes one transparent cleanup patch per
+//! translated dialogue region.
 
-use std::cmp::Ordering as CmpOrdering;
-use std::collections::HashMap;
-use std::env;
-use std::fmt::Write as _;
-use std::io::Cursor;
-use std::path::{Path, PathBuf};
+mod geometry;
+mod patch;
+mod ppocr_v5;
+mod ppocr_v5_detector;
+
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
 use camino::Utf8PathBuf;
 use hsk_control::{
-    CorrectionOutcome, HskControl, HskLevel as ControlHskLevel,
-    LookupRegionContext as ControlLookupRegion, PreservationViolation, ProperName,
-    ProperNameReason, ValidationReport, ViolationReason,
+    HskControl, HskLevel as ControlHskLevel, LookupRegionContext as ControlLookupRegion,
+    ProperName, ProperNameReason, ValidationReport,
 };
-use image::{DynamicImage, GrayImage, ImageFormat, Luma};
+use image::{DynamicImage, GenericImageView};
 use koharu_app::llm::{
-    FaithfulOcrRegion, FaithfulPageRequest, FaithfulRegionKind, FaithfulTranslation, HskRewrite,
-    HskRewritePageRequest, HskRewriteRegion, HskValidatorFeedback, PrecedingPageContext,
-    ProtectedName,
+    HSK_TRANSLATION_MODEL, HskPrecedingUtterance, HskProtectedName, HskRepairUtterance,
+    HskSourceUtterance, HskTranslationBatchRequest, HskTranslationOutcome,
+    HskTranslationRepairRequest, HskUtteranceKind, MAX_HSK_PRECEDING_UTTERANCES,
 };
-use koharu_app::pipeline::support::upsert_mask_blob;
-use koharu_app::pipeline::{self, Artifact, PipelineSpec, Scope};
-use koharu_app::{App, AppConfig, PipelineRunOptions, ProjectSession};
-use koharu_core::{
-    ImageData, ImageRole, MaskRole, Node, NodeId, NodeKind, Op, Page, PageId, PipelineStep,
-    ReadingOrder, TextData, TextDirection, Transform,
-};
+use koharu_app::{App, AppConfig};
 use koharu_runtime::{ComputePolicy, RuntimeManager};
+use rayon::ThreadPool;
 use serde::{Deserialize, Serialize};
-use tokio::sync::OnceCell;
+use tokio::sync::{OnceCell, oneshot};
 
+use self::geometry::{
+    Candidate, CandidateKind, PixelBounds, PixelRect, Tile, candidates_for_tile, ocr_crop_rect,
+    overlapping_tiles, prioritize_tiles, reading_order_key, spatially_dedupe,
+    text_candidate_is_confirmed,
+};
+use self::patch::{PatchPng, PlacedInkMask, make_cleanup_patch};
+use self::ppocr_v5::{EnglishPpOcrV5, MAX_LINE_BATCH_SIZE, PpOcrPrediction};
+use self::ppocr_v5_detector::{DETECTOR_TILE_BATCH_SIZE, PpOcrV5TextDetector};
 use crate::contracts::{
-    BrowserCacheStatus, BrowserJobRequest, BrowserJobResult, BrowserJobStage, BrowserRegion,
-    BrowserTextLayout, BrowserTextStyle, BrowserWarning, BrowserWarningCode, CleanImageMimeType,
-    FontCategory, HskLevel, LookupRegion, LookupResult, LookupToken, Point, ReadingDirection,
-    RegionKind, TextAlignment, VocabularyException, VocabularyExceptionReason, VocabularyStatus,
-    WritingMode,
+    BrowserJobRequest, BrowserJobStage, BrowserTextLayout, BrowserTextStyle, FontCategory,
+    HskLevel, HskRepairState, LookupRegion, LookupResult, LookupToken, NormalizedRect,
+    ProgressiveHskStatus, ProgressiveRegion, ReadingDirection, TextAlignment, WritingMode,
 };
 use crate::crypto::sha256_hex;
+use crate::cuda_scheduler::{
+    CudaAdmissionError, CudaPriority, CudaScheduler, global_cuda_scheduler,
+};
+use crate::server::{JobUpdateDraft, JobUpdateSink};
+use crate::setup::{
+    DETECTOR_MODEL_ID, OCR_CONFIG_ID, OCR_MODEL_ID, ResidentResourcePaths, TRANSLATION_MODEL_ID,
+};
 
-const CACHE_MARKER_VERSION: u8 = 4;
-const PIPELINE_FINGERPRINT: &str = "gate3-v4:comic-text-bubble-detector+detector-bubble-mask+speech-bubble-only+paddle-ocr-vl-1.6+english-only+dialogue-box-erase+dialogue-bubble-fill";
-const BROWSER_DIALOGUE_CLEANER: &str = "dialogue-bubble-fill";
-const LOW_OCR_CONFIDENCE: f32 = 0.60;
-const RESOURCES_DIRECTORY_ENV: &str = "HSK_MANGA_RESOURCES_DIR";
-const HSK_RESOURCE_ENV: &str = "HSK_MANGA_HSK_PATH";
-const DICTIONARY_RESOURCE_ENV: &str = "HSK_MANGA_DICTIONARY_PATH";
-const QWEN_RESOURCE_ENV: &str = "HSK_MANGA_QWEN_MODEL_PATH";
-const HSK_RESOURCE_FILE: &str = "hsk-2.0.normalized.json";
-const DICTIONARY_RESOURCE_FILE: &str = "cc-cedict.normalized.json";
-const QWEN_RESOURCE_FILE: &str = "Qwen3.5-4B-Q4_K_M.gguf";
+const OCR_REGION_BATCH_SIZE: usize = MAX_LINE_BATCH_SIZE;
+const TRANSLATION_BATCH_MAX: usize = 6;
+const TRANSLATION_BATCH_MIN: usize = 3;
+const TRANSLATION_MAX_FLUSH_DELAY: Duration = Duration::from_millis(75);
+const BROWSER_QWEN_INFERENCE_THREADS: i32 = 6;
+const MIN_OCR_CONFIDENCE: f32 = 0.45;
+const TRANSLATION_CACHE_SCHEMA: &str = "hskify-direct-hsk-region-cache-v4";
 
-pub(crate) type CleaningProgressSink = Arc<dyn Fn(CleaningProgress) + Send + Sync>;
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct RegionLookupContext {
+    pub(crate) source_english: String,
+    pub(crate) base_chinese: String,
+    pub(crate) displayed_chinese: String,
+    pub(crate) proper_names: Vec<ProperName>,
+}
+
+const TRANSLATION_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
+const PREPROCESSING_THREADS: usize = 6;
+
+static PREPROCESSING_POOL: OnceLock<std::result::Result<Arc<PreprocessingPool>, String>> =
+    OnceLock::new();
 
 #[derive(Debug, Clone)]
 pub(crate) struct CleaningInput {
-    pub source_bytes: Arc<[u8]>,
+    pub source: Arc<DynamicImage>,
     pub request: BrowserJobRequest,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct CleaningOutput {
-    pub clean_image: Vec<u8>,
-    pub clean_image_mime_type: CleanImageMimeType,
-    pub regions: Vec<BrowserRegion>,
-    pub warnings: Vec<BrowserWarning>,
-    pub cache: BrowserCacheStatus,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct RetranslationInput {
-    pub request: BrowserJobRequest,
-    pub base_result: BrowserJobResult,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct RetranslationOutput {
-    pub regions: Vec<BrowserRegion>,
-    pub warnings: Vec<BrowserWarning>,
-    pub cache: BrowserCacheStatus,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct CleaningProgress {
-    pub stage: BrowserJobStage,
-    pub overall_progress: Option<f32>,
-    pub current: Option<u32>,
-    pub total: Option<u32>,
-    pub message: String,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -103,7 +94,7 @@ pub(crate) struct CleaningError {
 }
 
 impl CleaningError {
-    fn new(code: &'static str, message: impl Into<String>) -> Self {
+    pub(crate) fn new(code: &'static str, message: impl Into<String>) -> Self {
         Self {
             code,
             message: message.into(),
@@ -113,8 +104,12 @@ impl CleaningError {
     fn pipeline(error: anyhow::Error) -> Self {
         Self::new(
             "PIPELINE_FAILED",
-            format!("Koharu cleaning pipeline failed: {error:#}"),
+            format!("Direct browser pipeline failed: {error:#}"),
         )
+    }
+
+    pub(crate) fn cancelled() -> Self {
+        Self::new("CANCELLED", "Cleaning was cancelled.")
     }
 }
 
@@ -124,20 +119,13 @@ pub(crate) trait CleaningPipeline: Send + Sync {
         &self,
         input: CleaningInput,
         cancel: Arc<AtomicBool>,
-        progress: CleaningProgressSink,
-    ) -> std::result::Result<CleaningOutput, CleaningError>;
-
-    async fn retranslate(
-        &self,
-        input: RetranslationInput,
-        cancel: Arc<AtomicBool>,
-        progress: CleaningProgressSink,
-    ) -> std::result::Result<RetranslationOutput, CleaningError>;
+        sink: JobUpdateSink,
+    ) -> std::result::Result<(), CleaningError>;
 
     async fn lookup(
         &self,
         selected_text: String,
-        region: Option<BrowserRegion>,
+        region: Option<RegionLookupContext>,
     ) -> std::result::Result<LookupResult, CleaningError>;
 
     fn resources_ready(&self) -> bool;
@@ -145,208 +133,791 @@ pub(crate) trait CleaningPipeline: Send + Sync {
 
 pub(crate) struct KoharuPipeline {
     cache_root: PathBuf,
-    app: OnceCell<Arc<App>>,
+    cuda_scheduler: Arc<CudaScheduler>,
+    resident: OnceCell<Arc<ResidentState>>,
     hsk_control: OnceCell<Arc<HskControl>>,
-    translation_model_ready: OnceCell<()>,
-    resources: std::result::Result<TranslationResourcePaths, String>,
+    resources: std::result::Result<ResidentResourcePaths, String>,
+    translation_cache: Mutex<TranslationCache>,
 }
 
 impl KoharuPipeline {
     pub(crate) fn new(cache_root: PathBuf) -> Self {
         Self {
             cache_root,
-            app: OnceCell::new(),
+            cuda_scheduler: global_cuda_scheduler(),
+            resident: OnceCell::new(),
             hsk_control: OnceCell::new(),
-            translation_model_ready: OnceCell::new(),
-            resources: TranslationResourcePaths::discover().map_err(|error| format!("{error:#}")),
+            resources: ResidentResourcePaths::discover().map_err(|error| format!("{error:#}")),
+            translation_cache: Mutex::new(TranslationCache::default()),
         }
     }
 
-    async fn app(&self) -> Result<&Arc<App>> {
-        self.app
-            .get_or_try_init(|| async {
-                let data_root = self.cache_root.join("koharu-data");
-                std::fs::create_dir_all(&data_root)
-                    .with_context(|| format!("create Koharu data root {}", data_root.display()))?;
-                let runtime = Arc::new(RuntimeManager::new(&data_root, ComputePolicy::PreferGpu)?);
-                runtime.prepare().await.context("prepare Koharu runtime")?;
-                let mut config = AppConfig::default();
-                config.data.path = utf8_path(data_root)?;
-                let app = App::new(config, runtime, false, env!("CARGO_PKG_VERSION"))
-                    .context("initialize Koharu application services")?;
-                Ok::<_, anyhow::Error>(Arc::new(app))
-            })
-            .await
-    }
-
-    fn project_path(&self, source_sha256: &str) -> PathBuf {
-        self.cache_root
-            .join("cleaning-projects-v1")
-            .join(format!("{source_sha256}.khrproj"))
-    }
-
-    fn resource_paths(&self) -> Result<&TranslationResourcePaths> {
+    fn resource_paths(&self) -> Result<&ResidentResourcePaths> {
         self.resources.as_ref().map_err(|error| anyhow!("{error}"))
     }
 
+    async fn resident(&self) -> Result<&Arc<ResidentState>> {
+        let resources = self.resource_paths()?.clone();
+        let runtime_root = resources.runtime_root().to_path_buf();
+        let app_state_root = self.cache_root.join("browser-runtime").join("app-state");
+        self.resident
+            .get_or_try_init(|| async move {
+                ResidentState::load(runtime_root, app_state_root, resources)
+                    .await
+                    .map(Arc::new)
+            })
+            .await
+    }
+
     async fn hsk_control(&self) -> Result<&Arc<HskControl>> {
-        let paths = self.resource_paths()?.clone();
+        let resources = self.resource_paths()?.clone();
         self.hsk_control
             .get_or_try_init(|| async move {
                 tokio::task::spawn_blocking(move || {
-                    let hsk_json = std::fs::read_to_string(&paths.hsk)
-                        .with_context(|| format!("read HSK resource {}", paths.hsk.display()))?;
-                    let dictionary_json =
-                        std::fs::read_to_string(&paths.dictionary).with_context(|| {
-                            format!("read dictionary resource {}", paths.dictionary.display())
+                    let hsk_json = std::fs::read_to_string(&resources.hsk)
+                        .with_context(|| format!("read HSK data {}", resources.hsk.display()))?;
+                    let dictionary_json = std::fs::read_to_string(&resources.dictionary)
+                        .with_context(|| {
+                            format!("read dictionary data {}", resources.dictionary.display())
                         })?;
                     HskControl::from_json(&hsk_json, &dictionary_json)
-                        .context("load complete HSK and dictionary resources")
+                        .context("load deterministic HSK control data")
                         .map(Arc::new)
                 })
                 .await
-                .context("join HSK resource loading task")?
+                .context("join HSK data loader")?
             })
             .await
     }
 
-    async fn ensure_translation_model(&self, app: &Arc<App>) -> Result<()> {
-        let model_path = self.resource_paths()?.model.clone();
-        let app = app.clone();
-        self.translation_model_ready
-            .get_or_try_init(|| async move {
-                app.llm
-                    .load_local_file(koharu_app::llm::FAITHFUL_TRANSLATION_MODEL, model_path)
-                    .await
-                    .context("load local Qwen translation model from managed resource")
-            })
-            .await?;
-        Ok(())
-    }
-
-    async fn translate_cleaned_output(
+    async fn run_direct(
         &self,
-        request: &BrowserJobRequest,
-        output: &mut CleaningOutput,
-        reuse_faithful: bool,
-        cancel: &AtomicBool,
-        progress: &CleaningProgressSink,
+        input: CleaningInput,
+        cancel: Arc<AtomicBool>,
+        sink: JobUpdateSink,
     ) -> std::result::Result<(), CleaningError> {
-        let control = self
-            .hsk_control()
-            .await
-            .map_err(|error| CleaningError::new("RESOURCES_NOT_READY", format!("{error:#}")))?;
-        let app = self.app().await.map_err(CleaningError::pipeline)?;
-        self.ensure_translation_model(app).await.map_err(|error| {
-            CleaningError::new("TRANSLATION_MODEL_LOAD_FAILED", format!("{error:#}"))
-        })?;
-        let translator = KoharuPageTranslationModel {
-            model: app.llm.clone(),
-        };
-        let translation_warnings = translate_regions_with(
-            &translator,
-            control,
-            request,
-            &mut output.regions,
-            reuse_faithful,
-            cancel,
-            progress,
-        )
-        .await
-        .map_err(|error| translation_error(error, cancel))?;
-        output.warnings.retain(|warning| {
-            !matches!(
-                warning.code,
-                BrowserWarningCode::HskException | BrowserWarningCode::HskRewriteFailed
+        cancellation_boundary(cancel.as_ref())?;
+        publish_progress(
+            &sink,
+            BrowserJobStage::Decoding,
+            None,
+            Some(0.01),
+            None,
+            None,
+            "Decoding the source image once",
+        )?;
+        let source = input.source;
+        let (image_width, image_height) = source.dimensions();
+        if image_width != input.request.natural_width
+            || image_height != input.request.natural_height
+        {
+            return Err(CleaningError::new(
+                "IMAGE_DIMENSION_MISMATCH",
+                "Decoded dimensions do not match the submitted job metadata.",
+            ));
+        }
+        cancellation_boundary(cancel.as_ref())?;
+
+        publish_progress(
+            &sink,
+            BrowserJobStage::Detecting,
+            None,
+            Some(0.02),
+            None,
+            None,
+            "Loading resident CUDA detector, OCR, and translation models",
+        )?;
+        let (resident, control) = tokio::try_join!(self.resident(), self.hsk_control())
+            .map_err(CleaningError::pipeline)?;
+        let preprocessing = global_preprocessing_pool().map_err(CleaningError::pipeline)?;
+        cancellation_boundary(cancel.as_ref())?;
+
+        let mut tiles = overlapping_tiles(image_width, image_height);
+        let total_tiles = tiles.len();
+        let total_tiles_u32 = u32::try_from(total_tiles).unwrap_or(u32::MAX);
+        let mut processed_tiles = 0usize;
+        let mut seen_text_blocks = Vec::<PixelRect>::new();
+        let mut pending_translation = Vec::<PreparedRegion>::new();
+        let mut repair_queue = RepairQueue::default();
+        let mut dialogue_context = translation_context(&input.request);
+        let mut prepared_next_tiles: Option<TileBatchTask> = None;
+
+        while !tiles.is_empty() {
+            cancellation_boundary(cancel.as_ref())?;
+            if sink.is_cancelled() {
+                return Err(CleaningError::cancelled());
+            }
+            let viewport = sink.viewport();
+            prioritize_tiles(
+                &mut tiles,
+                &viewport.visible_rects,
+                viewport.active,
+                image_width,
+                image_height,
+                input.request.settings.reading_direction,
+            );
+            let take = DETECTOR_TILE_BATCH_SIZE.min(tiles.len());
+            let use_prepared = prepared_next_tiles
+                .as_ref()
+                .is_some_and(|task| tiles_start_with(&tiles, &task.tiles));
+            let (tile_batch, tile_images) = if use_prepared {
+                let task = prepared_next_tiles
+                    .take()
+                    .expect("prepared tile task was just inspected");
+                tiles.drain(..task.tiles.len());
+                task.finish()
+                    .await
+                    .context("finish speculative detector tile crops")
+                    .map_err(CleaningError::pipeline)?
+            } else {
+                // A new viewport can invalidate the speculative offscreen
+                // choice. Dropping its receiver lets visible work overtake it
+                // at this tile boundary without waiting for the stale crop.
+                prepared_next_tiles.take();
+                let tile_batch = tiles.drain(..take).collect::<Vec<_>>();
+                TileBatchTask::start(preprocessing.as_ref(), source.clone(), tile_batch)
+                    .finish()
+                    .await
+                    .context("prepare detector tile crops on the browser preprocessing pool")
+                    .map_err(CleaningError::pipeline)?
+            };
+            let overall = batch_overall_progress(processed_tiles, total_tiles);
+            publish_progress(
+                &sink,
+                BrowserJobStage::Detecting,
+                Some(processed_tiles as f32 / total_tiles.max(1) as f32),
+                Some(overall),
+                Some(u32::try_from(processed_tiles).unwrap_or(u32::MAX)),
+                Some(total_tiles_u32),
+                "Detecting English story text in the next tile batch",
+            )?;
+
+            cancellation_boundary(cancel.as_ref())?;
+            let admission_viewport = sink.viewport();
+            prioritize_tiles(
+                &mut tiles,
+                &admission_viewport.visible_rects,
+                admission_viewport.active,
+                image_width,
+                image_height,
+                input.request.settings.reading_direction,
+            );
+            if !tiles.is_empty() {
+                let next_count = DETECTOR_TILE_BATCH_SIZE.min(tiles.len());
+                prepared_next_tiles = Some(TileBatchTask::start(
+                    preprocessing.as_ref(),
+                    source.clone(),
+                    tiles[..next_count].to_vec(),
+                ));
+            }
+            let detector_priority = if admission_viewport.active
+                && tile_batch.iter().any(|tile| {
+                    let tile_rect = NormalizedRect {
+                        x: tile.x as f32 / image_width.max(1) as f32,
+                        y: tile.y as f32 / image_height.max(1) as f32,
+                        width: tile.width as f32 / image_width.max(1) as f32,
+                        height: tile.height as f32 / image_height.max(1) as f32,
+                    };
+                    admission_viewport
+                        .visible_rects
+                        .iter()
+                        .any(|visible| normalized_rects_intersect(&tile_rect, visible))
+                }) {
+                CudaPriority::Visible
+            } else {
+                CudaPriority::Offscreen
+            };
+            let cuda_permit = self
+                .cuda_scheduler
+                .acquire(detector_priority, cancel.clone())
+                .await
+                .map_err(cuda_admission_error)?;
+            let detections = {
+                let mut detector = resident.detector.lock().map_err(|_| {
+                    CleaningError::new("MODEL_STATE_FAILED", "Detector lock poisoned.")
+                })?;
+                detector
+                    .detect_tiles(&tile_images)
+                    .context("run true-batched CUDA PP-OCRv5 text detection")
+                    .map_err(CleaningError::pipeline)?
+            };
+            drop(cuda_permit);
+            cancellation_boundary(cancel.as_ref())?;
+            if detections.len() != tile_batch.len() {
+                return Err(CleaningError::new(
+                    "DETECTION_FAILED",
+                    "Detector returned an incomplete tile batch.",
+                ));
+            }
+            // Reconsider queued translation immediately after the detector CUDA
+            // batch, before CPU postprocessing or any offscreen OCR admission.
+            self.flush_translation_queue(
+                resident,
+                control,
+                &input.request,
+                &mut pending_translation,
+                cancel.clone(),
+                &sink,
+                overall,
+                image_width,
+                image_height,
+                &mut dialogue_context,
+                &mut repair_queue,
+                false,
             )
-        });
-        output.warnings.extend(translation_warnings);
-        output.cache.translation_hit = false;
+            .await?;
+
+            let candidates = detections
+                .iter()
+                .zip(&tile_batch)
+                .flat_map(|(detection, tile)| {
+                    candidates_for_tile(detection, tile, image_width, image_height)
+                })
+                .collect::<Vec<_>>();
+            let mut candidates = spatially_dedupe(candidates, &seen_text_blocks);
+            candidates.retain(text_candidate_is_confirmed);
+            if !candidates.is_empty() {
+                publish_progress(
+                    &sink,
+                    BrowserJobStage::Ocr,
+                    None,
+                    Some(overall),
+                    None,
+                    None,
+                    "Reading English story text in OCR batches of eight",
+                )?;
+            }
+            let mut recognized_lines = Vec::new();
+            while !candidates.is_empty() {
+                let accepted = ocr_batch(
+                    resident,
+                    source.clone(),
+                    &mut candidates,
+                    &input.request,
+                    &sink,
+                    cancel.clone(),
+                    &self.cuda_scheduler,
+                    &preprocessing,
+                )
+                .await?;
+                for line in accepted {
+                    seen_text_blocks.push(line.candidate.text_rect);
+                    recognized_lines.push(line);
+                }
+            }
+            let prepared_regions = prepare_grouped_regions(
+                source.clone(),
+                recognized_lines,
+                &input.request,
+                &sink,
+                &preprocessing,
+            )
+            .await?;
+            pending_translation.extend(prepared_regions);
+            self.flush_translation_queue(
+                resident,
+                control,
+                &input.request,
+                &mut pending_translation,
+                cancel.clone(),
+                &sink,
+                overall,
+                image_width,
+                image_height,
+                &mut dialogue_context,
+                &mut repair_queue,
+                false,
+            )
+            .await?;
+            processed_tiles += tile_batch.len();
+            cancellation_boundary(cancel.as_ref())?;
+        }
+
+        self.flush_translation_queue(
+            resident,
+            control,
+            &input.request,
+            &mut pending_translation,
+            cancel.clone(),
+            &sink,
+            0.90,
+            image_width,
+            image_height,
+            &mut dialogue_context,
+            &mut repair_queue,
+            true,
+        )
+        .await?;
+        cancellation_boundary(cancel.as_ref())?;
+        repair_queue.finish_primary_phase();
+        self.process_queued_repairs(
+            resident,
+            control,
+            &input.request,
+            &mut repair_queue,
+            cancel.clone(),
+            &sink,
+            image_width,
+            image_height,
+        )
+        .await?;
+        cancellation_boundary(cancel.as_ref())?;
+        publish_progress(
+            &sink,
+            BrowserJobStage::Packaging,
+            Some(1.0),
+            Some(0.98),
+            None,
+            None,
+            "All region-local patches and translations are published",
+        )?;
         Ok(())
     }
-}
 
-#[derive(Debug, Clone)]
-struct TranslationResourcePaths {
-    hsk: PathBuf,
-    dictionary: PathBuf,
-    model: PathBuf,
-}
+    #[allow(clippy::too_many_arguments)]
+    async fn flush_translation_queue(
+        &self,
+        resident: &ResidentState,
+        control: &HskControl,
+        request: &BrowserJobRequest,
+        pending: &mut Vec<PreparedRegion>,
+        cancel: Arc<AtomicBool>,
+        sink: &JobUpdateSink,
+        overall_progress: f32,
+        image_width: u32,
+        image_height: u32,
+        context: &mut Vec<HskPrecedingUtterance>,
+        repair_queue: &mut RepairQueue,
+        force: bool,
+    ) -> std::result::Result<(), CleaningError> {
+        while !pending.is_empty() {
+            prioritize_pending_translation(pending, sink, image_width, image_height);
+            let count = match translation_boundary_action(
+                pending,
+                force,
+                tokio::time::Instant::now(),
+                cancel.load(Ordering::Acquire) || sink.is_cancelled(),
+            ) {
+                TranslationBoundaryAction::ContinueUpstream => {
+                    // This is a CUDA scheduling boundary, not a timer owner.
+                    // Let the caller submit available detector/OCR work and
+                    // reconsider the tail instead of idling CUDA here.
+                    return Ok(());
+                }
+                TranslationBoundaryAction::Dispatch(count) => count,
+                TranslationBoundaryAction::Cancelled => {
+                    return Err(CleaningError::cancelled());
+                }
+            };
+            if !(1..=TRANSLATION_BATCH_MAX).contains(&count) {
+                return Err(CleaningError::new(
+                    "TRANSLATION_BATCH_FAILED",
+                    "Translation batching produced an invalid microbatch size.",
+                ));
+            }
+            let batch = pending.drain(..count).collect::<Vec<_>>();
+            self.translate_and_publish(
+                resident,
+                control,
+                request,
+                batch,
+                cancel.clone(),
+                sink,
+                overall_progress,
+                image_width,
+                image_height,
+                context,
+                repair_queue,
+            )
+            .await?;
+        }
+        Ok(())
+    }
 
-impl TranslationResourcePaths {
-    fn discover() -> Result<Self> {
-        let root = nonempty_env_path(RESOURCES_DIRECTORY_ENV)
-            .or_else(default_resource_root)
-            .context(
-                "cannot determine the per-user resource directory; set HSK_MANGA_RESOURCES_DIR",
+    #[allow(clippy::too_many_arguments)]
+    async fn translate_and_publish(
+        &self,
+        resident: &ResidentState,
+        control: &HskControl,
+        request: &BrowserJobRequest,
+        regions: Vec<PreparedRegion>,
+        cancel: Arc<AtomicBool>,
+        sink: &JobUpdateSink,
+        overall_progress: f32,
+        image_width: u32,
+        image_height: u32,
+        context: &mut Vec<HskPrecedingUtterance>,
+        repair_queue: &mut RepairQueue,
+    ) -> std::result::Result<(), CleaningError> {
+        if regions.is_empty() {
+            return Ok(());
+        }
+        if regions.len() > TRANSLATION_BATCH_MAX {
+            return Err(CleaningError::new(
+                "TRANSLATION_BATCH_FAILED",
+                "Page-wide translation is disabled; microbatches are limited to six regions.",
+            ));
+        }
+        cancellation_boundary(cancel.as_ref())?;
+        publish_progress(
+            sink,
+            BrowserJobStage::Translating,
+            None,
+            Some(overall_progress),
+            None,
+            None,
+            "Translating English directly into HSK-targeted Chinese",
+        )?;
+        let translator = resident.app.llm.direct_hsk_translator();
+        let batch_context = context.clone();
+        let protected_names = translation_glossary(request);
+        let validator_names = control_proper_names(&protected_names);
+        let level = u8::from(request.settings.hsk_level);
+        let control_level = ControlHskLevel::new(level)
+            .map_err(|error| CleaningError::new("INVALID_HSK_LEVEL", error.to_string()))?;
+        let mut keys = Vec::with_capacity(regions.len());
+        let mut translated = vec![None::<CachedTranslation>; regions.len()];
+        let mut missing_indices = Vec::new();
+        let mut published = vec![false; regions.len()];
+        let mut states = std::iter::repeat_with(|| None::<TranslationState>)
+            .take(regions.len())
+            .collect::<Vec<_>>();
+        let model_id = translator.model_id().to_string();
+
+        {
+            let mut cache = self.translation_cache.lock().map_err(|_| {
+                CleaningError::new("CACHE_FAILED", "Translation cache lock poisoned.")
+            })?;
+            for index in 0..regions.len() {
+                let key = translation_cache_key(
+                    &regions[index].source_english,
+                    hsk_utterance_kind(regions[index].candidate.kind),
+                    &batch_context,
+                    &protected_names,
+                    level,
+                    &model_id,
+                    translator.model_revision(),
+                    translator.prompt_hash(),
+                    translator.validator_hash(),
+                    control.cache_revision(),
+                );
+                let cached = cache.get(&key);
+                if cached
+                    .as_ref()
+                    .is_some_and(|translation| translation.repair_state == HskRepairState::Pending)
+                {
+                    states[index] = cached.clone().map(TranslationState::from_cached);
+                }
+                translated[index] = cached;
+                if translated[index].is_none() {
+                    missing_indices.push(index);
+                }
+                keys.push(key);
+            }
+        }
+        let generation_indices = primary_generation_indices(&translated);
+
+        for (index, translation) in translated.iter().enumerate() {
+            let Some(translation) = translation.clone() else {
+                continue;
+            };
+            publish_region(
+                sink,
+                &regions[index],
+                translation,
+                request.settings.hsk_level,
+                image_width,
+                image_height,
             )?;
-        Ok(Self {
-            hsk: nonempty_env_path(HSK_RESOURCE_ENV)
-                .unwrap_or_else(|| root.join(HSK_RESOURCE_FILE)),
-            dictionary: nonempty_env_path(DICTIONARY_RESOURCE_ENV)
-                .unwrap_or_else(|| root.join(DICTIONARY_RESOURCE_FILE)),
-            model: nonempty_env_path(QWEN_RESOURCE_ENV)
-                .unwrap_or_else(|| root.join("models").join(QWEN_RESOURCE_FILE)),
-        })
+            published[index] = true;
+        }
+
+        if !generation_indices.is_empty() {
+            let utterances = generation_indices
+                .iter()
+                .map(|index| HskSourceUtterance {
+                    id: regions[*index].id.clone(),
+                    kind: hsk_utterance_kind(regions[*index].candidate.kind),
+                    source_english: regions[*index].source_english.clone(),
+                })
+                .collect::<Vec<_>>();
+            let index_by_id = generation_indices
+                .iter()
+                .map(|index| (regions[*index].id.clone(), *index))
+                .collect::<HashMap<_, _>>();
+            cancellation_boundary(cancel.as_ref())?;
+            let cuda_priority = prepared_region_priority(&regions, sink, image_width, image_height);
+            let cuda_permit = self
+                .cuda_scheduler
+                .acquire(cuda_priority, cancel.clone())
+                .await
+                .map_err(cuda_admission_error)?;
+            let mut publish_streamed = |outcome: &HskTranslationOutcome| -> Result<()> {
+                cancellation_boundary(cancel.as_ref()).map_err(anyhow::Error::new)?;
+                let index = *index_by_id
+                    .get(&outcome.id)
+                    .with_context(|| format!("unknown streamed translation id {}", outcome.id))?;
+                if translated[index].is_some() || states[index].is_some() {
+                    return Ok(());
+                }
+                let state = TranslationState::from_initial(
+                    outcome.clone(),
+                    control,
+                    control_level,
+                    &validator_names,
+                );
+                if let Some(mut translation) = state.initial_translation() {
+                    populate_pinyin(control, &mut translation);
+                    publish_region(
+                        sink,
+                        &regions[index],
+                        translation.clone(),
+                        request.settings.hsk_level,
+                        image_width,
+                        image_height,
+                    )
+                    .map_err(anyhow::Error::new)?;
+                    published[index] = true;
+                    self.translation_cache
+                        .lock()
+                        .map_err(|_| anyhow!("translation cache lock poisoned"))?
+                        .insert(keys[index].clone(), translation.clone());
+                    translated[index] = Some(translation);
+                }
+                states[index] = Some(state);
+                Ok(())
+            };
+            let initial = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(translator.translate_batch_streaming(
+                    &HskTranslationBatchRequest {
+                        requested_level: level,
+                        utterances,
+                        preceding_utterances: batch_context.clone(),
+                        protected_names: protected_names.clone(),
+                    },
+                    cancel.as_ref(),
+                    &mut publish_streamed,
+                ))
+            })
+            .context("run direct HSK translation batch")
+            .map_err(CleaningError::pipeline)?;
+            drop(publish_streamed);
+            drop(cuda_permit);
+            cancellation_boundary(cancel.as_ref())?;
+
+            for outcome in initial.items {
+                let Some(&index) = index_by_id.get(&outcome.id) else {
+                    continue;
+                };
+                if translated[index].is_none() && states[index].is_none() {
+                    states[index] = Some(TranslationState::from_initial(
+                        outcome,
+                        control,
+                        control_level,
+                        &validator_names,
+                    ));
+                }
+            }
+            for &index in &missing_indices {
+                if states[index].is_none() {
+                    states[index] = Some(TranslationState::from_initial(
+                        missing_translation_outcome(&regions[index].id),
+                        control,
+                        control_level,
+                        &validator_names,
+                    ));
+                }
+            }
+
+            for &index in &missing_indices {
+                if translated[index].is_some() {
+                    continue;
+                }
+                let Some(mut primary) = states[index]
+                    .as_ref()
+                    .and_then(TranslationState::initial_translation)
+                else {
+                    continue;
+                };
+                populate_pinyin(control, &mut primary);
+                publish_region(
+                    sink,
+                    &regions[index],
+                    primary.clone(),
+                    request.settings.hsk_level,
+                    image_width,
+                    image_height,
+                )?;
+                published[index] = true;
+                self.translation_cache
+                    .lock()
+                    .map_err(|_| {
+                        CleaningError::new("CACHE_FAILED", "Translation cache lock poisoned.")
+                    })?
+                    .insert(keys[index].clone(), primary.clone());
+                translated[index] = Some(primary);
+            }
+        }
+
+        cancellation_boundary(cancel.as_ref())?;
+        for (index, region) in regions.iter().enumerate() {
+            if !published[index] {
+                continue;
+            }
+            let Some(translation) = translated[index].as_ref() else {
+                continue;
+            };
+            context.push(HskPrecedingUtterance {
+                source_english: region.source_english.clone(),
+                chinese: translation.displayed_chinese.clone(),
+            });
+        }
+        if context.len() > MAX_HSK_PRECEDING_UTTERANCES {
+            context.drain(..context.len() - MAX_HSK_PRECEDING_UTTERANCES);
+        }
+
+        for (index, region) in regions.into_iter().enumerate() {
+            let Some(state) = states[index].take() else {
+                continue;
+            };
+            if state.problems.is_empty() {
+                continue;
+            }
+            let utterance = HskRepairUtterance {
+                id: region.id.clone(),
+                kind: hsk_utterance_kind(region.candidate.kind),
+                source_english: region.source_english.clone(),
+                rejected_chinese: state.base_chinese.clone(),
+                problems: state.problems.clone(),
+            };
+            repair_queue.enqueue(PendingRepair {
+                cache_key: keys[index].clone(),
+                region,
+                utterance,
+                preceding_utterances: batch_context.clone(),
+                state,
+                published: published[index],
+            });
+        }
+        Ok(())
     }
 
-    fn all_present(&self) -> bool {
-        self.hsk.is_file() && self.dictionary.is_file() && self.model.is_file()
-    }
-}
-
-fn nonempty_env_path(name: &str) -> Option<PathBuf> {
-    env::var_os(name)
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-}
-
-fn default_resource_root() -> Option<PathBuf> {
-    env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .or_else(dirs::data_local_dir)
-        .map(|root| {
-            root.join("Hskify")
-                .join("HSKMangaTranslator")
-                .join("resources")
-        })
-}
-
-#[async_trait]
-trait PageTranslationModel: Send + Sync {
-    async fn faithful(
+    #[allow(clippy::too_many_arguments)]
+    async fn process_queued_repairs(
         &self,
-        request: &FaithfulPageRequest,
-        cancel: &AtomicBool,
-    ) -> Result<Vec<FaithfulTranslation>>;
+        resident: &ResidentState,
+        control: &HskControl,
+        request: &BrowserJobRequest,
+        repair_queue: &mut RepairQueue,
+        cancel: Arc<AtomicBool>,
+        sink: &JobUpdateSink,
+        image_width: u32,
+        image_height: u32,
+    ) -> std::result::Result<(), CleaningError> {
+        if repair_queue.is_empty() {
+            return Ok(());
+        }
+        cancellation_boundary(cancel.as_ref())?;
+        publish_progress(
+            sink,
+            BrowserJobStage::HskValidating,
+            None,
+            Some(0.94),
+            None,
+            None,
+            "Refining queued translations after all primary regions are published",
+        )?;
 
-    async fn rewrite(
-        &self,
-        request: &HskRewritePageRequest,
-        cancel: &AtomicBool,
-    ) -> Result<Vec<HskRewrite>>;
-}
+        let translator = resident.app.llm.direct_hsk_translator();
+        let protected_names = translation_glossary(request);
+        let validator_names = control_proper_names(&protected_names);
+        let level = u8::from(request.settings.hsk_level);
+        let control_level = ControlHskLevel::new(level)
+            .map_err(|error| CleaningError::new("INVALID_HSK_LEVEL", error.to_string()))?;
 
-struct KoharuPageTranslationModel {
-    model: Arc<koharu_app::llm::Model>,
-}
+        while let Some(mut job) = repair_queue.next() {
+            cancellation_boundary(cancel.as_ref())?;
+            if sink.is_cancelled() {
+                return Err(CleaningError::cancelled());
+            }
 
-#[async_trait]
-impl PageTranslationModel for KoharuPageTranslationModel {
-    async fn faithful(
-        &self,
-        request: &FaithfulPageRequest,
-        cancel: &AtomicBool,
-    ) -> Result<Vec<FaithfulTranslation>> {
-        self.model.translate_faithful_page(request, cancel).await
-    }
+            // Primary work for this image has already drained. Offscreen
+            // admission also lets visible primary work from another job pass.
+            let cuda_permit = self
+                .cuda_scheduler
+                .acquire(CudaPriority::Offscreen, cancel.clone())
+                .await
+                .map_err(cuda_admission_error)?;
+            cancellation_boundary(cancel.as_ref())?;
+            let repair_result = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(translator.repair_invalid_item(
+                    &HskTranslationRepairRequest {
+                        requested_level: level,
+                        utterance: job.utterance.clone(),
+                        preceding_utterances: job.preceding_utterances.clone(),
+                        protected_names: protected_names.clone(),
+                    },
+                    cancel.as_ref(),
+                ))
+            });
+            drop(cuda_permit);
+            let repaired = match repair_result {
+                Ok(repaired) => repaired,
+                Err(_) if cancel.load(Ordering::Acquire) || sink.is_cancelled() => {
+                    return Err(CleaningError::cancelled());
+                }
+                Err(error) => {
+                    return Err(CleaningError::pipeline(
+                        error.context("run one targeted HSK bubble repair"),
+                    ));
+                }
+            };
+            cancellation_boundary(cancel.as_ref())?;
 
-    async fn rewrite(
-        &self,
-        request: &HskRewritePageRequest,
-        cancel: &AtomicBool,
-    ) -> Result<Vec<HskRewrite>> {
-        self.model.rewrite_hsk_page(request, cancel).await
+            let accepted =
+                job.state
+                    .apply_repair(repaired, control, control_level, &validator_names);
+            let publishable = job.state.can_publish();
+            let Ok(mut result) = job.state.finish() else {
+                eprintln!(
+                    "hskify: translation produced no publishable Chinese for region {} after one repair",
+                    job.region.id
+                );
+                continue;
+            };
+            populate_pinyin(control, &mut result);
+            cancellation_boundary(cancel.as_ref())?;
+
+            if job.published {
+                if accepted {
+                    publish_refinement(sink, &job.region.id, &result, request.settings.hsk_level)?;
+                }
+            } else if publishable {
+                publish_region(
+                    sink,
+                    &job.region,
+                    result.clone(),
+                    request.settings.hsk_level,
+                    image_width,
+                    image_height,
+                )?;
+            } else {
+                eprintln!(
+                    "hskify: translation rejected for region {} after one repair: {}",
+                    job.region.id,
+                    job.utterance.problems.join("; ")
+                );
+                continue;
+            }
+
+            self.translation_cache
+                .lock()
+                .map_err(|_| {
+                    CleaningError::new("CACHE_FAILED", "Translation cache lock poisoned.")
+                })?
+                .insert(job.cache_key, result);
+        }
+        Ok(())
     }
 }
 
@@ -356,203 +927,31 @@ impl CleaningPipeline for KoharuPipeline {
         &self,
         input: CleaningInput,
         cancel: Arc<AtomicBool>,
-        progress: CleaningProgressSink,
-    ) -> std::result::Result<CleaningOutput, CleaningError> {
-        if cancel.load(Ordering::Acquire) {
-            return Err(CleaningError::new("CANCELLED", "Cleaning was cancelled."));
-        }
-
-        let project_path = self.project_path(&input.request.source_sha256);
-        let (session, page_id) =
-            open_or_create_project(&project_path, &input).map_err(CleaningError::pipeline)?;
-
-        if cache_marker_matches(&project_path, &input.request)
-            && cached_artifacts_ready(&session, page_id)
-        {
-            progress(CleaningProgress {
-                stage: BrowserJobStage::Translating,
-                overall_progress: Some(0.58),
-                current: None,
-                total: None,
-                message: "Reusing cached Koharu cleaning result".to_owned(),
-            });
-            let mut output = extract_output(&session, page_id, &input.request, true)?;
-            self.translate_cleaned_output(
-                &input.request,
-                &mut output,
-                false,
-                cancel.as_ref(),
-                &progress,
-            )
-            .await?;
-            progress(CleaningProgress {
-                stage: BrowserJobStage::Packaging,
-                overall_progress: Some(0.98),
-                current: None,
-                total: None,
-                message: "Packaging translated browser result".to_owned(),
-            });
-            return Ok(output);
-        }
-
-        let app = self.app().await.map_err(CleaningError::pipeline)?;
-        let config = app.config.load();
-        let detection_steps = detection_steps(&config);
-        let ocr_steps = ocr_steps(&config);
-        let inpainting_steps = inpainting_steps();
-        drop(config);
-
-        let warnings = Arc::new(Mutex::new(Vec::<String>::new()));
-        let options = PipelineRunOptions {
-            target_language: None,
-            system_prompt: None,
-            default_font: None,
-            text_node_ids: None,
-            region: None,
-            reading_order: Some(reading_order(input.request.settings.reading_direction)),
-        };
-        let detection_warnings = run_pipeline_phase(
-            session.clone(),
-            app,
-            page_id,
-            detection_steps,
-            options.clone(),
-            cancel.clone(),
-            progress.clone(),
-            0.0,
-            0.22,
-            warnings.clone(),
-        )
-        .await
-        .map_err(CleaningError::pipeline)?;
-        retain_speech_bubble_text(&session, page_id).map_err(CleaningError::pipeline)?;
-        let ocr_warnings = run_pipeline_phase(
-            session.clone(),
-            app,
-            page_id,
-            ocr_steps,
-            options.clone(),
-            cancel.clone(),
-            progress.clone(),
-            0.22,
-            0.16,
-            warnings.clone(),
-        )
-        .await
-        .map_err(CleaningError::pipeline)?;
-        retain_english_text(&session, page_id).map_err(CleaningError::pipeline)?;
-        write_dialogue_erase_mask(&session, page_id).map_err(CleaningError::pipeline)?;
-        let inpainting_warnings = run_pipeline_phase(
-            session.clone(),
-            app,
-            page_id,
-            inpainting_steps,
-            options,
-            cancel.clone(),
-            progress.clone(),
-            0.38,
-            0.17,
-            warnings.clone(),
-        )
-        .await
-        .map_err(CleaningError::pipeline)?;
-        if cancel.load(Ordering::Acquire) {
-            return Err(CleaningError::new("CANCELLED", "Cleaning was cancelled."));
-        }
-        if detection_warnings + ocr_warnings + inpainting_warnings > 0 {
-            let details = warnings
-                .lock()
-                .expect("pipeline warning lock poisoned")
-                .join("; ");
-            return Err(CleaningError::new(
-                "PIPELINE_STEP_FAILED",
-                if details.is_empty() {
-                    "One or more Koharu cleaning stages failed.".to_owned()
-                } else {
-                    format!("One or more Koharu cleaning stages failed: {details}")
-                },
-            ));
-        }
-
-        let mut output = extract_output(&session, page_id, &input.request, false)?;
-        session.compact().map_err(CleaningError::pipeline)?;
-        write_cache_marker(&project_path, &input.request).map_err(CleaningError::pipeline)?;
-        self.translate_cleaned_output(
-            &input.request,
-            &mut output,
-            false,
-            cancel.as_ref(),
-            &progress,
-        )
-        .await?;
-        progress(CleaningProgress {
-            stage: BrowserJobStage::Packaging,
-            overall_progress: Some(0.98),
-            current: None,
-            total: None,
-            message: "Packaging translated browser result".to_owned(),
-        });
-        Ok(output)
-    }
-
-    async fn retranslate(
-        &self,
-        input: RetranslationInput,
-        cancel: Arc<AtomicBool>,
-        progress: CleaningProgressSink,
-    ) -> std::result::Result<RetranslationOutput, CleaningError> {
-        let mut output = CleaningOutput {
-            clean_image: Vec::new(),
-            clean_image_mime_type: input.base_result.clean_image_mime_type,
-            regions: input.base_result.regions,
-            warnings: input.base_result.warnings,
-            cache: BrowserCacheStatus {
-                detection_hit: true,
-                ocr_hit: true,
-                inpaint_hit: true,
-                translation_hit: false,
-            },
-        };
-        self.translate_cleaned_output(
-            &input.request,
-            &mut output,
-            true,
-            cancel.as_ref(),
-            &progress,
-        )
-        .await?;
-        progress(CleaningProgress {
-            stage: BrowserJobStage::Packaging,
-            overall_progress: Some(0.98),
-            current: None,
-            total: None,
-            message: "Packaging HSK retranslation".to_owned(),
-        });
-        Ok(RetranslationOutput {
-            regions: output.regions,
-            warnings: output.warnings,
-            cache: output.cache,
-        })
+        sink: JobUpdateSink,
+    ) -> std::result::Result<(), CleaningError> {
+        self.run_direct(input, cancel, sink).await
     }
 
     async fn lookup(
         &self,
         selected_text: String,
-        region: Option<BrowserRegion>,
+        region: Option<RegionLookupContext>,
     ) -> std::result::Result<LookupResult, CleaningError> {
         let control = self
             .hsk_control()
             .await
             .map_err(|error| CleaningError::new("RESOURCES_NOT_READY", format!("{error:#}")))?;
-        let proper_names = region
-            .as_ref()
-            .map(proper_names_from_region)
-            .unwrap_or_default();
-        let context = region.as_ref().map(|region| ControlLookupRegion {
-            displayed_chinese: region.displayed_chinese.clone(),
-            faithful_chinese: region.faithful_chinese.clone(),
-            source_english: region.source_english.clone(),
-        });
+        let (proper_names, context) = match region {
+            Some(region) => (
+                region.proper_names,
+                Some(ControlLookupRegion {
+                    displayed_chinese: region.displayed_chinese,
+                    base_chinese: region.base_chinese,
+                    source_english: region.source_english,
+                }),
+            ),
+            None => (Vec::new(), None),
+        };
         Ok(browser_lookup_result(control.lookup_with_region_context(
             &selected_text,
             &proper_names,
@@ -561,413 +960,1698 @@ impl CleaningPipeline for KoharuPipeline {
     }
 
     fn resources_ready(&self) -> bool {
-        self.resources
-            .as_ref()
-            .is_ok_and(TranslationResourcePaths::all_present)
+        self.resident.get().is_some() && self.hsk_control.get().is_some()
     }
 }
 
-struct RegionRewriteState<'a> {
-    id: String,
-    reading_order: u32,
-    source_english: String,
-    faithful_chinese: String,
-    proper_names: Vec<ProperName>,
-    correction: hsk_control::CorrectionLoop<'a>,
-    current_chinese: Option<String>,
-    validator_feedback: Vec<HskValidatorFeedback>,
-    preservation_feedback: Vec<String>,
-    final_report: Option<ValidationReport>,
-    failed: bool,
+struct ResidentState {
+    app: Arc<App>,
+    detector: Mutex<PpOcrV5TextDetector>,
+    ocr: Mutex<EnglishPpOcrV5>,
 }
 
-async fn translate_regions_with(
-    translator: &(dyn PageTranslationModel + Send + Sync),
-    control: &HskControl,
+impl ResidentState {
+    async fn load(
+        runtime_root: PathBuf,
+        app_state_root: PathBuf,
+        resources: ResidentResourcePaths,
+    ) -> Result<Self> {
+        koharu_runtime::require_hskify_cuda_target()
+            .context("resident model load requires the exact Hskify CUDA target")?;
+
+        let runtime = Arc::new(
+            RuntimeManager::new(&runtime_root, ComputePolicy::CudaRequired)
+                .context("initialize resident model runtime")?,
+        );
+        runtime
+            .prepare()
+            .await
+            .context("prepare resident model runtime")?;
+        let mut config = AppConfig::default();
+        config.data.path = utf8_path(app_state_root)?;
+        let app = Arc::new(
+            App::new(config, runtime.clone(), false, env!("CARGO_PKG_VERSION"))
+                .context("initialize resident application model state")?,
+        );
+        let detector_model = resources.path(DETECTOR_MODEL_ID)?.to_path_buf();
+        let ocr_config = resources.path(OCR_CONFIG_ID)?.to_path_buf();
+        let ocr_model = resources.path(OCR_MODEL_ID)?.to_path_buf();
+        let translation_model = resources.path(TRANSLATION_MODEL_ID)?.to_path_buf();
+        let detector_future = async move {
+            tokio::task::spawn_blocking(move || PpOcrV5TextDetector::load(&detector_model))
+                .await
+                .context("join resident PP-OCRv5 detector loader")?
+        };
+        let ocr_future = async move {
+            tokio::task::spawn_blocking(move || EnglishPpOcrV5::load(&ocr_model, &ocr_config))
+                .await
+                .context("join resident English PP-OCRv5 loader")?
+        };
+        let llm_future = app.llm.load_local_file_with_threads(
+            HSK_TRANSLATION_MODEL,
+            translation_model,
+            BROWSER_QWEN_INFERENCE_THREADS,
+        );
+        let (detector, ocr, ()) = tokio::try_join!(detector_future, ocr_future, llm_future)
+            .context("load resident CUDA models")?;
+        Ok(Self {
+            app,
+            detector: Mutex::new(detector),
+            ocr: Mutex::new(ocr),
+        })
+    }
+}
+
+fn utf8_path(path: PathBuf) -> Result<Utf8PathBuf> {
+    Utf8PathBuf::from_path_buf(path).map_err(|path| anyhow!("path is not valid UTF-8: {path:?}"))
+}
+
+#[derive(Debug)]
+struct PreparedRegion {
+    id: String,
+    candidate: Candidate,
+    source_english: String,
+    ocr_confidence: f32,
+    reading_order: u32,
+    prediction: PpOcrPrediction,
+    patch: PatchPng,
+    visible: bool,
+    translation_queued_at: tokio::time::Instant,
+}
+
+#[derive(Debug)]
+struct RecognizedLine {
+    candidate: Candidate,
+    prediction: PpOcrPrediction,
+    crop_bounds: PixelBounds,
+}
+
+struct PendingRepair {
+    cache_key: String,
+    region: PreparedRegion,
+    utterance: HskRepairUtterance,
+    preceding_utterances: Vec<HskPrecedingUtterance>,
+    state: TranslationState,
+    published: bool,
+}
+
+#[derive(Default)]
+struct RepairQueue {
+    jobs: VecDeque<PendingRepair>,
+    region_ids: HashSet<String>,
+    primary_phase_complete: bool,
+}
+
+impl RepairQueue {
+    fn enqueue(&mut self, job: PendingRepair) {
+        if self.region_ids.insert(job.region.id.clone()) {
+            self.jobs.push_back(job);
+        }
+    }
+
+    fn finish_primary_phase(&mut self) {
+        self.primary_phase_complete = true;
+    }
+
+    fn next(&mut self) -> Option<PendingRepair> {
+        if self.primary_phase_complete {
+            self.jobs.pop_front()
+        } else {
+            None
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.jobs.is_empty()
+    }
+}
+
+struct PreprocessingPool {
+    pool: ThreadPool,
+}
+
+impl PreprocessingPool {
+    fn new() -> Result<Self> {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(PREPROCESSING_THREADS)
+            .thread_name(|index| format!("hsk-browser-preprocess-{index}"))
+            .build()
+            .context("create dedicated six-thread browser preprocessing pool")?;
+        Ok(Self { pool })
+    }
+
+    fn start<T, F>(&self, task: F) -> oneshot::Receiver<Result<T>>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> Result<T> + Send + 'static,
+    {
+        let (send, receive) = oneshot::channel();
+        self.pool.spawn(move || {
+            let _ = send.send(task());
+        });
+        receive
+    }
+
+    async fn run<T, F>(&self, task: F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> Result<T> + Send + 'static,
+    {
+        self.start(task)
+            .await
+            .context("browser preprocessing worker stopped before returning its result")?
+    }
+
+    #[cfg(test)]
+    fn thread_count(&self) -> usize {
+        self.pool.current_num_threads()
+    }
+}
+
+struct TileBatchTask {
+    tiles: Vec<Tile>,
+    receive: oneshot::Receiver<Result<Vec<DynamicImage>>>,
+}
+
+impl TileBatchTask {
+    fn start(
+        preprocessing: &PreprocessingPool,
+        source: Arc<DynamicImage>,
+        tiles: Vec<Tile>,
+    ) -> Self {
+        let tiles_for_crops = tiles.clone();
+        let receive = preprocessing.start(move || {
+            Ok(tiles_for_crops
+                .iter()
+                .map(|tile| source.crop_imm(tile.x, tile.y, tile.width, tile.height))
+                .collect::<Vec<_>>())
+        });
+        Self { tiles, receive }
+    }
+
+    async fn finish(self) -> Result<(Vec<Tile>, Vec<DynamicImage>)> {
+        let images = self
+            .receive
+            .await
+            .context("browser preprocessing worker stopped before returning detector crops")??;
+        Ok((self.tiles, images))
+    }
+}
+
+fn tiles_start_with(remaining: &[Tile], prepared: &[Tile]) -> bool {
+    !prepared.is_empty()
+        && prepared.len() <= remaining.len()
+        && remaining
+            .iter()
+            .zip(prepared)
+            .all(|(left, right)| left.id == right.id)
+}
+
+fn global_preprocessing_pool() -> Result<Arc<PreprocessingPool>> {
+    match PREPROCESSING_POOL.get_or_init(|| {
+        PreprocessingPool::new()
+            .map(Arc::new)
+            .map_err(|error| format!("{error:#}"))
+    }) {
+        Ok(pool) => Ok(pool.clone()),
+        Err(error) => bail!("{error}"),
+    }
+}
+
+async fn ocr_batch(
+    resident: &ResidentState,
+    source: Arc<DynamicImage>,
+    candidates: &mut Vec<Candidate>,
     request: &BrowserJobRequest,
-    regions: &mut [BrowserRegion],
-    reuse_faithful: bool,
-    cancel: &AtomicBool,
-    progress: &CleaningProgressSink,
-) -> Result<Vec<BrowserWarning>> {
-    check_translation_cancelled(cancel)?;
-    if regions.is_empty() {
+    sink: &JobUpdateSink,
+    cancel: Arc<AtomicBool>,
+    cuda_scheduler: &Arc<CudaScheduler>,
+    preprocessing: &Arc<PreprocessingPool>,
+) -> std::result::Result<Vec<RecognizedLine>, CleaningError> {
+    let (image_width, image_height) = source.dimensions();
+    if candidates.is_empty() {
         return Ok(Vec::new());
     }
-
-    if !reuse_faithful {
-        progress(CleaningProgress {
-            stage: BrowserJobStage::Translating,
-            overall_progress: Some(0.62),
-            current: None,
-            total: None,
-            message: "Translating the full page faithfully with local Qwen".to_owned(),
-        });
-        let faithful_request = FaithfulPageRequest {
-            regions: regions
-                .iter()
-                .map(|region| FaithfulOcrRegion {
-                    id: region.id.clone(),
-                    kind: faithful_region_kind(region.kind),
-                    reading_order: region.reading_order,
-                    source_english: region.source_english.clone(),
-                })
-                .collect(),
-            preceding_context: request
-                .preceding_context
-                .as_deref()
-                .unwrap_or_default()
-                .iter()
-                .map(|context| PrecedingPageContext {
-                    source_english: context.source_english.clone(),
-                    chinese: context.chinese.clone(),
-                })
-                .collect(),
-            // Browser mode currently has no evidence-backed name detector.
-            // Never manufacture protected names from capitalization alone.
-            protected_names: Vec::<ProtectedName>::new(),
-        };
-        let faithful = translator.faithful(&faithful_request, cancel).await?;
-        validate_faithful_coverage(regions, &faithful)?;
-        for (region, translation) in regions.iter_mut().zip(faithful) {
-            region.faithful_chinese = canonicalize_mainland_question_particles(&translation.text);
-        }
-    } else if regions
-        .iter()
-        .any(|region| region.faithful_chinese.trim().is_empty())
-    {
-        bail!("cached retranslation input is missing faithful Chinese");
+    cancellation_boundary(cancel.as_ref())?;
+    if sink.is_cancelled() {
+        return Err(CleaningError::cancelled());
     }
-    check_translation_cancelled(cancel)?;
+    let viewport = sink.viewport();
+    candidates.sort_by(|left, right| {
+        let left_visible = viewport.active
+            && left.bubble_rect.intersects_viewport(
+                &viewport.visible_rects,
+                image_width,
+                image_height,
+            );
+        let right_visible = viewport.active
+            && right.bubble_rect.intersects_viewport(
+                &viewport.visible_rects,
+                image_width,
+                image_height,
+            );
+        right_visible.cmp(&left_visible).then_with(|| {
+            reading_order_key(
+                left.text_rect,
+                image_width,
+                image_height,
+                request.settings.reading_direction,
+            )
+            .cmp(&reading_order_key(
+                right.text_rect,
+                image_width,
+                image_height,
+                request.settings.reading_direction,
+            ))
+        })
+    });
+    let count = OCR_REGION_BATCH_SIZE.min(candidates.len());
+    let candidate_chunk = candidates.drain(..count).collect::<Vec<_>>();
+    let admission_viewport = sink.viewport();
+    let cuda_priority = if admission_viewport.active
+        && candidate_chunk.iter().any(|candidate| {
+            candidate.bubble_rect.intersects_viewport(
+                &admission_viewport.visible_rects,
+                image_width,
+                image_height,
+            )
+        }) {
+        CudaPriority::Visible
+    } else {
+        CudaPriority::Offscreen
+    };
+    let source_for_crops = source.clone();
+    let candidates_for_crops = candidate_chunk.clone();
+    let prepared_crops = preprocessing
+        .run(move || {
+            Ok(candidates_for_crops
+                .iter()
+                .map(|candidate| {
+                    let bounds = ocr_crop_rect(candidate, image_width, image_height)
+                        .pixel_bounds(image_width, image_height);
+                    (
+                        source_for_crops.crop_imm(bounds.x, bounds.y, bounds.width, bounds.height),
+                        bounds,
+                    )
+                })
+                .collect::<Vec<_>>())
+        })
+        .await
+        .context("prepare OCR crops on the browser preprocessing pool")
+        .map_err(CleaningError::pipeline)?;
+    let (crops, crop_bounds): (Vec<_>, Vec<_>) = prepared_crops.into_iter().unzip();
+    cancellation_boundary(cancel.as_ref())?;
+    let cuda_permit = cuda_scheduler
+        .acquire(cuda_priority, cancel.clone())
+        .await
+        .map_err(cuda_admission_error)?;
+    let predictions = {
+        let mut ocr = resident
+            .ocr
+            .lock()
+            .map_err(|_| CleaningError::new("MODEL_STATE_FAILED", "OCR model lock poisoned."))?;
+        ocr.recognize_regions(&crops)
+            .context("run batched CUDA English PP-OCRv5 recognition")
+            .map_err(CleaningError::pipeline)?
+    };
+    drop(cuda_permit);
+    cancellation_boundary(cancel.as_ref())?;
+    if predictions.len() != candidate_chunk.len() {
+        return Err(CleaningError::new(
+            "OCR_FAILED",
+            "OCR returned an incomplete region batch.",
+        ));
+    }
+    Ok(candidate_chunk
+        .into_iter()
+        .zip(predictions)
+        .zip(crop_bounds)
+        .filter(|((candidate, prediction), _)| {
+            let _ = candidate.kind;
+            accept_english_ocr_line(prediction.confidence, &prediction.text)
+        })
+        .map(|((candidate, prediction), crop_bounds)| RecognizedLine {
+            candidate,
+            prediction,
+            crop_bounds,
+        })
+        .collect())
+}
 
-    let selected_level = ControlHskLevel::new(u8::from(request.settings.hsk_level))?;
-    let mut states = regions
+async fn prepare_grouped_regions(
+    source: Arc<DynamicImage>,
+    lines: Vec<RecognizedLine>,
+    request: &BrowserJobRequest,
+    sink: &JobUpdateSink,
+    preprocessing: &Arc<PreprocessingPool>,
+) -> std::result::Result<Vec<PreparedRegion>, CleaningError> {
+    if lines.is_empty() {
+        return Ok(Vec::new());
+    }
+    let (image_width, image_height) = source.dimensions();
+    let groups = group_recognized_lines(lines, request.settings.reading_direction);
+    let source_for_patches = source.clone();
+    let prepared_groups = preprocessing
+        .run(move || {
+            let grouped_sources = groups
+                .iter()
+                .map(|group| grouped_source_english(group))
+                .collect::<Vec<_>>();
+            let credit_context = grouped_sources
+                .iter()
+                .any(|text| looks_like_credit_context(text));
+            groups
+                .into_iter()
+                .zip(grouped_sources)
+                .map(|(group, source_english)| {
+                    let candidate = merge_group_candidate(&group, image_width, image_height);
+                    let total_weight = group
+                        .iter()
+                        .map(|line| line.prediction.text.chars().count().max(1))
+                        .sum::<usize>();
+                    let ocr_confidence = group
+                        .iter()
+                        .map(|line| {
+                            line.prediction.confidence.clamp(0.0, 1.0)
+                                * line.prediction.text.chars().count().max(1) as f32
+                        })
+                        .sum::<f32>()
+                        / total_weight.max(1) as f32;
+                    if !accept_english_ocr(group[0].candidate.kind, ocr_confidence, &source_english)
+                        || (credit_context && looks_like_isolated_credit_name(&source_english))
+                    {
+                        return Ok(None);
+                    }
+                    let mut prediction = group
+                        .iter()
+                        .max_by_key(|line| line.prediction.text.chars().count())
+                        .expect("recognized group is non-empty")
+                        .prediction
+                        .clone();
+                    let inks = group
+                        .iter()
+                        .filter_map(|line| {
+                            line.prediction.ink_mask.as_ref().map(|mask| PlacedInkMask {
+                                mask,
+                                crop_bounds: line.crop_bounds,
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    let patch = make_cleanup_patch(
+                        source_for_patches.as_ref(),
+                        candidate.text_rect,
+                        candidate.confirmed_bubble_rect,
+                        &inks,
+                    )?;
+                    prediction.text.clone_from(&source_english);
+                    prediction.confidence = ocr_confidence;
+                    prediction.ink_mask = None;
+                    Ok(Some((
+                        candidate,
+                        source_english,
+                        ocr_confidence,
+                        prediction,
+                        patch,
+                    )))
+                })
+                .collect::<Result<Vec<_>>>()
+        })
+        .await
+        .context("pack cleanup patches on the browser preprocessing pool")
+        .map_err(CleaningError::pipeline)?;
+    let latest_viewport = sink.viewport();
+    let translation_queued_at = tokio::time::Instant::now();
+    Ok(prepared_groups
+        .into_iter()
+        .flatten()
+        .map(
+            |(candidate, source_english, ocr_confidence, prediction, patch)| {
+                let visible = latest_viewport.active
+                    && candidate.bubble_rect.intersects_viewport(
+                        &latest_viewport.visible_rects,
+                        image_width,
+                        image_height,
+                    );
+                let reading_order = reading_order_key(
+                    candidate.text_rect,
+                    image_width,
+                    image_height,
+                    request.settings.reading_direction,
+                );
+                PreparedRegion {
+                    id: stable_region_id(&request.source_sha256, candidate.text_rect),
+                    candidate,
+                    source_english,
+                    ocr_confidence,
+                    reading_order,
+                    prediction,
+                    patch,
+                    visible,
+                    translation_queued_at,
+                }
+            },
+        )
+        .collect())
+}
+
+fn grouped_source_english(group: &[RecognizedLine]) -> String {
+    group
         .iter()
-        .map(|region| {
-            let proper_names = proper_names_from_region(region);
-            let faithful_chinese =
-                canonicalize_mainland_question_particles(&region.faithful_chinese);
-            RegionRewriteState {
-                id: region.id.clone(),
-                reading_order: region.reading_order,
-                source_english: region.source_english.clone(),
-                faithful_chinese: faithful_chinese.clone(),
-                correction: control.correction_loop(
-                    selected_level,
-                    &faithful_chinese,
-                    &proper_names,
-                ),
-                proper_names,
-                current_chinese: None,
-                validator_feedback: Vec::new(),
-                preservation_feedback: Vec::new(),
-                final_report: None,
-                failed: false,
+        .map(|line| compact_ocr_text(&line.prediction.text))
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn group_recognized_lines(
+    mut lines: Vec<RecognizedLine>,
+    reading_direction: ReadingDirection,
+) -> Vec<Vec<RecognizedLine>> {
+    lines.sort_by(|left, right| {
+        left.candidate
+            .text_rect
+            .y0
+            .total_cmp(&right.candidate.text_rect.y0)
+            .then_with(|| match reading_direction {
+                ReadingDirection::Rtl => right
+                    .candidate
+                    .text_rect
+                    .x0
+                    .total_cmp(&left.candidate.text_rect.x0),
+                ReadingDirection::Auto | ReadingDirection::Ltr => left
+                    .candidate
+                    .text_rect
+                    .x0
+                    .total_cmp(&right.candidate.text_rect.x0),
+            })
+    });
+    let mut groups = Vec::<Vec<RecognizedLine>>::new();
+    for line in lines {
+        let destination = groups
+            .iter()
+            .enumerate()
+            .filter(|(_, group)| {
+                group.len() < 8
+                    && group
+                        .last()
+                        .is_some_and(|previous| lines_belong_to_same_block(previous, &line))
+            })
+            .min_by(|(_, left), (_, right)| {
+                let left_gap = line.candidate.text_rect.y0
+                    - left
+                        .last()
+                        .expect("filtered group is non-empty")
+                        .candidate
+                        .text_rect
+                        .y1;
+                let right_gap = line.candidate.text_rect.y0
+                    - right
+                        .last()
+                        .expect("filtered group is non-empty")
+                        .candidate
+                        .text_rect
+                        .y1;
+                left_gap.total_cmp(&right_gap)
+            })
+            .map(|(index, _)| index);
+        if let Some(index) = destination {
+            groups[index].push(line);
+        } else {
+            groups.push(vec![line]);
+        }
+    }
+    groups
+}
+
+fn lines_belong_to_same_block(previous: &RecognizedLine, next: &RecognizedLine) -> bool {
+    let upper = previous.candidate.text_rect;
+    let lower = next.candidate.text_rect;
+    let smaller_height = upper.height().min(lower.height()).max(1.0);
+    let larger_height = upper.height().max(lower.height()).max(1.0);
+    let vertical_gap = lower.y0 - upper.y1;
+    if vertical_gap < -smaller_height * 0.35 || vertical_gap > (larger_height * 2.2).max(24.0) {
+        return false;
+    }
+    if previous
+        .prediction
+        .text
+        .trim_end()
+        .ends_with(['.', '!', '?', '…'])
+        && vertical_gap > larger_height * 0.8
+    {
+        return false;
+    }
+    let horizontal_overlap = (upper.x1.min(lower.x1) - upper.x0.max(lower.x0)).max(0.0);
+    let overlap_ratio = horizontal_overlap / upper.width().min(lower.width()).max(1.0);
+    let (upper_center, _) = upper.center();
+    let (lower_center, _) = lower.center();
+    let center_distance = (upper_center - lower_center).abs();
+    let horizontally_aligned =
+        overlap_ratio >= 0.20 || center_distance <= upper.width().max(lower.width()) * 0.30;
+    horizontally_aligned
+        && color_distance(previous.prediction.text_color, next.prediction.text_color) <= 180
+}
+
+fn color_distance(left: [u8; 3], right: [u8; 3]) -> u16 {
+    left.into_iter()
+        .zip(right)
+        .map(|(left, right)| u16::from(left.abs_diff(right)))
+        .sum()
+}
+
+fn merge_group_candidate(
+    group: &[RecognizedLine],
+    image_width: u32,
+    image_height: u32,
+) -> Candidate {
+    let first = group.first().expect("recognized group is non-empty");
+    let text_rect = group
+        .iter()
+        .skip(1)
+        .fold(first.candidate.text_rect, |rect, line| {
+            rect.union(line.candidate.text_rect)
+        });
+    let bubble_rect = group
+        .iter()
+        .skip(1)
+        .fold(first.candidate.bubble_rect, |rect, line| {
+            rect.union(line.candidate.bubble_rect)
+        });
+    let layout_padding = (text_rect.height().min(text_rect.width()) * 0.08).clamp(4.0, 20.0);
+    let layout_rect =
+        bubble_rect.union(text_rect.expand(layout_padding, image_width, image_height));
+    Candidate {
+        kind: first.candidate.kind,
+        text_rect,
+        bubble_rect: layout_rect,
+        confirmed_bubble_rect: layout_rect,
+        detector_confidence: group
+            .iter()
+            .map(|line| line.candidate.detector_confidence)
+            .fold(0.0, f32::max),
+    }
+}
+
+fn prioritize_pending_translation(
+    regions: &mut [PreparedRegion],
+    sink: &JobUpdateSink,
+    image_width: u32,
+    image_height: u32,
+) {
+    let viewport = sink.viewport();
+    for region in regions.iter_mut() {
+        region.visible = viewport.active
+            && region.candidate.bubble_rect.intersects_viewport(
+                &viewport.visible_rects,
+                image_width,
+                image_height,
+            );
+    }
+    regions.sort_by(|left, right| {
+        right.visible.cmp(&left.visible).then_with(|| {
+            if left.visible {
+                left.reading_order.cmp(&right.reading_order)
+            } else {
+                left.translation_queued_at
+                    .cmp(&right.translation_queued_at)
+                    .then_with(|| left.reading_order.cmp(&right.reading_order))
             }
         })
-        .collect::<Vec<_>>();
-    let mut pending = (0..states.len()).collect::<Vec<_>>();
+    });
+}
 
-    for attempt in 0_u8..=hsk_control::MAX_CORRECTION_ATTEMPTS {
-        if pending.is_empty() {
-            break;
+fn prepared_region_priority(
+    regions: &[PreparedRegion],
+    sink: &JobUpdateSink,
+    image_width: u32,
+    image_height: u32,
+) -> CudaPriority {
+    let viewport = sink.viewport();
+    if viewport.active
+        && regions.iter().any(|region| {
+            region.candidate.bubble_rect.intersects_viewport(
+                &viewport.visible_rects,
+                image_width,
+                image_height,
+            )
+        })
+    {
+        CudaPriority::Visible
+    } else {
+        CudaPriority::Offscreen
+    }
+}
+
+fn normalized_rects_intersect(left: &NormalizedRect, right: &NormalizedRect) -> bool {
+    left.x < right.x + right.width
+        && right.x < left.x + left.width
+        && left.y < right.y + right.height
+        && right.y < left.y + left.height
+}
+
+fn cuda_admission_error(error: CudaAdmissionError) -> CleaningError {
+    match error {
+        CudaAdmissionError::Cancelled => CleaningError::cancelled(),
+        queue_error @ CudaAdmissionError::QueueFull { .. } => {
+            CleaningError::new("CUDA_QUEUE_FULL", queue_error.to_string())
         }
-        check_translation_cancelled(cancel)?;
-        progress(CleaningProgress {
-            stage: BrowserJobStage::HskRewriting,
-            overall_progress: Some(0.72 + f32::from(attempt) * 0.08),
-            current: Some(u32::from(attempt) + 1),
-            total: Some(u32::from(hsk_control::MAX_CORRECTION_ATTEMPTS) + 1),
-            message: if attempt == 0 {
-                format!(
-                    "Rewriting the full page for cumulative HSK {} vocabulary",
-                    request.settings.hsk_level as u8
-                )
-            } else {
-                format!("Correcting validator failures (attempt {attempt} of 2)")
-            },
-        });
-        let rewrite_request = HskRewritePageRequest {
-            requested_level: u8::from(request.settings.hsk_level),
-            correction_attempt: attempt,
-            final_attempt: attempt == hsk_control::MAX_CORRECTION_ATTEMPTS,
-            regions: pending
-                .iter()
-                .map(|index| {
-                    let state = &states[*index];
-                    HskRewriteRegion {
-                        id: state.id.clone(),
-                        reading_order: state.reading_order,
-                        source_english: state.source_english.clone(),
-                        faithful_chinese: state.faithful_chinese.clone(),
-                        current_chinese: state.current_chinese.clone(),
-                        protected_names: state
-                            .proper_names
-                            .iter()
-                            .map(|name| name.text.clone())
-                            .collect(),
-                        validator_feedback: state.validator_feedback.clone(),
-                        preservation_feedback: state.preservation_feedback.clone(),
-                    }
-                })
-                .collect(),
-        };
-        let rewrites = translator.rewrite(&rewrite_request, cancel).await?;
-        validate_rewrite_coverage(&rewrite_request, &rewrites)?;
-        check_translation_cancelled(cancel)?;
-        progress(CleaningProgress {
-            stage: BrowserJobStage::HskValidating,
-            overall_progress: Some(0.78 + f32::from(attempt) * 0.08),
-            current: Some(u32::from(attempt) + 1),
-            total: Some(u32::from(hsk_control::MAX_CORRECTION_ATTEMPTS) + 1),
-            message: "Validating HSK vocabulary and preservation deterministically".to_owned(),
-        });
+    }
+}
 
-        let mut retry = Vec::new();
-        for (state_index, rewrite) in pending.iter().copied().zip(rewrites) {
-            let state = &mut states[state_index];
-            let candidate = canonicalize_mainland_question_particles(&rewrite.text);
-            state.current_chinese = Some(candidate.clone());
-            match state.correction.evaluate(&candidate) {
-                CorrectionOutcome::Accepted { report } => {
-                    state.final_report = Some(report);
-                }
-                CorrectionOutcome::Retry {
-                    report,
-                    preservation_violations,
-                    ..
-                } => {
-                    state.validator_feedback = validator_feedback(&report);
-                    state.preservation_feedback = preservation_feedback(&preservation_violations);
-                    retry.push(state_index);
-                }
-                CorrectionOutcome::Failed {
-                    report,
-                    preservation_violations,
-                } => {
-                    state.validator_feedback = validator_feedback(&report);
-                    state.preservation_feedback = preservation_feedback(&preservation_violations);
-                    state.final_report = Some(report);
-                    state.failed = true;
-                }
-                CorrectionOutcome::Terminated => {
-                    bail!("HSK correction loop terminated before producing a final report")
-                }
+fn compact_ocr_text(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+const NARRATION_SFX_WORDS: &[&str] = &[
+    "ah", "bam", "bang", "boom", "bump", "clang", "clank", "crack", "crash", "ding", "gasp", "ha",
+    "haha", "hiss", "kaboom", "knock", "oh", "pow", "ring", "slam", "snap", "splash", "swoosh",
+    "thud", "thump", "ugh", "wham", "whoosh", "zap",
+];
+
+fn accept_english_ocr(_kind: CandidateKind, confidence: f32, text: &str) -> bool {
+    if !accept_english_ocr_line(confidence, text) {
+        return false;
+    }
+    let text = text.trim();
+    let lowercase = text.to_lowercase();
+    let words = lowercase
+        .split(|character: char| !is_latin_letter(character))
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>();
+    !contains_credit_or_release_metadata(&words)
+        && !looks_like_long_ocr_gibberish(text)
+        && !looks_like_low_confidence_ocr_gibberish(confidence, text, &words)
+        && is_confident_english_story_text(text)
+}
+
+fn accept_english_ocr_line(confidence: f32, text: &str) -> bool {
+    if !confidence.is_finite() || confidence < MIN_OCR_CONFIDENCE {
+        return false;
+    }
+    let text = text.trim();
+    if text.is_empty()
+        || text.contains('\u{fffd}')
+        || text.to_ascii_uppercase().contains("<UNK>")
+        || text.chars().any(char::is_control)
+        || looks_like_compact_alphanumeric_noise(text)
+    {
+        return false;
+    }
+    let alphabetic = text
+        .chars()
+        .filter(|character| character.is_alphabetic())
+        .collect::<Vec<_>>();
+    !alphabetic.is_empty()
+        && alphabetic
+            .iter()
+            .all(|character| is_latin_letter(*character))
+}
+
+fn looks_like_compact_alphanumeric_noise(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.chars().any(char::is_whitespace)
+        || trimmed
+            .chars()
+            .any(|character| !character.is_ascii_alphanumeric())
+    {
+        return false;
+    }
+    let letters = trimmed
+        .chars()
+        .filter(|character| character.is_ascii_alphabetic())
+        .count();
+    let digits = trimmed
+        .chars()
+        .filter(|character| character.is_ascii_digit())
+        .count();
+    trimmed.len() <= 10 && letters >= 3 && digits >= 2
+}
+
+fn looks_like_long_ocr_gibberish(text: &str) -> bool {
+    const STRUCTURAL_ENGLISH_WORDS: &[&str] = &[
+        "a", "an", "and", "are", "as", "at", "be", "been", "but", "by", "did", "do", "does", "for",
+        "from", "had", "has", "have", "he", "her", "him", "his", "i", "if", "in", "is", "it", "me",
+        "my", "not", "of", "on", "or", "she", "that", "the", "their", "them", "they", "this", "to",
+        "us", "was", "we", "were", "with", "you", "your",
+    ];
+    let lowercase = text.to_lowercase();
+    let words = lowercase
+        .split(|character: char| !is_latin_letter(character))
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>();
+    let structural_words = words
+        .iter()
+        .filter(|word| STRUCTURAL_ENGLISH_WORDS.contains(word))
+        .count();
+    words.len() >= 8 && structural_words.saturating_mul(5) < words.len()
+}
+
+fn looks_like_low_confidence_ocr_gibberish(confidence: f32, text: &str, words: &[&str]) -> bool {
+    if confidence >= 0.75 {
+        return false;
+    }
+    const STRUCTURAL_ENGLISH_WORDS: &[&str] = &[
+        "a", "an", "and", "are", "as", "at", "be", "been", "but", "by", "did", "do", "does", "for",
+        "from", "had", "has", "have", "he", "her", "him", "his", "i", "if", "in", "is", "it", "me",
+        "my", "not", "of", "on", "or", "she", "that", "the", "their", "them", "they", "this", "to",
+        "us", "was", "we", "were", "with", "you", "your",
+    ];
+    let structural_words = words
+        .iter()
+        .filter(|word| STRUCTURAL_ENGLISH_WORDS.contains(word))
+        .count();
+    (words.len() >= 4 && structural_words == 0)
+        || (confidence < 0.70
+            && words.len() <= 2
+            && words.iter().any(|word| word.chars().count() >= 6)
+            && !text.trim_end().ends_with(['.', '!', '?', '…']))
+}
+
+fn is_confident_english_story_text(text: &str) -> bool {
+    let lowercase = text.to_lowercase();
+    if lowercase.contains("http")
+        || lowercase.contains("www.")
+        || lowercase.contains(".com")
+        || lowercase.contains(".net")
+        || lowercase.contains('@')
+    {
+        return false;
+    }
+    let compact_identifier = text
+        .trim()
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric())
+        && text
+            .chars()
+            .filter(|character| character.is_ascii_alphabetic())
+            .count()
+            >= 2
+        && text
+            .chars()
+            .filter(|character| character.is_ascii_digit())
+            .count()
+            >= 2;
+    if compact_identifier {
+        return true;
+    }
+    let words = lowercase
+        .split(|character: char| !is_latin_letter(character))
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>();
+    if words.is_empty()
+        || words.iter().all(|word| NARRATION_SFX_WORDS.contains(word))
+        || looks_like_short_non_english_ocr(&words)
+        || looks_like_fragmented_metadata_ocr(&words)
+        || contains_credit_or_release_metadata(&words)
+    {
+        return false;
+    }
+    if words.len() == 1 {
+        return text.trim_end().ends_with(['.', '!', '?', '…']);
+    }
+    is_short_quoted_narration(text, &words)
+        || words.len() >= 2
+        || text.trim_end().ends_with(['.', '!', '?', '…'])
+}
+
+fn looks_like_short_non_english_ocr(words: &[&str]) -> bool {
+    const SHORT_ENGLISH_PHRASES: &[(&str, &str)] = &[
+        ("do", "it"),
+        ("go", "on"),
+        ("i", "am"),
+        ("i", "do"),
+        ("i", "go"),
+        ("is", "it"),
+        ("it", "is"),
+        ("no", "it"),
+        ("to", "me"),
+        ("we", "do"),
+        ("we", "go"),
+    ];
+    words.len() == 2
+        && words.iter().all(|word| word.chars().count() <= 2)
+        && !SHORT_ENGLISH_PHRASES.contains(&(words[0], words[1]))
+}
+
+fn is_short_quoted_narration(text: &str, words: &[&str]) -> bool {
+    if words.len() < 2 {
+        return false;
+    }
+    let trimmed = text.trim();
+    let Some(opening) = trimmed.chars().next() else {
+        return false;
+    };
+    let closing = match opening {
+        '"' => '"',
+        '\'' => '\'',
+        '“' => '”',
+        '‘' => '’',
+        _ => return false,
+    };
+    let Some(inner) = trimmed
+        .strip_prefix(opening)
+        .and_then(|value| value.strip_suffix(closing))
+    else {
+        return false;
+    };
+    inner
+        .trim_end()
+        .chars()
+        .last()
+        .is_some_and(|character| matches!(character, '.' | '!' | '?' | '…'))
+}
+
+fn contains_credit_or_release_metadata(words: &[&str]) -> bool {
+    const STRONG_METADATA_WORDS: &[&str] = &[
+        "chapter",
+        "chapters",
+        "copyright",
+        "credits",
+        "discord",
+        "edited",
+        "editor",
+        "episode",
+        "episodes",
+        "lettered",
+        "letterer",
+        "patreon",
+        "prologue",
+        "proofread",
+        "proofreader",
+        "redraw",
+        "redrawer",
+        "release",
+        "releases",
+        "scanlated",
+        "scanlation",
+        "scans",
+        "season",
+        "translated",
+        "translation",
+        "translator",
+        "typeset",
+        "typesetter",
+        "volume",
+    ];
+    const PRODUCTION_CREDIT_WORDS: &[&str] = &[
+        "art",
+        "background",
+        "color",
+        "colour",
+        "directing",
+        "editing",
+        "effect",
+        "effects",
+        "line",
+        "original",
+        "sketch",
+        "story",
+        "text",
+        "words",
+    ];
+    STRONG_METADATA_WORDS
+        .iter()
+        .any(|metadata| words.contains(metadata))
+        || words
+            .iter()
+            .filter(|word| PRODUCTION_CREDIT_WORDS.contains(word))
+            .take(2)
+            .count()
+            >= 2
+        || words.windows(2).any(|pair| {
+            matches!(
+                pair,
+                ["art" | "story" | "words", "by"] | ["fastest", "releases"] | ["read", "at"]
+            )
+        })
+}
+
+fn looks_like_credit_context(text: &str) -> bool {
+    let lowercase = text.to_lowercase();
+    let words = lowercase
+        .split(|character: char| !is_latin_letter(character))
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>();
+    contains_credit_or_release_metadata(&words)
+        || lowercase.contains("discord")
+        || lowercase.contains("www.")
+        || lowercase.contains(".com")
+        || lowercase.contains(".net")
+}
+
+fn looks_like_isolated_credit_name(text: &str) -> bool {
+    const STRUCTURAL_ENGLISH_WORDS: &[&str] = &[
+        "a", "an", "and", "are", "as", "at", "by", "for", "from", "in", "is", "of", "on", "or",
+        "the", "to", "with",
+    ];
+    let trimmed = text.trim();
+    if trimmed.ends_with(['.', '!', '?', '…'])
+        || trimmed.chars().any(char::is_lowercase)
+        || trimmed
+            .chars()
+            .any(|character| !(character.is_alphabetic() || character.is_whitespace()))
+    {
+        return false;
+    }
+    let lowercase = trimmed.to_lowercase();
+    let words = lowercase
+        .split_whitespace()
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>();
+    (2..=4).contains(&words.len())
+        && words.iter().all(|word| word.chars().count() >= 3)
+        && !words
+            .iter()
+            .any(|word| STRUCTURAL_ENGLISH_WORDS.contains(word))
+}
+
+fn looks_like_fragmented_metadata_ocr(words: &[&str]) -> bool {
+    words.len() >= 5
+        && words
+            .iter()
+            .filter(|word| word.chars().count() <= 2)
+            .count()
+            * 5
+            >= words.len() * 3
+}
+
+fn hsk_utterance_kind(kind: CandidateKind) -> HskUtteranceKind {
+    match kind {
+        CandidateKind::StoryText => HskUtteranceKind::Dialogue,
+    }
+}
+
+fn is_latin_letter(character: char) -> bool {
+    character.is_ascii_alphabetic()
+        || matches!(
+            character as u32,
+            0x00c0..=0x00ff | 0x0100..=0x017f | 0x0180..=0x024f | 0x1e00..=0x1eff
+        )
+}
+
+fn stable_region_id(source_sha256: &str, rect: PixelRect) -> String {
+    let canonical = format!(
+        "hskify-region|{source_sha256}|{:.2}|{:.2}|{:.2}|{:.2}",
+        rect.x0, rect.y0, rect.x1, rect.y1
+    );
+    let digest = sha256_hex(canonical.as_bytes());
+    format!(
+        "{}-region-{}",
+        &source_sha256[..source_sha256.len().min(8)],
+        &digest[..16]
+    )
+}
+
+#[derive(Debug, Clone)]
+struct CachedTranslation {
+    base_chinese: String,
+    displayed_chinese: String,
+    pinyin: String,
+    report: ValidationReport,
+    repair_state: HskRepairState,
+}
+
+struct TranslationCacheEntry {
+    value: CachedTranslation,
+    bytes: usize,
+    last_used: u64,
+}
+
+struct TranslationCache {
+    entries: HashMap<String, TranslationCacheEntry>,
+    retained_bytes: usize,
+    clock: u64,
+    max_bytes: usize,
+}
+
+impl Default for TranslationCache {
+    fn default() -> Self {
+        Self {
+            entries: HashMap::new(),
+            retained_bytes: 0,
+            clock: 0,
+            max_bytes: TRANSLATION_CACHE_MAX_BYTES,
+        }
+    }
+}
+
+impl TranslationCache {
+    fn get(&mut self, key: &str) -> Option<CachedTranslation> {
+        self.clock = self.clock.saturating_add(1);
+        let entry = self.entries.get_mut(key)?;
+        entry.last_used = self.clock;
+        Some(entry.value.clone())
+    }
+
+    fn insert(&mut self, key: String, value: CachedTranslation) {
+        let bytes = translation_cache_bytes(&key, &value);
+        if bytes > self.max_bytes {
+            return;
+        }
+        if let Some(previous) = self.entries.remove(&key) {
+            self.retained_bytes = self.retained_bytes.saturating_sub(previous.bytes);
+        }
+        self.clock = self.clock.saturating_add(1);
+        self.retained_bytes = self.retained_bytes.saturating_add(bytes);
+        self.entries.insert(
+            key,
+            TranslationCacheEntry {
+                value,
+                bytes,
+                last_used: self.clock,
+            },
+        );
+        while self.retained_bytes > self.max_bytes {
+            let Some(oldest) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            if let Some(removed) = self.entries.remove(&oldest) {
+                self.retained_bytes = self.retained_bytes.saturating_sub(removed.bytes);
             }
         }
-        pending = retry;
+    }
+}
+
+fn translation_cache_bytes(key: &str, value: &CachedTranslation) -> usize {
+    let report = &value.report;
+    key.len()
+        .saturating_add(value.base_chinese.len())
+        .saturating_add(value.displayed_chinese.len())
+        .saturating_add(value.pinyin.len())
+        .saturating_add(report.normalized_text.len())
+        .saturating_add(report.cache_revision.len())
+        .saturating_add(
+            report
+                .violations
+                .iter()
+                .map(|violation| {
+                    violation.text.len().saturating_add(
+                        violation
+                            .suggested_words
+                            .iter()
+                            .map(String::len)
+                            .sum::<usize>(),
+                    )
+                })
+                .sum::<usize>(),
+        )
+        .saturating_add(
+            report
+                .exceptions
+                .iter()
+                .map(|exception| exception.text.len())
+                .sum::<usize>(),
+        )
+        .saturating_add(std::mem::size_of::<TranslationCacheEntry>())
+}
+
+struct TranslationState {
+    base_chinese: Option<String>,
+    displayed_chinese: Option<String>,
+    report: Option<ValidationReport>,
+    problems: Vec<String>,
+    meaning_valid: bool,
+    repair_state: HskRepairState,
+}
+
+impl TranslationState {
+    fn from_initial(
+        outcome: HskTranslationOutcome,
+        control: &HskControl,
+        level: ControlHskLevel,
+        proper_names: &[ProperName],
+    ) -> Self {
+        let excluded = outcome.is_excluded();
+        let mut problems = outcome.repair_problems();
+        let meaning_valid = outcome.issues.is_empty();
+        let base_chinese = nonempty_translation(outcome.text);
+        let report = base_chinese
+            .as_deref()
+            .map(|text| control.validate(text, level, proper_names));
+        if let Some(report) = &report {
+            append_validation_problems(&mut problems, report);
+        }
+        let valid = !excluded && problems.is_empty() && report.is_some();
+        Self {
+            displayed_chinese: valid.then(|| {
+                report
+                    .as_ref()
+                    .expect("valid translation has a validation report")
+                    .normalized_text
+                    .clone()
+            }),
+            base_chinese,
+            report,
+            problems,
+            meaning_valid,
+            repair_state: HskRepairState::NotNeeded,
+        }
     }
 
-    if !pending.is_empty() {
-        bail!("HSK correction loop exceeded its deterministic attempt bound");
+    fn from_cached(translation: CachedTranslation) -> Self {
+        let mut problems = Vec::new();
+        append_validation_problems(&mut problems, &translation.report);
+        Self {
+            base_chinese: Some(translation.base_chinese),
+            displayed_chinese: Some(translation.displayed_chinese),
+            report: Some(translation.report),
+            problems,
+            meaning_valid: true,
+            repair_state: translation.repair_state,
+        }
     }
 
-    let mut warnings = Vec::new();
-    for (region, state) in regions.iter_mut().zip(states) {
-        let report = if state.failed {
-            control.validate(&state.faithful_chinese, selected_level, &state.proper_names)
+    fn can_publish(&self) -> bool {
+        self.meaning_valid && self.base_chinese.is_some() && self.report.is_some()
+    }
+
+    fn initial_translation(&self) -> Option<CachedTranslation> {
+        if !self.can_publish() {
+            return None;
+        }
+        let report = self.report.clone()?;
+        Some(CachedTranslation {
+            base_chinese: self.base_chinese.clone()?,
+            displayed_chinese: report.normalized_text.clone(),
+            pinyin: String::new(),
+            repair_state: if self.problems.is_empty() {
+                HskRepairState::NotNeeded
+            } else {
+                HskRepairState::Pending
+            },
+            report,
+        })
+    }
+
+    fn apply_repair(
+        &mut self,
+        outcome: HskTranslationOutcome,
+        control: &HskControl,
+        level: ControlHskLevel,
+        proper_names: &[ProperName],
+    ) -> bool {
+        let mut problems = outcome.repair_problems();
+        let repaired_meaning_valid = outcome.issues.is_empty();
+        let repaired = nonempty_translation(outcome.text);
+        let report = repaired
+            .as_deref()
+            .filter(|_| repaired_meaning_valid)
+            .map(|repaired| control.validate(repaired, level, proper_names));
+        if let Some(report) = &report {
+            append_validation_problems(&mut problems, report);
+        }
+        self.apply_evaluated_repair(
+            repaired.filter(|_| repaired_meaning_valid),
+            report,
+            problems,
+        )
+    }
+
+    fn apply_evaluated_repair(
+        &mut self,
+        repaired: Option<String>,
+        report: Option<ValidationReport>,
+        problems: Vec<String>,
+    ) -> bool {
+        let had_usable_primary = self.can_publish();
+        let accepted = repaired.is_some() && report.is_some() && problems.is_empty();
+        if let (Some(repaired), Some(report)) = (repaired, report)
+            && (accepted || !had_usable_primary)
+        {
+            if !had_usable_primary {
+                self.base_chinese = Some(repaired);
+            }
+            self.displayed_chinese = Some(report.normalized_text.clone());
+            self.report = Some(report);
+            self.meaning_valid = true;
+        }
+        self.problems = problems;
+        self.repair_state = if accepted && self.can_publish() {
+            HskRepairState::Accepted
         } else {
-            state
-                .final_report
-                .context("HSK rewrite did not produce a final validation report")?
+            HskRepairState::Rejected
         };
-        region.faithful_chinese = state.faithful_chinese;
-        region.displayed_chinese =
-            canonicalize_mainland_question_particles(&report.normalized_text);
-        region.pinyin = control
-            .lookup(&region.displayed_chinese, &state.proper_names)
-            .tokens
-            .into_iter()
-            .filter_map(|token| (!token.pinyin.trim().is_empty()).then_some(token.pinyin))
-            .collect::<Vec<_>>()
-            .join(" ");
-        let exceptions = report
+        accepted && self.can_publish()
+    }
+
+    fn finish(mut self) -> Result<CachedTranslation> {
+        let displayed_chinese = self
+            .displayed_chinese
+            .take()
+            .or_else(|| {
+                self.report
+                    .as_ref()
+                    .map(|report| report.normalized_text.clone())
+            })
+            .filter(|text| !text.trim().is_empty())
+            .context("direct translation and its sole repair produced no Chinese text")?;
+        let base_chinese = self
+            .base_chinese
+            .take()
+            .unwrap_or_else(|| displayed_chinese.clone());
+        let report = self
+            .report
+            .take()
+            .context("translated Chinese is missing deterministic HSK validation")?;
+        Ok(CachedTranslation {
+            base_chinese,
+            displayed_chinese,
+            pinyin: String::new(),
+            report,
+            repair_state: self.repair_state,
+        })
+    }
+}
+
+fn nonempty_translation(text: Option<String>) -> Option<String> {
+    text.map(|text| text.trim().to_owned())
+        .filter(|text| !text.is_empty())
+}
+
+fn missing_translation_outcome(id: &str) -> HskTranslationOutcome {
+    use koharu_app::llm::HskTranslationIssue;
+    HskTranslationOutcome {
+        id: id.to_owned(),
+        text: None,
+        issues: vec![HskTranslationIssue::MissingLine],
+    }
+}
+
+fn append_validation_problems(problems: &mut Vec<String>, report: &ValidationReport) {
+    for violation in &report.violations {
+        let problem = format!(
+            "replace invalid or above-level token `{}` at {}..{}",
+            violation.text, violation.start_char, violation.end_char
+        );
+        if !problems.contains(&problem) {
+            problems.push(problem);
+        }
+    }
+}
+
+fn translation_context(request: &BrowserJobRequest) -> Vec<HskPrecedingUtterance> {
+    let context = request.preceding_context.as_deref().unwrap_or_default();
+    let start = context.len().saturating_sub(MAX_HSK_PRECEDING_UTTERANCES);
+    context[start..]
+        .iter()
+        .map(|utterance| HskPrecedingUtterance {
+            source_english: utterance.source_english.clone(),
+            chinese: utterance.chinese.clone(),
+        })
+        .collect()
+}
+
+fn translation_glossary(request: &BrowserJobRequest) -> Vec<HskProtectedName> {
+    request
+        .proper_name_glossary
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .map(|name| HskProtectedName {
+            source_english: name.source_english.clone(),
+            chinese: name.chinese.clone(),
+        })
+        .collect()
+}
+
+fn control_proper_names(names: &[HskProtectedName]) -> Vec<ProperName> {
+    names
+        .iter()
+        .map(|name| ProperName {
+            text: name.chinese.clone(),
+            reason: ProperNameReason::UnavoidableProperNoun,
+        })
+        .collect()
+}
+
+// Only an all-hit replay can skip the model. A partial hit regenerates every
+// numbered input so uncached siblings see the identical deterministic prompt.
+fn primary_generation_indices<T>(cache_results: &[Option<T>]) -> Vec<usize> {
+    if cache_results.iter().all(Option::is_some) {
+        Vec::new()
+    } else {
+        (0..cache_results.len()).collect()
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn translation_cache_key(
+    source_english: &str,
+    kind: HskUtteranceKind,
+    context: &[HskPrecedingUtterance],
+    protected_names: &[HskProtectedName],
+    hsk_level: u8,
+    model_id: &str,
+    model_revision: &str,
+    prompt_hash: &str,
+    validator_hash: &str,
+    hsk_control_revision: &str,
+) -> String {
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct KeyMaterial<'a> {
+        schema: &'static str,
+        ocr_text: &'a str,
+        kind: HskUtteranceKind,
+        context: &'a [HskPrecedingUtterance],
+        protected_names: &'a [HskProtectedName],
+        hsk_level: u8,
+        model_id: &'a str,
+        model_revision: &'a str,
+        prompt_hash: &'a str,
+        validator_hash: &'a str,
+        hsk_control_revision: &'a str,
+    }
+    let start = context.len().saturating_sub(MAX_HSK_PRECEDING_UTTERANCES);
+    let ocr_text = compact_ocr_text(source_english);
+    let material = KeyMaterial {
+        schema: TRANSLATION_CACHE_SCHEMA,
+        ocr_text: &ocr_text,
+        kind,
+        context: &context[start..],
+        protected_names,
+        hsk_level,
+        model_id,
+        model_revision,
+        prompt_hash,
+        validator_hash,
+        hsk_control_revision,
+    };
+    let bytes = serde_json::to_vec(&material).expect("cache key material is serializable");
+    format!("sha256:{}", sha256_hex(&bytes))
+}
+
+fn publish_region(
+    sink: &JobUpdateSink,
+    region: &PreparedRegion,
+    translation: CachedTranslation,
+    requested_level: HskLevel,
+    image_width: u32,
+    image_height: u32,
+) -> std::result::Result<(), CleaningError> {
+    let text_polygon = region
+        .candidate
+        .text_rect
+        .polygon(image_width, image_height);
+    let layout_polygon = region
+        .candidate
+        .bubble_rect
+        .polygon(image_width, image_height);
+    let bubble_polygon = None;
+    let (style, layout) = style_and_layout(
+        &region,
+        &translation.displayed_chinese,
+        image_width,
+        layout_polygon,
+    );
+    let patch_rect = region.patch.bounds.normalized(image_width, image_height);
+    let patch = sink
+        .store_patch_png(patch_rect, region.patch.bytes.clone())
+        .map_err(|error| publish_error(error, sink))?;
+    let above_level_tokens = above_level_tokens(&translation.report);
+    let progressive = ProgressiveRegion {
+        id: region.id.clone(),
+        text_polygon,
+        bubble_polygon,
+        patch,
+        source_english: region.source_english.clone(),
+        base_chinese: translation.base_chinese.clone(),
+        displayed_chinese: translation.displayed_chinese.clone(),
+        pinyin: translation.pinyin.clone(),
+        ocr_confidence: region.ocr_confidence,
+        reading_order: region.reading_order,
+        style,
+        layout,
+        hsk: ProgressiveHskStatus {
+            requested_level,
+            strictly_valid: translation.report.strictly_valid,
+            above_level_tokens,
+            repair_state: translation.repair_state,
+        },
+    };
+    sink.remember_region_for_lookup(
+        region.id.clone(),
+        RegionLookupContext {
+            source_english: region.source_english.clone(),
+            base_chinese: translation.base_chinese,
+            displayed_chinese: translation.displayed_chinese,
+            proper_names: translation
+                .report
+                .exceptions
+                .into_iter()
+                .map(|exception| ProperName {
+                    text: exception.text,
+                    reason: exception.reason,
+                })
+                .collect(),
+        },
+    );
+    sink.publish(JobUpdateDraft::RegionReady {
+        region: Box::new(progressive),
+    })
+    .map_err(|error| publish_error(error, sink))?;
+    Ok(())
+}
+
+fn publish_refinement(
+    sink: &JobUpdateSink,
+    region_id: &str,
+    translation: &CachedTranslation,
+    requested_level: HskLevel,
+) -> std::result::Result<(), CleaningError> {
+    sink.publish(JobUpdateDraft::RegionRefined {
+        region_id: region_id.to_owned(),
+        displayed_chinese: translation.displayed_chinese.clone(),
+        pinyin: translation.pinyin.clone(),
+        hsk: ProgressiveHskStatus {
+            requested_level,
+            strictly_valid: translation.report.strictly_valid,
+            above_level_tokens: above_level_tokens(&translation.report),
+            repair_state: translation.repair_state,
+        },
+    })
+    .map_err(|error| publish_error(error, sink))?;
+    sink.refine_region_for_lookup(
+        region_id,
+        translation.displayed_chinese.clone(),
+        translation
+            .report
             .exceptions
             .iter()
-            .map(|exception| VocabularyException {
+            .map(|exception| ProperName {
                 text: exception.text.clone(),
-                reason: browser_name_reason(exception.reason),
+                reason: exception.reason,
             })
-            .collect::<Vec<_>>();
-        region.vocabulary = VocabularyStatus {
-            requested_hsk_level: request.settings.hsk_level,
-            strictly_valid: report.strictly_valid && exceptions.is_empty() && !state.failed,
-            exceptions,
-        };
-
-        if !region.vocabulary.exceptions.is_empty() {
-            warnings.push(BrowserWarning {
-                code: BrowserWarningCode::HskException,
-                region_id: Some(region.id.clone()),
-                message: "Vocabulary is restricted to the requested cumulative HSK level, except for the explicitly labelled name."
-                    .to_owned(),
-            });
-        }
-        if state.failed {
-            warnings.push(BrowserWarning {
-                code: BrowserWarningCode::HskRewriteFailed,
-                region_id: Some(region.id.clone()),
-                message: unresolved_rewrite_message(
-                    &state.validator_feedback,
-                    &state.preservation_feedback,
-                ),
-            });
-        }
-    }
-    Ok(warnings)
-}
-
-/// Qwen occasionally emits Taiwan-style `幺` in common Mandarin question
-/// particles despite a zh-CN prompt. Keep literal uses of `幺` intact while
-/// canonicalizing only the unambiguous particle forms before HSK validation.
-fn canonicalize_mainland_question_particles(input: &str) -> String {
-    input
-        .replace("什幺", "什么")
-        .replace("怎幺", "怎么")
-        .replace("这幺", "这么")
-        .replace("那幺", "那么")
-        .replace("多幺", "多么")
-}
-
-fn validate_faithful_coverage(
-    regions: &[BrowserRegion],
-    faithful: &[FaithfulTranslation],
-) -> Result<()> {
-    if regions.len() != faithful.len() {
-        bail!(
-            "faithful translation returned {} regions; expected {}",
-            faithful.len(),
-            regions.len()
-        );
-    }
-    for (index, (region, translation)) in regions.iter().zip(faithful).enumerate() {
-        if region.id != translation.region_id {
-            bail!(
-                "faithful translation order mismatch at index {index}: expected `{}`, got `{}`",
-                region.id,
-                translation.region_id
-            );
-        }
-        if translation.text.trim().is_empty() {
-            bail!("faithful translation for `{}` is empty", region.id);
-        }
-    }
+            .collect(),
+    );
     Ok(())
 }
 
-fn validate_rewrite_coverage(
-    request: &HskRewritePageRequest,
-    rewrites: &[HskRewrite],
-) -> Result<()> {
-    if request.regions.len() != rewrites.len() {
-        bail!(
-            "HSK rewrite returned {} regions; expected {}",
-            rewrites.len(),
-            request.regions.len()
-        );
-    }
-    for (index, (region, rewrite)) in request.regions.iter().zip(rewrites).enumerate() {
-        if region.id != rewrite.region_id {
-            bail!(
-                "HSK rewrite order mismatch at index {index}: expected `{}`, got `{}`",
-                region.id,
-                rewrite.region_id
-            );
-        }
-        if rewrite.text.trim().is_empty() {
-            bail!("HSK rewrite for `{}` is empty", region.id);
+fn above_level_tokens(report: &ValidationReport) -> Vec<String> {
+    let mut tokens = Vec::new();
+    for violation in &report.violations {
+        if !tokens.contains(&violation.text) {
+            tokens.push(violation.text.clone());
         }
     }
-    Ok(())
+    tokens
 }
 
-fn validator_feedback(report: &ValidationReport) -> Vec<HskValidatorFeedback> {
-    report
-        .violations
-        .iter()
-        .map(|violation| HskValidatorFeedback {
-            text: violation.text.clone(),
-            start_char: violation.start_char,
-            end_char: violation.end_char,
-            reason: match &violation.reason {
-                ViolationReason::AboveSelectedHskLevel { required_level } => {
-                    format!("above-selected-hsk-level:{}", required_level.get())
-                }
-                ViolationReason::KnownDictionaryWord => "known-dictionary-word".to_owned(),
-                ViolationReason::UnknownChineseWord => "unknown-chinese-word".to_owned(),
-                ViolationReason::NonChineseLexicalToken => "non-chinese-lexical-token".to_owned(),
-            },
-            suggested_words: violation.suggested_words.clone(),
-        })
-        .collect()
-}
-
-fn preservation_feedback(violations: &[PreservationViolation]) -> Vec<String> {
-    violations
-        .iter()
-        .map(|violation| match violation {
-            PreservationViolation::NumbersChanged { expected, actual } => {
-                format!("numbers changed: expected {expected:?}, actual {actual:?}")
-            }
-            PreservationViolation::ProperNameOccurrencesChanged {
-                text,
-                expected,
-                actual,
-            } => format!(
-                "protected name `{text}` occurrence count changed: expected {expected}, actual {actual}"
-            ),
-            PreservationViolation::NegationMarkersChanged { expected, actual } => {
-                format!("negation markers changed: expected {expected:?}, actual {actual:?}")
-            }
-        })
-        .collect()
-}
-
-fn unresolved_rewrite_message(
-    validator_feedback: &[HskValidatorFeedback],
-    preservation_feedback: &[String],
-) -> String {
-    let mut message =
-        "HSK rewrite remained invalid after the initial pass and two correction attempts"
-            .to_owned();
-    if !validator_feedback.is_empty() {
-        let spans = validator_feedback
-            .iter()
-            .map(|violation| {
-                format!(
-                    "`{}` at {}..{} ({})",
-                    violation.text, violation.start_char, violation.end_char, violation.reason
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-        let _ = write!(message, ": {spans}");
-    }
-    if !preservation_feedback.is_empty() {
-        let _ = write!(
-            message,
-            "{}preservation: {}",
-            if validator_feedback.is_empty() {
-                ": "
-            } else {
-                "; "
-            },
-            preservation_feedback.join("; ")
-        );
-    }
-    message
-}
-
-pub(crate) fn proper_names_from_region(region: &BrowserRegion) -> Vec<ProperName> {
-    region
-        .vocabulary
+fn populate_pinyin(control: &HskControl, translation: &mut CachedTranslation) {
+    let proper_names = translation
+        .report
         .exceptions
         .iter()
         .map(|exception| ProperName {
             text: exception.text.clone(),
-            reason: control_name_reason(exception.reason),
+            reason: exception.reason,
         })
+        .collect::<Vec<_>>();
+    translation.pinyin = control
+        .lookup(&translation.displayed_chinese, &proper_names)
+        .tokens
+        .into_iter()
+        .map(|token| {
+            if token.pinyin.trim().is_empty() {
+                token.simplified
+            } else {
+                token.pinyin
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    if translation.pinyin.trim().is_empty() {
+        translation
+            .pinyin
+            .clone_from(&translation.displayed_chinese);
+    }
+}
+
+fn style_and_layout(
+    region: &PreparedRegion,
+    displayed_chinese: &str,
+    image_width: u32,
+    bubble_polygon: Vec<crate::contracts::Point>,
+) -> (BrowserTextStyle, BrowserTextLayout) {
+    let foreground = rgb(region.prediction.text_color);
+    let outline_color = region
+        .prediction
+        .has_stroke_color
+        .then(|| rgb(region.prediction.stroke_color));
+    let outline_width_ratio = if outline_color.is_some() {
+        (2.0 / region.candidate.text_rect.width().max(1.0)).clamp(0.002, 0.08)
+    } else {
+        0.0
+    };
+    (
+        BrowserTextStyle {
+            font_id: "hmt-sans".to_owned(),
+            category: FontCategory::Sans,
+            foreground,
+            weight: 600,
+            italic_degrees: 0.0,
+            outline_color,
+            outline_width_ratio,
+            shadow_color: None,
+            shadow_x_ratio: 0.0,
+            shadow_y_ratio: 0.0,
+            alignment: TextAlignment::Center,
+            writing_mode: WritingMode::HorizontalTb,
+            line_height: 1.15,
+            letter_spacing_em: 0.0,
+        },
+        BrowserTextLayout {
+            suggested_lines: suggested_lines(displayed_chinese),
+            font_size_to_image_width: (region.candidate.text_rect.height() * 0.65
+                / image_width.max(1) as f32)
+                .clamp(0.002, 0.25),
+            safe_polygon: Some(bubble_polygon),
+        },
+    )
+}
+
+fn suggested_lines(text: &str) -> Vec<String> {
+    let characters = text.chars().collect::<Vec<_>>();
+    if characters.len() <= 10 {
+        return vec![text.to_owned()];
+    }
+    let line_length = (characters.len() as f32).sqrt().ceil().max(6.0) as usize;
+    characters
+        .chunks(line_length)
+        .map(|chunk| chunk.iter().collect())
         .collect()
+}
+
+fn rgb(color: [u8; 3]) -> String {
+    format!("#{:02x}{:02x}{:02x}", color[0], color[1], color[2])
+}
+
+fn batch_overall_progress(processed: usize, total: usize) -> f32 {
+    0.04 + (processed as f32 / total.max(1) as f32) * 0.84
+}
+
+fn translation_queue_ready_len(
+    pending: &[PreparedRegion],
+    force: bool,
+    now: tokio::time::Instant,
+) -> usize {
+    if pending.is_empty() {
+        return 0;
+    }
+    if force || pending.len() >= TRANSLATION_BATCH_MIN {
+        return pending.len();
+    }
+    translation_queue_deadline(pending)
+        .is_some_and(|deadline| deadline <= now)
+        .then_some(pending.len())
+        .unwrap_or(0)
+}
+
+fn translation_queue_deadline(pending: &[PreparedRegion]) -> Option<tokio::time::Instant> {
+    pending
+        .iter()
+        .map(|region| region.translation_queued_at + TRANSLATION_MAX_FLUSH_DELAY)
+        .min()
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TranslationBoundaryAction {
+    ContinueUpstream,
+    Dispatch(usize),
+    Cancelled,
+}
+
+fn translation_boundary_action(
+    pending: &[PreparedRegion],
+    force: bool,
+    now: tokio::time::Instant,
+    cancelled: bool,
+) -> TranslationBoundaryAction {
+    if cancelled {
+        return TranslationBoundaryAction::Cancelled;
+    }
+    let eligible = translation_queue_ready_len(pending, force, now);
+    if eligible == 0 {
+        TranslationBoundaryAction::ContinueUpstream
+    } else {
+        TranslationBoundaryAction::Dispatch(translation_batch_len(eligible))
+    }
+}
+
+fn translation_batch_len(available: usize) -> usize {
+    debug_assert!(available > 0);
+    if available <= TRANSLATION_BATCH_MAX {
+        return available;
+    }
+    let tail = available - TRANSLATION_BATCH_MAX;
+    if tail < TRANSLATION_BATCH_MIN {
+        TRANSLATION_BATCH_MAX - (TRANSLATION_BATCH_MIN - tail)
+    } else {
+        TRANSLATION_BATCH_MAX
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn publish_progress(
+    sink: &JobUpdateSink,
+    stage: BrowserJobStage,
+    stage_progress: Option<f32>,
+    overall_progress: Option<f32>,
+    current: Option<u32>,
+    total: Option<u32>,
+    message: impl Into<String>,
+) -> std::result::Result<(), CleaningError> {
+    sink.publish(JobUpdateDraft::Progress {
+        stage,
+        stage_progress,
+        overall_progress,
+        current,
+        total,
+        message: message.into(),
+    })
+    .map_err(|error| publish_error(error, sink))?;
+    Ok(())
+}
+
+fn publish_error(error: crate::server::PublishError, sink: &JobUpdateSink) -> CleaningError {
+    if sink.is_cancelled() {
+        CleaningError::cancelled()
+    } else {
+        CleaningError::new("UPDATE_PUBLISH_FAILED", error.to_string())
+    }
+}
+
+fn cancellation_boundary(cancel: &AtomicBool) -> std::result::Result<(), CleaningError> {
+    if cancel.load(Ordering::Acquire) {
+        Err(CleaningError::cancelled())
+    } else {
+        Ok(())
+    }
 }
 
 pub(crate) fn browser_lookup_result(result: hsk_control::LookupResult) -> LookupResult {
@@ -988,1660 +2672,765 @@ pub(crate) fn browser_lookup_result(result: hsk_control::LookupResult) -> Lookup
             .collect(),
         region: result.region.map(|region| LookupRegion {
             displayed_chinese: region.displayed_chinese,
-            faithful_chinese: region.faithful_chinese,
+            base_chinese: region.base_chinese,
             source_english: region.source_english,
         }),
     }
 }
 
-fn control_name_reason(reason: VocabularyExceptionReason) -> ProperNameReason {
-    match reason {
-        VocabularyExceptionReason::PersonName => ProperNameReason::PersonName,
-        VocabularyExceptionReason::PlaceName => ProperNameReason::PlaceName,
-        VocabularyExceptionReason::Title => ProperNameReason::Title,
-        VocabularyExceptionReason::UnavoidableProperNoun => ProperNameReason::UnavoidableProperNoun,
-    }
-}
-
-fn browser_name_reason(reason: ProperNameReason) -> VocabularyExceptionReason {
-    match reason {
-        ProperNameReason::PersonName => VocabularyExceptionReason::PersonName,
-        ProperNameReason::PlaceName => VocabularyExceptionReason::PlaceName,
-        ProperNameReason::Title => VocabularyExceptionReason::Title,
-        ProperNameReason::UnavoidableProperNoun => VocabularyExceptionReason::UnavoidableProperNoun,
-    }
-}
-
-fn faithful_region_kind(kind: RegionKind) -> FaithfulRegionKind {
-    match kind {
-        RegionKind::Dialogue => FaithfulRegionKind::Dialogue,
-        RegionKind::Caption => FaithfulRegionKind::Caption,
-        RegionKind::Thought => FaithfulRegionKind::Thought,
-        RegionKind::Sfx => FaithfulRegionKind::Sfx,
-    }
-}
-
-fn check_translation_cancelled(cancel: &AtomicBool) -> Result<()> {
-    if cancel.load(Ordering::Acquire) {
-        bail!("cancelled");
-    }
-    Ok(())
-}
-
-fn translation_error(error: anyhow::Error, cancel: &AtomicBool) -> CleaningError {
-    if cancel.load(Ordering::Acquire) || error.to_string().contains("cancelled") {
-        CleaningError::new("CANCELLED", "Translation was cancelled.")
-    } else {
-        CleaningError::new(
-            "TRANSLATION_FAILED",
-            format!("Local faithful/HSK translation failed: {error:#}"),
-        )
-    }
-}
-
-fn progress_stage(step: PipelineStep) -> Option<(BrowserJobStage, &'static str)> {
-    match step {
-        PipelineStep::Detect => Some((BrowserJobStage::Detecting, "Detecting text and masks")),
-        PipelineStep::Ocr => Some((BrowserJobStage::Ocr, "Reading English text")),
-        PipelineStep::Inpaint => Some((BrowserJobStage::Inpainting, "Cleaning source lettering")),
-        PipelineStep::LlmGenerate | PipelineStep::Render => None,
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn run_pipeline_phase(
-    session: Arc<ProjectSession>,
-    app: &Arc<App>,
-    page_id: PageId,
-    steps: Vec<String>,
-    options: PipelineRunOptions,
-    cancel: Arc<AtomicBool>,
-    progress: CleaningProgressSink,
-    progress_start: f32,
-    progress_span: f32,
-    warnings: Arc<Mutex<Vec<String>>>,
-) -> Result<usize> {
-    let progress_bridge = Arc::new(move |tick: pipeline::ProgressTick| {
-        let Some((stage, message)) = tick.step.and_then(progress_stage) else {
-            return;
-        };
-        progress(CleaningProgress {
-            stage,
-            overall_progress: Some(
-                progress_start + f32::from(tick.overall_percent) / 100.0 * progress_span,
-            ),
-            current: u32::try_from(tick.step_index + 1).ok(),
-            total: u32::try_from(tick.total_steps).ok(),
-            message: message.to_owned(),
-        });
-    }) as pipeline::ProgressSink;
-    let warning_bridge = Arc::new(move |tick: pipeline::WarningTick| {
-        warnings
-            .lock()
-            .expect("pipeline warning lock poisoned")
-            .push(format!("{}: {}", tick.step_id, tick.message));
-    }) as pipeline::WarningSink;
-    let outcome = pipeline::run(
-        session,
-        app.registry.clone(),
-        app.runtime.clone(),
-        app.cpu_only(),
-        app.llm.clone(),
-        app.renderer.clone(),
-        PipelineSpec {
-            scope: Scope::Pages(vec![page_id]),
-            steps,
-            options,
-        },
-        cancel,
-        Some(progress_bridge),
-        Some(warning_bridge),
-    )
-    .await?;
-    Ok(outcome.warning_count)
-}
-
-fn detection_steps(config: &AppConfig) -> Vec<String> {
-    let pipeline = &config.pipeline;
-    let mut steps = Vec::with_capacity(2);
-    if !pipeline.detector.trim().is_empty() {
-        steps.push(pipeline.detector.clone());
-    }
-    let detector_produces_bubbles = pipeline::Registry::find(&pipeline.detector)
-        .is_ok_and(|engine| engine.produces.contains(&Artifact::BubbleMask));
-    if !detector_produces_bubbles && !pipeline.bubble_segmenter.trim().is_empty() {
-        steps.push(pipeline.bubble_segmenter.clone());
-    }
-    steps
-}
-
-fn ocr_steps(config: &AppConfig) -> Vec<String> {
-    (!config.pipeline.ocr.trim().is_empty())
-        .then(|| config.pipeline.ocr.clone())
-        .into_iter()
-        .collect()
-}
-
-fn inpainting_steps() -> Vec<String> {
-    vec![BROWSER_DIALOGUE_CLEANER.to_owned()]
-}
-
-fn retain_speech_bubble_text(session: &ProjectSession, page_id: PageId) -> Result<usize> {
-    let scene = session.scene_snapshot();
-    let page = scene
-        .pages
-        .get(&page_id)
-        .context("Koharu page disappeared before dialogue filtering")?;
-    let bubble_blob = page
-        .nodes
-        .values()
-        .find_map(|node| match &node.kind {
-            NodeKind::Mask(mask) if mask.role == MaskRole::Bubble => Some(&mask.blob),
-            _ => None,
-        })
-        .context("Koharu bubble mask is missing before dialogue filtering")?;
-    let bubble_mask = session.blobs.load_image(bubble_blob)?.to_luma8();
-
-    let mut kept = 0;
-    let mut removals = Vec::new();
-    for (index, (node_id, node)) in page.nodes.iter().enumerate() {
-        let NodeKind::Text(_) = &node.kind else {
-            continue;
-        };
-        let keep = bubble_label_for(&bubble_mask, node.transform).is_some();
-        if keep {
-            kept += 1;
-        } else {
-            removals.push(Op::RemoveNode {
-                page: page_id,
-                id: *node_id,
-                prev_node: node.clone(),
-                prev_index: index,
-            });
-        }
-    }
-    if !removals.is_empty() {
-        session.apply(Op::Batch {
-            ops: removals,
-            label: "Keep speech-bubble text geometry".to_owned(),
-        })?;
-    }
-    if kept == 0 {
-        bail!("no text was detected inside a speech bubble");
-    }
-    Ok(kept)
-}
-
-fn retain_english_text(session: &ProjectSession, page_id: PageId) -> Result<usize> {
-    let scene = session.scene_snapshot();
-    let page = scene
-        .pages
-        .get(&page_id)
-        .context("Koharu page disappeared before English dialogue filtering")?;
-    let mut kept = 0;
-    let mut removals = Vec::new();
-    for (index, (node_id, node)) in page.nodes.iter().enumerate() {
-        let NodeKind::Text(text) = &node.kind else {
-            continue;
-        };
-        if text
-            .text
-            .as_deref()
-            .map(str::trim)
-            .is_some_and(is_probably_english)
-        {
-            kept += 1;
-        } else {
-            removals.push(Op::RemoveNode {
-                page: page_id,
-                id: *node_id,
-                prev_node: node.clone(),
-                prev_index: index,
-            });
-        }
-    }
-    if !removals.is_empty() {
-        session.apply(Op::Batch {
-            ops: removals,
-            label: "Keep English speech-bubble dialogue".to_owned(),
-        })?;
-    }
-    if kept == 0 {
-        bail!("no English dialogue was detected inside a speech bubble");
-    }
-    Ok(kept)
-}
-
-fn write_dialogue_erase_mask(session: &ProjectSession, page_id: PageId) -> Result<()> {
-    let scene = session.scene_snapshot();
-    let page = scene
-        .pages
-        .get(&page_id)
-        .context("Koharu page disappeared before dialogue mask generation")?;
-    let bubble_blob = page
-        .nodes
-        .values()
-        .find_map(|node| match &node.kind {
-            NodeKind::Mask(mask) if mask.role == MaskRole::Bubble => Some(&mask.blob),
-            _ => None,
-        })
-        .context("Koharu bubble mask is missing before dialogue mask generation")?;
-    let mut bubbles = session.blobs.load_image(bubble_blob)?.to_luma8();
-    let (width, height) = bubbles.dimensions();
-    let mut erase = GrayImage::new(width, height);
-    let mut painted = 0_u64;
-
-    for node in page.nodes.values() {
-        let NodeKind::Text(_) = &node.kind else {
-            continue;
-        };
-        let Some(label) = bubble_label_for(&bubbles, node.transform) else {
-            continue;
-        };
-        let Some([x0, y0, x1, y1]) = clamped_transform_bounds(node.transform, width, height) else {
-            continue;
-        };
-        let pad_x = ((x1 - x0) as f32 * 0.12).ceil().clamp(3.0, 18.0) as u32;
-        let pad_y = ((y1 - y0) as f32 * 0.12).ceil().clamp(3.0, 18.0) as u32;
-        let outer_x0 = x0.saturating_sub(pad_x);
-        let outer_y0 = y0.saturating_sub(pad_y);
-        let outer_x1 = x1.saturating_add(pad_x).min(width);
-        let outer_y1 = y1.saturating_add(pad_y).min(height);
-
-        for y in outer_y0..outer_y1 {
-            for x in outer_x0..outer_x1 {
-                let core = x >= x0 && x < x1 && y >= y0 && y < y1;
-                if !core && bubbles.get_pixel(x, y).0[0] != label {
-                    continue;
-                }
-                erase.put_pixel(x, y, Luma([255]));
-                // Detector ellipses are conservative. Once OCR has confirmed
-                // English inside this bubble, extending the same bubble ID
-                // through the text box lets the flat-fill path erase every
-                // original glyph without touching unrelated artwork.
-                bubbles.put_pixel(x, y, Luma([label]));
-                painted += 1;
-            }
-        }
-    }
-    if painted == 0 {
-        bail!("English dialogue produced an empty erase mask");
-    }
-
-    let bubble_blob = session.blobs.put_webp(&DynamicImage::ImageLuma8(bubbles))?;
-    let erase_blob = session.blobs.put_webp(&DynamicImage::ImageLuma8(erase))?;
-    session.apply(Op::Batch {
-        ops: vec![
-            upsert_mask_blob(&scene, page_id, MaskRole::Bubble, bubble_blob),
-            upsert_mask_blob(&scene, page_id, MaskRole::Segment, erase_blob),
-        ],
-        label: "Build English dialogue erase mask".to_owned(),
-    })?;
-    Ok(())
-}
-
-fn is_probably_english(text: &str) -> bool {
-    let mut ascii_letters = 0;
-    let mut non_ascii_letters = 0;
-    for character in text.chars() {
-        if character.is_ascii_alphabetic() {
-            ascii_letters += 1;
-        } else if character.is_alphabetic() {
-            non_ascii_letters += 1;
-        }
-    }
-    ascii_letters > 0 && non_ascii_letters == 0
-}
-
-fn reading_order(direction: ReadingDirection) -> ReadingOrder {
-    match direction {
-        ReadingDirection::Ltr => ReadingOrder::Ltr,
-        ReadingDirection::Auto | ReadingDirection::Rtl => ReadingOrder::Rtl,
-    }
-}
-
-fn utf8_path(path: PathBuf) -> Result<Utf8PathBuf> {
-    Utf8PathBuf::from_path_buf(path)
-        .map_err(|path| anyhow!("browser cache path is not valid UTF-8: {}", path.display()))
-}
-
-fn open_or_create_project(
-    project_path: &Path,
-    input: &CleaningInput,
-) -> Result<(Arc<ProjectSession>, PageId)> {
-    if let Some(parent) = project_path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create browser project cache {}", parent.display()))?;
-    }
-    let project_path = utf8_path(project_path.to_path_buf())?;
-    if project_path.is_dir() {
-        let session = ProjectSession::open(&project_path)
-            .with_context(|| format!("open cached browser project {project_path}"))?;
-        let page_id = validate_cached_source(&session, input)?;
-        return Ok((session, page_id));
-    }
-
-    let session = ProjectSession::create(&project_path, "Browser cleaning cache")
-        .with_context(|| format!("create cached browser project {project_path}"))?;
-    let source_blob = session
-        .blobs
-        .put_bytes(input.source_bytes.as_ref())
-        .context("store browser source image in Koharu blob storage")?;
-    let mut page = Page::new(
-        &input.request.client_image_id,
-        input.request.natural_width,
-        input.request.natural_height,
-    );
-    let page_id = page.id;
-    let source_id = NodeId::new();
-    page.nodes.insert(
-        source_id,
-        Node {
-            id: source_id,
-            transform: Transform::default(),
-            visible: true,
-            kind: NodeKind::Image(ImageData {
-                role: ImageRole::Source,
-                blob: source_blob,
-                opacity: 1.0,
-                natural_width: input.request.natural_width,
-                natural_height: input.request.natural_height,
-                name: Some(input.request.client_image_id.clone()),
-            }),
-        },
-    );
-    session
-        .apply(Op::AddPage { page, at: 0 })
-        .context("import browser source page into Koharu")?;
-    Ok((session, page_id))
-}
-
-fn validate_cached_source(session: &ProjectSession, input: &CleaningInput) -> Result<PageId> {
-    let scene = session.scene.read();
-    if scene.pages.len() != 1 {
-        bail!("cached browser project must contain exactly one page");
-    }
-    let (page_id, page) = scene.pages.iter().next().expect("one cached page");
-    if page.width != input.request.natural_width || page.height != input.request.natural_height {
-        bail!("cached browser project dimensions do not match the upload");
-    }
-    let source = page
-        .nodes
-        .values()
-        .find_map(|node| match &node.kind {
-            NodeKind::Image(image) if image.role == ImageRole::Source => Some(image),
-            _ => None,
-        })
-        .context("cached browser project has no source image")?;
-    let source_bytes = session.blobs.get_bytes(&source.blob)?;
-    if !sha256_hex(&source_bytes).eq_ignore_ascii_case(&input.request.source_sha256) {
-        bail!("cached browser project source hash does not match the upload");
-    }
-    Ok(*page_id)
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct CacheMarker {
-    version: u8,
-    pipeline_fingerprint: String,
-    source_sha256: String,
-    source_width: u32,
-    source_height: u32,
-}
-
-fn cache_marker_path(project_path: &Path) -> PathBuf {
-    project_path.join("browser-cleaning-v1.json")
-}
-
-fn cache_marker_matches(project_path: &Path, request: &BrowserJobRequest) -> bool {
-    let Ok(bytes) = std::fs::read(cache_marker_path(project_path)) else {
-        return false;
-    };
-    let Ok(marker) = serde_json::from_slice::<CacheMarker>(&bytes) else {
-        return false;
-    };
-    marker.version == CACHE_MARKER_VERSION
-        && marker.pipeline_fingerprint == PIPELINE_FINGERPRINT
-        && marker
-            .source_sha256
-            .eq_ignore_ascii_case(&request.source_sha256)
-        && marker.source_width == request.natural_width
-        && marker.source_height == request.natural_height
-}
-
-fn write_cache_marker(project_path: &Path, request: &BrowserJobRequest) -> Result<()> {
-    let marker = CacheMarker {
-        version: CACHE_MARKER_VERSION,
-        pipeline_fingerprint: PIPELINE_FINGERPRINT.to_owned(),
-        source_sha256: request.source_sha256.clone(),
-        source_width: request.natural_width,
-        source_height: request.natural_height,
-    };
-    let bytes = serde_json::to_vec(&marker)?;
-    std::fs::write(cache_marker_path(project_path), bytes)
-        .with_context(|| format!("write cleaning cache marker {}", project_path.display()))
-}
-
-fn cached_artifacts_ready(session: &ProjectSession, page_id: PageId) -> bool {
-    let scene = session.scene.read();
-    let Some(page) = scene.pages.get(&page_id) else {
-        return false;
-    };
-    [
-        Artifact::TextBoxes,
-        Artifact::OcrText,
-        Artifact::SegmentMask,
-        Artifact::BubbleMask,
-        Artifact::Inpainted,
-    ]
-    .into_iter()
-    .all(|artifact| artifact.ready(page))
-}
-
-fn extract_output(
-    session: &ProjectSession,
-    page_id: PageId,
-    request: &BrowserJobRequest,
-    cache_hit: bool,
-) -> std::result::Result<CleaningOutput, CleaningError> {
-    let scene = session.scene_snapshot();
-    let page = scene
-        .pages
-        .get(&page_id)
-        .ok_or_else(|| CleaningError::new("PIPELINE_FAILED", "Koharu page disappeared."))?;
-    let text_nodes = page
-        .nodes
-        .values()
-        .filter_map(|node| match &node.kind {
-            NodeKind::Text(text) => Some((node.transform, text)),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    if text_nodes.is_empty() {
-        return Err(CleaningError::new(
-            "NO_TEXT_DETECTED",
-            "Koharu did not detect any text regions.",
-        ));
-    }
-    if !Artifact::OcrText.ready(page) {
-        return Err(CleaningError::new(
-            "OCR_INCOMPLETE",
-            "Koharu did not return English OCR for every detected region.",
-        ));
-    }
-    if !Artifact::SegmentMask.ready(page) || !Artifact::BubbleMask.ready(page) {
-        return Err(CleaningError::new(
-            "MASK_GENERATION_FAILED",
-            "Koharu did not produce the required text and bubble masks.",
-        ));
-    }
-
-    let bubble_mask = page
-        .nodes
-        .values()
-        .find_map(|node| match &node.kind {
-            NodeKind::Mask(mask) if mask.role == MaskRole::Bubble => Some(&mask.blob),
-            _ => None,
-        })
-        .ok_or_else(|| {
-            CleaningError::new("MASK_GENERATION_FAILED", "Koharu bubble mask is missing.")
-        })
-        .and_then(|blob| {
-            session.blobs.load_image(blob).map_err(|error| {
-                CleaningError::new(
-                    "MASK_GENERATION_FAILED",
-                    format!("Koharu bubble mask could not be loaded: {error:#}"),
-                )
-            })
-        })?
-        .to_luma8();
-    let bubble_polygons = bubble_polygons(&bubble_mask, page.width, page.height);
-
-    let mut regions = Vec::with_capacity(text_nodes.len());
-    let mut warnings = Vec::new();
-    let mut id_counts = HashMap::<String, usize>::new();
-    for (reading_order, (transform, text)) in text_nodes.into_iter().enumerate() {
-        let Some(source_english) = text
-            .text
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .filter(|value| is_probably_english(value))
-            .map(ToOwned::to_owned)
-        else {
-            continue;
-        };
-        let Some(bubble_label) = bubble_label_for(&bubble_mask, transform) else {
-            continue;
-        };
-        let text_polygon = text_polygon(transform, text, page.width, page.height);
-        let base_id = stable_region_id(&request.source_sha256, &text_polygon);
-        let count = id_counts.entry(base_id.clone()).or_default();
-        *count += 1;
-        let id = if *count == 1 {
-            base_id
-        } else {
-            format!("{base_id}-{}", *count)
-        };
-        let bubble_polygon = bubble_polygons.get(&bubble_label).cloned();
-        let confidence = finite_unit(text.confidence);
-        if confidence < LOW_OCR_CONFIDENCE {
-            warnings.push(BrowserWarning {
-                code: BrowserWarningCode::LowOcrConfidence,
-                region_id: Some(id.clone()),
-                message: format!("Koharu OCR confidence is low ({confidence:.2}) for this region."),
-            });
-        }
-        let (style, layout) = browser_style_and_layout(
-            transform,
-            text,
-            page.width,
-            &source_english,
-            bubble_polygon.clone(),
-        );
-        regions.push(BrowserRegion {
-            id,
-            kind: RegionKind::Dialogue,
-            text_polygon,
-            bubble_polygon,
-            rotation_degrees: finite_or(text.rotation_deg.unwrap_or(transform.rotation_deg), 0.0),
-            source_english: source_english.clone(),
-            faithful_chinese: source_english.clone(),
-            displayed_chinese: source_english,
-            pinyin: String::new(),
-            ocr_confidence: confidence,
-            reading_order: u32::try_from(reading_order).unwrap_or(u32::MAX),
-            vocabulary: VocabularyStatus {
-                requested_hsk_level: request.settings.hsk_level,
-                strictly_valid: false,
-                exceptions: Vec::new(),
-            },
-            style,
-            layout,
-        });
-    }
-
-    let inpainted = page
-        .nodes
-        .values()
-        .find_map(|node| match &node.kind {
-            NodeKind::Image(image) if image.role == ImageRole::Inpainted => Some(&image.blob),
-            _ => None,
-        })
-        .ok_or_else(|| {
-            CleaningError::new(
-                "INPAINTING_FAILED",
-                "Koharu did not produce a cleaned image.",
-            )
-        })?;
-    let mut clean_image = session.blobs.get_bytes(inpainted).map_err(|error| {
-        CleaningError::new(
-            "INPAINTING_FAILED",
-            format!("Koharu cleaned image could not be loaded: {error:#}"),
-        )
-    })?;
-    let clean_image_mime_type = match image::guess_format(&clean_image) {
-        Ok(ImageFormat::Png) => CleanImageMimeType::Png,
-        Ok(ImageFormat::WebP) => CleanImageMimeType::Webp,
-        _ => {
-            let image = session.blobs.load_image(inpainted).map_err(|error| {
-                CleaningError::new(
-                    "INPAINTING_FAILED",
-                    format!("Koharu cleaned image could not be decoded: {error:#}"),
-                )
-            })?;
-            let mut encoded = Cursor::new(Vec::new());
-            image
-                .write_to(&mut encoded, ImageFormat::Png)
-                .map_err(|error| {
-                    CleaningError::new(
-                        "INPAINTING_FAILED",
-                        format!("Koharu cleaned image could not be encoded: {error:#}"),
-                    )
-                })?;
-            clean_image = encoded.into_inner();
-            CleanImageMimeType::Png
-        }
-    };
-
-    Ok(CleaningOutput {
-        clean_image,
-        clean_image_mime_type,
-        regions,
-        warnings,
-        cache: BrowserCacheStatus {
-            detection_hit: cache_hit,
-            ocr_hit: cache_hit,
-            inpaint_hit: cache_hit,
-            translation_hit: false,
-        },
-    })
-}
-
-fn text_polygon(transform: Transform, text: &TextData, width: u32, height: u32) -> Vec<Point> {
-    let mut pixels = text
-        .line_polygons
-        .as_ref()
-        .into_iter()
-        .flatten()
-        .flat_map(|polygon| polygon.iter().copied())
-        .filter(|point| point[0].is_finite() && point[1].is_finite())
-        .collect::<Vec<_>>();
-    if pixels.len() < 3 {
-        pixels = rotated_rectangle(transform);
-    }
-    let hull = convex_hull(pixels);
-    let pixels = if hull.len() >= 3 {
-        hull
-    } else {
-        rotated_rectangle(transform)
-    };
-    normalize_polygon(&pixels, width, height)
-}
-
-fn rotated_rectangle(transform: Transform) -> Vec<[f32; 2]> {
-    let x0 = finite_or(transform.x, 0.0);
-    let y0 = finite_or(transform.y, 0.0);
-    let width = finite_or(transform.width, 1.0).max(1.0);
-    let height = finite_or(transform.height, 1.0).max(1.0);
-    let center_x = x0 + width / 2.0;
-    let center_y = y0 + height / 2.0;
-    let radians = finite_or(transform.rotation_deg, 0.0).to_radians();
-    let (sin, cos) = radians.sin_cos();
-    [
-        [x0, y0],
-        [x0 + width, y0],
-        [x0 + width, y0 + height],
-        [x0, y0 + height],
-    ]
-    .into_iter()
-    .map(|[x, y]| {
-        let dx = x - center_x;
-        let dy = y - center_y;
-        [
-            center_x + dx * cos - dy * sin,
-            center_y + dx * sin + dy * cos,
-        ]
-    })
-    .collect()
-}
-
-fn normalize_polygon(points: &[[f32; 2]], width: u32, height: u32) -> Vec<Point> {
-    let width = width.max(1) as f32;
-    let height = height.max(1) as f32;
-    points
-        .iter()
-        .map(|point| Point {
-            x: (finite_or(point[0], 0.0) / width).clamp(0.0, 1.0),
-            y: (finite_or(point[1], 0.0) / height).clamp(0.0, 1.0),
-        })
-        .collect()
-}
-
-fn convex_hull(mut points: Vec<[f32; 2]>) -> Vec<[f32; 2]> {
-    points.sort_by(|left, right| {
-        left[0]
-            .partial_cmp(&right[0])
-            .unwrap_or(CmpOrdering::Equal)
-            .then_with(|| left[1].partial_cmp(&right[1]).unwrap_or(CmpOrdering::Equal))
-    });
-    points.dedup_by(|left, right| {
-        (left[0] - right[0]).abs() < f32::EPSILON && (left[1] - right[1]).abs() < f32::EPSILON
-    });
-    if points.len() <= 2 {
-        return points;
-    }
-
-    fn cross(origin: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
-        (a[0] - origin[0]) * (b[1] - origin[1]) - (a[1] - origin[1]) * (b[0] - origin[0])
-    }
-
-    let mut lower = Vec::new();
-    for point in &points {
-        while lower.len() >= 2
-            && cross(lower[lower.len() - 2], lower[lower.len() - 1], *point) <= 0.0
-        {
-            lower.pop();
-        }
-        lower.push(*point);
-    }
-    let mut upper = Vec::new();
-    for point in points.iter().rev() {
-        while upper.len() >= 2
-            && cross(upper[upper.len() - 2], upper[upper.len() - 1], *point) <= 0.0
-        {
-            upper.pop();
-        }
-        upper.push(*point);
-    }
-    lower.pop();
-    upper.pop();
-    lower.extend(upper);
-    lower
-}
-
-fn bubble_label_for(mask: &GrayImage, transform: Transform) -> Option<u8> {
-    let (width, height) = mask.dimensions();
-    let [x0, y0, x1, y1] = clamped_transform_bounds(transform, width, height)?;
-    let center_x = x0 + (x1 - x0) / 2;
-    let center_y = y0 + (y1 - y0) / 2;
-    let center_label = mask
-        .get_pixel(center_x.min(width - 1), center_y.min(height - 1))
-        .0[0];
-    if center_label != 0 {
-        return Some(center_label);
-    }
-    let mut counts = [0_u32; 256];
-    for y in y0.min(height)..y1 {
-        for x in x0.min(width)..x1 {
-            let label = mask.get_pixel(x, y).0[0];
-            if label != 0 {
-                counts[usize::from(label)] = counts[usize::from(label)].saturating_add(1);
-            }
-        }
-    }
-    let area = (x1 - x0).saturating_mul(y1 - y0);
-    counts
-        .iter()
-        .enumerate()
-        .skip(1)
-        .max_by_key(|(_, count)| *count)
-        .and_then(|(label, count)| {
-            (area > 0 && count.saturating_mul(5) >= area).then_some(label as u8)
-        })
-}
-
-fn clamped_transform_bounds(transform: Transform, width: u32, height: u32) -> Option<[u32; 4]> {
-    if width == 0 || height == 0 {
-        return None;
-    }
-    let x0 = finite_or(transform.x, 0.0).floor().max(0.0) as u32;
-    let y0 = finite_or(transform.y, 0.0).floor().max(0.0) as u32;
-    let x1 = (finite_or(transform.x + transform.width, 0.0)
-        .ceil()
-        .max(0.0) as u32)
-        .min(width);
-    let y1 = (finite_or(transform.y + transform.height, 0.0)
-        .ceil()
-        .max(0.0) as u32)
-        .min(height);
-    (x1 > x0 && y1 > y0).then_some([x0, y0, x1, y1])
-}
-
-fn bubble_polygons(mask: &GrayImage, width: u32, height: u32) -> HashMap<u8, Vec<Point>> {
-    let mut candidates = HashMap::<u8, Vec<[f32; 2]>>::new();
-    for y in 0..mask.height() {
-        let mut spans = HashMap::<u8, (u32, u32)>::new();
-        for x in 0..mask.width() {
-            let label = mask.get_pixel(x, y).0[0];
-            if label == 0 {
-                continue;
-            }
-            spans
-                .entry(label)
-                .and_modify(|span| span.1 = x)
-                .or_insert((x, x));
-        }
-        for (label, (min_x, max_x)) in spans {
-            let points = candidates.entry(label).or_default();
-            points.extend([
-                [min_x as f32, y as f32],
-                [(max_x + 1) as f32, y as f32],
-                [(max_x + 1) as f32, (y + 1) as f32],
-                [min_x as f32, (y + 1) as f32],
-            ]);
-        }
-    }
-    candidates
-        .into_iter()
-        .filter_map(|(label, points)| {
-            let polygon = normalize_polygon(&convex_hull(points), width, height);
-            (polygon.len() >= 3).then_some((label, polygon))
-        })
-        .collect()
-}
-
-fn stable_region_id(source_sha256: &str, polygon: &[Point]) -> String {
-    let mut canonical = String::from("gate3-region-v1|");
-    canonical.push_str(source_sha256);
-    for point in polygon {
-        canonical.push('|');
-        canonical.push_str(&format!("{:.6},{:.6}", point.x, point.y));
-    }
-    let digest = sha256_hex(canonical.as_bytes());
-    format!(
-        "{}-region-{}",
-        &source_sha256[..8.min(source_sha256.len())],
-        &digest[..16]
-    )
-}
-
-fn browser_style_and_layout(
-    transform: Transform,
-    text: &TextData,
-    image_width: u32,
-    source_english: &str,
-    safe_polygon: Option<Vec<Point>>,
-) -> (BrowserTextStyle, BrowserTextLayout) {
-    let prediction = text.font_prediction.as_ref();
-    let style = text.style.as_ref();
-    let foreground = prediction
-        .map(|prediction| rgb(prediction.text_color))
-        .unwrap_or_else(|| {
-            style
-                .map(|style| rgba(style.color))
-                .unwrap_or_else(|| "#000000".to_owned())
-        });
-    let stroke_width = prediction
-        .map(|prediction| prediction.stroke_width_px)
-        .or_else(|| {
-            style
-                .and_then(|style| style.stroke.as_ref())
-                .and_then(|stroke| stroke.width_px)
-        })
-        .filter(|width| width.is_finite() && *width > 0.0);
-    let outline_color = stroke_width.map(|_| {
-        prediction
-            .map(|prediction| rgb(prediction.stroke_color))
-            .or_else(|| {
-                style
-                    .and_then(|style| style.stroke.as_ref())
-                    .map(|stroke| rgba(stroke.color))
-            })
-            .unwrap_or_else(|| "#ffffff".to_owned())
-    });
-    let bold = style
-        .and_then(|style| style.effect)
-        .is_some_and(|effect| effect.bold);
-    let italic = style
-        .and_then(|style| style.effect)
-        .is_some_and(|effect| effect.italic);
-    let serif = prediction
-        .and_then(|prediction| {
-            prediction.named_fonts.iter().max_by(|left, right| {
-                left.probability
-                    .partial_cmp(&right.probability)
-                    .unwrap_or(CmpOrdering::Equal)
-            })
-        })
-        .is_some_and(|font| font.serif);
-    let vertical = text.source_direction == Some(TextDirection::Vertical)
-        || prediction.is_some_and(|prediction| prediction.direction == TextDirection::Vertical);
-    let font_size = prediction
-        .map(|prediction| prediction.font_size_px)
-        .or(text.detected_font_size_px)
-        .or_else(|| style.and_then(|style| style.font_size))
-        .filter(|size| size.is_finite() && *size > 0.0)
-        .unwrap_or_else(|| finite_or(transform.height, 1.0).max(1.0) * 0.35);
-    let line_height = prediction
-        .map(|prediction| prediction.line_height)
-        .filter(|line_height| line_height.is_finite() && *line_height > 0.0)
-        .unwrap_or(1.2)
-        .clamp(0.5, 3.0);
-    let alignment = match style.and_then(|style| style.text_align) {
-        Some(koharu_core::TextAlign::Left) => TextAlignment::Left,
-        Some(koharu_core::TextAlign::Right) => TextAlignment::Right,
-        Some(koharu_core::TextAlign::Center) | None => TextAlignment::Center,
-    };
-    let browser_style = BrowserTextStyle {
-        font_id: if serif { "hmt-serif" } else { "hmt-sans" }.to_owned(),
-        category: if serif {
-            FontCategory::Serif
-        } else {
-            FontCategory::Sans
-        },
-        foreground,
-        weight: if bold { 700 } else { 400 },
-        italic_degrees: if italic { 12.0 } else { 0.0 },
-        outline_color,
-        outline_width_ratio: stroke_width
-            .map(|width| width / finite_or(transform.width, 1.0).max(1.0))
-            .unwrap_or(0.0)
-            .clamp(0.0, 1.0),
-        shadow_color: None,
-        shadow_x_ratio: 0.0,
-        shadow_y_ratio: 0.0,
-        alignment,
-        writing_mode: if vertical {
-            WritingMode::VerticalRl
-        } else {
-            WritingMode::HorizontalTb
-        },
-        line_height,
-        letter_spacing_em: 0.0,
-    };
-    let layout = BrowserTextLayout {
-        suggested_lines: source_english.lines().map(ToOwned::to_owned).collect(),
-        font_size_to_image_width: (font_size / image_width.max(1) as f32).clamp(f32::EPSILON, 1.0),
-        safe_polygon,
-    };
-    (browser_style, layout)
-}
-
-fn finite_unit(value: f32) -> f32 {
-    finite_or(value, 0.0).clamp(0.0, 1.0)
-}
-
-fn finite_or(value: f32, fallback: f32) -> f32 {
-    if value.is_finite() { value } else { fallback }
-}
-
-fn rgb(color: [u8; 3]) -> String {
-    format!("#{:02x}{:02x}{:02x}", color[0], color[1], color[2])
-}
-
-fn rgba(color: [u8; 4]) -> String {
-    format!(
-        "#{:02x}{:02x}{:02x}{:02x}",
-        color[0], color[1], color[2], color[3]
-    )
-}
-
 #[cfg(test)]
 mod tests {
-    use std::collections::VecDeque;
-    use std::sync::atomic::AtomicUsize;
-
-    use anyhow::anyhow;
-    use image::{DynamicImage, GenericImageView, GrayImage, Luma, Rgba, RgbaImage};
-    use koharu_core::{BlobRef, MaskData};
-    use tempfile::tempdir;
-
     use super::*;
-    use crate::contracts::{HskLevel, Validate};
+    use hsk_control::{HskViolation, ViolationReason};
 
-    struct FakePageTranslationModel {
-        faithful_outputs: Mutex<VecDeque<Vec<FaithfulTranslation>>>,
-        rewrite_outputs: Mutex<VecDeque<Vec<HskRewrite>>>,
-        rewrite_requests: Mutex<Vec<HskRewritePageRequest>>,
-        faithful_calls: AtomicUsize,
-        rewrite_calls: AtomicUsize,
-    }
-
-    impl FakePageTranslationModel {
-        fn new(
-            faithful: impl IntoIterator<Item = Vec<FaithfulTranslation>>,
-            rewrites: impl IntoIterator<Item = Vec<HskRewrite>>,
-        ) -> Self {
-            Self {
-                faithful_outputs: Mutex::new(faithful.into_iter().collect()),
-                rewrite_outputs: Mutex::new(rewrites.into_iter().collect()),
-                rewrite_requests: Mutex::new(Vec::new()),
-                faithful_calls: AtomicUsize::new(0),
-                rewrite_calls: AtomicUsize::new(0),
-            }
+    fn validation_report(text: &str, violations: Vec<HskViolation>) -> ValidationReport {
+        ValidationReport {
+            normalized_text: text.to_owned(),
+            requested_level: ControlHskLevel::new(1).unwrap(),
+            strictly_valid: violations.is_empty(),
+            violations,
+            exceptions: Vec::new(),
+            cache_revision: "test-control-r1".to_owned(),
         }
     }
 
-    #[async_trait]
-    impl PageTranslationModel for FakePageTranslationModel {
-        async fn faithful(
-            &self,
-            _request: &FaithfulPageRequest,
-            cancel: &AtomicBool,
-        ) -> Result<Vec<FaithfulTranslation>> {
-            check_translation_cancelled(cancel)?;
-            self.faithful_calls.fetch_add(1, Ordering::Relaxed);
-            self.faithful_outputs
-                .lock()
-                .unwrap()
-                .pop_front()
-                .ok_or_else(|| anyhow!("fake faithful output exhausted"))
-        }
-
-        async fn rewrite(
-            &self,
-            request: &HskRewritePageRequest,
-            cancel: &AtomicBool,
-        ) -> Result<Vec<HskRewrite>> {
-            check_translation_cancelled(cancel)?;
-            self.rewrite_calls.fetch_add(1, Ordering::Relaxed);
-            self.rewrite_requests.lock().unwrap().push(request.clone());
-            self.rewrite_outputs
-                .lock()
-                .unwrap()
-                .pop_front()
-                .ok_or_else(|| anyhow!("fake rewrite output exhausted"))
-        }
-    }
-
-    fn seed_control() -> HskControl {
-        HskControl::from_json_with_policy(
-            include_str!("../../../data/hsk/test-seed.normalized.json"),
-            include_str!("../../../data/dictionary/test-seed.normalized.json"),
-            hsk_control::LoadPolicy::AllowIncompleteTestSeed,
-        )
-        .unwrap()
-    }
-
-    fn translation_request(level: HskLevel) -> BrowserJobRequest {
-        let mut request: BrowserJobRequest = serde_json::from_str(include_str!(
-            "../../../fixtures/contracts/job-request.valid.json"
-        ))
-        .unwrap();
-        request.settings.hsk_level = level;
-        request
-    }
-
-    fn translation_region(source: &str) -> BrowserRegion {
-        let request = translation_request(HskLevel::Two);
-        let mut region = crate::fixtures::result("job", "blob", &request)
-            .regions
-            .remove(0);
-        region.id = "region-1".to_owned();
-        region.reading_order = 0;
-        region.source_english = source.to_owned();
-        region.faithful_chinese = source.to_owned();
-        region.displayed_chinese = source.to_owned();
-        region.pinyin.clear();
-        region.vocabulary.strictly_valid = false;
-        region.vocabulary.exceptions.clear();
-        region
-    }
-
-    fn faithful(text: &str) -> Vec<FaithfulTranslation> {
-        vec![FaithfulTranslation {
-            region_id: "region-1".to_owned(),
+    fn above_level_violation(text: &str) -> HskViolation {
+        HskViolation {
             text: text.to_owned(),
-        }]
-    }
-
-    fn rewrite(text: &str) -> Vec<HskRewrite> {
-        vec![HskRewrite {
-            region_id: "region-1".to_owned(),
-            text: text.to_owned(),
-        }]
-    }
-
-    fn no_progress() -> CleaningProgressSink {
-        Arc::new(|_| {})
-    }
-
-    #[test]
-    fn mainland_question_particles_do_not_rewrite_literal_yao() {
-        assert_eq!(
-            canonicalize_mainland_question_particles(
-                "为什么这么难？怎么会那么快？多么好。幺妹打一幺。"
-            ),
-            "为什么这么难？怎么会那么快？多么好。幺妹打一幺。"
-        );
-        assert_eq!(
-            canonicalize_mainland_question_particles(
-                "为什幺这幺难？怎幺会那幺快？多幺好。幺妹打一幺。"
-            ),
-            "为什么这么难？怎么会那么快？多么好。幺妹打一幺。"
-        );
-        assert_eq!(
-            canonicalize_mainland_question_particles(
-                &seed_control().normalize_text("为什么这么难？")
-            ),
-            "为什么这么难？"
-        );
-    }
-
-    #[tokio::test]
-    async fn valid_rewrite_fills_faithful_displayed_pinyin_and_strict_vocabulary() {
-        let control = seed_control();
-        let model =
-            FakePageTranslationModel::new([faithful("我们马上离开")], [rewrite("我们马上离开")]);
-        let mut regions = vec![translation_region("We leave now.")];
-        let warnings = translate_regions_with(
-            &model,
-            &control,
-            &translation_request(HskLevel::Two),
-            &mut regions,
-            false,
-            &AtomicBool::new(false),
-            &no_progress(),
-        )
-        .await
-        .unwrap();
-
-        assert!(warnings.is_empty());
-        assert_eq!(model.faithful_calls.load(Ordering::Relaxed), 1);
-        assert_eq!(model.rewrite_calls.load(Ordering::Relaxed), 1);
-        assert_eq!(regions[0].faithful_chinese, "我们马上离开");
-        assert_eq!(regions[0].displayed_chinese, "我们马上离开");
-        assert!(regions[0].pinyin.contains("wǒ men"));
-        assert!(regions[0].pinyin.contains("lí kāi"));
-        assert!(regions[0].vocabulary.strictly_valid);
-        assert_eq!(regions[0].vocabulary.requested_hsk_level, HskLevel::Two);
-    }
-
-    #[tokio::test]
-    async fn validator_feedback_drives_at_most_two_preserving_corrections() {
-        let control = seed_control();
-        let model = FakePageTranslationModel::new(
-            [faithful("我们不马上离开2个")],
-            [
-                rewrite("我们立即离开"),
-                rewrite("我们立即离开"),
-                rewrite("我们不马上离开2个"),
-            ],
-        );
-        let mut regions = vec![translation_region("We do not leave 2.")];
-        let warnings = translate_regions_with(
-            &model,
-            &control,
-            &translation_request(HskLevel::Two),
-            &mut regions,
-            false,
-            &AtomicBool::new(false),
-            &no_progress(),
-        )
-        .await
-        .unwrap();
-
-        assert!(warnings.is_empty());
-        assert_eq!(model.rewrite_calls.load(Ordering::Relaxed), 3);
-        assert_eq!(regions[0].displayed_chinese, "我们不马上离开2个");
-        assert!(regions[0].vocabulary.strictly_valid);
-        let requests = model.rewrite_requests.lock().unwrap();
-        assert_eq!(requests[0].correction_attempt, 0);
-        assert_eq!(requests[1].correction_attempt, 1);
-        assert!(!requests[1].final_attempt);
-        assert_eq!(requests[2].correction_attempt, 2);
-        assert!(requests[2].final_attempt);
-        assert_eq!(requests[1].regions[0].validator_feedback[0].text, "立即");
-        assert!(
-            requests[1].regions[0]
-                .preservation_feedback
-                .iter()
-                .any(|feedback| feedback.starts_with("numbers changed"))
-        );
-        assert!(
-            requests[1].regions[0]
-                .preservation_feedback
-                .iter()
-                .any(|feedback| feedback.starts_with("negation markers changed"))
-        );
-    }
-
-    #[tokio::test]
-    async fn unresolved_third_candidate_is_non_strict_and_warned() {
-        let control = seed_control();
-        let model = FakePageTranslationModel::new(
-            [faithful("我们马上离开")],
-            [
-                rewrite("我们立即离开"),
-                rewrite("我们立即离开"),
-                rewrite("我们立即离开"),
-            ],
-        );
-        let mut regions = vec![translation_region("We leave now.")];
-        let warnings = translate_regions_with(
-            &model,
-            &control,
-            &translation_request(HskLevel::Two),
-            &mut regions,
-            false,
-            &AtomicBool::new(false),
-            &no_progress(),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(model.rewrite_calls.load(Ordering::Relaxed), 3);
-        assert!(!regions[0].vocabulary.strictly_valid);
-        assert_eq!(regions[0].displayed_chinese, "我们马上离开");
-        assert_eq!(warnings.len(), 1);
-        assert_eq!(warnings[0].code, BrowserWarningCode::HskRewriteFailed);
-        assert!(
-            warnings[0]
-                .message
-                .contains("initial pass and two correction attempts")
-        );
-        assert!(warnings[0].message.contains("立即"));
-    }
-
-    #[tokio::test]
-    async fn only_explicit_names_become_reported_exceptions() {
-        let control = seed_control();
-        let model = FakePageTranslationModel::new([], [rewrite("小明离开")]);
-        let mut region = translation_region("Xiaoming leaves.");
-        region.faithful_chinese = "小明离开".to_owned();
-        region.vocabulary.exceptions.push(VocabularyException {
-            text: "小明".to_owned(),
-            reason: VocabularyExceptionReason::PersonName,
-        });
-        let mut regions = vec![region];
-        let warnings = translate_regions_with(
-            &model,
-            &control,
-            &translation_request(HskLevel::Two),
-            &mut regions,
-            true,
-            &AtomicBool::new(false),
-            &no_progress(),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(model.faithful_calls.load(Ordering::Relaxed), 0);
-        assert!(!regions[0].vocabulary.strictly_valid);
-        assert_eq!(regions[0].vocabulary.exceptions[0].text, "小明");
-        assert_eq!(warnings[0].code, BrowserWarningCode::HskException);
-    }
-
-    #[tokio::test]
-    async fn cancellation_stops_before_any_translation_model_call() {
-        let control = seed_control();
-        let model = FakePageTranslationModel::new([], []);
-        let mut regions = vec![translation_region("We leave now.")];
-        let error = translate_regions_with(
-            &model,
-            &control,
-            &translation_request(HskLevel::Two),
-            &mut regions,
-            false,
-            &AtomicBool::new(true),
-            &no_progress(),
-        )
-        .await
-        .unwrap_err();
-
-        assert!(error.to_string().contains("cancelled"));
-        assert_eq!(model.faithful_calls.load(Ordering::Relaxed), 0);
-        assert_eq!(model.rewrite_calls.load(Ordering::Relaxed), 0);
-    }
-
-    #[test]
-    fn browser_lookup_uses_real_longest_match_data_and_region_context() {
-        let control = seed_control();
-        let result = browser_lookup_result(control.lookup_with_region_context(
-            "研究生离开",
-            &[],
-            Some(ControlLookupRegion {
-                displayed_chinese: "研究生离开".to_owned(),
-                faithful_chinese: "研究生离开".to_owned(),
-                source_english: "The graduate student leaves.".to_owned(),
-            }),
-        ));
-
-        assert_eq!(
-            result
-                .tokens
-                .iter()
-                .map(|token| token.simplified.as_str())
-                .collect::<Vec<_>>(),
-            ["研究生", "离开"]
-        );
-        assert_eq!(result.tokens[0].pinyin, "yán jiū shēng");
-        assert_eq!(result.tokens[1].hsk_level, Some(HskLevel::Two));
-        assert_eq!(
-            result.region.unwrap().source_english,
-            "The graduate student leaves."
-        );
-    }
-
-    fn png(image: DynamicImage) -> Vec<u8> {
-        let mut bytes = Cursor::new(Vec::new());
-        image.write_to(&mut bytes, ImageFormat::Png).unwrap();
-        bytes.into_inner()
-    }
-
-    fn add_image_node(page: &mut Page, role: ImageRole, blob: BlobRef, width: u32, height: u32) {
-        let id = NodeId::new();
-        page.nodes.insert(
-            id,
-            Node {
-                id,
-                transform: Transform::default(),
-                visible: true,
-                kind: NodeKind::Image(ImageData {
-                    role,
-                    blob,
-                    opacity: 1.0,
-                    natural_width: width,
-                    natural_height: height,
-                    name: None,
-                }),
+            start_char: 0,
+            end_char: text.chars().count(),
+            reason: ViolationReason::AboveSelectedHskLevel {
+                required_level: ControlHskLevel::new(2).unwrap(),
             },
-        );
+            suggested_words: vec!["学生".to_owned()],
+        }
     }
 
-    fn add_mask_node(page: &mut Page, role: MaskRole, blob: BlobRef) {
-        let id = NodeId::new();
-        page.nodes.insert(
-            id,
-            Node {
-                id,
-                transform: Transform::default(),
+    fn usable_pending_state() -> TranslationState {
+        let report = validation_report("研究生", vec![above_level_violation("研究生")]);
+        TranslationState {
+            base_chinese: Some("研究生".to_owned()),
+            displayed_chinese: Some("研究生".to_owned()),
+            report: Some(report),
+            problems: vec!["replace invalid or above-level token `研究生` at 0..3".to_owned()],
+            meaning_valid: true,
+            repair_state: HskRepairState::Pending,
+        }
+    }
+
+    fn pending_repair(id: &str) -> PendingRepair {
+        let rect = PixelRect::new(1.0, 1.0, 9.0, 9.0).unwrap();
+        PendingRepair {
+            cache_key: format!("cache-{id}"),
+            region: PreparedRegion {
+                id: id.to_owned(),
+                candidate: Candidate {
+                    kind: CandidateKind::StoryText,
+                    text_rect: rect,
+                    bubble_rect: rect,
+                    confirmed_bubble_rect: rect,
+                    detector_confidence: 0.99,
+                },
+                source_english: "Graduate student".to_owned(),
+                ocr_confidence: 0.99,
+                reading_order: 0,
+                prediction: PpOcrPrediction {
+                    text: "Graduate student".to_owned(),
+                    confidence: 0.99,
+                    ink_mask: None,
+                    text_color: [0, 0, 0],
+                    stroke_color: [255, 255, 255],
+                    has_stroke_color: false,
+                },
+                patch: PatchPng {
+                    bounds: geometry::PixelBounds {
+                        x: 1,
+                        y: 1,
+                        width: 8,
+                        height: 8,
+                    },
+                    bytes: vec![1, 2, 3],
+                },
                 visible: false,
-                kind: NodeKind::Mask(MaskData { role, blob }),
+                translation_queued_at: tokio::time::Instant::now(),
             },
-        );
-    }
-
-    fn add_text_node(
-        page: &mut Page,
-        transform: Transform,
-        confidence: f32,
-        text: &str,
-        polygon: [[f32; 2]; 4],
-    ) {
-        let id = NodeId::new();
-        page.nodes.insert(
-            id,
-            Node {
-                id,
-                transform,
-                visible: true,
-                kind: NodeKind::Text(TextData {
-                    confidence,
-                    source_lang: Some("en".to_owned()),
-                    source_direction: Some(TextDirection::Horizontal),
-                    line_polygons: Some(vec![polygon]),
-                    rotation_deg: Some(transform.rotation_deg),
-                    detected_font_size_px: Some(24.0),
-                    text: Some(text.to_owned()),
-                    ..Default::default()
-                }),
+            utterance: HskRepairUtterance {
+                id: id.to_owned(),
+                kind: HskUtteranceKind::Dialogue,
+                source_english: "Graduate student".to_owned(),
+                rejected_chinese: Some("研究生".to_owned()),
+                problems: vec!["above level".to_owned()],
             },
-        );
-    }
-
-    #[test]
-    fn english_filter_rejects_non_latin_dialogue() {
-        assert!(is_probably_english("Why do I feel like this?"));
-        assert!(is_probably_english("I"));
-        assert!(!is_probably_english("저벅"));
-        assert!(!is_probably_english("你好"));
-        assert!(!is_probably_english("hello 世界"));
-        assert!(!is_probably_english("..."));
-    }
-
-    #[test]
-    fn bubble_matching_requires_center_or_meaningful_overlap() {
-        let mut mask = GrayImage::new(32, 32);
-        for y in 8..24 {
-            for x in 8..24 {
-                mask.put_pixel(x, y, Luma([7]));
-            }
+            preceding_utterances: Vec::new(),
+            state: usable_pending_state(),
+            published: true,
         }
-        assert_eq!(
-            bubble_label_for(
-                &mask,
-                Transform {
-                    x: 10.0,
-                    y: 10.0,
-                    width: 10.0,
-                    height: 10.0,
-                    rotation_deg: 0.0,
-                },
+    }
+
+    fn recognized_line(text: &str, rect: PixelRect, color: [u8; 3]) -> RecognizedLine {
+        RecognizedLine {
+            candidate: Candidate {
+                kind: CandidateKind::StoryText,
+                text_rect: rect,
+                bubble_rect: rect,
+                confirmed_bubble_rect: rect,
+                detector_confidence: 0.99,
+            },
+            prediction: PpOcrPrediction {
+                text: text.to_owned(),
+                confidence: 0.99,
+                ink_mask: None,
+                text_color: color,
+                stroke_color: [0, 0, 0],
+                has_stroke_color: false,
+            },
+            crop_bounds: PixelBounds {
+                x: rect.x0 as u32,
+                y: rect.y0 as u32,
+                width: rect.width() as u32,
+                height: rect.height() as u32,
+            },
+        }
+    }
+
+    #[test]
+    fn adjacent_same_color_lines_form_one_story_text_block() {
+        let lines = vec![
+            recognized_line(
+                "AND BECAME THE HERO",
+                PixelRect::new(100.0, 100.0, 500.0, 140.0).unwrap(),
+                [250, 250, 250],
             ),
-            Some(7)
-        );
-        assert_eq!(
-            bubble_label_for(
-                &mask,
-                Transform {
-                    x: 0.0,
-                    y: 0.0,
-                    width: 10.0,
-                    height: 10.0,
-                    rotation_deg: 0.0,
-                },
+            recognized_line(
+                "WHO BROUGHT AN END",
+                PixelRect::new(130.0, 148.0, 470.0, 188.0).unwrap(),
+                [248, 249, 250],
             ),
-            None
+        ];
+
+        let groups = group_recognized_lines(lines, ReadingDirection::Ltr);
+
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].len(), 2);
+    }
+
+    #[test]
+    fn colored_emphasis_and_side_by_side_bubbles_stay_separate() {
+        let lines = vec![
+            recognized_line(
+                "THE PRETEXT OF",
+                PixelRect::new(180.0, 100.0, 500.0, 140.0).unwrap(),
+                [250, 250, 250],
+            ),
+            recognized_line(
+                "ASSASSINATION REQUESTS",
+                PixelRect::new(120.0, 148.0, 560.0, 190.0).unwrap(),
+                [210, 30, 35],
+            ),
+            recognized_line(
+                "LEFT BUBBLE",
+                PixelRect::new(20.0, 240.0, 220.0, 280.0).unwrap(),
+                [20, 20, 20],
+            ),
+            recognized_line(
+                "RIGHT BUBBLE",
+                PixelRect::new(350.0, 242.0, 560.0, 282.0).unwrap(),
+                [20, 20, 20],
+            ),
+        ];
+
+        let groups = group_recognized_lines(lines, ReadingDirection::Ltr);
+
+        assert_eq!(groups.len(), 4);
+        assert!(groups.iter().all(|group| group.len() == 1));
+    }
+
+    #[test]
+    fn english_gate_accepts_confident_latin_bubble_text() {
+        assert!(accept_english_ocr_line(0.91, "FORGOTTEN,"));
+        assert!(accept_english_ocr_line(0.91, "-ENRIQUE-"));
+        assert!(accept_english_ocr(
+            CandidateKind::StoryText,
+            0.91,
+            "'LITTLE' MAN?"
+        ));
+        assert!(!accept_english_ocr(
+            CandidateKind::StoryText,
+            0.44,
+            "Too uncertain"
+        ));
+        assert!(!accept_english_ocr(
+            CandidateKind::StoryText,
+            0.99,
+            "rgrodbedj e gbdue t js gb socews nggpodbgedg ectrseeed gbucbgebbr ege rbgtg"
+        ));
+        assert!(!accept_english_ocr(
+            CandidateKind::StoryText,
+            0.99,
+            "もう帰る"
+        ));
+        assert!(!accept_english_ocr(
+            CandidateKind::StoryText,
+            0.99,
+            "30 YEARS SINCE THE PROLOGUE"
+        ));
+        assert!(!accept_english_ocr(CandidateKind::StoryText, 0.99, "Ka Z"));
+        assert!(!accept_english_ocr(
+            CandidateKind::StoryText,
+            0.99,
+            "30H0EXC"
+        ));
+        assert!(accept_english_ocr(CandidateKind::StoryText, 0.99, "Go on"));
+        assert!(accept_english_ocr(CandidateKind::StoryText, 0.99, "R2D2"));
+        assert!(!accept_english_ocr(
+            CandidateKind::StoryText,
+            0.64,
+            "Egodbeab Ejgne ysugede deedj rgebjon."
+        ));
+        assert!(!accept_english_ocr(
+            CandidateKind::StoryText,
+            0.66,
+            "I Egsbgla"
+        ));
+    }
+
+    #[test]
+    fn narration_gate_accepts_prose_but_rejects_sfx_credits_logos_and_ambiguity() {
+        assert!(accept_english_ocr(
+            CandidateKind::StoryText,
+            0.93,
+            "And the shadow blade who devised the extermination unit."
+        ));
+        assert!(accept_english_ocr(
+            CandidateKind::StoryText,
+            0.93,
+            "Thirty years later"
+        ));
+        assert!(accept_english_ocr(
+            CandidateKind::StoryText,
+            0.93,
+            "NEXT IS..."
+        ));
+        assert!(accept_english_ocr(
+            CandidateKind::StoryText,
+            0.93,
+            "“DANGEROUS ASSIGNMENTS.”"
+        ));
+        assert!(!accept_english_ocr(CandidateKind::StoryText, 0.99, "WHAM"));
+        assert!(!accept_english_ocr(
+            CandidateKind::StoryText,
+            0.99,
+            "BANG BOOM CRASH WHAM!"
+        ));
+        assert!(!accept_english_ocr(
+            CandidateKind::StoryText,
+            0.99,
+            "“BANG BOOM!”"
+        ));
+        assert!(!accept_english_ocr(
+            CandidateKind::StoryText,
+            0.99,
+            "Translated by Moonlight Scans"
+        ));
+        assert!(!accept_english_ocr(
+            CandidateKind::StoryText,
+            0.99,
+            "READ-MANGA.COM"
+        ));
+        assert!(!accept_english_ocr(
+            CandidateKind::StoryText,
+            0.99,
+            "ORIGINAL CONTI | BACK GROUND | SKETCH | LINE ART | COLOR | EFFECT | TEXT | EDITING | DIRECTING"
+        ));
+        assert!(!accept_english_ocr(
+            CandidateKind::StoryText,
+            0.99,
+            "BACK GROUND | COLOR | EFFECT | EDITING"
+        ));
+        assert!(!accept_english_ocr(
+            CandidateKind::StoryText,
+            0.99,
+            "V d at a ea Read at.."
+        ));
+        assert!(!accept_english_ocr(
+            CandidateKind::StoryText,
+            0.99,
+            "for the fastest releases"
+        ));
+        assert!(!accept_english_ocr(
+            CandidateKind::StoryText,
+            0.99,
+            "30 YEARS SINCE THE PROLOGUE"
+        ));
+        assert!(accept_english_ocr(CandidateKind::StoryText, 0.99, "AND..."));
+    }
+
+    #[test]
+    fn credit_context_only_rejects_isolated_uppercase_name_labels() {
+        assert!(looks_like_credit_context("30 YEARS SINCE THE PROLOGUE"));
+        assert!(looks_like_credit_context("for the fastest releases"));
+        assert!(looks_like_isolated_credit_name("STEPH BLACK"));
+        assert!(looks_like_isolated_credit_name("SHOUNEN BLACK BLACK"));
+
+        assert!(!looks_like_isolated_credit_name("Southern Prizhenkaya"));
+        assert!(!looks_like_isolated_credit_name(
+            "THE NAMELESS HERO RETURNS"
+        ));
+        assert!(!looks_like_credit_context("SOUTHERN PRIZHENKAYA"));
+    }
+
+    #[test]
+    fn cache_key_is_stable_across_batch_regrouping_and_numbered_position() {
+        let context = vec![HskPrecedingUtterance {
+            source_english: "Earlier".to_owned(),
+            chinese: "以前".to_owned(),
+        }];
+        let original_group = ["Wait here", "A sibling", "  Leave \n now  "];
+        let regrouped = ["Leave now", "A different sibling"];
+
+        assert_eq!(
+            translation_cache_key(
+                original_group[2],
+                HskUtteranceKind::Dialogue,
+                &context,
+                &[],
+                2,
+                "qwen",
+                "model-r1",
+                "prompt-r1",
+                "validator-r1",
+                "control-r1",
+            ),
+            translation_cache_key(
+                regrouped[0],
+                HskUtteranceKind::Dialogue,
+                &context,
+                &[],
+                2,
+                "qwen",
+                "model-r1",
+                "prompt-r1",
+                "validator-r1",
+                "control-r1",
+            )
         );
     }
 
     #[test]
-    fn dialogue_filter_removes_non_bubble_and_non_english_text_nodes() {
-        const WIDTH: u32 = 128;
-        const HEIGHT: u32 = 128;
-        let temp = tempdir().unwrap();
-        let project = Utf8PathBuf::from_path_buf(temp.path().join("filter.khrproj")).unwrap();
-        let session = ProjectSession::create(&project, "dialogue filter").unwrap();
-        let mut bubbles = GrayImage::new(WIDTH, HEIGHT);
-        for y in 8..64 {
-            for x in 8..64 {
-                bubbles.put_pixel(x, y, Luma([3]));
-            }
-        }
-        let bubble_blob = session
-            .blobs
-            .put_bytes(&png(DynamicImage::ImageLuma8(bubbles)))
-            .unwrap();
-        let mut page = Page::new("filter.png", WIDTH, HEIGHT);
-        let page_id = page.id;
-        add_mask_node(&mut page, MaskRole::Bubble, bubble_blob);
-        add_text_node(
-            &mut page,
-            Transform {
-                x: 16.0,
-                y: 16.0,
-                width: 32.0,
-                height: 20.0,
-                rotation_deg: 0.0,
-            },
-            0.9,
-            "HELLO",
-            [[16.0, 16.0], [48.0, 16.0], [48.0, 36.0], [16.0, 36.0]],
+    fn cache_key_covers_every_output_affecting_input_and_limits_context_to_six() {
+        let key = |source_english: &str,
+                   context: &[HskPrecedingUtterance],
+                   protected_names: &[HskProtectedName],
+                   hsk_level: u8,
+                   model_id: &str,
+                   model_revision: &str,
+                   prompt_hash: &str,
+                   validator_hash: &str,
+                   control_revision: &str| {
+            translation_cache_key(
+                source_english,
+                HskUtteranceKind::Dialogue,
+                context,
+                protected_names,
+                hsk_level,
+                model_id,
+                model_revision,
+                prompt_hash,
+                validator_hash,
+                control_revision,
+            )
+        };
+        let context = vec![HskPrecedingUtterance {
+            source_english: "Earlier".to_owned(),
+            chinese: "以前".to_owned(),
+        }];
+        let no_names = Vec::<HskProtectedName>::new();
+        let base = key(
+            "Leave now",
+            &context,
+            &no_names,
+            2,
+            "qwen",
+            "model-r1",
+            "prompt-r1",
+            "validator-r1",
+            "control-r1",
         );
-        add_text_node(
-            &mut page,
-            Transform {
-                x: 80.0,
-                y: 80.0,
-                width: 24.0,
-                height: 20.0,
-                rotation_deg: 0.0,
-            },
-            0.9,
-            "SFX",
-            [[80.0, 80.0], [104.0, 80.0], [104.0, 100.0], [80.0, 100.0]],
+        assert_ne!(
+            base,
+            key(
+                "Stay here",
+                &context,
+                &no_names,
+                2,
+                "qwen",
+                "model-r1",
+                "prompt-r1",
+                "validator-r1",
+                "control-r1",
+            )
         );
-        add_text_node(
-            &mut page,
-            Transform {
-                x: 20.0,
-                y: 40.0,
-                width: 24.0,
-                height: 16.0,
-                rotation_deg: 0.0,
-            },
-            0.9,
-            "저벅",
-            [[20.0, 40.0], [44.0, 40.0], [44.0, 56.0], [20.0, 56.0]],
+        assert_ne!(
+            base,
+            key(
+                "Leave now",
+                &[],
+                &no_names,
+                2,
+                "qwen",
+                "model-r1",
+                "prompt-r1",
+                "validator-r1",
+                "control-r1",
+            )
         );
-        session.apply(Op::AddPage { page, at: 0 }).unwrap();
+        assert_ne!(
+            base,
+            key(
+                "Leave now",
+                &context,
+                &no_names,
+                3,
+                "qwen",
+                "model-r1",
+                "prompt-r1",
+                "validator-r1",
+                "control-r1",
+            )
+        );
+        assert_ne!(
+            base,
+            key(
+                "Leave now",
+                &context,
+                &no_names,
+                2,
+                "other-qwen",
+                "model-r1",
+                "prompt-r1",
+                "validator-r1",
+                "control-r1",
+            )
+        );
+        assert_ne!(
+            base,
+            key(
+                "Leave now",
+                &context,
+                &no_names,
+                2,
+                "qwen",
+                "model-r2",
+                "prompt-r1",
+                "validator-r1",
+                "control-r1",
+            )
+        );
+        assert_ne!(
+            base,
+            key(
+                "Leave now",
+                &context,
+                &no_names,
+                2,
+                "qwen",
+                "model-r1",
+                "prompt-r2",
+                "validator-r1",
+                "control-r1",
+            )
+        );
+        assert_ne!(
+            base,
+            key(
+                "Leave now",
+                &context,
+                &no_names,
+                2,
+                "qwen",
+                "model-r1",
+                "prompt-r1",
+                "validator-r2",
+                "control-r1",
+            )
+        );
+        assert_ne!(
+            base,
+            key(
+                "Leave now",
+                &context,
+                &no_names,
+                2,
+                "qwen",
+                "model-r1",
+                "prompt-r1",
+                "validator-r1",
+                "control-r2",
+            )
+        );
+        assert_ne!(
+            base,
+            key(
+                "Leave now",
+                &context,
+                &[HskProtectedName {
+                    source_english: "Alice".to_owned(),
+                    chinese: "爱丽丝".to_owned(),
+                }],
+                2,
+                "qwen",
+                "model-r1",
+                "prompt-r1",
+                "validator-r1",
+                "control-r1",
+            )
+        );
 
-        assert_eq!(retain_speech_bubble_text(&session, page_id).unwrap(), 2);
-        assert_eq!(retain_english_text(&session, page_id).unwrap(), 1);
-        write_dialogue_erase_mask(&session, page_id).unwrap();
-        let scene = session.scene_snapshot();
-        let retained = scene.pages[&page_id]
-            .nodes
-            .values()
-            .filter_map(|node| match &node.kind {
-                NodeKind::Text(text) => text.text.as_deref(),
-                _ => None,
+        let seven_context_items = (0..7)
+            .map(|index| HskPrecedingUtterance {
+                source_english: format!("source-{index}"),
+                chinese: format!("中文-{index}"),
             })
             .collect::<Vec<_>>();
-        assert_eq!(retained, ["HELLO"]);
-        let segment_blob = scene.pages[&page_id]
-            .nodes
-            .values()
-            .find_map(|node| match &node.kind {
-                NodeKind::Mask(mask) if mask.role == MaskRole::Segment => Some(&mask.blob),
-                _ => None,
-            })
-            .unwrap();
-        let segment = session.blobs.load_image(segment_blob).unwrap().to_luma8();
-        assert_ne!(segment.get_pixel(20, 20).0[0], 0);
-        assert_eq!(segment.get_pixel(90, 90).0[0], 0);
+        assert_eq!(
+            key(
+                "Leave now",
+                &seven_context_items,
+                &no_names,
+                2,
+                "qwen",
+                "model-r1",
+                "prompt-r1",
+                "validator-r1",
+                "control-r1",
+            ),
+            key(
+                "Leave now",
+                &seven_context_items[1..],
+                &no_names,
+                2,
+                "qwen",
+                "model-r1",
+                "prompt-r1",
+                "validator-r1",
+                "control-r1",
+            )
+        );
     }
 
     #[test]
-    fn tall_webtoon_scene_packages_stable_regions_masks_and_clean_blob() {
-        const WIDTH: u32 = 256;
-        const HEIGHT: u32 = 4_096;
-        let temp = tempdir().unwrap();
-        let project = Utf8PathBuf::from_path_buf(temp.path().join("tall.khrproj")).unwrap();
-        let session = ProjectSession::create(&project, "tall synthetic").unwrap();
+    fn partial_cache_hits_preserve_the_full_primary_prompt_batch() {
+        let sources = ["First", "Second", "Third"];
+        let partial_hits = [Some("cached-first"), None, Some("cached-third")];
+        let generation_sources = primary_generation_indices(&partial_hits)
+            .into_iter()
+            .map(|index| sources[index])
+            .collect::<Vec<_>>();
 
-        let mut source = RgbaImage::from_pixel(WIDTH, HEIGHT, Rgba([238, 238, 238, 255]));
-        for y in 200..520 {
-            for x in 40..216 {
-                source.put_pixel(x, y, Rgba([255, 255, 255, 255]));
-            }
-        }
-        for y in 2_700..3_060 {
-            for x in 28..228 {
-                source.put_pixel(x, y, Rgba([255, 255, 255, 255]));
-            }
-        }
-        let source_bytes = png(DynamicImage::ImageRgba8(source.clone()));
-        let source_blob = session.blobs.put_bytes(&source_bytes).unwrap();
-        let clean_blob = session
-            .blobs
-            .put_bytes(&png(DynamicImage::ImageRgba8(source)))
-            .unwrap();
-
-        let mut segment = GrayImage::new(WIDTH, HEIGHT);
-        for y in 310..360 {
-            for x in 70..190 {
-                segment.put_pixel(x, y, Luma([255]));
-            }
-        }
-        let segment_blob = session
-            .blobs
-            .put_bytes(&png(DynamicImage::ImageLuma8(segment)))
-            .unwrap();
-        let mut bubbles = GrayImage::new(WIDTH, HEIGHT);
-        for (label, center_y, radius_x, radius_y) in [
-            (1_u8, 360_i32, 96_i32, 150_i32),
-            (2_u8, 2_880_i32, 108_i32, 170_i32),
-        ] {
-            for y in (center_y - radius_y)..=(center_y + radius_y) {
-                for x in (128 - radius_x)..=(128 + radius_x) {
-                    let dx = (x - 128) as f32 / radius_x as f32;
-                    let dy = (y - center_y) as f32 / radius_y as f32;
-                    if dx * dx + dy * dy <= 1.0 {
-                        bubbles.put_pixel(x as u32, y as u32, Luma([label]));
-                    }
-                }
-            }
-        }
-        let bubble_blob = session
-            .blobs
-            .put_bytes(&png(DynamicImage::ImageLuma8(bubbles)))
-            .unwrap();
-
-        let mut page = Page::new("synthetic-webtoon.png", WIDTH, HEIGHT);
-        let page_id = page.id;
-        add_image_node(&mut page, ImageRole::Source, source_blob, WIDTH, HEIGHT);
-        add_image_node(&mut page, ImageRole::Inpainted, clean_blob, WIDTH, HEIGHT);
-        add_mask_node(&mut page, MaskRole::Segment, segment_blob);
-        add_mask_node(&mut page, MaskRole::Bubble, bubble_blob);
-        add_text_node(
-            &mut page,
-            Transform {
-                x: 68.0,
-                y: 300.0,
-                width: 124.0,
-                height: 72.0,
-                rotation_deg: -2.0,
-            },
-            0.42,
-            "WE SHOULD GO NOW!",
-            [[70.0, 305.0], [190.0, 301.0], [192.0, 368.0], [72.0, 372.0]],
-        );
-        add_text_node(
-            &mut page,
-            Transform {
-                x: 58.0,
-                y: 2_815.0,
-                width: 142.0,
-                height: 88.0,
-                rotation_deg: 0.0,
-            },
-            0.96,
-            "I KNOW.",
-            [
-                [60.0, 2_820.0],
-                [198.0, 2_820.0],
-                [198.0, 2_900.0],
-                [60.0, 2_900.0],
-            ],
-        );
-        session.apply(Op::AddPage { page, at: 0 }).unwrap();
-
-        let request = BrowserJobRequest {
-            protocol_version: crate::contracts::PROTOCOL_VERSION,
-            client_image_id: "tall-webtoon".to_owned(),
-            source_sha256: sha256_hex(&source_bytes),
-            source_mime_type: "image/png".to_owned(),
-            natural_width: WIDTH,
-            natural_height: HEIGHT,
-            page_session_id: "page".to_owned(),
-            page_index: 0,
-            settings: crate::contracts::BrowserJobSettings {
-                source_language: "en".to_owned(),
-                target_language: "zh-CN".to_owned(),
-                hsk_standard: "2.0".to_owned(),
-                hsk_level: HskLevel::Three,
-                reading_direction: ReadingDirection::Auto,
-                translate_sound_effects: false,
-            },
-            preceding_context: Some(Vec::new()),
-        };
-        let first = extract_output(&session, page_id, &request, false).unwrap();
-        let second = extract_output(&session, page_id, &request, true).unwrap();
-
-        assert_eq!(first.regions.len(), 2);
-        assert_eq!(
-            first
-                .regions
-                .iter()
-                .map(|region| region.id.as_str())
-                .collect::<Vec<_>>(),
-            second
-                .regions
-                .iter()
-                .map(|region| region.id.as_str())
-                .collect::<Vec<_>>()
-        );
-        assert!(first.regions.iter().all(|region| {
-            region
-                .text_polygon
-                .iter()
-                .all(|point| (0.0..=1.0).contains(&point.x) && (0.0..=1.0).contains(&point.y))
-        }));
+        assert_eq!(generation_sources, sources.to_vec());
         assert!(
-            first
-                .regions
-                .iter()
-                .all(|region| region.bubble_polygon.as_ref().is_some_and(|p| p.len() > 4))
+            primary_generation_indices(&[
+                Some("cached-first"),
+                Some("cached-second"),
+                Some("cached-third"),
+            ])
+            .is_empty()
         );
-        assert_eq!(first.regions[0].faithful_chinese, "WE SHOULD GO NOW!");
-        assert!(!first.regions[0].vocabulary.strictly_valid);
-        assert_eq!(first.warnings.len(), 1);
-        assert_eq!(first.warnings[0].code, BrowserWarningCode::LowOcrConfidence);
-        assert!(!first.cache.detection_hit);
-        assert!(second.cache.detection_hit);
+    }
+
+    #[test]
+    fn cancellation_is_observed_at_batch_boundaries() {
+        let cancel = AtomicBool::new(false);
+        assert!(cancellation_boundary(&cancel).is_ok());
+        cancel.store(true, Ordering::Release);
+        let error = cancellation_boundary(&cancel).unwrap_err();
+        assert_eq!(error.code, "CANCELLED");
+    }
+
+    #[tokio::test]
+    async fn sparse_translation_tail_is_not_dispatched_before_its_deadline() {
+        let now = tokio::time::Instant::now();
+        let mut one = vec![pending_repair("bubble-a").region];
+        one[0].translation_queued_at = now;
         assert_eq!(
-            image::load_from_memory(&first.clean_image)
-                .unwrap()
-                .dimensions(),
-            (WIDTH, HEIGHT)
+            translation_queue_deadline(&one),
+            Some(now + TRANSLATION_MAX_FLUSH_DELAY)
+        );
+        assert_eq!(
+            translation_boundary_action(&one, false, now, false),
+            TranslationBoundaryAction::ContinueUpstream
+        );
+        assert_eq!(
+            translation_boundary_action(
+                &one,
+                false,
+                now + TRANSLATION_MAX_FLUSH_DELAY - Duration::from_nanos(1),
+                false
+            ),
+            TranslationBoundaryAction::ContinueUpstream
+        );
+    }
+
+    #[tokio::test]
+    async fn unready_translation_tail_does_not_consume_tokio_time_or_block_upstream_work() {
+        let now = tokio::time::Instant::now();
+        let mut two = vec![
+            pending_repair("bubble-a").region,
+            pending_repair("bubble-b").region,
+        ];
+        two[0].translation_queued_at = now + Duration::from_millis(20);
+        two[1].translation_queued_at = now;
+
+        // The production boundary uses this zero result to return immediately,
+        // allowing the caller's already-available OCR/detector batch to run.
+        let checked_at = tokio::time::Instant::now();
+        assert_eq!(
+            translation_boundary_action(&two, false, now, false),
+            TranslationBoundaryAction::ContinueUpstream
+        );
+        assert!(checked_at.elapsed() < Duration::from_millis(5));
+    }
+
+    #[tokio::test]
+    async fn sparse_translation_tail_dispatches_at_the_deadline_boundary() {
+        let now = tokio::time::Instant::now();
+        let mut tail = vec![
+            pending_repair("bubble-a").region,
+            pending_repair("bubble-b").region,
+        ];
+        tail[0].translation_queued_at = now + Duration::from_millis(20);
+        tail[1].translation_queued_at = now;
+
+        assert_eq!(
+            translation_boundary_action(
+                &tail,
+                false,
+                now + TRANSLATION_MAX_FLUSH_DELAY - Duration::from_nanos(1),
+                false
+            ),
+            TranslationBoundaryAction::ContinueUpstream
+        );
+        assert_eq!(
+            translation_boundary_action(&tail, false, now + TRANSLATION_MAX_FLUSH_DELAY, false),
+            TranslationBoundaryAction::Dispatch(2)
+        );
+    }
+
+    #[tokio::test]
+    async fn translation_batches_cap_at_six_and_cancellation_wins_at_boundaries() {
+        for available in 1..32 {
+            let count = translation_batch_len(available);
+            assert!((1..=TRANSLATION_BATCH_MAX).contains(&count));
+            assert!(count <= available);
+            let remaining = available - count;
+            assert!(remaining == 0 || remaining >= TRANSLATION_BATCH_MIN);
+        }
+
+        let now = tokio::time::Instant::now();
+        let mut full = (0..7)
+            .map(|index| pending_repair(&format!("bubble-{index}")).region)
+            .collect::<Vec<_>>();
+        for region in &mut full {
+            region.translation_queued_at = now;
+        }
+        assert_eq!(
+            translation_boundary_action(&full[..6], false, now, false),
+            TranslationBoundaryAction::Dispatch(TRANSLATION_BATCH_MAX)
+        );
+        assert_eq!(
+            translation_boundary_action(&full, false, now, false),
+            TranslationBoundaryAction::Dispatch(4)
         );
 
-        let result = crate::contracts::BrowserJobResult {
-            protocol_version: crate::contracts::PROTOCOL_VERSION,
-            job_id: "job-tall".to_owned(),
-            source_sha256: request.source_sha256,
-            source_width: WIDTH,
-            source_height: HEIGHT,
-            clean_image_blob_id: "blob-tall".to_owned(),
-            clean_image_mime_type: first.clean_image_mime_type,
-            regions: first.regions,
-            warnings: first.warnings,
-            cache: first.cache,
-        };
-        result.validate().unwrap();
+        let cancel = AtomicBool::new(false);
+        assert!(cancellation_boundary(&cancel).is_ok());
+        cancel.store(true, Ordering::Release);
+        assert_eq!(
+            translation_boundary_action(&full, false, now, cancel.load(Ordering::Acquire)),
+            TranslationBoundaryAction::Cancelled
+        );
+        assert_eq!(
+            cancellation_boundary(&cancel).unwrap_err().code,
+            "CANCELLED"
+        );
+    }
+
+    #[test]
+    fn repair_queue_deduplicates_and_stays_closed_until_primary_work_finishes() {
+        let mut queue = RepairQueue::default();
+        queue.enqueue(pending_repair("bubble-a"));
+        queue.enqueue(pending_repair("bubble-a"));
+
+        assert_eq!(queue.jobs.len(), 1);
+        assert!(queue.next().is_none());
+        assert_eq!(queue.jobs.len(), 1);
+
+        queue.finish_primary_phase();
+        assert_eq!(queue.next().unwrap().region.id, "bubble-a");
+        assert!(queue.next().is_none());
+    }
+
+    #[test]
+    fn usable_above_level_primary_is_cacheable_while_its_repair_is_pending() {
+        let primary = usable_pending_state().initial_translation().unwrap();
+        assert_eq!(primary.displayed_chinese, "研究生");
+        assert_eq!(primary.repair_state, HskRepairState::Pending);
+
+        let mut cache = TranslationCache::default();
+        cache.insert("primary-key".to_owned(), primary);
+        let cached = cache.get("primary-key").unwrap();
+        assert_eq!(cached.displayed_chinese, "研究生");
+        assert_eq!(cached.repair_state, HskRepairState::Pending);
+    }
+
+    #[test]
+    fn only_a_valid_improvement_replaces_a_usable_primary() {
+        let mut accepted_state = usable_pending_state();
+        assert!(accepted_state.apply_evaluated_repair(
+            Some("学生".to_owned()),
+            Some(validation_report("学生", Vec::new())),
+            Vec::new(),
+        ));
+        let accepted = accepted_state.finish().unwrap();
+        assert_eq!(accepted.base_chinese, "研究生");
+        assert_eq!(accepted.displayed_chinese, "学生");
+        assert_eq!(accepted.repair_state, HskRepairState::Accepted);
+        let mut cache = TranslationCache::default();
+        cache.insert("refined-key".to_owned(), accepted);
+        let refined = cache.get("refined-key").unwrap();
+        assert_eq!(refined.displayed_chinese, "学生");
+        assert_eq!(refined.repair_state, HskRepairState::Accepted);
+
+        let mut worse_state = usable_pending_state();
+        assert!(!worse_state.apply_evaluated_repair(
+            Some("教授".to_owned()),
+            Some(validation_report(
+                "教授",
+                vec![above_level_violation("教授")],
+            )),
+            vec!["still above level".to_owned()],
+        ));
+        let worse = worse_state.finish().unwrap();
+        assert_eq!(worse.base_chinese, "研究生");
+        assert_eq!(worse.displayed_chinese, "研究生");
+        assert_eq!(worse.repair_state, HskRepairState::Rejected);
+
+        let mut malformed_state = usable_pending_state();
+        assert!(!malformed_state.apply_evaluated_repair(
+            None,
+            None,
+            vec!["malformed repair".to_owned()],
+        ));
+        let malformed = malformed_state.finish().unwrap();
+        assert_eq!(malformed.base_chinese, "研究生");
+        assert_eq!(malformed.displayed_chinese, "研究生");
+        assert_eq!(malformed.repair_state, HskRepairState::Rejected);
+    }
+
+    #[test]
+    fn browser_preprocessing_pool_has_exactly_six_threads() {
+        let pool = global_preprocessing_pool().unwrap();
+        assert_eq!(pool.thread_count(), PREPROCESSING_THREADS);
+        assert_eq!(PREPROCESSING_THREADS, 6);
     }
 }

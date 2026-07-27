@@ -1,148 +1,69 @@
-# Windows developer package
+# Windows performance package
 
-This directory provides the deliberately small Windows packaging path for the
-HSK Manga Translator. It builds the two release companion executables, builds
-and zips the Firefox Manifest V3 extension, stages a portable directory, and
-installs that directory for the current user. It does not introduce an MSI,
-GUI bootstrapper, model downloader, or another runtime.
-
-The existing scripts under `native-host-registration` remain the authority for
-the exact Firefox native host:
-
-```text
-local.hskify.hsk_manga
-```
-
-and its one allowed extension:
-
-```text
-hsk-manga-translator@local.hskify
-```
-
-## Build
-
-Install the Rust MSVC toolchain, Visual Studio C++ build tools and Windows SDK,
-CMake, LLVM/libclang, Node.js, and npm. `cmake` should be on `PATH`; when
-libclang is installed in a nonstandard location, set `LIBCLANG_PATH` to the
-directory containing `libclang.dll`. Then run this from the repository root:
+The current Hskify product target is Windows on an NVIDIA GeForce RTX 4080
+SUPER 16 GB (compute capability 8.9). Production native binaries must come from
+the CUDA-gated performance build:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\installers\windows\Build-DeveloperPackage.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\Invoke-PerformanceBuild.ps1
 ```
 
-That command runs:
+That script rejects other GPUs, provisions the pinned CUDA 13.1 compiler
+components, sets compute capability 8.9, and produces:
 
 ```text
-cargo build --release --package browser-companion --bin hsk-manga-native-host --bin hsk-manga-browser-daemon
-npm install --no-package-lock --no-audit --no-fund
-npm run build
-npm run zip
+target\x86_64-pc-windows-msvc\release\hsk-manga-native-host.exe
+target\x86_64-pc-windows-msvc\release\hsk-manga-browser-daemon.exe
+target\x86_64-pc-windows-msvc\release\hskify-performance-build-attestation.json
 ```
 
-The npm commands run from `extensions/firefox`. Pass `-SkipNpmInstall` when its
-dependencies are already present.
-
-Production language/model files are never guessed or downloaded by the build.
-Supply their existing paths explicitly:
+`Build-DeveloperPackage.ps1` invokes that exact performance wrapper when
+binaries are omitted. Explicit binaries are accepted only with their matching
+attestation; the packager verifies the exact source tree, target, release
+profile, CUDA feature/toolchain, RTX 4080 SUPER hardware, fingerprint, and
+binary byte/hash claims before staging:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\installers\windows\Build-DeveloperPackage.ps1 `
+  -NativeHostPath .\target\x86_64-pc-windows-msvc\release\hsk-manga-native-host.exe `
+  -BrowserDaemonPath .\target\x86_64-pc-windows-msvc\release\hsk-manga-browser-daemon.exe `
+  -BuildAttestationPath .\target\x86_64-pc-windows-msvc\release\hskify-performance-build-attestation.json `
   -HskArtifactPath C:\artifacts\hsk-2.0.normalized.json `
   -DictionaryArtifactPath C:\artifacts\cc-cedict.normalized.json `
   -ModelPath C:\models\Qwen3.5-4B-Q4_K_M.gguf `
   -Force
 ```
 
-The build also packages `NotoSansSC-VF.ttf` and `NotoSerifSC-VF.ttf` from
-`%WINDIR%\Fonts` by default. Use `-SansFontPath` and `-SerifFontPath` when
-those fonts are installed elsewhere.
+The packager verifies the mandatory Qwen3.5-4B artifact's byte count and
+SHA-256 against the model manifest and stages the Firefox extension, exact
+native host and daemon, release attestation, fonts, language resources, and
+registration scripts. The bundle manifest hashes the copied attestation.
 
-The model must match the selected standard pack in
-`data\model-packs\manifest.v1.json`. The build checks both its byte count and
-SHA-256 (`00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4`
-for the current Qwen3.5 4B Q4_K_M selection) before copying it. No large file is
-downloaded automatically.
+## Installed layout
 
-Prebuilt binaries and an extension archive can be supplied with
-`-NativeHostPath`, `-BrowserDaemonPath`, and `-FirefoxExtensionZipPath`. This is
-the deterministic seam used by the smoke test; the two executable paths must
-be supplied together.
-
-The default output is:
+The current-user installation root is:
 
 ```text
-dist\hsk-manga-translator-windows\
-  Install.ps1
-  Uninstall.ps1
-  README.md
-  bundle-manifest.json
-  companion\
-    hsk-manga-native-host.exe
-    hsk-manga-browser-daemon.exe
-  extension\
-    hsk-manga-translator-firefox.zip
-  native-host-registration\
-    Register-NativeHost.ps1
-    Unregister-NativeHost.ps1
-    local.hskify.hsk_manga.json.template
-    README.md
-  resources\
-    hsk-2.0.normalized.json                 # only when supplied
-    cc-cedict.normalized.json               # only when supplied
-    models\
-      Qwen3.5-4B-Q4_K_M.gguf                # only when supplied
-    fonts\
-      NotoSansSC-VF.ttf
-      NotoSerifSC-VF.ttf
-    model-packs\
-      manifest.v1.json
+%LOCALAPPDATA%\Hskify
 ```
 
-## Install and uninstall
-
-Install for the current user:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\dist\hsk-manga-translator-windows\Install.ps1
-```
-
-The installed application is under:
+Production resources are:
 
 ```text
-%LOCALAPPDATA%\Hskify\HSKMangaTranslator\app
+resources\hsk-2.0.normalized.json
+resources\cc-cedict.normalized.json
+resources\models\Qwen3.5-4B-Q4_K_M.gguf
+resources\fonts\NotoSansSC-VF.ttf
+resources\fonts\NotoSerifSC-VF.ttf
 ```
 
-The production resource contract is:
+The registered native host is `local.hskify.hsk_manga`, and the only allowed
+Firefox extension is `hsk-manga-translator@local.hskify`.
 
-```text
-%LOCALAPPDATA%\Hskify\HSKMangaTranslator\resources\hsk-2.0.normalized.json
-%LOCALAPPDATA%\Hskify\HSKMangaTranslator\resources\cc-cedict.normalized.json
-%LOCALAPPDATA%\Hskify\HSKMangaTranslator\resources\models\Qwen3.5-4B-Q4_K_M.gguf
-%LOCALAPPDATA%\Hskify\HSKMangaTranslator\resources\fonts\NotoSansSC-VF.ttf
-%LOCALAPPDATA%\Hskify\HSKMangaTranslator\resources\fonts\NotoSerifSC-VF.ttf
-```
+## Status
 
-The installer verifies staged file hashes, copies the bundle, and invokes the
-preserved registration script with the installed native-host path. It prints
-the packaged Firefox extension location.
-
-Uninstall with:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\Hskify\HSKMangaTranslator\app\Uninstall.ps1"
-```
-
-Uninstall stops only a recorded daemon whose executable path exactly matches
-this installation, unregisters the native host, and removes the application,
-resources, and browser cache. Pass `-KeepCache` to retain the browser cache.
-
-## Smoke tests
-
-The tests use tiny local dummy binaries, data, model bytes, and an isolated
-per-test registry key. They do not compile the application or download a
-model:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\installers\test-native-host-registration.ps1
-powershell -ExecutionPolicy Bypass -File .\installers\windows\Test-DeveloperPackage.ps1
-```
+Packaging-script tests with dummy bytes do not establish CUDA execution,
+installed-Firefox behavior, or chapter performance. A complete installed
+performance-package run is **pending** under
+[`docs/firefox-manual-test-checklist.md`](../../docs/firefox-manual-test-checklist.md)
+and [`docs/chapter-5-benchmark.md`](../../docs/chapter-5-benchmark.md).

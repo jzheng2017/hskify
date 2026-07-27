@@ -1,6 +1,6 @@
 {
   "name": "local.hskify.hsk_manga",
-  "description": "HSK Manga Translator local browser companion",
+  "description": "Hskify local browser companion",
   "path": "__ABSOLUTE_NATIVE_HOST_PATH__",
   "type": "stdio",
   "allowed_extensions": [

@@ -1,161 +1,195 @@
-# Hskify architecture
+# Hskify performance architecture
 
-Hskify is a local Firefox companion built around a narrow browser-facing
-service and a reused Koharu image pipeline. The browser layer owns discovery,
-consent, and presentation. The native layer owns trust boundaries, bounded job
-execution, and adaptation. Koharu remains the production image-processing
-engine rather than being copied into a second browser-specific stack.
+Hskify is a local Firefox-to-native pipeline specialized for low time-to-first
+translated dialogue on one CUDA machine class. The browser and daemon exchange
+an append-only sequence of small region updates; they never wait for or
+transfer a reconstructed page.
 
-## System overview
+## System shape
 
 ```mermaid
 flowchart LR
-    Reader["Manga or webtoon reader"]
-    Extension["Firefox extension<br/>discovery, consent, overlays"]
-    Native["Native messaging host<br/>validate caller, discover daemon"]
-    Daemon["Hskify loopback daemon<br/>auth, limits, jobs, cache"]
-    Adapter["Browser pipeline adapter"]
-    Koharu["Koharu pipeline<br/>detect → OCR → clean"]
-    Qwen["Local Qwen model<br/>faithful + HSK rewrite"]
-    Control["hsk-control<br/>validate, pinyin, dictionary"]
-    Data[("Local models and<br/>language resources")]
-    Voice["Firefox Web Speech<br/>local Mandarin voice"]
+    Reader["Firefox reader page"]
+    Extension["Hskify extension"]
+    Host["One-shot native host"]
+    Daemon["Loopback daemon"]
+    Scheduler["Viewport-first tile scheduler"]
+    Vision["Resident CUDA detector and OCR"]
+    Translator["Resident Qwen3.5 4B direct HSK translator"]
+    Control["HSK validation, pinyin, dictionary"]
+    Patch["Region-local transparent PNG patch"]
+    Overlay["Patch-first selectable overlay"]
+    Speech["Local Mandarin Web Speech voice"]
 
-    Reader -->|"explicit user action"| Extension
-    Extension -->|"native message"| Native
-    Native -->|"short-lived session"| Extension
-    Extension -->|"authenticated /browser/v1"| Daemon
-    Daemon --> Adapter
-    Adapter --> Koharu
-    Adapter --> Qwen
-    Adapter --> Control
-    Data --> Koharu
-    Data --> Qwen
-    Data --> Control
-    Adapter -->|"clean blob, regions,<br/>Chinese, pinyin, warnings"| Daemon
-    Daemon --> Extension
-    Extension -->|"clean image + selectable overlay"| Reader
-    Extension -->|"selected Chinese only"| Voice
+    Reader -->|"explicit action"| Extension
+    Extension -->|"native handshake"| Host
+    Host -->|"start or discover"| Daemon
+    Extension -->|"authenticated unversioned routes"| Daemon
+    Daemon --> Scheduler --> Vision
+    Vision --> Patch
+    Vision --> Translator --> Control
+    Patch --> Daemon
+    Control --> Daemon
+    Daemon -->|"flat sequenced updates"| Extension
+    Extension --> Overlay --> Reader
+    Extension -->|"selected Chinese"| Speech
 ```
 
-## Ownership boundaries
+## Build affinity and trust boundary
 
-| Component | Owns | Must not own |
-| --- | --- | --- |
-| Firefox extension | User-triggered page discovery, exact-origin permission requests, image acquisition, progress UI, overlays, selection, lookup display, and pronunciation controls | Model loading, native secrets, arbitrary page access at install time, or remote translation |
-| Native messaging host | Validation of the registered manifest and add-on identity, bounded framing, daemon discovery/start, and one-time session handoff | Long-running jobs, HTTP serving, ML initialization, or browser content |
-| Browser daemon | Per-user locking, random loopback binding, authentication, request limits, immutable job snapshots, cancellation, cache retention, and `/browser/v1` | Koharu's general RPC/UI routes, permissive CORS, telemetry, URL fetching, or cloud credentials |
-| Browser pipeline adapter | Verified image import, Koharu pipeline invocation, browser-specific artifacts, stable protocol geometry, HSK rewrite loop, and warnings | A duplicate detector, OCR stack, blob store, job runtime, or local-LLM implementation |
-| Koharu layers | Project/session types, blob store, engine registry, ML runtime, detection, OCR, cleaning engines, shared cancellation, and model state | Firefox permissions, browser authentication, HSK policy, or extension rendering |
-| `hsk-control` | Reproducible HSK data import, vocabulary validation, proper-name exceptions, longest-match pinyin, and CC-CEDICT-compatible lookup | Translation generation, OCR, page geometry, or user-interface state |
-| Installers/data manifests | Exact native-host registration, packaging, artifact checksums, fonts, and licence metadata | Silent model selection or unreviewed redistribution |
+`hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-07-26-r2` is compiled into the TypeScript and Rust
+contracts. Native handshake requests and responses, health responses, and job
+creation metadata must carry that exact value. A different value is rejected.
+There is no protocol-version header, range negotiation, compatibility shim, or
+migration adapter.
 
-The browser protocol is the seam between the extension and daemon. Koharu
-types do not cross that seam directly; the adapter converts them to versioned,
-validated browser contracts.
+The Windows release wrapper writes a post-success, ignored JSON attestation
+covering the complete tracked and untracked-nonignored source identity, exact
+x86_64 MSVC release/CUDA configuration, pinned toolchain and llama.cpp tag,
+device-0 hardware/driver claims, and SHA-256/byte identities for both native
+binaries. Packaging and benchmark preflight reject missing, stale, mutated, or
+nonmatching attestations.
 
-## Data flow
+The native host accepts only the registered
+`local.hskify.hsk_manga` manifest whose executable resolves to the running
+binary and whose sole allowed extension is
+`hsk-manga-translator@local.hskify`. It asks the daemon for a fresh 256-bit
+bearer token bound to the exact canonical `moz-extension://` origin.
 
-1. A popup action causes the extension to inspect the active reader and request
-   only the exact page or image-CDN origins it needs.
-2. The extension sends a bounded native message. The host validates the
-   manifest path and permanent add-on identity, then discovers or starts the
-   detached per-user daemon.
-3. The daemon returns a fresh expiring bearer token bound to the exact
-   `moz-extension://` origin. The control secret used for daemon discovery is
-   never returned to Firefox.
-4. The extension uploads the image and declared metadata to `/browser/v1`.
-   Authentication and protocol checks occur before body polling. The daemon
-   verifies size, MIME type, dimensions, decoded allocation, and SHA-256.
-5. The adapter imports the image into a content-addressed Koharu project. The
-   pipeline detects text and bubble geometry, keeps only English dialogue
-   sufficiently overlapping a bubble, OCRs that geometry, and fills only the
-   accepted erase pixels.
-6. The same local Qwen model first produces faithful Simplified Chinese and
-   then an HSK-targeted rewrite. `hsk-control` validates each candidate; only
-   invalid regions receive at most two correction attempts.
-7. The daemon exposes immutable progress/result snapshots and content-addressed
-   clean blobs. A repeated source can reuse cleaning artifacts; changing the
-   HSK level reruns only rewrite and validation.
-8. The extension renders browser-safe text styles and normalized polygons over
-   the cleaned image. Selected Chinese can be looked up locally or spoken by an
-   installed local Mandarin voice.
+The daemon binds to a random `127.0.0.1` port. Browser requests require the
+exact `Host`, the active extension origin (standard `Origin` and/or
+`X-HSK-Manga-Extension-Origin`), and the bearer token before request-body
+polling. CORS allows only that origin and the required GET, POST, PUT, and
+DELETE methods. No general application router, URL fetch, telemetry, provider
+credential, or remote translation path is mounted.
 
-## Security and privacy
+## Direct progressive data flow
 
-- The daemon binds literally to `127.0.0.1:0`; no fixed or non-loopback listener
-  is exposed.
-- Only the registered `local.hskify.hsk_manga` host and
-  `hsk-manga-translator@local.hskify` add-on identity are accepted.
-- Session tokens are random, expiring, and bound to one canonical extension
-  origin. Secret comparisons use constant-time byte equality.
-- The browser router verifies the exact Host, protocol version, extension
-  origin, and bearer token before handlers or body extractors run.
-- CORS has an explicit active-extension origin, a small method/header allowlist,
-  and no wildcard or credential fallback.
-- Koharu's `/api/v1`, `/mcp`, UI, remote providers, and general headless routes
-  are not mounted in the browser daemon.
-- The service has no URL-fetch endpoint, telemetry, cloud credential path, or
-  manga-image egress. Translation models, HSK data, dictionary data, fonts, and
-  cache entries are local.
-- Style colors and protocol data are validated before reaching page CSS.
-- Native state and cache files use per-user permissions; exact platform
-  enforcement remains part of release smoke testing.
+1. The extension uploads one raster plus strict metadata to `POST /jobs`.
+   Byte, MIME, hash, declared dimension, decoded dimension, pixel, and decoder
+   allocation checks occur before the job begins.
+2. The source is decoded once. The adapter divides it into 2,048-pixel tiles
+   with 410-pixel overlap and reprioritizes remaining tiles whenever the
+   viewport changes. Detector input is letterboxed to at most 1,280 pixels.
+3. The official PP-OCRv5 mobile text detector processes true CUDA batches of
+   up to six tiles. Line candidates are spatially deduplicated.
+4. PP-OCRv5 English recognition runs in batches of eight. Adjacent lines with
+   compatible geometry and inferred color are grouped into story regions;
+   differently colored emphasis and separated balloons stay independent. A
+   region is accepted only after grouping, when it meets the 0.45 confidence
+   and English/story-text gates. On a tile with explicit credit/release
+   context, isolated uppercase name labels are excluded; the same form on a
+   normal story tile remains eligible.
+   Sound effects, credits, scanlation promotion, branding, non-English text,
+   and ambiguous OCR do not enter translation or cleanup.
+5. A small transparent PNG is constructed for the accepted text geometry.
+   Foreground and background colors are inferred from local pixels rather than
+   a fixed palette. Only the erase/glyph mask has alpha; pixels outside it
+   remain transparent, and cleanup preserves local color, gradients, texture,
+   contours, and styling instead of whitening the region.
+6. Visible accepted regions jump ahead of off-screen work. Translation batches
+   contain up to six regions and normally flush once three are pending; a
+   visible arrival flushes immediately.
+7. Qwen3.5 4B translates English directly to HSK 2.0-targeted Simplified
+   Chinese in one primary generation. The same line can return a reserved
+   non-story marker, but the daemon honors it only when deterministic source
+   evidence supports credits, release metadata, SFX, non-English OCR, or
+   fragmented gibberish. Unsupported exclusions enter the single targeted
+   repair instead of disappearing. `hsk-control` validates vocabulary; the
+   direct protocol validator checks protected names, standalone numbers,
+   question intent, and output structure. Digits embedded in Latin OCR tokens
+   such as `IDENTIT4` are not treated as semantic numbers. Only rejected items
+   may enter one targeted repair batch.
+   This is not a page-wide faithful pass followed by an HSK rewrite.
+8. For each completed region, the daemon stores the patch blob first and then
+   appends `regionReady`, which carries the patch descriptor, geometry, source
+   text, base/direct Chinese, displayed Chinese, pinyin, style, layout, and HSK
+   status.
+9. Firefox fetches and validates the PNG, decodes it, inserts it in the patch
+   layer, and only then inserts the selectable text. Later updates continue
+   independently.
 
-See [ADR 0002](architecture-decisions/0002-gate-zero-contract-clarifications.md)
-for the browser contract decisions and the
-[browser-companion implementation](../crates/browser-companion/IMPLEMENTATION.md)
-for endpoint-level detail.
+Completion is a terminal event in the same log. It does not unlock a separate
+result representation.
 
-## Resource constraints
+## Scheduling and cache identity
 
-The default daemon envelope is intentionally finite:
+The daemon stays warm for a 30-minute idle window and uses four Tokio workers,
+at most eight general blocking threads, one serialized priority CUDA
+scheduler, and one dedicated six-thread Rayon pool for browser image
+preprocessing. The detector, OCR model, local LLM
+application state, and HSK control data are lazy `OnceCell` residents, so later
+jobs reuse loaded state.
 
-| Resource | Default bound |
+The in-memory translation cache is keyed by:
+
+- normalized OCR text;
+- up to six preceding dialogue utterances;
+- the complete proper-name glossary;
+- requested HSK level;
+- model ID and exact model revision;
+- prompt hash;
+- validator hash; and
+- the full HSK/dictionary control revision.
+
+Changing any output-affecting dependency invalidates the cache. There is no
+project cache, page history, stored page reconstruction, or level-change
+retranslation endpoint.
+
+Decoded images use a 512 MiB byte-bounded LRU. Completed per-image region
+results and PNG patches also have a byte-bounded
+2 GiB persistent cache. Its key includes the complete strict job request,
+source hash, exact build fingerprint, and a fingerprint of every
+output-affecting model, prompt, validator, dictionary, and pipeline resource.
+Entries are atomically installed only after visible processing completes.
+No detector, OCR, translation, or patch intermediate is written to disk.
+
+The job log is append-only, starts at sequence 1, rejects regressive overall
+progress, rejects duplicate region publication, and permits one terminal
+`complete`, `failed`, or `cancelled` event. Clients long-poll after the last
+acknowledged sequence, so extension background suspension does not require a
+second status/result model.
+
+## Resource envelope
+
+| Resource | Default |
 | --- | ---: |
 | Image multipart field | 20 MiB |
-| Metadata field | 64 KiB |
-| Complete multipart body | 21 MiB |
-| Decoded image | 25,000,000 pixels |
-| Either image dimension | 16,384 pixels |
-| Decoder allocation budget | 128 MiB |
-| Clean output blob | 64 MiB |
+| JSON metadata field | 64 KiB |
+| Complete HTTP body | 21 MiB |
+| Decoded pixels | 25,000,000 |
+| Either dimension | 16,384 px |
+| Decoder allocation | 128 MiB |
+| One patch blob | 16 MiB |
 | Retained jobs | 128 |
-| Retained source/clean blobs | 256 MiB |
-| Concurrent authenticated requests | 4 |
-| Active cleaning/retranslation pipelines | 1 |
-| Idle daemon lifetime | 2 minutes with no active jobs or admitted requests |
+| Retained sources and patches | 256 MiB |
+| Authenticated in-flight requests | 64 |
+| Updates per job | 10,000 |
+| One update long-poll | 20 seconds maximum |
+| Idle daemon window | 30 minutes |
 
-The Tokio runtime uses two workers and four blocking threads. On Windows,
-inference defaults to half the available CPUs with a six-core cap;
-`KOHARU_INFERENCE_THREADS` is the explicit override. Terminal jobs are evicted
-oldest-first under admission pressure, active jobs are never eviction
-candidates, and identical clean payloads are deduplicated by hash, MIME type,
-and exact bytes.
+Terminal inactive jobs are evicted oldest-first when job or byte capacity is
+needed. Active jobs are never eviction candidates. Patch blobs are owned by
+one job and removed with it.
 
-These bounds are part of the security model, not tuning suggestions. A change
-requires adversarial body/decode coverage, retention tests, and corresponding
-documentation updates.
+## Hardware boundary
 
-## Deliberate limitations
+The performance build is CUDA-only and gated to an NVIDIA GeForce RTX 4080
+SUPER with at least 16,000 MiB, compute capability 8.9, and the pinned CUDA
+13.1 compiler packages. This is an intentional optimization boundary, not a
+recommended tier among several. Results from another GPU, a CPU path, or a
+different model revision are not evidence for this build.
 
-- Browser cleaning handles accepted English speech-bubble dialogue. Sound
-  effects, captions outside bubbles, non-English text, and punctuation-only
-  regions are intentionally excluded.
-- Deterministic median-color filling favors bounded behavior and preservation
-  outside the erase mask; textured or transparent bubbles may look less
-  natural than neural inpainting.
-- The HSK correction loop is bounded and can return a visible
-  `HSK_REWRITE_FAILED` warning rather than retry indefinitely.
-- Pronunciation depends on an installed browser/OS voice and cannot guarantee
-  a particular accent or correct contextual reading. See
-  [ADR 0005](architecture-decisions/0005-mandarin-pronunciation-voice-selection.md).
-- Platform packaging exists beyond Windows, but remaining real-Firefox checks
-  are tracked in the
-  [manual test checklist](firefox-manual-test-checklist.md).
+## Reader features retained
 
-## Related decisions
+The progressive architecture preserves:
 
-- [ADR 0001: Koharu upstream pin](architecture-decisions/0001-koharu-upstream-pin.md)
-- [ADR 0003: Koharu extraction map](architecture-decisions/0003-koharu-extraction-map.md)
-- [ADR 0004: Dialogue-only webtoon cleaning](architecture-decisions/0004-dialogue-only-webtoon-cleaning.md)
+- selectable Chinese with displayed pinyin;
+- local longest-match dictionary definitions and HSK overlay;
+- region context showing direct/displayed Chinese and source English;
+- original/Chinese/hold-to-compare controls; and
+- local-only Mandarin pronunciation using an eligible Firefox/OS voice.
+
+See [the browser contract](browser-contract.md) for exact routes and event
+shapes and [the Chapter 5 evidence plan](chapter-5-benchmark.md) for the
+complete 36-image gold corpus and the packaged measurements still to be run.

@@ -1,0 +1,11 @@
+{
+  "jobId": "fixture-job-0001",
+  "nextSequence": 4,
+  "updates": [
+    {
+      "sequence": 4,
+      "type": "complete",
+      "message": "Local cleaning and HSK translation complete"
+    }
+  ]
+}

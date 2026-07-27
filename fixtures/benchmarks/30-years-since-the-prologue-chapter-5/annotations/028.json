@@ -1,0 +1,1949 @@
+{
+  "schemaVersion": 1,
+  "page": {
+    "order": 28,
+    "file": "028.webp",
+    "width": 900,
+    "height": 16066,
+    "sourceSha256": "2cd83978fe530195d78c7f265a527bb6a7d7ae106fa81f525d17b4428cf9fd4e"
+  },
+  "policy": {
+    "included": "English story text: dialogue, thoughts, narration, captions, and unbubbled spoken lines, including punctuation-only reactions and silent ellipses",
+    "excluded": "sound effects, credits, scanlation promotion, translator notes, series branding, decorative labels, ambiguous OCR, and non-English text",
+    "detectorUse": "proposal only; every region and omission was manually gated against the source image"
+  },
+  "regions": [
+    {
+      "id": "30ysp-ch5-p028-r00",
+      "kind": "dialogue",
+      "containerStyle": "standard",
+      "readingOrder": 0,
+      "sourceEnglish": "I NEVER TAUGHT THEM.",
+      "normalizedEnglish": "I NEVER TAUGHT THEM.",
+      "textPolygon": [
+        [
+          0.05920139,
+          0.01053759
+        ],
+        [
+          0.5005208,
+          0.01053759
+        ],
+        [
+          0.5005208,
+          0.01908631
+        ],
+        [
+          0.05920139,
+          0.01908631
+        ]
+      ],
+      "eraseMask": {
+        "encoding": "normalized-polygon-v1",
+        "polygon": [
+          [
+            0.06222222,
+            0.01089257
+          ],
+          [
+            0.49666668,
+            0.01089257
+          ],
+          [
+            0.49666668,
+            0.01910868
+          ],
+          [
+            0.06222222,
+            0.01910868
+          ]
+        ],
+        "operation": "erase every English glyph, outline, punctuation mark, and antialiased edge inside the polygon; preserve every pixel outside the erase mask"
+      },
+      "geometryAudit": "detector-adjusted",
+      "reviewProvenance": {
+        "type": "acceptedProposal",
+        "uncertainty": "low",
+        "proposalIndex": 1,
+        "reviewRegionId": "2cd83978-region-1c06539c7e5250be"
+      },
+      "bubblePolygon": [
+        [
+          0.01440972,
+          0.0013713
+        ],
+        [
+          0.5473958,
+          0.0013713
+        ],
+        [
+          0.5473958,
+          0.0197136
+        ],
+        [
+          0.01440972,
+          0.0197136
+        ]
+      ],
+      "productionMatch": {
+        "stableRegionId": "2cd83978-region-1c06539c7e5250be",
+        "method": "stable-region-id-and-text-geometry",
+        "textGeometryIou": 1.0
+      },
+      "simplifiedChinese": "我从来没教过他们。",
+      "pinyin": "wǒ cóng lái méi Jiào / jiào / jiāo Guō / guo / guò tā men",
+      "hskValidation": {
+        "requestedLevel": 5,
+        "strictlyValid": false,
+        "aboveLevelTokens": [
+          "从来没",
+          "没",
+          "教过",
+          "他们",
+          "们"
+        ],
+        "repairState": "pending"
+      },
+      "hskTokens": [
+        {
+          "text": "我",
+          "startChar": 0,
+          "endChar": 1,
+          "pinyin": "wǒ",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "从来没",
+          "startChar": 1,
+          "endChar": 4,
+          "pinyin": "cóng lái méi",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "教",
+          "startChar": 4,
+          "endChar": 5,
+          "pinyin": "Jiào / jiào / jiāo",
+          "classification": "hsk",
+          "hskLevel": 3,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "过",
+          "startChar": 5,
+          "endChar": 6,
+          "pinyin": "Guō / guo / guò",
+          "classification": "hsk",
+          "hskLevel": 2,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "他们",
+          "startChar": 6,
+          "endChar": 8,
+          "pinyin": "tā men",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        }
+      ]
+    },
+    {
+      "id": "30ysp-ch5-p028-r01",
+      "kind": "dialogue",
+      "containerStyle": "standard",
+      "readingOrder": 1,
+      "sourceEnglish": "THEY WERE MAKING EFFORTS IN ALL SORTS OF WAYS TO FIND JOBS AFTER GRADUATION.",
+      "normalizedEnglish": "THEY WERE MAKING EFFORTS IN ALL SORTS OF WAYS TO FIND JOBS AFTER GRADUATION.",
+      "textPolygon": [
+        [
+          0.3265625,
+          0.02881182
+        ],
+        [
+          0.9234375,
+          0.02881182
+        ],
+        [
+          0.9234375,
+          0.046308
+        ],
+        [
+          0.3265625,
+          0.046308
+        ]
+      ],
+      "eraseMask": {
+        "encoding": "normalized-polygon-v1",
+        "polygon": [
+          [
+            0.32666665,
+            0.02819619
+          ],
+          [
+            0.92777775,
+            0.02819619
+          ],
+          [
+            0.92777775,
+            0.04674468
+          ],
+          [
+            0.32666665,
+            0.04674468
+          ]
+        ],
+        "operation": "erase every English glyph, outline, punctuation mark, and antialiased edge inside the polygon; preserve every pixel outside the erase mask"
+      },
+      "geometryAudit": "detector-adjusted",
+      "reviewProvenance": {
+        "type": "acceptedProposal",
+        "uncertainty": "low",
+        "proposalIndex": 2,
+        "reviewRegionId": "2cd83978-region-4affe97f29c82f54"
+      },
+      "bubblePolygon": [
+        [
+          0.2611111,
+          0.02840821
+        ],
+        [
+          0.98611116,
+          0.02840821
+        ],
+        [
+          0.98611116,
+          0.05624261
+        ],
+        [
+          0.2611111,
+          0.05624261
+        ]
+      ],
+      "productionMatch": {
+        "stableRegionId": "2cd83978-region-4affe97f29c82f54",
+        "method": "stable-region-id-and-text-geometry",
+        "textGeometryIou": 1.0
+      },
+      "simplifiedChinese": "毕业后，他们想尽各种办法找工作。",
+      "pinyin": "bì yè Hòu / hòu tā men xiǎng jìn / jǐn gè zhǒng bàn fǎ zhǎo gōng zuò",
+      "hskValidation": {
+        "requestedLevel": 5,
+        "strictlyValid": false,
+        "aboveLevelTokens": [
+          "后",
+          "他们",
+          "们",
+          "想尽",
+          "尽",
+          "各种"
+        ],
+        "repairState": "pending"
+      },
+      "hskTokens": [
+        {
+          "text": "毕业",
+          "startChar": 0,
+          "endChar": 2,
+          "pinyin": "bì yè",
+          "classification": "hsk",
+          "hskLevel": 4,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "后",
+          "startChar": 2,
+          "endChar": 3,
+          "pinyin": "Hòu / hòu",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "他们",
+          "startChar": 4,
+          "endChar": 6,
+          "pinyin": "tā men",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "想",
+          "startChar": 6,
+          "endChar": 7,
+          "pinyin": "xiǎng",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "尽",
+          "startChar": 7,
+          "endChar": 8,
+          "pinyin": "jìn / jǐn",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "各种",
+          "startChar": 8,
+          "endChar": 10,
+          "pinyin": "gè zhǒng",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "办法",
+          "startChar": 10,
+          "endChar": 12,
+          "pinyin": "bàn fǎ",
+          "classification": "hsk",
+          "hskLevel": 3,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "找",
+          "startChar": 12,
+          "endChar": 13,
+          "pinyin": "zhǎo",
+          "classification": "hsk",
+          "hskLevel": 2,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "工作",
+          "startChar": 13,
+          "endChar": 15,
+          "pinyin": "gōng zuò",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        }
+      ]
+    },
+    {
+      "id": "30ysp-ch5-p028-r02",
+      "kind": "dialogue",
+      "containerStyle": "standard",
+      "readingOrder": 2,
+      "sourceEnglish": "AH, I SEE. ALL ON THEIR OWN...",
+      "normalizedEnglish": "AH, I SEE. ALL ON THEIR OWN...",
+      "textPolygon": [
+        [
+          0.3,
+          0.07680427
+        ],
+        [
+          0.7652778,
+          0.07680427
+        ],
+        [
+          0.7652778,
+          0.08975865
+        ],
+        [
+          0.3,
+          0.08975865
+        ]
+      ],
+      "eraseMask": {
+        "encoding": "normalized-polygon-v1",
+        "polygon": [
+          [
+            0.30222222,
+            0.07643471
+          ],
+          [
+            0.76777777,
+            0.07643471
+          ],
+          [
+            0.76777777,
+            0.09012822
+          ],
+          [
+            0.30222222,
+            0.09012822
+          ]
+        ],
+        "operation": "erase every English glyph, outline, punctuation mark, and antialiased edge inside the polygon; preserve every pixel outside the erase mask"
+      },
+      "geometryAudit": "detector-adjusted",
+      "reviewProvenance": {
+        "type": "acceptedProposal",
+        "uncertainty": "low",
+        "proposalIndex": 3,
+        "reviewRegionId": "2cd83978-region-0d3a1455d5e0e232"
+      },
+      "bubblePolygon": [
+        [
+          0.24131945,
+          0.06782763
+        ],
+        [
+          0.81840277,
+          0.06782763
+        ],
+        [
+          0.81840277,
+          0.09842408
+        ],
+        [
+          0.24131945,
+          0.09842408
+        ]
+      ],
+      "productionMatch": {
+        "stableRegionId": "2cd83978-region-0d3a1455d5e0e232",
+        "method": "stable-region-id-and-text-geometry",
+        "textGeometryIou": 1.0
+      },
+      "simplifiedChinese": "啊，我明白了。都是他们自己。。。。。。",
+      "pinyin": "a / à / á / ā / ǎ wǒ míng bai le / liào / liǎo Dū / dōu / dū shì tā men zì jǐ",
+      "hskValidation": {
+        "requestedLevel": 5,
+        "strictlyValid": false,
+        "aboveLevelTokens": [
+          "他们",
+          "们"
+        ],
+        "repairState": "pending"
+      },
+      "hskTokens": [
+        {
+          "text": "啊",
+          "startChar": 0,
+          "endChar": 1,
+          "pinyin": "a / à / á / ā / ǎ",
+          "classification": "hsk",
+          "hskLevel": 3,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "我",
+          "startChar": 2,
+          "endChar": 3,
+          "pinyin": "wǒ",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "明白",
+          "startChar": 3,
+          "endChar": 5,
+          "pinyin": "míng bai",
+          "classification": "hsk",
+          "hskLevel": 3,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "了",
+          "startChar": 5,
+          "endChar": 6,
+          "pinyin": "le / liào / liǎo",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "都",
+          "startChar": 7,
+          "endChar": 8,
+          "pinyin": "Dū / dōu / dū",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "是",
+          "startChar": 8,
+          "endChar": 9,
+          "pinyin": "shì",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "他们",
+          "startChar": 9,
+          "endChar": 11,
+          "pinyin": "tā men",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "自己",
+          "startChar": 11,
+          "endChar": 13,
+          "pinyin": "zì jǐ",
+          "classification": "hsk",
+          "hskLevel": 3,
+          "aboveRequestedLevel": false
+        }
+      ]
+    },
+    {
+      "id": "30ysp-ch5-p028-r03",
+      "kind": "thought",
+      "containerStyle": "thought",
+      "readingOrder": 3,
+      "sourceEnglish": "AFTER THAT, I WALKED FOR QUITE SOME TIME WITH PRISCILLA.",
+      "normalizedEnglish": "AFTER THAT, I WALKED FOR QUITE SOME TIME WITH PRISCILLA.",
+      "textPolygon": [
+        [
+          0.10625,
+          0.20412673
+        ],
+        [
+          0.89652777,
+          0.20412673
+        ],
+        [
+          0.89652777,
+          0.21999876
+        ],
+        [
+          0.10625,
+          0.21999876
+        ]
+      ],
+      "eraseMask": {
+        "encoding": "normalized-polygon-v1",
+        "polygon": [
+          [
+            0.10777777,
+            0.20478028
+          ],
+          [
+            0.89444447,
+            0.20478028
+          ],
+          [
+            0.89444447,
+            0.22034109
+          ],
+          [
+            0.10777777,
+            0.22034109
+          ]
+        ],
+        "operation": "erase every English glyph, outline, punctuation mark, and antialiased edge inside the polygon; preserve every pixel outside the erase mask"
+      },
+      "geometryAudit": "detector-adjusted",
+      "reviewProvenance": {
+        "type": "acceptedProposal",
+        "uncertainty": "low",
+        "proposalIndex": 4,
+        "reviewRegionId": "2cd83978-region-1663915dfa607d87"
+      },
+      "bubblePolygon": [
+        [
+          0.0,
+          0.1912307
+        ],
+        [
+          1.0,
+          0.1912307
+        ],
+        [
+          1.0,
+          0.22305256
+        ],
+        [
+          0.0,
+          0.22305256
+        ]
+      ],
+      "productionMatch": {
+        "stableRegionId": "2cd83978-region-1663915dfa607d87",
+        "method": "stable-region-id-and-text-geometry",
+        "textGeometryIou": 1.0
+      },
+      "simplifiedChinese": "之后，我和普里西拉走了相当长一段路。",
+      "pinyin": "zhī hòu wǒ Hé / huò / huó / hè / hé / hú pǔ Lǐ / lǐ Xī lā zǒu le / liào / liǎo xiāng dāng cháng / zhǎng yī Duàn / duàn Lù / lù",
+      "hskValidation": {
+        "requestedLevel": 5,
+        "strictlyValid": false,
+        "aboveLevelTokens": [
+          "之后",
+          "后",
+          "普里",
+          "普",
+          "西拉",
+          "拉走",
+          "一段路"
+        ],
+        "repairState": "pending"
+      },
+      "hskTokens": [
+        {
+          "text": "之后",
+          "startChar": 0,
+          "endChar": 2,
+          "pinyin": "zhī hòu",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "我",
+          "startChar": 3,
+          "endChar": 4,
+          "pinyin": "wǒ",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "和",
+          "startChar": 4,
+          "endChar": 5,
+          "pinyin": "Hé / huò / huó / hè / hé / hú",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "普",
+          "startChar": 5,
+          "endChar": 6,
+          "pinyin": "pǔ",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "里",
+          "startChar": 6,
+          "endChar": 7,
+          "pinyin": "Lǐ / lǐ",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "西拉",
+          "startChar": 7,
+          "endChar": 9,
+          "pinyin": "Xī lā",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "走",
+          "startChar": 9,
+          "endChar": 10,
+          "pinyin": "zǒu",
+          "classification": "hsk",
+          "hskLevel": 2,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "了",
+          "startChar": 10,
+          "endChar": 11,
+          "pinyin": "le / liào / liǎo",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "相当",
+          "startChar": 11,
+          "endChar": 13,
+          "pinyin": "xiāng dāng",
+          "classification": "hsk",
+          "hskLevel": 5,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "长",
+          "startChar": 13,
+          "endChar": 14,
+          "pinyin": "cháng / zhǎng",
+          "classification": "hsk",
+          "hskLevel": 2,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "一",
+          "startChar": 14,
+          "endChar": 15,
+          "pinyin": "yī",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "段",
+          "startChar": 15,
+          "endChar": 16,
+          "pinyin": "Duàn / duàn",
+          "classification": "hsk",
+          "hskLevel": 3,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "路",
+          "startChar": 16,
+          "endChar": 17,
+          "pinyin": "Lù / lù",
+          "classification": "hsk",
+          "hskLevel": 2,
+          "aboveRequestedLevel": false
+        }
+      ]
+    },
+    {
+      "id": "30ysp-ch5-p028-r04",
+      "kind": "thought",
+      "containerStyle": "thought",
+      "readingOrder": 4,
+      "sourceEnglish": "Which means this place is quite far from the orphanage.",
+      "normalizedEnglish": "Which means this place is quite far from the orphanage.",
+      "textPolygon": [
+        [
+          0.11111111,
+          0.28420266
+        ],
+        [
+          0.88888889,
+          0.28420266
+        ],
+        [
+          0.88888889,
+          0.30013694
+        ],
+        [
+          0.11111111,
+          0.30013694
+        ]
+      ],
+      "eraseMask": {
+        "encoding": "normalized-polygon-v1",
+        "polygon": [
+          [
+            0.10777778,
+            0.28401593
+          ],
+          [
+            0.89222222,
+            0.28401593
+          ],
+          [
+            0.89222222,
+            0.30032367
+          ],
+          [
+            0.10777778,
+            0.30032367
+          ]
+        ],
+        "operation": "erase every English glyph, outline, punctuation mark, and antialiased edge inside the polygon; preserve every pixel outside the erase mask"
+      },
+      "geometryAudit": "manual",
+      "reviewProvenance": {
+        "type": "missedStoryTextRegion",
+        "uncertainty": "low",
+        "missedIndex": 1
+      },
+      "simplifiedChinese": "也就是说，这里离孤儿院相当远。",
+      "pinyin": "Yě jiùshì shuō, zhèlǐ lí gū'éryuàn xiāngdāng yuǎn.",
+      "hskTokens": [
+        {
+          "text": "也就是说",
+          "startChar": 0,
+          "endChar": 4,
+          "pinyin": "yě jiù shì shuō",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "这里",
+          "startChar": 5,
+          "endChar": 7,
+          "pinyin": "zhè lǐ",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "离",
+          "startChar": 7,
+          "endChar": 8,
+          "pinyin": "Lí / chī / lí",
+          "classification": "hsk",
+          "hskLevel": 2,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "孤儿院",
+          "startChar": 8,
+          "endChar": 11,
+          "pinyin": "gū ér yuàn",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "相当",
+          "startChar": 11,
+          "endChar": 13,
+          "pinyin": "xiāng dāng",
+          "classification": "hsk",
+          "hskLevel": 5,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "远",
+          "startChar": 13,
+          "endChar": 14,
+          "pinyin": "yuàn / yuǎn",
+          "classification": "hsk",
+          "hskLevel": 2,
+          "aboveRequestedLevel": false
+        }
+      ]
+    },
+    {
+      "id": "30ysp-ch5-p028-r05",
+      "kind": "thought",
+      "containerStyle": "thought",
+      "readingOrder": 5,
+      "sourceEnglish": "Why did Priscilla come all the way out here in the first place?",
+      "normalizedEnglish": "Why did Priscilla come all the way out here in the first place?",
+      "textPolygon": [
+        [
+          0.1,
+          0.33119632
+        ],
+        [
+          0.89555556,
+          0.33119632
+        ],
+        [
+          0.89555556,
+          0.3451388
+        ],
+        [
+          0.1,
+          0.3451388
+        ]
+      ],
+      "eraseMask": {
+        "encoding": "normalized-polygon-v1",
+        "polygon": [
+          [
+            0.09666667,
+            0.33100959
+          ],
+          [
+            0.89888889,
+            0.33100959
+          ],
+          [
+            0.89888889,
+            0.34532553
+          ],
+          [
+            0.09666667,
+            0.34532553
+          ]
+        ],
+        "operation": "erase every English glyph, outline, punctuation mark, and antialiased edge inside the polygon; preserve every pixel outside the erase mask"
+      },
+      "geometryAudit": "manual",
+      "reviewProvenance": {
+        "type": "missedStoryTextRegion",
+        "uncertainty": "low",
+        "missedIndex": 2
+      },
+      "simplifiedChinese": "普里西拉一开始为什么要大老远跑到这里来？",
+      "pinyin": "Pǔlǐxīlā yī kāishǐ wèishénme yào dàlǎoyuǎn pǎo dào zhèlǐ lái?",
+      "hskTokens": [
+        {
+          "text": "普",
+          "startChar": 0,
+          "endChar": 1,
+          "pinyin": "pǔ",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "里",
+          "startChar": 1,
+          "endChar": 2,
+          "pinyin": "Lǐ / lǐ",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "西拉",
+          "startChar": 2,
+          "endChar": 4,
+          "pinyin": "Xī lā",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "一",
+          "startChar": 4,
+          "endChar": 5,
+          "pinyin": "yī",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "开始",
+          "startChar": 5,
+          "endChar": 7,
+          "pinyin": "kāi shǐ",
+          "classification": "hsk",
+          "hskLevel": 2,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "为",
+          "startChar": 7,
+          "endChar": 8,
+          "pinyin": "wèi / wéi",
+          "classification": "hsk",
+          "hskLevel": 3,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "什",
+          "startChar": 8,
+          "endChar": 9,
+          "pinyin": "shén / shí",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "么",
+          "startChar": 9,
+          "endChar": 10,
+          "pinyin": "mó",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "要",
+          "startChar": 10,
+          "endChar": 11,
+          "pinyin": "yào / yāo",
+          "classification": "hsk",
+          "hskLevel": 2,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "大老远",
+          "startChar": 11,
+          "endChar": 14,
+          "pinyin": "dà lǎo yuǎn",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "跑",
+          "startChar": 14,
+          "endChar": 15,
+          "pinyin": "páo / pǎo",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "到",
+          "startChar": 15,
+          "endChar": 16,
+          "pinyin": "dào",
+          "classification": "hsk",
+          "hskLevel": 2,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "这里",
+          "startChar": 16,
+          "endChar": 18,
+          "pinyin": "zhè lǐ",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "来",
+          "startChar": 18,
+          "endChar": 19,
+          "pinyin": "lái",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        }
+      ]
+    },
+    {
+      "id": "30ysp-ch5-p028-r06",
+      "kind": "thought",
+      "containerStyle": "thought",
+      "readingOrder": 6,
+      "sourceEnglish": "AND CATCH THE EYE OF ENRIQUE'S SUBORDINATES?",
+      "normalizedEnglish": "AND CATCH THE EYE OF ENRIQUE'S SUBORDINATES?",
+      "textPolygon": [
+        [
+          0.18263888,
+          0.44112763
+        ],
+        [
+          0.82708335,
+          0.44112763
+        ],
+        [
+          0.82708335,
+          0.4573109
+        ],
+        [
+          0.18263888,
+          0.4573109
+        ]
+      ],
+      "eraseMask": {
+        "encoding": "normalized-polygon-v1",
+        "polygon": [
+          [
+            0.19111112,
+            0.44124237
+          ],
+          [
+            0.81111112,
+            0.44124237
+          ],
+          [
+            0.81111112,
+            0.45680318
+          ],
+          [
+            0.19111112,
+            0.45680318
+          ]
+        ],
+        "operation": "erase every English glyph, outline, punctuation mark, and antialiased edge inside the polygon; preserve every pixel outside the erase mask"
+      },
+      "geometryAudit": "detector-adjusted",
+      "reviewProvenance": {
+        "type": "acceptedProposal",
+        "uncertainty": "low",
+        "proposalIndex": 5,
+        "reviewRegionId": "2cd83978-region-70ef439a246d349d"
+      },
+      "bubblePolygon": [
+        [
+          0.18263888,
+          0.44112763
+        ],
+        [
+          0.82708335,
+          0.44112763
+        ],
+        [
+          0.82708335,
+          0.4573109
+        ],
+        [
+          0.18263888,
+          0.4573109
+        ]
+      ],
+      "productionMatch": {
+        "stableRegionId": "2cd83978-region-70ef439a246d349d",
+        "method": "stable-region-id-and-text-geometry",
+        "textGeometryIou": 1.0
+      },
+      "simplifiedChinese": "难道要引起恩里克下属的注意吗？",
+      "pinyin": "nán dào yào / yāo yǐn qǐ ēn Lǐ / lǐ Kè / kè / kēi xià shǔ de / dì / dí / dī zhù yì ma / má / mǎ",
+      "hskValidation": {
+        "requestedLevel": 5,
+        "strictlyValid": false,
+        "aboveLevelTokens": [
+          "恩里克",
+          "恩",
+          "下属",
+          "属"
+        ],
+        "repairState": "pending"
+      },
+      "hskTokens": [
+        {
+          "text": "难道",
+          "startChar": 0,
+          "endChar": 2,
+          "pinyin": "nán dào",
+          "classification": "hsk",
+          "hskLevel": 4,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "要",
+          "startChar": 2,
+          "endChar": 3,
+          "pinyin": "yào / yāo",
+          "classification": "hsk",
+          "hskLevel": 2,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "引起",
+          "startChar": 3,
+          "endChar": 5,
+          "pinyin": "yǐn qǐ",
+          "classification": "hsk",
+          "hskLevel": 4,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "恩",
+          "startChar": 5,
+          "endChar": 6,
+          "pinyin": "ēn",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "里",
+          "startChar": 6,
+          "endChar": 7,
+          "pinyin": "Lǐ / lǐ",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "克",
+          "startChar": 7,
+          "endChar": 8,
+          "pinyin": "Kè / kè / kēi",
+          "classification": "hsk",
+          "hskLevel": 5,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "下属",
+          "startChar": 8,
+          "endChar": 10,
+          "pinyin": "xià shǔ",
+          "classification": "hsk",
+          "hskLevel": 6,
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "的",
+          "startChar": 10,
+          "endChar": 11,
+          "pinyin": "de / dì / dí / dī",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "注意",
+          "startChar": 11,
+          "endChar": 13,
+          "pinyin": "zhù yì",
+          "classification": "hsk",
+          "hskLevel": 3,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "吗",
+          "startChar": 13,
+          "endChar": 14,
+          "pinyin": "ma / má / mǎ",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        }
+      ]
+    },
+    {
+      "id": "30ysp-ch5-p028-r07",
+      "kind": "dialogue",
+      "containerStyle": "standard",
+      "readingOrder": 7,
+      "sourceEnglish": "UM, DIRECTOR.",
+      "normalizedEnglish": "UM, DIRECTOR.",
+      "textPolygon": [
+        [
+          0.43819445,
+          0.50509906
+        ],
+        [
+          0.86041665,
+          0.50509906
+        ],
+        [
+          0.86041665,
+          0.51600134
+        ],
+        [
+          0.43819445,
+          0.51600134
+        ]
+      ],
+      "eraseMask": {
+        "encoding": "normalized-polygon-v1",
+        "polygon": [
+          [
+            0.44555557,
+            0.50541514
+          ],
+          [
+            0.86111114,
+            0.50541514
+          ],
+          [
+            0.86111114,
+            0.51605873
+          ],
+          [
+            0.44555557,
+            0.51605873
+          ]
+        ],
+        "operation": "erase every English glyph, outline, punctuation mark, and antialiased edge inside the polygon; preserve every pixel outside the erase mask"
+      },
+      "geometryAudit": "detector-adjusted",
+      "reviewProvenance": {
+        "type": "acceptedProposal",
+        "uncertainty": "low",
+        "proposalIndex": 6,
+        "reviewRegionId": "2cd83978-region-2b63c47c855942c7"
+      },
+      "bubblePolygon": [
+        [
+          0.35572916,
+          0.4947852
+        ],
+        [
+          0.94982636,
+          0.4947852
+        ],
+        [
+          0.94982636,
+          0.5261208
+        ],
+        [
+          0.35572916,
+          0.5261208
+        ]
+      ],
+      "productionMatch": {
+        "stableRegionId": "2cd83978-region-2b63c47c855942c7",
+        "method": "stable-region-id-and-text-geometry",
+        "textGeometryIou": 1.0
+      },
+      "simplifiedChinese": "嗯，主任。",
+      "pinyin": "en / èn / ēn zhǔ rèn",
+      "hskValidation": {
+        "requestedLevel": 5,
+        "strictlyValid": true,
+        "aboveLevelTokens": [],
+        "repairState": "not-needed"
+      },
+      "hskTokens": [
+        {
+          "text": "嗯",
+          "startChar": 0,
+          "endChar": 1,
+          "pinyin": "en / èn / ēn",
+          "classification": "hsk",
+          "hskLevel": 5,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "主任",
+          "startChar": 2,
+          "endChar": 4,
+          "pinyin": "zhǔ rèn",
+          "classification": "hsk",
+          "hskLevel": 5,
+          "aboveRequestedLevel": false
+        }
+      ]
+    },
+    {
+      "id": "30ysp-ch5-p028-r08",
+      "kind": "dialogue",
+      "containerStyle": "standard",
+      "readingOrder": 8,
+      "sourceEnglish": "HM?",
+      "normalizedEnglish": "HM?",
+      "textPolygon": [
+        [
+          0.13185763,
+          0.5955526
+        ],
+        [
+          0.4000868,
+          0.5955526
+        ],
+        [
+          0.4000868,
+          0.6035324
+        ],
+        [
+          0.13185763,
+          0.6035324
+        ]
+      ],
+      "eraseMask": {
+        "encoding": "normalized-polygon-v1",
+        "polygon": [
+          [
+            0.13777778,
+            0.59622806
+          ],
+          [
+            0.4011111,
+            0.59622806
+          ],
+          [
+            0.4011111,
+            0.60338603
+          ],
+          [
+            0.13777778,
+            0.60338603
+          ]
+        ],
+        "operation": "erase every English glyph, outline, punctuation mark, and antialiased edge inside the polygon; preserve every pixel outside the erase mask"
+      },
+      "geometryAudit": "detector-adjusted",
+      "reviewProvenance": {
+        "type": "acceptedProposal",
+        "uncertainty": "low",
+        "proposalIndex": 7,
+        "reviewRegionId": "2cd83978-region-05a18d484d406f5d"
+      },
+      "bubblePolygon": [
+        [
+          0.05052083,
+          0.5879497
+        ],
+        [
+          0.4842014,
+          0.5879497
+        ],
+        [
+          0.4842014,
+          0.6111353
+        ],
+        [
+          0.05052083,
+          0.6111353
+        ]
+      ],
+      "productionMatch": {
+        "stableRegionId": "2cd83978-region-05a18d484d406f5d",
+        "method": "stable-region-id-and-text-geometry",
+        "textGeometryIou": 1.0
+      },
+      "simplifiedChinese": "嗯？",
+      "pinyin": "en / èn / ēn",
+      "hskValidation": {
+        "requestedLevel": 5,
+        "strictlyValid": true,
+        "aboveLevelTokens": [],
+        "repairState": "not-needed"
+      },
+      "hskTokens": [
+        {
+          "text": "嗯",
+          "startChar": 0,
+          "endChar": 1,
+          "pinyin": "en / èn / ēn",
+          "classification": "hsk",
+          "hskLevel": 5,
+          "aboveRequestedLevel": false
+        }
+      ]
+    },
+    {
+      "id": "30ysp-ch5-p028-r09",
+      "kind": "dialogue",
+      "containerStyle": "standard",
+      "readingOrder": 9,
+      "sourceEnglish": "By any chance, are you really... I mean, just maybe...",
+      "normalizedEnglish": "By any chance, are you really... I mean, just maybe...",
+      "textPolygon": [
+        [
+          0.42430556,
+          0.6524463
+        ],
+        [
+          0.9034722,
+          0.6524463
+        ],
+        [
+          0.9034722,
+          0.66858095
+        ],
+        [
+          0.42430556,
+          0.66858095
+        ]
+      ],
+      "eraseMask": {
+        "encoding": "normalized-polygon-v1",
+        "polygon": [
+          [
+            0.41333333,
+            0.65274495
+          ],
+          [
+            0.91555557,
+            0.65274495
+          ],
+          [
+            0.91555557,
+            0.66892819
+          ],
+          [
+            0.41333333,
+            0.66892819
+          ]
+        ],
+        "operation": "erase every English glyph, outline, punctuation mark, and antialiased edge inside the polygon; preserve every pixel outside the erase mask"
+      },
+      "geometryAudit": "detector-adjusted",
+      "reviewProvenance": {
+        "type": "acceptedProposal",
+        "uncertainty": "low",
+        "proposalIndex": 8,
+        "reviewRegionId": "2cd83978-region-a60dfa63c01bba17"
+      },
+      "bubblePolygon": [
+        [
+          0.36440971,
+          0.6444763
+        ],
+        [
+          0.9661459,
+          0.6444763
+        ],
+        [
+          0.9661459,
+          0.67655104
+        ],
+        [
+          0.36440971,
+          0.67655104
+        ]
+      ],
+      "productionMatch": {
+        "stableRegionId": "2cd83978-region-a60dfa63c01bba17",
+        "method": "stable-region-id-and-text-geometry",
+        "textGeometryIou": 1.0
+      },
+      "simplifiedChinese": "万一呢？你是真的。。。。。。我是说，也许只是。。。。。。",
+      "pinyin": "wàn yī ne / ní nǐ shì zhēn de wǒ shì shuì / shuō yě xǔ zhǐ shì",
+      "hskValidation": {
+        "requestedLevel": 5,
+        "strictlyValid": false,
+        "aboveLevelTokens": [
+          "真的",
+          "只是"
+        ],
+        "repairState": "pending"
+      },
+      "hskTokens": [
+        {
+          "text": "万一",
+          "startChar": 0,
+          "endChar": 2,
+          "pinyin": "wàn yī",
+          "classification": "hsk",
+          "hskLevel": 5,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "呢",
+          "startChar": 2,
+          "endChar": 3,
+          "pinyin": "ne / ní",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "你",
+          "startChar": 4,
+          "endChar": 5,
+          "pinyin": "nǐ",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "是",
+          "startChar": 5,
+          "endChar": 6,
+          "pinyin": "shì",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "真的",
+          "startChar": 6,
+          "endChar": 8,
+          "pinyin": "zhēn de",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "我",
+          "startChar": 14,
+          "endChar": 15,
+          "pinyin": "wǒ",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "是",
+          "startChar": 15,
+          "endChar": 16,
+          "pinyin": "shì",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "说",
+          "startChar": 16,
+          "endChar": 17,
+          "pinyin": "shuì / shuō",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "也许",
+          "startChar": 18,
+          "endChar": 20,
+          "pinyin": "yě xǔ",
+          "classification": "hsk",
+          "hskLevel": 4,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "只是",
+          "startChar": 20,
+          "endChar": 22,
+          "pinyin": "zhǐ shì",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        }
+      ]
+    },
+    {
+      "id": "30ysp-ch5-p028-r10",
+      "kind": "dialogue",
+      "containerStyle": "standard",
+      "readingOrder": 10,
+      "sourceEnglish": "ARE YOU PREPARING TO LEAVE.. SOMEWHERE?",
+      "normalizedEnglish": "ARE YOU PREPARING TO LEAVE.. SOMEWHERE?",
+      "textPolygon": [
+        [
+          0.19583334,
+          0.7695697
+        ],
+        [
+          0.7986111,
+          0.7695697
+        ],
+        [
+          0.7986111,
+          0.780754
+        ],
+        [
+          0.19583334,
+          0.780754
+        ]
+      ],
+      "eraseMask": {
+        "encoding": "normalized-polygon-v1",
+        "polygon": [
+          [
+            0.19555555,
+            0.7695755
+          ],
+          [
+            0.80555555,
+            0.7695755
+          ],
+          [
+            0.80555555,
+            0.78090377
+          ],
+          [
+            0.19555555,
+            0.78090377
+          ]
+        ],
+        "operation": "erase every English glyph, outline, punctuation mark, and antialiased edge inside the polygon; preserve every pixel outside the erase mask"
+      },
+      "geometryAudit": "detector-adjusted",
+      "reviewProvenance": {
+        "type": "acceptedProposal",
+        "uncertainty": "low",
+        "proposalIndex": 9,
+        "reviewRegionId": "2cd83978-region-047fc8007cb41abf"
+      },
+      "bubblePolygon": [
+        [
+          0.15902779,
+          0.7571794
+        ],
+        [
+          0.8409722,
+          0.7571794
+        ],
+        [
+          0.8409722,
+          0.7931443
+        ],
+        [
+          0.15902779,
+          0.7931443
+        ]
+      ],
+      "productionMatch": {
+        "stableRegionId": "2cd83978-region-047fc8007cb41abf",
+        "method": "stable-region-id-and-text-geometry",
+        "textGeometryIou": 1.0
+      },
+      "simplifiedChinese": "你要离开。。。。。。某个地方吗？",
+      "pinyin": "nǐ yào / yāo lí kāi mǒu gè / gě dì fang / dì fāng ma / má / mǎ",
+      "hskValidation": {
+        "requestedLevel": 5,
+        "strictlyValid": false,
+        "aboveLevelTokens": [
+          "某个"
+        ],
+        "repairState": "pending"
+      },
+      "hskTokens": [
+        {
+          "text": "你",
+          "startChar": 0,
+          "endChar": 1,
+          "pinyin": "nǐ",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "要",
+          "startChar": 1,
+          "endChar": 2,
+          "pinyin": "yào / yāo",
+          "classification": "hsk",
+          "hskLevel": 2,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "离开",
+          "startChar": 2,
+          "endChar": 4,
+          "pinyin": "lí kāi",
+          "classification": "hsk",
+          "hskLevel": 3,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "某",
+          "startChar": 10,
+          "endChar": 11,
+          "pinyin": "mǒu",
+          "classification": "hsk",
+          "hskLevel": 5,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "个",
+          "startChar": 11,
+          "endChar": 12,
+          "pinyin": "gè / gě",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "地方",
+          "startChar": 12,
+          "endChar": 14,
+          "pinyin": "dì fang / dì fāng",
+          "classification": "hsk",
+          "hskLevel": 3,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "吗",
+          "startChar": 14,
+          "endChar": 15,
+          "pinyin": "ma / má / mǎ",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        }
+      ]
+    },
+    {
+      "id": "30ysp-ch5-p028-r11",
+      "kind": "thought",
+      "containerStyle": "thought",
+      "readingOrder": 11,
+      "sourceEnglish": "A GOVERNMENT AGENT CAME TO SEE ME, EVEN THOUGH I HAD STAYED ONLY AT THE ORPHANAGE FOR TWO YEARS,",
+      "normalizedEnglish": "A GOVERNMENT AGENT CAME TO SEE ME, EVEN THOUGH I HAD STAYED ONLY AT THE ORPHANAGE FOR TWO YEARS,",
+      "textPolygon": [
+        [
+          0.18263888,
+          0.9107315
+        ],
+        [
+          0.8095486,
+          0.9107315
+        ],
+        [
+          0.8095486,
+          0.93318766
+        ],
+        [
+          0.18263888,
+          0.93318766
+        ]
+      ],
+      "eraseMask": {
+        "encoding": "normalized-polygon-v1",
+        "polygon": [
+          [
+            0.16111112,
+            0.91180134
+          ],
+          [
+            0.83888889,
+            0.91180134
+          ],
+          [
+            0.83888889,
+            0.93346199
+          ],
+          [
+            0.16111112,
+            0.93346199
+          ]
+        ],
+        "operation": "erase every English glyph, outline, punctuation mark, and antialiased edge inside the polygon; preserve every pixel outside the erase mask"
+      },
+      "geometryAudit": "detector-adjusted",
+      "reviewProvenance": {
+        "type": "acceptedProposal",
+        "uncertainty": "low",
+        "proposalIndex": 10,
+        "reviewRegionId": "2cd83978-region-4f44ec96585f0367"
+      },
+      "bubblePolygon": [
+        [
+          0.16788195,
+          0.9102258
+        ],
+        [
+          0.82378477,
+          0.9102258
+        ],
+        [
+          0.82378477,
+          0.93391716
+        ],
+        [
+          0.16788195,
+          0.93391716
+        ]
+      ],
+      "productionMatch": {
+        "stableRegionId": "2cd83978-region-4f44ec96585f0367",
+        "method": "stable-region-id-and-text-geometry",
+        "textGeometryIou": 1.0
+      },
+      "simplifiedChinese": "尽管我只在孤儿院待了两年，一位政府人员还是来找我。",
+      "pinyin": "jǐn guǎn wǒ qí / zhī / zhǐ zài gū ér yuàn dài / dāi le / liào / liǎo liǎng Nián / nián yī wèi zhèng fǔ rén yuán hái shi lái zhǎo wǒ",
+      "hskValidation": {
+        "requestedLevel": 5,
+        "strictlyValid": false,
+        "aboveLevelTokens": [
+          "孤儿院",
+          "孤儿",
+          "孤",
+          "儿",
+          "院",
+          "待",
+          "两年",
+          "一位"
+        ],
+        "repairState": "pending"
+      },
+      "hskTokens": [
+        {
+          "text": "尽管",
+          "startChar": 0,
+          "endChar": 2,
+          "pinyin": "jǐn guǎn",
+          "classification": "hsk",
+          "hskLevel": 4,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "我",
+          "startChar": 2,
+          "endChar": 3,
+          "pinyin": "wǒ",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "只",
+          "startChar": 3,
+          "endChar": 4,
+          "pinyin": "qí / zhī / zhǐ",
+          "classification": "hsk",
+          "hskLevel": 3,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "在",
+          "startChar": 4,
+          "endChar": 5,
+          "pinyin": "zài",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "孤儿院",
+          "startChar": 5,
+          "endChar": 8,
+          "pinyin": "gū ér yuàn",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "待",
+          "startChar": 8,
+          "endChar": 9,
+          "pinyin": "dài / dāi",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "了",
+          "startChar": 9,
+          "endChar": 10,
+          "pinyin": "le / liào / liǎo",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "两",
+          "startChar": 10,
+          "endChar": 11,
+          "pinyin": "liǎng",
+          "classification": "hsk",
+          "hskLevel": 2,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "年",
+          "startChar": 11,
+          "endChar": 12,
+          "pinyin": "Nián / nián",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "一",
+          "startChar": 13,
+          "endChar": 14,
+          "pinyin": "yī",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "位",
+          "startChar": 14,
+          "endChar": 15,
+          "pinyin": "wèi",
+          "classification": "hsk",
+          "hskLevel": 3,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "政府",
+          "startChar": 15,
+          "endChar": 17,
+          "pinyin": "zhèng fǔ",
+          "classification": "hsk",
+          "hskLevel": 5,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "人员",
+          "startChar": 17,
+          "endChar": 19,
+          "pinyin": "rén yuán",
+          "classification": "hsk",
+          "hskLevel": 5,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "还是",
+          "startChar": 19,
+          "endChar": 21,
+          "pinyin": "hái shi",
+          "classification": "hsk",
+          "hskLevel": 3,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "来",
+          "startChar": 21,
+          "endChar": 22,
+          "pinyin": "lái",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "找",
+          "startChar": 22,
+          "endChar": 23,
+          "pinyin": "zhǎo",
+          "classification": "hsk",
+          "hskLevel": 2,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "我",
+          "startChar": 23,
+          "endChar": 24,
+          "pinyin": "wǒ",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "jobId": "fixture-job-invalid",
+  "nextSequence": 1,
+  "updates": [
+    {
+      "sequence": 2,
+      "type": "progress",
+      "stage": "detecting",
+      "message": "Detecting"
+    },
+    {
+      "sequence": 1,
+      "type": "complete"
+    }
+  ]
+}

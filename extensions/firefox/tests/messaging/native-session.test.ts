@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from 'vitest'
 
 import {
+  BUILD_FINGERPRINT,
+} from '../../src/contracts/browser'
+import {
   NATIVE_HOST_NAME,
   NativeSessionError,
   NativeSessionManager,
@@ -10,7 +13,7 @@ import { MemoryStorage } from '../helpers/storage'
 function ready(token = 'A'.repeat(43), expires = 2_000_000) {
   return {
     type: 'ready',
-    protocolVersion: 1,
+    buildFingerprint: BUILD_FINGERPRINT,
     engineVersion: '0.1.0',
     port: 43127,
     token,
@@ -41,7 +44,7 @@ describe('one-shot native session handshake', () => {
     expect(session.port).toBe(43127)
     expect(sendNativeMessage).toHaveBeenCalledWith(NATIVE_HOST_NAME, {
       type: 'start-or-discover-daemon',
-      protocolVersion: 1,
+      buildFingerprint: BUILD_FINGERPRINT,
       extensionVersion: '0.1.0',
       extensionOrigin: 'moz-extension://fixture-installation',
     })

@@ -1,3 +1,4 @@
+pub mod direct_hsk_protocol;
 mod jinja;
 pub mod language;
 mod model;
@@ -128,6 +129,15 @@ pub enum ModelId {
         )
     )]
     HunyuanMT7B,
+    #[strum(
+        serialize = "hy-mt2-1.8b",
+        props(
+            repo = "tencent/Hy-MT2-1.8B-GGUF",
+            filename = "Hy-MT2-1.8B-Q4_K_M.gguf",
+            languages = "*"
+        )
+    )]
+    HyMt2_1_8b,
     #[strum(
         serialize = "sugoi-14b-ultra",
         props(

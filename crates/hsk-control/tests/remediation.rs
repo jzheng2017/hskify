@@ -1,9 +1,9 @@
 use hsk_control::{
     DatasetCompleteness, DatasetKind, Delimiter, DictionaryArtifact, DictionaryEntry, HSK_STANDARD,
     HskArtifact, HskControl, HskControlError, HskEntry, HskLevel, ImportMetadata, LicenceAudit,
-    LookupRegionContext, PreservationViolation, SourceAudit, TextNormalizer,
-    UNICODE_NORMALIZATION_CRATE_VERSION, UNICODE_NORMALIZATION_TABLES_SHA256,
-    UNICODE_NORMALIZATION_UNICODE_VERSION, ViolationReason, generate_hsk_artifact, sha256_hex,
+    LookupRegionContext, SourceAudit, TextNormalizer, UNICODE_NORMALIZATION_CRATE_VERSION,
+    UNICODE_NORMALIZATION_TABLES_SHA256, UNICODE_NORMALIZATION_UNICODE_VERSION, ViolationReason,
+    generate_hsk_artifact, sha256_hex,
 };
 use jieba_rs::Jieba;
 
@@ -175,120 +175,6 @@ fn test_seed_import_without_independent_use_column_defaults_false() {
 }
 
 #[test]
-fn lexicalized_feichang_does_not_create_negation_addition_or_removal() {
-    let control = negation_control();
-    for lexicalized in ["非常好", "不错"] {
-        assert!(
-            preservation_violations(&control, lexicalized, "很好").is_empty(),
-            "removing lexicalized {lexicalized} must not count as removed negation"
-        );
-        assert!(
-            preservation_violations(&control, "很好", lexicalized).is_empty(),
-            "adding lexicalized {lexicalized} must not count as added negation"
-        );
-    }
-}
-
-#[test]
-fn multiple_clause_negation_preserves_every_marker_occurrence() {
-    let control = negation_control();
-    assert!(preservation_violations(&control, "我不吃也不喝", "我不吃也不喝").is_empty());
-    assert_eq!(
-        preservation_violations(&control, "我不吃也不喝", "我不吃也喝"),
-        vec![PreservationViolation::NegationMarkersChanged {
-            expected: vec!["不".into(), "不".into()],
-            actual: vec!["不".into()],
-        }]
-    );
-}
-
-#[test]
-fn real_negation_markers_remain_preserved_end_to_end() {
-    let control = negation_control();
-    for (negative, positive, marker) in [
-        ("不好", "好", "不"),
-        ("没来", "来", "没"),
-        ("没有来", "有来", "没"),
-        ("别走", "走", "别"),
-        ("未完成", "完成", "未"),
-        ("非会员", "会员", "非"),
-        ("莫来", "来", "莫"),
-    ] {
-        assert_eq!(
-            preservation_violations(&control, negative, positive),
-            vec![PreservationViolation::NegationMarkersChanged {
-                expected: vec![marker.into()],
-                actual: vec![],
-            }],
-            "{negative:?} -> {positive:?}"
-        );
-    }
-}
-
-#[test]
-fn negation_diagnostics_cover_added_replaced_and_reordered_markers() {
-    let control = negation_control();
-    for (reference, candidate, expected, actual) in [
-        ("我来", "我不来", vec![], vec!["不"]),
-        ("我不来", "我没来", vec!["不"], vec!["没"]),
-        (
-            "我不来，你别走",
-            "我别来，你不走",
-            vec!["不", "别"],
-            vec!["别", "不"],
-        ),
-    ] {
-        assert_eq!(
-            preservation_violations(&control, reference, candidate),
-            vec![PreservationViolation::NegationMarkersChanged {
-                expected: expected.into_iter().map(str::to_owned).collect(),
-                actual: actual.into_iter().map(str::to_owned).collect(),
-            }],
-            "{reference:?} -> {candidate:?}"
-        );
-    }
-}
-
-#[test]
-fn one_negative_and_justified_marker_aliases_are_preserved() {
-    let control = negation_control();
-    assert!(preservation_violations(&control, "我不吃", "我不喝").is_empty());
-    assert!(preservation_violations(&control, "我没有来", "我没来").is_empty());
-    assert!(preservation_violations(&control, "他并非会员", "他非会员").is_empty());
-}
-
-#[test]
-fn lexicalized_words_do_not_hide_real_negation_units() {
-    let control = negation_control();
-    assert!(
-        preservation_violations(&control, "他非常不好", "他非常好").contains(
-            &PreservationViolation::NegationMarkersChanged {
-                expected: vec!["不".into()],
-                actual: vec![],
-            }
-        )
-    );
-    assert!(preservation_violations(&control, "不错，我不来", "很好，我不来").is_empty());
-}
-
-#[test]
-fn repeated_proper_name_occurrences_are_preserved() {
-    let control = negation_control();
-    let names = [hsk_control::ProperName {
-        text: "小明".into(),
-        reason: hsk_control::ProperNameReason::PersonName,
-    }];
-    assert_eq!(
-        preservation_violations_with_names(&control, "小明问小明", "小明问", &names),
-        vec![PreservationViolation::ProperNameOccurrencesChanged {
-            text: "小明".into(),
-            expected: 2,
-            actual: 1,
-        }]
-    );
-}
-
-#[test]
 fn lookup_can_carry_optional_frozen_region_context_without_protocol_dependency() {
     let control = control(
         "lookup-region",
@@ -297,14 +183,14 @@ fn lookup_can_carry_optional_frozen_region_context_without_protocol_dependency()
     );
     let region = LookupRegionContext {
         displayed_chinese: "我们现在要走！".into(),
-        faithful_chinese: "我们得马上离开！".into(),
+        base_chinese: "我们得马上离开！".into(),
         source_english: "We have to leave now!".into(),
     };
     let result = control.lookup_with_region_context("离开", &[], Some(region.clone()));
     assert_eq!(result.region, Some(region));
     let json = serde_json::to_value(result).unwrap();
     assert_eq!(json["region"]["displayedChinese"], "我们现在要走！");
-    assert_eq!(json["region"]["faithfulChinese"], "我们得马上离开！");
+    assert_eq!(json["region"]["baseChinese"], "我们得马上离开！");
     assert_eq!(json["region"]["sourceEnglish"], "We have to leave now!");
 
     let plain = serde_json::to_value(control.lookup("离开", &[])).unwrap();
@@ -341,51 +227,6 @@ fn cache_dependencies_are_exact_and_normalization_tables_match_unicode_17() {
         "139519822fe8ab9e10d9d07e68ea0451045380aedaf54ecc51e2a28c6b42a13f"
     );
     assert_eq!(hsk_control::JIEBA_CRATE_VERSION, "0.10.1");
-}
-
-fn preservation_violations(
-    control: &HskControl,
-    reference: &str,
-    candidate: &str,
-) -> Vec<PreservationViolation> {
-    preservation_violations_with_names(control, reference, candidate, &[])
-}
-
-fn preservation_violations_with_names(
-    control: &HskControl,
-    reference: &str,
-    candidate: &str,
-    proper_names: &[hsk_control::ProperName],
-) -> Vec<PreservationViolation> {
-    match control
-        .correction_loop(HskLevel::ONE, reference, proper_names)
-        .evaluate(candidate)
-    {
-        hsk_control::CorrectionOutcome::Accepted { .. } => Vec::new(),
-        hsk_control::CorrectionOutcome::Retry {
-            preservation_violations,
-            ..
-        }
-        | hsk_control::CorrectionOutcome::Failed {
-            preservation_violations,
-            ..
-        } => preservation_violations,
-        hsk_control::CorrectionOutcome::Terminated => unreachable!(),
-    }
-}
-
-fn negation_control() -> HskControl {
-    control(
-        "negation",
-        [
-            "常", "很", "好", "错", "我", "你", "他", "吃", "也", "喝", "不", "没", "没有", "有",
-            "来", "别", "走", "未", "完成", "非", "会员", "莫", "问",
-        ]
-        .into_iter()
-        .map(|word| hsk_entry(word, HskLevel::ONE))
-        .collect(),
-        vec![dictionary_entry("词典")],
-    )
 }
 
 fn control(

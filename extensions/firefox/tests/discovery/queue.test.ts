@@ -53,6 +53,43 @@ describe('visible-first page queue', () => {
     expect(queue.size).toBe(0)
   })
 
+  it('accepts a fresh run with the same id while cancelled work settles', async () => {
+    const order: string[] = []
+    const succeeded: string[] = []
+    const queue = new VisibleFirstQueue<string>(
+      async (item, signal) => {
+        order.push(item.value)
+        if (item.value === 'cancelled run') {
+          await new Promise<void>((resolve) => {
+            signal.addEventListener('abort', () => resolve(), { once: true })
+          })
+        }
+      },
+      { onSuccess: (item) => succeeded.push(item.value) },
+    )
+
+    queue.enqueue({
+      id: 'same-image',
+      value: 'cancelled run',
+      visible: true,
+      order: 0,
+    })
+    queue.cancelAll()
+    expect(queue.activeId).toBeUndefined()
+    expect(
+      queue.enqueue({
+        id: 'same-image',
+        value: 'fresh run',
+        visible: true,
+        order: 0,
+      }),
+    ).toBe(true)
+
+    await vi.waitFor(() => expect(queue.size).toBe(0))
+    expect(order).toEqual(['cancelled run', 'fresh run'])
+    expect(succeeded).toEqual(['fresh run'])
+  })
+
   it('can remove a pending item without stopping the active pipeline', async () => {
     const gate = deferred()
     const processed: string[] = []
@@ -66,6 +103,80 @@ describe('visible-first page queue', () => {
     gate.resolve()
     await vi.waitFor(() => expect(queue.size).toBe(0))
     expect(processed).toEqual(['active'])
+  })
+
+  it('preempts and requeues active offscreen work when a pending image becomes visible', async () => {
+    const order: string[] = []
+    let releaseVisible!: () => void
+    const visibleGate = new Promise<void>((resolve) => {
+      releaseVisible = resolve
+    })
+    const queue = new VisibleFirstQueue<string>(async (item, signal) => {
+      order.push(item.id)
+      if (item.id === 'offscreen' && order.length === 1) {
+        await new Promise<void>((resolve) => {
+          signal.addEventListener('abort', () => resolve(), { once: true })
+        })
+      }
+      if (item.id === 'visible') await visibleGate
+    })
+
+    queue.enqueue({ id: 'offscreen', value: 'offscreen', visible: true, order: 0 })
+    queue.enqueue({ id: 'visible', value: 'visible', visible: false, order: 1 })
+    queue.reprioritize('offscreen', false)
+    queue.reprioritize('visible', true)
+
+    await vi.waitFor(() => expect(order).toEqual(['offscreen', 'visible']))
+    releaseVisible()
+    await vi.waitFor(() => expect(queue.size).toBe(0))
+    expect(order).toEqual(['offscreen', 'visible', 'offscreen'])
+  })
+
+  it('preempts active offscreen work when a newly enqueued image is visible', async () => {
+    const order: string[] = []
+    const succeeded: string[] = []
+    const failed: string[] = []
+    const queue = new VisibleFirstQueue<string>(
+      async (item, signal) => {
+        order.push(item.id)
+        if (item.id === 'offscreen' && order.length === 1) {
+          await new Promise<void>((resolve) => {
+            signal.addEventListener('abort', () => resolve(), { once: true })
+          })
+        }
+      },
+      {
+        onSuccess: (item) => succeeded.push(item.id),
+        onFailure: (item) => failed.push(item.id),
+      },
+    )
+
+    queue.enqueue({ id: 'offscreen', value: 'offscreen', visible: false, order: 0 })
+    queue.enqueue({ id: 'visible', value: 'visible', visible: true, order: 1 })
+
+    await vi.waitFor(() => expect(queue.size).toBe(0))
+    expect(order).toEqual(['offscreen', 'visible', 'offscreen'])
+    expect(succeeded).toEqual(['visible', 'offscreen'])
+    expect(failed).toEqual([])
+  })
+
+  it('does not preempt active visible work for another visible image', async () => {
+    const gate = deferred()
+    const order: string[] = []
+    const queue = new VisibleFirstQueue<string>(async (item) => {
+      order.push(item.id)
+      if (item.id === 'first') await gate.promise
+    })
+
+    queue.enqueue({ id: 'first', value: 'first', visible: true, order: 0 })
+    queue.enqueue({ id: 'second', value: 'second', visible: false, order: 1 })
+    queue.reprioritize('second', true)
+    await Promise.resolve()
+    expect(order).toEqual(['first'])
+
+    gate.resolve()
+    await vi.waitFor(() => expect(queue.size).toBe(0))
+    expect(order).toEqual(['first', 'second'])
   })
 
   it('does not automatically re-enqueue a failed item and requires explicit retry', async () => {

@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, anyhow, bail};
 use libloading::Library;
 use serde::Deserialize;
+use std::ffi::{CStr, c_char};
 use std::fmt;
 
 use crate::Runtime;
@@ -9,21 +10,32 @@ use crate::install::InstallState;
 use crate::loader::{add_runtime_search_path, preload_library};
 
 const CUDA_SUCCESS: i32 = 0;
-const CUDA_13_0_DRIVER_VERSION: i32 = 13000;
 const CUDA_13_1_DRIVER_VERSION: i32 = 13010;
-const CUDA_EXTRACT_REVISION: u32 = 2;
+const CUDA_EXTRACT_REVISION: u32 = 5;
 const CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR: i32 = 75;
 const CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR: i32 = 76;
-const MIN_COMPUTE_CAPABILITY: (i32, i32) = (8, 0); // Ampere (RTX 30xx) and above
+const HSKIFY_TARGET_DEVICE_NAME: &str = "NVIDIA GeForce RTX 4080 SUPER";
+const HSKIFY_TARGET_COMPUTE_CAPABILITY: (i32, i32) = (8, 9);
+const HSKIFY_TARGET_MIN_MEMORY_MIB: usize = 16_000;
+const MIB: usize = 1024 * 1024;
 
 type CuInit = unsafe extern "C" fn(flags: u32) -> i32;
 type CuDriverGetVersion = unsafe extern "C" fn(driver_version: *mut i32) -> i32;
 type CuDeviceGet = unsafe extern "C" fn(device: *mut i32, ordinal: i32) -> i32;
 type CuDeviceGetAttribute = unsafe extern "C" fn(pi: *mut i32, attrib: i32, dev: i32) -> i32;
+type CuDeviceGetName = unsafe extern "C" fn(name: *mut c_char, len: i32, dev: i32) -> i32;
+type CuDeviceTotalMem = unsafe extern "C" fn(bytes: *mut usize, dev: i32) -> i32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct CudaDriverVersion {
     raw: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CudaDeviceInfo {
+    pub name: String,
+    pub total_memory_bytes: usize,
+    pub compute_capability: (i32, i32),
 }
 
 #[derive(Debug, Deserialize)]
@@ -46,17 +58,22 @@ struct WheelSpec {
 
 const WHEELS: &[WheelSpec] = &[
     WheelSpec {
-        package: "nvidia-cuda-runtime/13.0.96",
+        package: "nvidia-cuda-runtime/13.1.80",
         windows_dylibs: &["cudart64_13.dll"],
         linux_dylibs: &["libcudart.so.13"],
     },
     WheelSpec {
-        package: "nvidia-cublas/13.0.2.14",
+        package: "nvidia-cuda-nvrtc/13.1.80",
+        windows_dylibs: &["nvrtc64_130_0.dll", "nvrtc-builtins64_131.dll"],
+        linux_dylibs: &["libnvrtc.so.13", "libnvrtc-builtins.so.13.1"],
+    },
+    WheelSpec {
+        package: "nvidia-cublas/13.2.0.9",
         windows_dylibs: &["cublasLt64_13.dll", "cublas64_13.dll"],
         linux_dylibs: &["libcublasLt.so.13", "libcublas.so.13"],
     },
     WheelSpec {
-        package: "nvidia-cufft/12.1.0.78",
+        package: "nvidia-cufft/12.1.0.31",
         windows_dylibs: &["cufft64_12.dll"],
         linux_dylibs: &["libcufft.so.12"],
     },
@@ -66,14 +83,13 @@ const WHEELS: &[WheelSpec] = &[
         linux_dylibs: &["libcurand.so.10"],
     },
     WheelSpec {
-        package: "nvidia-cudnn-cu13/9.21.0.82",
+        package: "nvidia-cudnn-cu13/9.17.0.29",
         windows_dylibs: &[
             "cudnn64_9.dll",
             "cudnn_adv64_9.dll",
             "cudnn_cnn64_9.dll",
             "cudnn_engines_precompiled64_9.dll",
             "cudnn_engines_runtime_compiled64_9.dll",
-            "cudnn_engines_tensor_ir64_9.dll",
             "cudnn_graph64_9.dll",
             "cudnn_heuristic64_9.dll",
             "cudnn_ops64_9.dll",
@@ -107,10 +123,6 @@ impl CudaDriverVersion {
 
     pub const fn minor(self) -> i32 {
         (self.raw % 1000) / 10
-    }
-
-    pub const fn supports_cuda_13_0(self) -> bool {
-        self.raw >= CUDA_13_0_DRIVER_VERSION
     }
 
     pub const fn supports_cuda_13_1(self) -> bool {
@@ -160,6 +172,13 @@ pub fn driver_version() -> Result<CudaDriverVersion> {
 ///
 /// Returns `(major, minor)` e.g. `(8, 0)` for Ampere, `(8, 9)` for Ada.
 pub fn compute_capability() -> Result<(i32, i32)> {
+    Ok(cuda_device_info()?.compute_capability)
+}
+
+/// Query the exact identity and capacity of CUDA device 0 through the NVIDIA
+/// driver API. Hskify's performance build uses this at runtime as well as at
+/// build time so a copied binary cannot silently run on another GPU.
+pub fn cuda_device_info() -> Result<CudaDeviceInfo> {
     let library_name = if cfg!(target_os = "windows") {
         "nvcuda.dll"
     } else {
@@ -178,6 +197,13 @@ pub fn compute_capability() -> Result<(i32, i32)> {
         let cu_device_get_attribute = *library
             .get::<CuDeviceGetAttribute>(b"cuDeviceGetAttribute\0")
             .context("cuDeviceGetAttribute not found")?;
+        let cu_device_get_name = *library
+            .get::<CuDeviceGetName>(b"cuDeviceGetName\0")
+            .context("cuDeviceGetName not found")?;
+        let cu_device_total_mem = *library
+            .get::<CuDeviceTotalMem>(b"cuDeviceTotalMem_v2\0")
+            .or_else(|_| library.get::<CuDeviceTotalMem>(b"cuDeviceTotalMem\0"))
+            .context("cuDeviceTotalMem not found")?;
 
         let status = cu_init(0);
         if status != CUDA_SUCCESS {
@@ -210,79 +236,81 @@ pub fn compute_capability() -> Result<(i32, i32)> {
             bail!("cuDeviceGetAttribute(MINOR) failed with error code {status}");
         }
 
-        Ok((major, minor))
+        let mut name = [0 as c_char; 256];
+        let status = cu_device_get_name(name.as_mut_ptr(), name.len() as i32, dev);
+        if status != CUDA_SUCCESS {
+            bail!("cuDeviceGetName failed with error code {status}");
+        }
+        let name = CStr::from_ptr(name.as_ptr())
+            .to_str()
+            .context("CUDA device name is not valid UTF-8")?
+            .to_owned();
+
+        let mut total_memory_bytes = 0usize;
+        let status = cu_device_total_mem(&mut total_memory_bytes, dev);
+        if status != CUDA_SUCCESS {
+            bail!("cuDeviceTotalMem failed with error code {status}");
+        }
+
+        Ok(CudaDeviceInfo {
+            name,
+            total_memory_bytes,
+            compute_capability: (major, minor),
+        })
     }
 }
 
-/// Check whether the installed NVIDIA driver supports CUDA 13.0+.
+/// Require the one runtime target supported by the Hskify product.
 ///
-/// Returns `true` when GPU compute should be used, `false` when the caller
-/// should fall back to CPU.  Warnings are emitted via `tracing::warn!`.
-pub fn check_cuda_driver_support() -> bool {
-    if !driver_library_available() {
-        return false;
-    }
+/// This deliberately has no compatibility or CPU path. Callers must propagate
+/// the error and stop before creating product state or downloading assets.
+pub fn require_hskify_cuda_target() -> Result<CudaDeviceInfo> {
+    #[cfg(not(all(target_os = "windows", target_arch = "x86_64")))]
+    bail!(
+        "Hskify requires 64-bit Windows; detected os={}, arch={}",
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    );
 
-    // Check driver version
-    match driver_version() {
-        Ok(version) if version.supports_cuda_13_0() => {
-            tracing::info!("NVIDIA driver reports CUDA {version} support");
-        }
-        Ok(version) => {
-            tracing::warn!(
-                "NVIDIA driver only supports CUDA {version}; \
-                 falling back to CPU. Update your NVIDIA driver to a version \
-                 that supports CUDA 13.0 or newer to enable GPU acceleration."
-            );
-            return false;
-        }
-        Err(err) => {
-            tracing::warn!(
-                "Could not verify NVIDIA driver support for CUDA 13.0: {err:#}; \
-                 falling back to CPU."
-            );
-            return false;
-        }
-    }
+    let driver =
+        driver_version().context("Hskify requires the NVIDIA CUDA driver API 13.1 or newer")?;
+    let info = cuda_device_info().context("Hskify could not query CUDA device 0")?;
+    validate_hskify_cuda_target(driver, &info)?;
+    Ok(info)
+}
 
-    // Check GPU compute capability (need >= 8.0 / Ampere)
-    match compute_capability() {
-        Ok((major, minor)) if (major, minor) >= MIN_COMPUTE_CAPABILITY => {
-            tracing::info!("GPU compute capability: {major}.{minor}");
-            true
-        }
-        Ok((major, minor)) => {
-            tracing::warn!(
-                "GPU compute capability {major}.{minor} is below the minimum \
-                 required {}.{}; falling back to CPU. An Ampere (RTX 30xx) or \
-                 newer GPU is required for GPU acceleration.",
-                MIN_COMPUTE_CAPABILITY.0,
-                MIN_COMPUTE_CAPABILITY.1,
-            );
-            false
-        }
-        Err(err) => {
-            tracing::warn!("Could not query GPU compute capability: {err:#}; falling back to CPU.");
-            false
-        }
+fn validate_hskify_cuda_target(driver: CudaDriverVersion, info: &CudaDeviceInfo) -> Result<()> {
+    if !driver.supports_cuda_13_1() {
+        bail!(
+            "Hskify requires the NVIDIA CUDA driver API 13.1 or newer; driver reports CUDA {driver}"
+        );
     }
+    let total_memory_mib = info.total_memory_bytes / MIB;
+    if info.name != HSKIFY_TARGET_DEVICE_NAME
+        || info.compute_capability != HSKIFY_TARGET_COMPUTE_CAPABILITY
+        || total_memory_mib < HSKIFY_TARGET_MIN_MEMORY_MIB
+    {
+        bail!(
+            "Hskify requires {HSKIFY_TARGET_DEVICE_NAME} with at least \
+             {HSKIFY_TARGET_MIN_MEMORY_MIB} MiB and compute capability {}.{}; \
+             CUDA device 0 is `{}` with {total_memory_mib} MiB and compute {}.{}",
+            HSKIFY_TARGET_COMPUTE_CAPABILITY.0,
+            HSKIFY_TARGET_COMPUTE_CAPABILITY.1,
+            info.name,
+            info.compute_capability.0,
+            info.compute_capability.1
+        );
+    }
+    Ok(())
 }
 
 pub(crate) fn package_enabled(runtime: &Runtime) -> bool {
-    runtime.wants_gpu()
-        && driver_library_available()
-        && driver_version()
-            .map(|version| version.supports_cuda_13_0())
-            .unwrap_or(false)
-}
-
-#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-pub(crate) fn llama_cuda_enabled(runtime: &Runtime) -> bool {
-    runtime.wants_gpu()
-        && driver_library_available()
-        && driver_version()
-            .map(|version| version.supports_cuda_13_1())
-            .unwrap_or(false)
+    runtime.cuda_required()
+        || (runtime.wants_gpu()
+            && driver_library_available()
+            && driver_version()
+                .map(|version| version.supports_cuda_13_1())
+                .unwrap_or(false))
 }
 
 pub(crate) fn package_present(runtime: &Runtime) -> Result<bool> {
@@ -300,6 +328,9 @@ pub(crate) fn package_present(runtime: &Runtime) -> Result<bool> {
 }
 
 pub(crate) async fn package_prepare(runtime: &Runtime) -> Result<()> {
+    if runtime.cuda_required() {
+        require_hskify_cuda_target()?;
+    }
     ensure_ready(runtime).await
 }
 
@@ -451,6 +482,14 @@ mod tests {
         let id = source_id().unwrap();
         assert!(id.contains("cuda"));
         assert!(id.contains("platform="));
+        assert!(id.contains("extract=5"));
+    }
+
+    #[test]
+    fn required_policy_keeps_cuda_package_enabled() {
+        let runtime =
+            Runtime::new("unused", crate::ComputePolicy::CudaRequired).expect("create runtime");
+        assert!(package_enabled(&runtime));
     }
 
     #[test]
@@ -486,17 +525,42 @@ mod tests {
     }
 
     #[test]
-    fn cuda_runtime_includes_cudnn() {
-        let _wheel = WHEELS
+    fn pinned_wheel_set_is_release_aligned() {
+        let packages = WHEELS.iter().map(|wheel| wheel.package).collect::<Vec<_>>();
+        assert_eq!(
+            packages,
+            [
+                "nvidia-cuda-runtime/13.1.80",
+                "nvidia-cuda-nvrtc/13.1.80",
+                "nvidia-cublas/13.2.0.9",
+                "nvidia-cufft/12.1.0.31",
+                "nvidia-curand/10.4.1.81",
+                "nvidia-cudnn-cu13/9.17.0.29",
+            ]
+        );
+    }
+
+    #[test]
+    fn cuda_runtime_matches_the_pinned_windows_wheel() {
+        let wheel = WHEELS
             .iter()
-            .find(|wheel| wheel.package.starts_with("nvidia-cudnn-cu13/"))
-            .expect("missing cuDNN runtime wheel");
+            .find(|wheel| wheel.package == "nvidia-cudnn-cu13/9.17.0.29")
+            .expect("missing pinned cuDNN runtime wheel");
 
         #[cfg(target_os = "windows")]
-        assert!(_wheel.dylibs().contains(&"cudnn64_9.dll"));
-
-        #[cfg(target_os = "linux")]
-        assert!(_wheel.dylibs().contains(&"libcudnn.so.9"));
+        assert_eq!(
+            wheel.dylibs(),
+            [
+                "cudnn64_9.dll",
+                "cudnn_adv64_9.dll",
+                "cudnn_cnn64_9.dll",
+                "cudnn_engines_precompiled64_9.dll",
+                "cudnn_engines_runtime_compiled64_9.dll",
+                "cudnn_graph64_9.dll",
+                "cudnn_heuristic64_9.dll",
+                "cudnn_ops64_9.dll",
+            ]
+        );
     }
 
     #[test]
@@ -508,18 +572,36 @@ mod tests {
     }
 
     #[test]
-    fn checks_cuda_13_0_threshold() {
-        assert!(CudaDriverVersion::from_raw(13010).supports_cuda_13_0());
-        assert!(CudaDriverVersion::from_raw(13020).supports_cuda_13_0());
-        assert!(CudaDriverVersion::from_raw(13000).supports_cuda_13_0());
-        assert!(!CudaDriverVersion::from_raw(12080).supports_cuda_13_0());
-    }
-
-    #[test]
     fn checks_cuda_13_1_threshold() {
         assert!(CudaDriverVersion::from_raw(13010).supports_cuda_13_1());
         assert!(CudaDriverVersion::from_raw(13020).supports_cuda_13_1());
         assert!(!CudaDriverVersion::from_raw(13000).supports_cuda_13_1());
         assert!(!CudaDriverVersion::from_raw(12080).supports_cuda_13_1());
+    }
+
+    #[test]
+    fn exact_hskify_target_is_accepted() {
+        let info = CudaDeviceInfo {
+            name: HSKIFY_TARGET_DEVICE_NAME.to_owned(),
+            total_memory_bytes: HSKIFY_TARGET_MIN_MEMORY_MIB * MIB,
+            compute_capability: HSKIFY_TARGET_COMPUTE_CAPABILITY,
+        };
+        validate_hskify_cuda_target(CudaDriverVersion::from_raw(13010), &info).unwrap();
+    }
+
+    #[test]
+    fn hskify_target_rejects_old_driver_and_wrong_device() {
+        let info = CudaDeviceInfo {
+            name: "NVIDIA GeForce RTX 4090".to_owned(),
+            total_memory_bytes: 24_000 * MIB,
+            compute_capability: HSKIFY_TARGET_COMPUTE_CAPABILITY,
+        };
+        let old_driver =
+            validate_hskify_cuda_target(CudaDriverVersion::from_raw(13000), &info).unwrap_err();
+        assert!(old_driver.to_string().contains("driver API 13.1"));
+
+        let wrong_device =
+            validate_hskify_cuda_target(CudaDriverVersion::from_raw(13010), &info).unwrap_err();
+        assert!(wrong_device.to_string().contains(HSKIFY_TARGET_DEVICE_NAME));
     }
 }

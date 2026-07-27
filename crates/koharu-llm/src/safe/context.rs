@@ -33,6 +33,12 @@ pub struct LlamaContext<'a> {
     embeddings_enabled: bool,
 }
 
+// A llama.cpp context may move between OS threads, provided it is never used
+// concurrently. The wrapper intentionally remains !Sync; all mutating decode
+// operations require `&mut self`, and Hskify serializes them on one inference
+// worker.
+unsafe impl Send for LlamaContext<'_> {}
+
 impl Debug for LlamaContext<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LlamaContext")
@@ -71,6 +77,11 @@ impl<'model> LlamaContext<'model> {
     #[must_use]
     pub fn n_ctx(&self) -> u32 {
         unsafe { crate::sys::llama_n_ctx(self.context.as_ptr()) }
+    }
+
+    /// Wait until all queued computations for this context have finished.
+    pub fn synchronize(&mut self) {
+        unsafe { crate::sys::llama_synchronize(self.context.as_ptr()) }
     }
 
     /// Decodes the batch.

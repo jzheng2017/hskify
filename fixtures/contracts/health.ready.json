@@ -1,6 +1,40 @@
 {
-  "protocolVersion": 1,
-  "engineVersion": "0.1.0",
+  "buildFingerprint": "hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-07-26-r2",
+  "engineVersion": "0.61.2",
   "status": "ready",
-  "setupState": "ready"
+  "setupState": "ready",
+  "resourceIdentities": [
+    {
+      "id": "pp-ocr-v5-english-recognizer-config",
+      "repository": "PaddlePaddle/en_PP-OCRv5_mobile_rec_onnx",
+      "repositoryRevision": "3fafbc3b5dcf93dd72add9f48368be8a3a2cd33b",
+      "filename": "inference.yml",
+      "bytes": 3964,
+      "sha256": "27e91d0582f40168aa218303c76e184bc78fa7a5d105aad0cfbad8458b441067"
+    },
+    {
+      "id": "pp-ocr-v5-english-recognizer-model",
+      "repository": "PaddlePaddle/en_PP-OCRv5_mobile_rec_onnx",
+      "repositoryRevision": "3fafbc3b5dcf93dd72add9f48368be8a3a2cd33b",
+      "filename": "inference.onnx",
+      "bytes": 7848423,
+      "sha256": "b5f833dfc5d0eb71da397b4efa06ebeee9b431b690a47d6af40d77d8eabc557f"
+    },
+    {
+      "id": "pp-ocr-v5-mobile-detector-model",
+      "repository": "PaddlePaddle/PP-OCRv5_mobile_det_onnx",
+      "repositoryRevision": "e6f4fa85f00e168c862bc462aebca69eef9b3d3d",
+      "filename": "inference.onnx",
+      "bytes": 4826518,
+      "sha256": "a431985659dc921974177a95adcfbb90fd9e51989a5e04d70d0b75f597b6e61d"
+    },
+    {
+      "id": "translation-model",
+      "repository": "unsloth/Qwen3.5-4B-GGUF",
+      "repositoryRevision": "e87f176479d0855a907a41277aca2f8ee7a09523",
+      "filename": "Qwen3.5-4B-Q4_K_M.gguf",
+      "bytes": 2740937888,
+      "sha256": "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4"
+    }
+  ]
 }

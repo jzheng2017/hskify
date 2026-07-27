@@ -18,6 +18,7 @@ pub type RuntimeHttpClient = Arc<ClientWithMiddleware>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ComputePolicy {
     PreferGpu,
+    CudaRequired,
     CpuOnly,
 }
 
@@ -124,7 +125,14 @@ impl Runtime {
     }
 
     pub fn wants_gpu(&self) -> bool {
-        matches!(self.inner.compute, ComputePolicy::PreferGpu)
+        matches!(
+            self.inner.compute,
+            ComputePolicy::PreferGpu | ComputePolicy::CudaRequired
+        )
+    }
+
+    pub(crate) fn cuda_required(&self) -> bool {
+        self.inner.compute == ComputePolicy::CudaRequired
     }
 
     pub fn http_client(&self) -> RuntimeHttpClient {
@@ -140,6 +148,15 @@ impl Runtime {
     }
 
     pub async fn prepare(&self) -> Result<()> {
+        if self.cuda_required() {
+            crate::cuda::require_hskify_cuda_target()
+                .context("required Hskify CUDA target validation failed")?;
+            return self
+                .inner
+                .packages
+                .prepare_preinstalled_bootstrap(self)
+                .await;
+        }
         let dirs = [
             self.root().join("runtime"),
             self.root().join("runtime").join(".downloads"),
@@ -167,6 +184,13 @@ mod tests {
     use anyhow::Result;
 
     use super::*;
+
+    #[test]
+    fn cuda_required_is_a_gpu_policy() {
+        let runtime = Runtime::new("unused", ComputePolicy::CudaRequired).unwrap();
+        assert!(runtime.wants_gpu());
+        assert!(runtime.cuda_required());
+    }
 
     #[tokio::test]
     #[ignore]

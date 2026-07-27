@@ -1,16 +1,14 @@
-# Firefox native-host registration (Linux)
+# Firefox native-host registration utility (Linux)
 
-The per-user installer invokes `register.sh` with the absolute installed native
-host path. It writes a mode-0600 manifest to
-`~/.mozilla/native-messaging-hosts`. The manifest allows only the permanent
-Firefox add-on ID.
+These scripts preserve per-user registration behavior for development and
+future packaging work. The current Hskify performance product is Windows
+CUDA-only on an RTX 4080 SUPER; Linux execution and performance are not
+supported or measured.
 
-`unregister.sh` removes only that manifest. Main application cache/state cleanup
-belongs to the companion uninstaller.
+`register.sh` accepts the absolute native-host path and writes a mode-0600
+manifest to `~/.mozilla/native-messaging-hosts`. It permits only
+`hsk-manga-translator@local.hskify`. `unregister.sh` removes only that manifest.
 
-From the repository root, run
-`sh installers/test-native-host-registration.sh` to exercise both Unix
-registration scripts with a valid non-ASCII UTF-8 executable path and a
-control-character rejection case. It also exercises unregistration and rejects
-a directory with the native-host filename. The check redirects `HOME` to a
-temporary directory and does not modify the user's Firefox profile.
+`sh installers/test-native-host-registration.sh` exercises path validation and
+isolated registration logic. Passing it does not establish a supported Linux
+runtime or browser benchmark.

@@ -16,9 +16,8 @@ describe('page and image progress UI', () => {
       current: 1,
       total: 4,
       status: {
-        revision: 2,
-        jobId: 'job',
-        state: 'running',
+        sequence: 2,
+        type: 'progress',
         stage: 'ocr',
         overallProgress: 0.3,
         current: 2,
@@ -37,9 +36,8 @@ describe('page and image progress UI', () => {
       current: 1,
       total: 4,
       status: {
-        revision: 3,
-        jobId: 'job',
-        state: 'running',
+        sequence: 3,
+        type: 'progress',
         stage: 'inpainting',
         message: 'Removing lettering',
       },

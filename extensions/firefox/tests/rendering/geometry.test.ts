@@ -1,10 +1,12 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import {
   objectFitRect,
   polygonBounds,
   rectDifference,
+  visibleImageRects,
 } from '../../src/rendering/geometry'
+import { loadedImage } from '../helpers/images'
 
 describe('normalized and object-fit geometry', () => {
   it('maps contain with letterboxing and percentage object-position', () => {
@@ -63,5 +65,27 @@ describe('normalized and object-fit geometry', () => {
       }) as DOMRect
     expect(rectDifference(rect(0), rect(1.9))).toBeCloseTo(1.9)
     expect(rectDifference(rect(0), rect(0, 603))).toBe(3)
+  })
+
+  it('maps the browser viewport into normalized source coordinates', () => {
+    const image = loadedImage()
+    document.body.append(image)
+    vi.spyOn(image, 'getBoundingClientRect').mockReturnValue({
+      left: 100,
+      right: 500,
+      top: -500,
+      bottom: 1_500,
+      width: 400,
+      height: 2_000,
+      x: 100,
+      y: -500,
+      toJSON: () => ({}),
+    })
+    const [visible] = visibleImageRects(image, 900, 16_000)
+    expect(visible?.x).toBeCloseTo(0)
+    expect(visible?.y).toBeCloseTo(0.25)
+    expect(visible?.width).toBeCloseTo(1)
+    expect(visible?.height).toBeCloseTo(window.innerHeight / 2_000)
+    image.remove()
   })
 })

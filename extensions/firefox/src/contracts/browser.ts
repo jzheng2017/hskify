@@ -1,22 +1,40 @@
-export const PROTOCOL_VERSION = 1 as const
+export const BUILD_FINGERPRINT =
+  'hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-07-26-r2' as const
 export const HSK_STANDARD = '2.0' as const
 export const SOURCE_LANGUAGE = 'en' as const
 export const TARGET_LANGUAGE = 'zh-CN' as const
-export const MAX_PRECEDING_CONTEXT = 12
+export const MAX_PRECEDING_CONTEXT = 6
+export const MAX_PROPER_NAME_GLOSSARY = 64
 
 export type HskLevel = 1 | 2 | 3 | 4 | 5 | 6
 export type Point = { x: number; y: number }
 
+export type NormalizedRect = {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+export type ResourceIdentity = {
+  id: string
+  repository: string
+  repositoryRevision: string
+  filename: string
+  bytes: number
+  sha256: string
+}
+
 export type NativeHandshakeRequest = {
   type: 'start-or-discover-daemon'
-  protocolVersion: 1
+  buildFingerprint: typeof BUILD_FINGERPRINT
   extensionVersion: string
   extensionOrigin: string
 }
 
 export type NativeReadyResponse = {
   type: 'ready'
-  protocolVersion: 1
+  buildFingerprint: typeof BUILD_FINGERPRINT
   engineVersion: string
   port: number
   token: string
@@ -30,14 +48,15 @@ export type NativeReadyResponse = {
 }
 
 export type HealthResponse = {
-  protocolVersion: 1
+  buildFingerprint: typeof BUILD_FINGERPRINT
   engineVersion: string
   status: 'ready'
   setupState: BrowserSetupStatus['state']
+  resourceIdentities: ResourceIdentity[]
 }
 
 export type BrowserJobRequest = {
-  protocolVersion: 1
+  buildFingerprint: typeof BUILD_FINGERPRINT
   clientImageId: string
   sourceSha256: string
   sourceMimeType: string
@@ -45,6 +64,7 @@ export type BrowserJobRequest = {
   naturalHeight: number
   pageSessionId: string
   pageIndex: number
+  visibleRects: NormalizedRect[]
   settings: {
     sourceLanguage: 'en'
     targetLanguage: 'zh-CN'
@@ -57,96 +77,72 @@ export type BrowserJobRequest = {
     sourceEnglish: string
     chinese: string
   }>
+  properNameGlossary?: Array<{
+    sourceEnglish: string
+    chinese: string
+  }>
 }
 
 export type BrowserJobCreated = {
-  protocolVersion: 1
+  buildFingerprint: typeof BUILD_FINGERPRINT
   jobId: string
 }
 
-export type RetranslateRequest = {
-  protocolVersion: 1
-  settings: {
-    hskStandard: '2.0'
-    hskLevel: HskLevel
-  }
-  precedingContext?: BrowserJobRequest['precedingContext']
+export type ViewportUpdate = {
+  visibleRects: NormalizedRect[]
+  active: boolean
 }
 
-export type BrowserJobResult = {
-  protocolVersion: 1
-  jobId: string
-  sourceSha256: string
-  sourceWidth: number
-  sourceHeight: number
-  cleanImageBlobId: string
-  cleanImageMimeType: 'image/png' | 'image/webp'
-  regions: BrowserRegion[]
-  warnings: BrowserWarning[]
-  cache: {
-    detectionHit: boolean
-    ocrHit: boolean
-    inpaintHit: boolean
-    translationHit: boolean
-  }
+export type RegionHsk = {
+  requestedLevel: HskLevel
+  strictlyValid: boolean
+  aboveLevelTokens: string[]
+  repairState: 'not-needed' | 'pending' | 'accepted' | 'rejected'
+}
+
+export type RegionStyle = {
+  fontId: string
+  category: 'sans' | 'serif' | 'handwritten' | 'display' | 'brush'
+  foreground: string
+  weight: number
+  italicDegrees: number
+  outlineColor?: string
+  outlineWidthRatio: number
+  shadowColor?: string
+  shadowXRatio: number
+  shadowYRatio: number
+  alignment: 'left' | 'center' | 'right'
+  writingMode: 'horizontal-tb' | 'vertical-rl'
+  lineHeight: number
+  letterSpacingEm: number
+}
+
+export type RegionLayout = {
+  suggestedLines: string[]
+  fontSizeToImageWidth: number
+  safePolygon?: Point[]
 }
 
 export type BrowserRegion = {
   id: string
-  kind: 'dialogue' | 'caption' | 'thought' | 'sfx'
   textPolygon: Point[]
   bubblePolygon?: Point[]
-  rotationDegrees: number
+  patch: {
+    blobId: string
+    mimeType: 'image/png'
+    rect: NormalizedRect
+  }
   sourceEnglish: string
-  faithfulChinese: string
+  baseChinese: string
   displayedChinese: string
   pinyin: string
   ocrConfidence: number
   readingOrder: number
-  vocabulary: {
-    requestedHskLevel: HskLevel
-    strictlyValid: boolean
-    exceptions: Array<{
-      text: string
-      reason: 'person-name' | 'place-name' | 'title' | 'unavoidable-proper-noun'
-    }>
-  }
-  style: {
-    fontId: string
-    category: 'sans' | 'serif' | 'handwritten' | 'display' | 'brush'
-    foreground: string
-    weight: number
-    italicDegrees: number
-    outlineColor?: string
-    outlineWidthRatio: number
-    shadowColor?: string
-    shadowXRatio: number
-    shadowYRatio: number
-    alignment: 'left' | 'center' | 'right'
-    writingMode: 'horizontal-tb' | 'vertical-rl'
-    lineHeight: number
-    letterSpacingEm: number
-  }
-  layout: {
-    suggestedLines: string[]
-    fontSizeToImageWidth: number
-    safePolygon?: Point[]
-  }
+  style: RegionStyle
+  layout: RegionLayout
+  hsk: RegionHsk
 }
 
-export type BrowserWarning = {
-  code:
-    | 'LOW_OCR_CONFIDENCE'
-    | 'HSK_EXCEPTION'
-    | 'HSK_REWRITE_FAILED'
-    | 'TEXT_FIT_DEGRADED'
-    | 'STYLE_LOW_CONFIDENCE'
-    | 'SFX_SKIPPED'
-  regionId?: string
-  message: string
-}
-
-export type BrowserJobState = 'running' | 'complete' | 'failed' | 'cancelled'
 export type BrowserJobStage =
   | 'queued'
   | 'decoding'
@@ -154,30 +150,73 @@ export type BrowserJobStage =
   | 'ocr'
   | 'inpainting'
   | 'translating'
-  | 'hsk-rewriting'
   | 'hsk-validating'
   | 'styling'
   | 'packaging'
-  | 'complete'
-  | 'failed'
-  | 'cancelled'
 
-export type BrowserJobStatus = {
-  revision: number
-  jobId: string
-  state: BrowserJobState
+export type ProgressJobUpdate = {
+  sequence: number
+  type: 'progress'
   stage: BrowserJobStage
   stageProgress?: number
   overallProgress?: number
   current?: number
   total?: number
   message: string
-  errorCode?: string
+}
+
+export type RegionReadyJobUpdate = {
+  sequence: number
+  type: 'regionReady'
+  region: BrowserRegion
+}
+
+export type RegionRefinedJobUpdate = {
+  sequence: number
+  type: 'regionRefined'
+  regionId: string
+  displayedChinese: string
+  pinyin: string
+  hsk: RegionHsk
+}
+
+export type CompleteJobUpdate = {
+  sequence: number
+  type: 'complete'
+  message?: string
+}
+
+export type FailedJobUpdate = {
+  sequence: number
+  type: 'failed'
+  code: string
+  message: string
+  retryable: boolean
+}
+
+export type CancelledJobUpdate = {
+  sequence: number
+  type: 'cancelled'
+  message?: string
+}
+
+export type JobUpdate =
+  | ProgressJobUpdate
+  | RegionReadyJobUpdate
+  | RegionRefinedJobUpdate
+  | CompleteJobUpdate
+  | FailedJobUpdate
+  | CancelledJobUpdate
+
+export type JobUpdateBatch = {
+  jobId: string
+  nextSequence: number
+  updates: JobUpdate[]
 }
 
 export type BrowserSetupStatus = {
   state: 'missing-models' | 'downloading' | 'verifying' | 'ready' | 'failed'
-  selectedPackId?: string
+  modelId: string
   currentFile?: string
   completedBytes?: number
   totalBytes?: number
@@ -203,13 +242,12 @@ export type LookupResult = {
   }>
   region?: {
     displayedChinese: string
-    faithfulChinese: string
+    baseChinese: string
     sourceEnglish: string
   }
 }
 
 export type ErrorResponse = {
-  protocolVersion: 1
   code: string
   message: string
   retryable: boolean
@@ -234,22 +272,9 @@ const jobStages: readonly BrowserJobStage[] = [
   'ocr',
   'inpainting',
   'translating',
-  'hsk-rewriting',
   'hsk-validating',
   'styling',
   'packaging',
-  'complete',
-  'failed',
-  'cancelled',
-]
-
-const warningCodes: readonly BrowserWarning['code'][] = [
-  'LOW_OCR_CONFIDENCE',
-  'HSK_EXCEPTION',
-  'HSK_REWRITE_FAILED',
-  'TEXT_FIT_DEGRADED',
-  'STYLE_LOW_CONFIDENCE',
-  'SFX_SKIPPED',
 ]
 
 function fail(path: string, message: string): never {
@@ -263,14 +288,26 @@ function record(value: unknown, path: string): UnknownRecord {
   return value as UnknownRecord
 }
 
-function array(value: unknown, path: string): unknown[] {
+function exact(item: UnknownRecord, allowed: readonly string[], path: string): void {
+  const expected = new Set(allowed)
+  const unexpected = Object.keys(item).find((key) => !expected.has(key))
+  if (unexpected) fail(`${path}.${unexpected}`, 'is not permitted')
+}
+
+function array(value: unknown, path: string, maximum = 10_000): unknown[] {
   if (!Array.isArray(value)) fail(path, 'must be an array')
+  if (value.length > maximum) fail(path, `must contain at most ${maximum} items`)
   return value
 }
 
-function string(value: unknown, path: string, allowEmpty = false): string {
-  if (typeof value !== 'string' || (!allowEmpty && value.trim() === '')) {
-    fail(path, allowEmpty ? 'must be a string' : 'must be a non-empty string')
+function string(value: unknown, path: string, allowEmpty = false, maximum = 8_192): string {
+  if (typeof value !== 'string' || (!allowEmpty && value.trim() === '') || value.length > maximum) {
+    fail(
+      path,
+      allowEmpty
+        ? `must be a string no longer than ${maximum} characters`
+        : `must be a non-empty string no longer than ${maximum} characters`,
+    )
   }
   return value
 }
@@ -314,15 +351,15 @@ function oneOf<const T extends readonly (string | number | boolean)[]>(
   path: string,
   values: T,
 ): T[number] {
-  if (!values.includes(value as never)) {
-    fail(path, `must be one of ${values.join(', ')}`)
-  }
+  if (!values.includes(value as never)) fail(path, `must be one of ${values.join(', ')}`)
   return value as T[number]
 }
 
-function protocol(value: unknown, path = 'protocolVersion'): 1 {
-  if (value !== PROTOCOL_VERSION) fail(path, `must equal ${PROTOCOL_VERSION}`)
-  return PROTOCOL_VERSION
+function buildFingerprint(value: unknown, path = 'buildFingerprint'): typeof BUILD_FINGERPRINT {
+  if (value !== BUILD_FINGERPRINT) {
+    fail(path, `must equal the running extension build ${BUILD_FINGERPRINT}`)
+  }
+  return BUILD_FINGERPRINT
 }
 
 function hskLevel(value: unknown, path: string): HskLevel {
@@ -330,16 +367,16 @@ function hskLevel(value: unknown, path: string): HskLevel {
 }
 
 function sha256(value: unknown, path: string): string {
-  const parsed = string(value, path)
-  if (!/^[a-fA-F0-9]{64}$/.test(parsed)) {
-    fail(path, 'must be a 64-character hexadecimal SHA-256')
+  const parsed = string(value, path, false, 64)
+  if (!/^[a-f0-9]{64}$/u.test(parsed)) {
+    fail(path, 'must be a lowercase 64-character hexadecimal SHA-256')
   }
   return parsed
 }
 
 function cssColor(value: unknown, path: string): string {
-  const parsed = string(value, path)
-  if (!/^#(?:[\da-fA-F]{3}|[\da-fA-F]{4}|[\da-fA-F]{6}|[\da-fA-F]{8})$/.test(parsed)) {
+  const parsed = string(value, path, false, 9)
+  if (!/^#(?:[\da-f]{3}|[\da-f]{4}|[\da-f]{6}|[\da-f]{8})$/iu.test(parsed)) {
     fail(path, 'must be a hexadecimal CSS color')
   }
   return parsed
@@ -347,168 +384,285 @@ function cssColor(value: unknown, path: string): string {
 
 function point(value: unknown, path: string): Point {
   const item = record(value, path)
-  return {
-    x: unit(item.x, `${path}.x`),
-    y: unit(item.y, `${path}.y`),
-  }
+  exact(item, ['x', 'y'], path)
+  return { x: unit(item.x, `${path}.x`), y: unit(item.y, `${path}.y`) }
 }
 
 function polygon(value: unknown, path: string): Point[] {
-  const items = array(value, path)
+  const items = array(value, path, 2_048)
   if (items.length < 3) fail(path, 'must contain at least three points')
   return items.map((item, index) => point(item, `${path}[${index}]`))
 }
 
-function stringArray(value: unknown, path: string, allowEmptyItems = false): string[] {
-  return array(value, path).map((item, index) =>
-    string(item, `${path}[${index}]`, allowEmptyItems),
+function normalizedRect(value: unknown, path: string): NormalizedRect {
+  const item = record(value, path)
+  exact(item, ['x', 'y', 'width', 'height'], path)
+  const parsed = {
+    x: unit(item.x, `${path}.x`),
+    y: unit(item.y, `${path}.y`),
+    width: unit(item.width, `${path}.width`),
+    height: unit(item.height, `${path}.height`),
+  }
+  if (parsed.width <= 0 || parsed.height <= 0) {
+    fail(path, 'must have positive width and height')
+  }
+  if (parsed.x + parsed.width > 1 + Number.EPSILON) {
+    fail(path, 'must not extend past the image width')
+  }
+  if (parsed.y + parsed.height > 1 + Number.EPSILON) {
+    fail(path, 'must not extend past the image height')
+  }
+  return parsed
+}
+
+function visibleRects(value: unknown, path: string): NormalizedRect[] {
+  return array(value, path, 64).map((item, index) => normalizedRect(item, `${path}[${index}]`))
+}
+
+function resourceIdentity(value: unknown, path: string): ResourceIdentity {
+  const item = record(value, path)
+  exact(item, ['id', 'repository', 'repositoryRevision', 'filename', 'bytes', 'sha256'], path)
+  const id = string(item.id, `${path}.id`, false, 128)
+  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/u.test(id)) {
+    fail(`${path}.id`, 'must be a lowercase kebab-case identifier')
+  }
+  const repository = string(item.repository, `${path}.repository`, false, 256)
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(repository)) {
+    fail(`${path}.repository`, 'must contain exactly one owner/name repository')
+  }
+  const repositoryRevision = string(
+    item.repositoryRevision,
+    `${path}.repositoryRevision`,
+    false,
+    40,
   )
+  if (!/^[0-9a-f]{40}$/u.test(repositoryRevision)) {
+    fail(`${path}.repositoryRevision`, 'must be a lowercase 40-character hexadecimal revision')
+  }
+  const filename = string(item.filename, `${path}.filename`, false, 255)
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(filename)) {
+    fail(`${path}.filename`, 'must be a safe ASCII filename')
+  }
+  const sha256 = string(item.sha256, `${path}.sha256`, false, 64)
+  if (!/^[0-9a-f]{64}$/u.test(sha256)) {
+    fail(`${path}.sha256`, 'must be a lowercase 64-character hexadecimal SHA-256')
+  }
+  return {
+    id,
+    repository,
+    repositoryRevision,
+    filename,
+    bytes: integer(item.bytes, `${path}.bytes`, 1),
+    sha256,
+  }
+}
+
+function resourceIdentities(value: unknown, path: string): ResourceIdentity[] {
+  const identities = array(value, path, 256).map((item, index) =>
+    resourceIdentity(item, `${path}[${index}]`),
+  )
+  if (identities.length === 0) fail(path, 'must not be empty')
+  for (let index = 1; index < identities.length; index += 1) {
+    if (identities[index - 1]!.id >= identities[index]!.id) {
+      fail(`${path}[${index}].id`, 'must be unique and sorted in ascending ordinal order')
+    }
+  }
+  return identities
+}
+
+function stringArray(
+  value: unknown,
+  path: string,
+  allowEmptyItems = false,
+  maximumItems = 10_000,
+): string[] {
+  return array(value, path, maximumItems).map((item, index) =>
+    string(item, `${path}[${index}]`, allowEmptyItems, 4_096),
+  )
+}
+
+function parseHsk(value: unknown, path: string): RegionHsk {
+  const item = record(value, path)
+  exact(item, ['requestedLevel', 'strictlyValid', 'aboveLevelTokens', 'repairState'], path)
+  const aboveLevelTokens = stringArray(
+    item.aboveLevelTokens,
+    `${path}.aboveLevelTokens`,
+    false,
+    512,
+  )
+  const strictlyValid = boolean(item.strictlyValid, `${path}.strictlyValid`)
+  if (strictlyValid && aboveLevelTokens.length > 0) {
+    fail(`${path}.strictlyValid`, 'cannot be true when above-level tokens are present')
+  }
+  return {
+    requestedLevel: hskLevel(item.requestedLevel, `${path}.requestedLevel`),
+    strictlyValid,
+    aboveLevelTokens,
+    repairState: oneOf(item.repairState, `${path}.repairState`, [
+      'not-needed',
+      'pending',
+      'accepted',
+      'rejected',
+    ] as const),
+  }
+}
+
+function parseStyle(value: unknown, path: string): RegionStyle {
+  const item = record(value, path)
+  exact(
+    item,
+    [
+      'fontId',
+      'category',
+      'foreground',
+      'weight',
+      'italicDegrees',
+      'outlineColor',
+      'outlineWidthRatio',
+      'shadowColor',
+      'shadowXRatio',
+      'shadowYRatio',
+      'alignment',
+      'writingMode',
+      'lineHeight',
+      'letterSpacingEm',
+    ],
+    path,
+  )
+  const weight = integer(item.weight, `${path}.weight`, 1)
+  if (weight > 1_000) fail(`${path}.weight`, 'must be at most 1000')
+  const outlineWidthRatio = finite(item.outlineWidthRatio, `${path}.outlineWidthRatio`)
+  if (outlineWidthRatio < 0) fail(`${path}.outlineWidthRatio`, 'must not be negative')
+  const lineHeight = finite(item.lineHeight, `${path}.lineHeight`)
+  if (lineHeight <= 0) fail(`${path}.lineHeight`, 'must be positive')
+  const outlineColor = optional(item.outlineColor, `${path}.outlineColor`, cssColor)
+  const shadowColor = optional(item.shadowColor, `${path}.shadowColor`, cssColor)
+  return {
+    fontId: string(item.fontId, `${path}.fontId`, false, 512),
+    category: oneOf(item.category, `${path}.category`, [
+      'sans',
+      'serif',
+      'handwritten',
+      'display',
+      'brush',
+    ] as const),
+    foreground: cssColor(item.foreground, `${path}.foreground`),
+    weight,
+    italicDegrees: finite(item.italicDegrees, `${path}.italicDegrees`),
+    ...(outlineColor === undefined ? {} : { outlineColor }),
+    outlineWidthRatio,
+    ...(shadowColor === undefined ? {} : { shadowColor }),
+    shadowXRatio: finite(item.shadowXRatio, `${path}.shadowXRatio`),
+    shadowYRatio: finite(item.shadowYRatio, `${path}.shadowYRatio`),
+    alignment: oneOf(item.alignment, `${path}.alignment`, ['left', 'center', 'right'] as const),
+    writingMode: oneOf(item.writingMode, `${path}.writingMode`, [
+      'horizontal-tb',
+      'vertical-rl',
+    ] as const),
+    lineHeight,
+    letterSpacingEm: finite(item.letterSpacingEm, `${path}.letterSpacingEm`),
+  }
+}
+
+function parseLayout(value: unknown, path: string): RegionLayout {
+  const item = record(value, path)
+  exact(item, ['suggestedLines', 'fontSizeToImageWidth', 'safePolygon'], path)
+  const fontSizeToImageWidth = finite(item.fontSizeToImageWidth, `${path}.fontSizeToImageWidth`)
+  if (fontSizeToImageWidth <= 0) {
+    fail(`${path}.fontSizeToImageWidth`, 'must be positive')
+  }
+  const safePolygon = optional(item.safePolygon, `${path}.safePolygon`, polygon)
+  return {
+    suggestedLines: stringArray(item.suggestedLines, `${path}.suggestedLines`, true, 256),
+    fontSizeToImageWidth,
+    ...(safePolygon === undefined ? {} : { safePolygon }),
+  }
 }
 
 function parseRegion(value: unknown, path: string): BrowserRegion {
   const item = record(value, path)
-  const kind = oneOf(item.kind, `${path}.kind`, [
-    'dialogue',
-    'caption',
-    'thought',
-    'sfx',
-  ] as const)
-  const sourceEnglish = string(item.sourceEnglish, `${path}.sourceEnglish`, kind === 'sfx')
-  const faithfulChinese = string(item.faithfulChinese, `${path}.faithfulChinese`, kind === 'sfx')
-  const displayedChinese = string(item.displayedChinese, `${path}.displayedChinese`, kind === 'sfx')
-  const vocabulary = record(item.vocabulary, `${path}.vocabulary`)
-  const exceptions = array(vocabulary.exceptions, `${path}.vocabulary.exceptions`).map(
-    (exception, index) => {
-      const parsed = record(exception, `${path}.vocabulary.exceptions[${index}]`)
-      return {
-        text: string(parsed.text, `${path}.vocabulary.exceptions[${index}].text`),
-        reason: oneOf(parsed.reason, `${path}.vocabulary.exceptions[${index}].reason`, [
-          'person-name',
-          'place-name',
-          'title',
-          'unavoidable-proper-noun',
-        ] as const),
-      }
-    },
+  exact(
+    item,
+    [
+      'id',
+      'textPolygon',
+      'bubblePolygon',
+      'patch',
+      'sourceEnglish',
+      'baseChinese',
+      'displayedChinese',
+      'pinyin',
+      'ocrConfidence',
+      'readingOrder',
+      'style',
+      'layout',
+      'hsk',
+    ],
+    path,
   )
-  const strictlyValid = boolean(vocabulary.strictlyValid, `${path}.vocabulary.strictlyValid`)
-  if (strictlyValid && exceptions.length > 0) {
-    fail(`${path}.vocabulary.strictlyValid`, 'cannot be true when exceptions are present')
-  }
-
-  const style = record(item.style, `${path}.style`)
-  const weight = integer(style.weight, `${path}.style.weight`, 1)
-  if (weight > 1000) fail(`${path}.style.weight`, 'must be at most 1000')
-  const outlineWidthRatio = finite(
-    style.outlineWidthRatio,
-    `${path}.style.outlineWidthRatio`,
-  )
-  if (outlineWidthRatio < 0) {
-    fail(`${path}.style.outlineWidthRatio`, 'must not be negative')
-  }
-  const lineHeight = finite(style.lineHeight, `${path}.style.lineHeight`)
-  if (lineHeight <= 0) fail(`${path}.style.lineHeight`, 'must be positive')
-
-  const layout = record(item.layout, `${path}.layout`)
-  const fontSizeToImageWidth = finite(
-    layout.fontSizeToImageWidth,
-    `${path}.layout.fontSizeToImageWidth`,
-  )
-  if (fontSizeToImageWidth <= 0) {
-    fail(`${path}.layout.fontSizeToImageWidth`, 'must be positive')
-  }
+  const patch = record(item.patch, `${path}.patch`)
+  exact(patch, ['blobId', 'mimeType', 'rect'], `${path}.patch`)
   const bubblePolygon = optional(item.bubblePolygon, `${path}.bubblePolygon`, polygon)
-  const outlineColor = optional(style.outlineColor, `${path}.style.outlineColor`, cssColor)
-  const shadowColor = optional(style.shadowColor, `${path}.style.shadowColor`, cssColor)
-  const safePolygon = optional(layout.safePolygon, `${path}.layout.safePolygon`, polygon)
-
   return {
-    id: string(item.id, `${path}.id`),
-    kind,
+    id: string(item.id, `${path}.id`, false, 512),
     textPolygon: polygon(item.textPolygon, `${path}.textPolygon`),
     ...(bubblePolygon === undefined ? {} : { bubblePolygon }),
-    rotationDegrees: finite(item.rotationDegrees, `${path}.rotationDegrees`),
-    sourceEnglish,
-    faithfulChinese,
-    displayedChinese,
-    pinyin: string(item.pinyin, `${path}.pinyin`, kind === 'sfx'),
+    patch: {
+      blobId: string(patch.blobId, `${path}.patch.blobId`, false, 512),
+      mimeType: oneOf(patch.mimeType, `${path}.patch.mimeType`, ['image/png'] as const),
+      rect: normalizedRect(patch.rect, `${path}.patch.rect`),
+    },
+    sourceEnglish: string(item.sourceEnglish, `${path}.sourceEnglish`, false, 4_096),
+    baseChinese: string(item.baseChinese, `${path}.baseChinese`, false, 4_096),
+    displayedChinese: string(item.displayedChinese, `${path}.displayedChinese`, false, 4_096),
+    pinyin: string(item.pinyin, `${path}.pinyin`, false, 8_192),
     ocrConfidence: unit(item.ocrConfidence, `${path}.ocrConfidence`),
     readingOrder: integer(item.readingOrder, `${path}.readingOrder`),
-    vocabulary: {
-      requestedHskLevel: hskLevel(
-        vocabulary.requestedHskLevel,
-        `${path}.vocabulary.requestedHskLevel`,
-      ),
-      strictlyValid,
-      exceptions,
-    },
-    style: {
-      fontId: string(style.fontId, `${path}.style.fontId`),
-      category: oneOf(style.category, `${path}.style.category`, [
-        'sans',
-        'serif',
-        'handwritten',
-        'display',
-        'brush',
-      ] as const),
-      foreground: cssColor(style.foreground, `${path}.style.foreground`),
-      weight,
-      italicDegrees: finite(style.italicDegrees, `${path}.style.italicDegrees`),
-      ...(outlineColor === undefined ? {} : { outlineColor }),
-      outlineWidthRatio,
-      ...(shadowColor === undefined ? {} : { shadowColor }),
-      shadowXRatio: finite(style.shadowXRatio, `${path}.style.shadowXRatio`),
-      shadowYRatio: finite(style.shadowYRatio, `${path}.style.shadowYRatio`),
-      alignment: oneOf(style.alignment, `${path}.style.alignment`, [
-        'left',
-        'center',
-        'right',
-      ] as const),
-      writingMode: oneOf(style.writingMode, `${path}.style.writingMode`, [
-        'horizontal-tb',
-        'vertical-rl',
-      ] as const),
-      lineHeight,
-      letterSpacingEm: finite(style.letterSpacingEm, `${path}.style.letterSpacingEm`),
-    },
-    layout: {
-      suggestedLines: stringArray(
-        layout.suggestedLines,
-        `${path}.layout.suggestedLines`,
-        kind === 'sfx',
-      ),
-      fontSizeToImageWidth,
-      ...(safePolygon === undefined ? {} : { safePolygon }),
-    },
+    style: parseStyle(item.style, `${path}.style`),
+    layout: parseLayout(item.layout, `${path}.layout`),
+    hsk: parseHsk(item.hsk, `${path}.hsk`),
   }
 }
 
 export function parseNativeHandshakeRequest(value: unknown): NativeHandshakeRequest {
   const item = record(value, '$')
+  exact(item, ['type', 'buildFingerprint', 'extensionVersion', 'extensionOrigin'], '$')
   const extensionOrigin = string(item.extensionOrigin, 'extensionOrigin')
   if (!extensionOrigin.startsWith('moz-extension://') || extensionOrigin.endsWith('/')) {
-    fail('extensionOrigin', 'must be a non-empty moz-extension origin without a trailing slash')
+    fail('extensionOrigin', 'must be a moz-extension origin without a trailing slash')
   }
   return {
     type: oneOf(item.type, 'type', ['start-or-discover-daemon'] as const),
-    protocolVersion: protocol(item.protocolVersion),
-    extensionVersion: string(item.extensionVersion, 'extensionVersion'),
+    buildFingerprint: buildFingerprint(item.buildFingerprint),
+    extensionVersion: string(item.extensionVersion, 'extensionVersion', false, 128),
     extensionOrigin,
   }
 }
 
 export function parseNativeReadyResponse(value: unknown): NativeReadyResponse {
   const item = record(value, '$')
+  exact(
+    item,
+    [
+      'type',
+      'buildFingerprint',
+      'engineVersion',
+      'port',
+      'token',
+      'sessionExpiresAtUnixMs',
+      'capabilities',
+    ],
+    '$',
+  )
   const capabilities = record(item.capabilities, 'capabilities')
-  const sourceLanguages = stringArray(
-    capabilities.sourceLanguages,
-    'capabilities.sourceLanguages',
+  exact(
+    capabilities,
+    ['sourceLanguages', 'targetLanguages', 'hskLevels', 'modelsReady'],
+    'capabilities',
   )
-  const targetLanguages = stringArray(
-    capabilities.targetLanguages,
-    'capabilities.targetLanguages',
-  )
-  const hskLevels = array(capabilities.hskLevels, 'capabilities.hskLevels').map((level, index) =>
+  const sourceLanguages = stringArray(capabilities.sourceLanguages, 'capabilities.sourceLanguages')
+  const targetLanguages = stringArray(capabilities.targetLanguages, 'capabilities.targetLanguages')
+  const hskLevels = array(capabilities.hskLevels, 'capabilities.hskLevels', 6).map((level, index) =>
     hskLevel(level, `capabilities.hskLevels[${index}]`),
   )
   if (
@@ -518,23 +672,19 @@ export function parseNativeReadyResponse(value: unknown): NativeReadyResponse {
     targetLanguages[0] !== TARGET_LANGUAGE ||
     hskLevels.join(',') !== '1,2,3,4,5,6'
   ) {
-    fail('capabilities', 'must advertise exactly the protocol v1 capabilities')
+    fail('capabilities', 'must advertise exactly the required translation capabilities')
   }
   const port = integer(item.port, 'port', 1)
-  if (port > 65535) fail('port', 'must be at most 65535')
+  if (port > 65_535) fail('port', 'must be at most 65535')
   const token = string(item.token, 'token')
-  if (!/^[\w-]{43,}$/.test(token)) fail('token', 'must be a base64url session token')
+  if (!/^[\w-]{43,}$/u.test(token)) fail('token', 'must be a base64url session token')
   return {
     type: oneOf(item.type, 'type', ['ready'] as const),
-    protocolVersion: protocol(item.protocolVersion),
-    engineVersion: string(item.engineVersion, 'engineVersion'),
+    buildFingerprint: buildFingerprint(item.buildFingerprint),
+    engineVersion: string(item.engineVersion, 'engineVersion', false, 128),
     port,
     token,
-    sessionExpiresAtUnixMs: integer(
-      item.sessionExpiresAtUnixMs,
-      'sessionExpiresAtUnixMs',
-      1,
-    ),
+    sessionExpiresAtUnixMs: integer(item.sessionExpiresAtUnixMs, 'sessionExpiresAtUnixMs', 1),
     capabilities: {
       sourceLanguages: ['en'],
       targetLanguages: ['zh-CN'],
@@ -546,9 +696,14 @@ export function parseNativeReadyResponse(value: unknown): NativeReadyResponse {
 
 export function parseHealthResponse(value: unknown): HealthResponse {
   const item = record(value, '$')
+  exact(
+    item,
+    ['buildFingerprint', 'engineVersion', 'status', 'setupState', 'resourceIdentities'],
+    '$',
+  )
   return {
-    protocolVersion: protocol(item.protocolVersion),
-    engineVersion: string(item.engineVersion, 'engineVersion'),
+    buildFingerprint: buildFingerprint(item.buildFingerprint),
+    engineVersion: string(item.engineVersion, 'engineVersion', false, 128),
     status: oneOf(item.status, 'status', ['ready'] as const),
     setupState: oneOf(item.setupState, 'setupState', [
       'missing-models',
@@ -557,51 +712,107 @@ export function parseHealthResponse(value: unknown): HealthResponse {
       'ready',
       'failed',
     ] as const),
+    resourceIdentities: resourceIdentities(item.resourceIdentities, 'resourceIdentities'),
   }
 }
 
 export function parseBrowserJobRequest(value: unknown): BrowserJobRequest {
   const item = record(value, '$')
+  exact(
+    item,
+    [
+      'buildFingerprint',
+      'clientImageId',
+      'sourceSha256',
+      'sourceMimeType',
+      'naturalWidth',
+      'naturalHeight',
+      'pageSessionId',
+      'pageIndex',
+      'visibleRects',
+      'settings',
+      'precedingContext',
+      'properNameGlossary',
+    ],
+    '$',
+  )
   const settings = record(item.settings, 'settings')
+  exact(
+    settings,
+    [
+      'sourceLanguage',
+      'targetLanguage',
+      'hskStandard',
+      'hskLevel',
+      'readingDirection',
+      'translateSoundEffects',
+    ],
+    'settings',
+  )
   const precedingContext =
     item.precedingContext === undefined
       ? undefined
-      : array(item.precedingContext, 'precedingContext').map((entry, index) => {
-          const parsed = record(entry, `precedingContext[${index}]`)
-          return {
-            sourceEnglish: string(
-              parsed.sourceEnglish,
-              `precedingContext[${index}].sourceEnglish`,
-            ),
-            chinese: string(parsed.chinese, `precedingContext[${index}].chinese`),
-          }
-        })
-  if (precedingContext && precedingContext.length > MAX_PRECEDING_CONTEXT) {
-    fail('precedingContext', `must contain at most ${MAX_PRECEDING_CONTEXT} entries`)
+      : array(item.precedingContext, 'precedingContext', MAX_PRECEDING_CONTEXT).map(
+          (entry, index) => {
+            const parsed = record(entry, `precedingContext[${index}]`)
+            exact(parsed, ['sourceEnglish', 'chinese'], `precedingContext[${index}]`)
+            return {
+              sourceEnglish: string(
+                parsed.sourceEnglish,
+                `precedingContext[${index}].sourceEnglish`,
+                false,
+                4_096,
+              ),
+              chinese: string(parsed.chinese, `precedingContext[${index}].chinese`, false, 4_096),
+            }
+          },
+        )
+  const properNameGlossary =
+    item.properNameGlossary === undefined
+      ? undefined
+      : array(item.properNameGlossary, 'properNameGlossary', MAX_PROPER_NAME_GLOSSARY).map(
+          (entry, index) => {
+            const parsed = record(entry, `properNameGlossary[${index}]`)
+            exact(parsed, ['sourceEnglish', 'chinese'], `properNameGlossary[${index}]`)
+            return {
+              sourceEnglish: string(
+                parsed.sourceEnglish,
+                `properNameGlossary[${index}].sourceEnglish`,
+                false,
+                256,
+              ),
+              chinese: string(parsed.chinese, `properNameGlossary[${index}].chinese`, false, 128),
+            }
+          },
+        )
+  if (properNameGlossary) {
+    const seen = new Set<string>()
+    properNameGlossary.forEach((entry, index) => {
+      const normalized = entry.sourceEnglish.trim().toLocaleLowerCase('en-US')
+      if (seen.has(normalized)) {
+        fail(`properNameGlossary[${index}].sourceEnglish`, 'must be unique ignoring ASCII case')
+      }
+      seen.add(normalized)
+    })
   }
-  const naturalWidth = integer(item.naturalWidth, 'naturalWidth', 1)
-  const naturalHeight = integer(item.naturalHeight, 'naturalHeight', 1)
-  const sourceMimeType = oneOf(item.sourceMimeType, 'sourceMimeType', [
-    'image/png',
-    'image/jpeg',
-    'image/webp',
-    'image/gif',
-  ] as const)
-
   return {
-    protocolVersion: protocol(item.protocolVersion),
-    clientImageId: string(item.clientImageId, 'clientImageId'),
+    buildFingerprint: buildFingerprint(item.buildFingerprint),
+    clientImageId: string(item.clientImageId, 'clientImageId', false, 512),
     sourceSha256: sha256(item.sourceSha256, 'sourceSha256'),
-    sourceMimeType,
-    naturalWidth,
-    naturalHeight,
-    pageSessionId: string(item.pageSessionId, 'pageSessionId'),
+    sourceMimeType: oneOf(item.sourceMimeType, 'sourceMimeType', [
+      'image/png',
+      'image/jpeg',
+      'image/webp',
+      'image/gif',
+    ] as const),
+    naturalWidth: integer(item.naturalWidth, 'naturalWidth', 1),
+    naturalHeight: integer(item.naturalHeight, 'naturalHeight', 1),
+    pageSessionId: string(item.pageSessionId, 'pageSessionId', false, 256),
     pageIndex: integer(item.pageIndex, 'pageIndex'),
+    visibleRects: visibleRects(item.visibleRects, 'visibleRects'),
     settings: {
       sourceLanguage: oneOf(settings.sourceLanguage, 'settings.sourceLanguage', ['en'] as const),
-      targetLanguage: oneOf(settings.targetLanguage, 'settings.targetLanguage', [
-        'zh-CN',
-      ] as const),
+      targetLanguage: oneOf(settings.targetLanguage, 'settings.targetLanguage', ['zh-CN'] as const),
       hskStandard: oneOf(settings.hskStandard, 'settings.hskStandard', ['2.0'] as const),
       hskLevel: hskLevel(settings.hskLevel, 'settings.hskLevel'),
       readingDirection: oneOf(settings.readingDirection, 'settings.readingDirection', [
@@ -616,155 +827,174 @@ export function parseBrowserJobRequest(value: unknown): BrowserJobRequest {
       ),
     },
     ...(precedingContext === undefined ? {} : { precedingContext }),
+    ...(properNameGlossary === undefined ? {} : { properNameGlossary }),
   }
 }
 
 export function parseBrowserJobCreated(value: unknown): BrowserJobCreated {
   const item = record(value, '$')
+  exact(item, ['buildFingerprint', 'jobId'], '$')
   return {
-    protocolVersion: protocol(item.protocolVersion),
-    jobId: string(item.jobId, 'jobId'),
+    buildFingerprint: buildFingerprint(item.buildFingerprint),
+    jobId: string(item.jobId, 'jobId', false, 512),
   }
 }
 
-export function parseRetranslateRequest(value: unknown): RetranslateRequest {
+export function parseViewportUpdate(value: unknown): ViewportUpdate {
   const item = record(value, '$')
-  const settings = record(item.settings, 'settings')
-  const precedingContext =
-    item.precedingContext === undefined
-      ? undefined
-      : array(item.precedingContext, 'precedingContext').map((entry, index) => {
-          const parsed = record(entry, `precedingContext[${index}]`)
-          return {
-            sourceEnglish: string(
-              parsed.sourceEnglish,
-              `precedingContext[${index}].sourceEnglish`,
-            ),
-            chinese: string(parsed.chinese, `precedingContext[${index}].chinese`),
-          }
-        })
-  if (precedingContext && precedingContext.length > MAX_PRECEDING_CONTEXT) {
-    fail('precedingContext', `must contain at most ${MAX_PRECEDING_CONTEXT} entries`)
-  }
+  exact(item, ['visibleRects', 'active'], '$')
   return {
-    protocolVersion: protocol(item.protocolVersion),
-    settings: {
-      hskStandard: oneOf(settings.hskStandard, 'settings.hskStandard', ['2.0'] as const),
-      hskLevel: hskLevel(settings.hskLevel, 'settings.hskLevel'),
-    },
-    ...(precedingContext === undefined ? {} : { precedingContext }),
+    visibleRects: visibleRects(item.visibleRects, 'visibleRects'),
+    active: boolean(item.active, 'active'),
   }
 }
 
-export function parseBrowserJobResult(value: unknown): BrowserJobResult {
-  const item = record(value, '$')
-  const regions = array(item.regions, 'regions').map((region, index) =>
-    parseRegion(region, `regions[${index}]`),
-  )
-  const regionIds = new Set<string>()
-  for (const [index, region] of regions.entries()) {
-    if (regionIds.has(region.id)) fail(`regions[${index}].id`, 'region IDs must be unique')
-    regionIds.add(region.id)
-  }
-  const warnings = array(item.warnings, 'warnings').map((warning, index) => {
-    const parsed = record(warning, `warnings[${index}]`)
-    const regionId = optional(parsed.regionId, `warnings[${index}].regionId`, string)
-    if (regionId && !regionIds.has(regionId)) {
-      fail(`warnings[${index}].regionId`, 'must reference a region in this result')
-    }
-    return {
-      code: oneOf(parsed.code, `warnings[${index}].code`, warningCodes),
-      ...(regionId === undefined ? {} : { regionId }),
-      message: string(parsed.message, `warnings[${index}].message`),
-    }
-  })
-  const cache = record(item.cache, 'cache')
-  return {
-    protocolVersion: protocol(item.protocolVersion),
-    jobId: string(item.jobId, 'jobId'),
-    sourceSha256: sha256(item.sourceSha256, 'sourceSha256'),
-    sourceWidth: integer(item.sourceWidth, 'sourceWidth', 1),
-    sourceHeight: integer(item.sourceHeight, 'sourceHeight', 1),
-    cleanImageBlobId: string(item.cleanImageBlobId, 'cleanImageBlobId'),
-    cleanImageMimeType: oneOf(item.cleanImageMimeType, 'cleanImageMimeType', [
-      'image/png',
-      'image/webp',
-    ] as const),
-    regions,
-    warnings,
-    cache: {
-      detectionHit: boolean(cache.detectionHit, 'cache.detectionHit'),
-      ocrHit: boolean(cache.ocrHit, 'cache.ocrHit'),
-      inpaintHit: boolean(cache.inpaintHit, 'cache.inpaintHit'),
-      translationHit: boolean(cache.translationHit, 'cache.translationHit'),
-    },
-  }
-}
-
-export function parseBrowserJobStatus(value: unknown): BrowserJobStatus {
-  const item = record(value, '$')
-  const state = oneOf(item.state, 'state', [
-    'running',
+export function parseJobUpdate(value: unknown, path = '$'): JobUpdate {
+  const item = record(value, path)
+  const sequence = integer(item.sequence, `${path}.sequence`, 1)
+  const type = oneOf(item.type, `${path}.type`, [
+    'progress',
+    'regionReady',
+    'regionRefined',
     'complete',
     'failed',
     'cancelled',
   ] as const)
-  const stage = oneOf(item.stage, 'stage', jobStages)
-  const expectedTerminalStage = state === 'running' ? undefined : state
-  if (
-    (expectedTerminalStage && stage !== expectedTerminalStage) ||
-    (!expectedTerminalStage && ['complete', 'failed', 'cancelled'].includes(stage))
-  ) {
-    fail('stage', 'must agree with the job state')
-  }
-  const current = optional(item.current, 'current', integer)
-  const total = optional(item.total, 'total', (candidate, path) => integer(candidate, path, 1))
-  if ((current === undefined) !== (total === undefined)) {
-    fail('current', 'current and total must be present together')
-  }
-  if (current !== undefined && total !== undefined && current > total) {
-    fail('current', 'must not exceed total')
-  }
-  const errorCode = optional(item.errorCode, 'errorCode', string)
-  if (state === 'failed' && !errorCode) fail('errorCode', 'failed jobs require an error code')
-  const stageProgress = optional(item.stageProgress, 'stageProgress', unit)
-  const overallProgress = optional(item.overallProgress, 'overallProgress', unit)
-  return {
-    revision: integer(item.revision, 'revision', 1),
-    jobId: string(item.jobId, 'jobId'),
-    state,
-    stage,
-    ...(stageProgress === undefined ? {} : { stageProgress }),
-    ...(overallProgress === undefined ? {} : { overallProgress }),
-    ...(current === undefined ? {} : { current }),
-    ...(total === undefined ? {} : { total }),
-    message: string(item.message, 'message'),
-    ...(errorCode === undefined ? {} : { errorCode }),
+  switch (type) {
+    case 'progress': {
+      exact(
+        item,
+        [
+          'sequence',
+          'type',
+          'stage',
+          'stageProgress',
+          'overallProgress',
+          'current',
+          'total',
+          'message',
+        ],
+        path,
+      )
+      const current = optional(item.current, `${path}.current`, integer)
+      const total = optional(item.total, `${path}.total`, (candidate, itemPath) =>
+        integer(candidate, itemPath, 1),
+      )
+      if ((current === undefined) !== (total === undefined)) {
+        fail(`${path}.current`, 'current and total must be present together')
+      }
+      if (current !== undefined && total !== undefined && current > total) {
+        fail(`${path}.current`, 'must not exceed total')
+      }
+      const stageProgress = optional(item.stageProgress, `${path}.stageProgress`, unit)
+      const overallProgress = optional(item.overallProgress, `${path}.overallProgress`, unit)
+      return {
+        sequence,
+        type,
+        stage: oneOf(item.stage, `${path}.stage`, jobStages),
+        ...(stageProgress === undefined ? {} : { stageProgress }),
+        ...(overallProgress === undefined ? {} : { overallProgress }),
+        ...(current === undefined ? {} : { current }),
+        ...(total === undefined ? {} : { total }),
+        message: string(item.message, `${path}.message`, false, 2_048),
+      }
+    }
+    case 'regionReady':
+      exact(item, ['sequence', 'type', 'region'], path)
+      return {
+        sequence,
+        type,
+        region: parseRegion(item.region, `${path}.region`),
+      }
+    case 'regionRefined':
+      exact(item, ['sequence', 'type', 'regionId', 'displayedChinese', 'pinyin', 'hsk'], path)
+      return {
+        sequence,
+        type,
+        regionId: string(item.regionId, `${path}.regionId`, false, 512),
+        displayedChinese: string(item.displayedChinese, `${path}.displayedChinese`, false, 4_096),
+        pinyin: string(item.pinyin, `${path}.pinyin`, false, 8_192),
+        hsk: parseHsk(item.hsk, `${path}.hsk`),
+      }
+    case 'complete': {
+      exact(item, ['sequence', 'type', 'message'], path)
+      const message = optional(item.message, `${path}.message`, (candidate, itemPath) =>
+        string(candidate, itemPath, false, 2_048),
+      )
+      return { sequence, type, ...(message === undefined ? {} : { message }) }
+    }
+    case 'failed':
+      exact(item, ['sequence', 'type', 'code', 'message', 'retryable'], path)
+      return {
+        sequence,
+        type,
+        code: string(item.code, `${path}.code`, false, 256),
+        message: string(item.message, `${path}.message`, false, 2_048),
+        retryable: boolean(item.retryable, `${path}.retryable`),
+      }
+    case 'cancelled': {
+      exact(item, ['sequence', 'type', 'message'], path)
+      const message = optional(item.message, `${path}.message`, (candidate, itemPath) =>
+        string(candidate, itemPath, false, 2_048),
+      )
+      return { sequence, type, ...(message === undefined ? {} : { message }) }
+    }
   }
 }
 
-export function parseBrowserJobStatusSequence(value: unknown): BrowserJobStatus[] {
-  const statuses = array(value, '$').map(parseBrowserJobStatus)
-  let revision = 0
-  let overallProgress = 0
-  for (const [index, status] of statuses.entries()) {
-    if (status.revision <= revision) {
-      fail(`[${index}].revision`, 'must increase monotonically')
+export function parseJobUpdateBatch(value: unknown, after = 0): JobUpdateBatch {
+  const item = record(value, '$')
+  exact(item, ['jobId', 'nextSequence', 'updates'], '$')
+  const nextSequence = integer(item.nextSequence, 'nextSequence')
+  if (nextSequence < after) fail('nextSequence', 'must not move backwards')
+  const updates = array(item.updates, 'updates', 2_048).map((update, index) =>
+    parseJobUpdate(update, `updates[${index}]`),
+  )
+  let previous = after
+  for (const [index, update] of updates.entries()) {
+    if (update.sequence <= previous) {
+      fail(`updates[${index}].sequence`, 'must increase beyond the requested sequence')
+    }
+    if (update.sequence > nextSequence) {
+      fail(`updates[${index}].sequence`, 'must not exceed nextSequence')
     }
     if (
-      status.overallProgress !== undefined &&
-      status.overallProgress + Number.EPSILON < overallProgress
+      (update.type === 'complete' || update.type === 'failed' || update.type === 'cancelled') &&
+      index !== updates.length - 1
     ) {
-      fail(`[${index}].overallProgress`, 'must not decrease')
+      fail(`updates[${index}].type`, 'terminal updates must be last')
     }
-    revision = status.revision
-    overallProgress = status.overallProgress ?? overallProgress
+    previous = update.sequence
   }
-  return statuses
+  if (updates.length > 0 && previous !== nextSequence) {
+    fail('nextSequence', 'must equal the final update sequence')
+  }
+  if (updates.length === 0 && nextSequence !== after) {
+    fail('nextSequence', 'must equal the requested sequence when no updates are returned')
+  }
+  return {
+    jobId: string(item.jobId, 'jobId', false, 512),
+    nextSequence,
+    updates,
+  }
 }
 
 export function parseBrowserSetupStatus(value: unknown): BrowserSetupStatus {
   const item = record(value, '$')
+  exact(
+    item,
+    [
+      'state',
+      'modelId',
+      'currentFile',
+      'completedBytes',
+      'totalBytes',
+      'requiredDiskBytes',
+      'message',
+      'errorCode',
+    ],
+    '$',
+  )
   const state = oneOf(item.state, 'state', [
     'missing-models',
     'downloading',
@@ -777,33 +1007,31 @@ export function parseBrowserSetupStatus(value: unknown): BrowserSetupStatus {
   if ((completedBytes === undefined) !== (totalBytes === undefined)) {
     fail('completedBytes', 'completed and total bytes must be present together')
   }
-  if (
-    completedBytes !== undefined &&
-    totalBytes !== undefined &&
-    completedBytes > totalBytes
-  ) {
+  if (completedBytes !== undefined && totalBytes !== undefined && completedBytes > totalBytes) {
     fail('completedBytes', 'must not exceed total bytes')
   }
   const errorCode = optional(item.errorCode, 'errorCode', string)
   if (state === 'failed' && !errorCode) fail('errorCode', 'failed setup requires an error code')
-  const selectedPackId = optional(item.selectedPackId, 'selectedPackId', string)
+  const modelId = string(item.modelId, 'modelId', false, 128)
+  if (modelId !== 'qwen3.5-4b') fail('modelId', 'must identify the mandatory qwen3.5-4b model')
   const currentFile = optional(item.currentFile, 'currentFile', string)
   const requiredDiskBytes = optional(item.requiredDiskBytes, 'requiredDiskBytes', integer)
   return {
     state,
-    ...(selectedPackId === undefined ? {} : { selectedPackId }),
+    modelId,
     ...(currentFile === undefined ? {} : { currentFile }),
     ...(completedBytes === undefined ? {} : { completedBytes }),
     ...(totalBytes === undefined ? {} : { totalBytes }),
     ...(requiredDiskBytes === undefined ? {} : { requiredDiskBytes }),
-    message: string(item.message, 'message'),
+    message: string(item.message, 'message', false, 2_048),
     ...(errorCode === undefined ? {} : { errorCode }),
   }
 }
 
 export function parseLookupRequest(value: unknown): LookupRequest {
   const item = record(value, '$')
-  const selectedText = string(item.selectedText, 'selectedText')
+  exact(item, ['selectedText', 'jobId', 'regionId'], '$')
+  const selectedText = string(item.selectedText, 'selectedText', false, 256)
   if ([...selectedText].length > 256) fail('selectedText', 'must contain at most 256 characters')
   const jobId = optional(item.jobId, 'jobId', string)
   const regionId = optional(item.regionId, 'regionId', string)
@@ -819,8 +1047,14 @@ export function parseLookupRequest(value: unknown): LookupRequest {
 
 export function parseLookupResult(value: unknown): LookupResult {
   const item = record(value, '$')
-  const tokens = array(item.tokens, 'tokens').map((token, index) => {
+  exact(item, ['selectedText', 'tokens', 'region'], '$')
+  const tokens = array(item.tokens, 'tokens', 512).map((token, index) => {
     const parsed = record(token, `tokens[${index}]`)
+    exact(
+      parsed,
+      ['simplified', 'pinyin', 'definitions', 'hskLevel', 'properName'],
+      `tokens[${index}]`,
+    )
     const properName = boolean(parsed.properName, `tokens[${index}].properName`)
     const parsedHskLevel = optional(parsed.hskLevel, `tokens[${index}].hskLevel`, hskLevel)
     return {
@@ -836,10 +1070,11 @@ export function parseLookupResult(value: unknown): LookupResult {
       ? undefined
       : (() => {
           const parsed = record(item.region, 'region')
+          exact(parsed, ['displayedChinese', 'baseChinese', 'sourceEnglish'], 'region')
           return {
-            displayedChinese: string(parsed.displayedChinese, 'region.displayedChinese'),
-            faithfulChinese: string(parsed.faithfulChinese, 'region.faithfulChinese'),
-            sourceEnglish: string(parsed.sourceEnglish, 'region.sourceEnglish'),
+            displayedChinese: string(parsed.displayedChinese, 'region.displayedChinese', true),
+            baseChinese: string(parsed.baseChinese, 'region.baseChinese', true),
+            sourceEnglish: string(parsed.sourceEnglish, 'region.sourceEnglish', true),
           }
         })()
   return {
@@ -851,10 +1086,10 @@ export function parseLookupResult(value: unknown): LookupResult {
 
 export function parseErrorResponse(value: unknown): ErrorResponse {
   const item = record(value, '$')
+  exact(item, ['code', 'message', 'retryable'], '$')
   return {
-    protocolVersion: protocol(item.protocolVersion),
-    code: string(item.code, 'code'),
-    message: string(item.message, 'message'),
+    code: string(item.code, 'code', false, 256),
+    message: string(item.message, 'message', false, 2_048),
     retryable: boolean(item.retryable, 'retryable'),
   }
 }

@@ -1,4 +1,4 @@
-import type { BrowserJobStatus } from '../contracts/browser'
+import type { ProgressJobUpdate } from '../contracts/browser'
 import type { PageState } from '../messaging/messages'
 
 const HUD_CSS = `
@@ -77,7 +77,7 @@ button {
 export type HudProgress = {
   current: number
   total: number
-  status?: BrowserJobStatus
+  status?: ProgressJobUpdate
   message?: string
 }
 
@@ -108,7 +108,7 @@ export class PageHud {
     panel.className = 'panel'
     this.title = document.createElement('span')
     this.title.className = 'title'
-    this.title.textContent = 'HSK Manga Translator'
+    this.title.textContent = 'Hskify'
     this.detail = document.createElement('span')
     this.detail.className = 'detail'
     this.detail.textContent = 'Preparing page…'
@@ -126,12 +126,7 @@ export class PageHud {
 
   update(input: HudProgress): void {
     const status = input.status
-    const state =
-      status?.state === 'failed'
-        ? 'failed'
-        : status?.state === 'cancelled'
-          ? 'cancelled'
-          : 'running'
+    const state = 'running'
     const message = input.message ?? status?.message ?? 'Preparing image'
     this.state = {
       state,
@@ -227,7 +222,7 @@ export class ImageStatusBadge {
     this.position()
   }
 
-  update(status: BrowserJobStatus | string): void {
+  update(status: ProgressJobUpdate | string): void {
     this.message.textContent = typeof status === 'string' ? status : status.message
     this.retryButton.hidden = true
     this.position()

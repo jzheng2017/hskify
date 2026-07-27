@@ -1,63 +1,37 @@
 # Hskify documentation
 
-This directory contains two intentionally separate documentation sets:
+These documents describe only the direct, performance-only Firefox build in
+the current code. The removed multilingual desktop documentation covered a
+different product surface: general RPC APIs, projects and history, provider
+configuration, broad hardware fallbacks, and page-wide translation workflows.
+It must not be used as Hskify documentation.
 
-1. Hskify documentation for the Firefox reading companion, its local native
-   service, HSK learning behavior, packaging, and maintenance.
-2. Inherited Koharu documentation retained for the shared manga pipeline and
-   desktop application layers.
+## Read in this order
 
-Use the Hskify documents first. A statement in inherited Koharu documentation
-does not automatically describe Hskify's browser permissions, packaging,
-security boundary, supported platforms, or release status.
+- [Architecture](architecture.md): components, data flow, scheduling, caches,
+  security, and the RTX 4080 SUPER/CUDA-only boundary.
+- [Browser contract](browser-contract.md): exact unversioned routes, flat
+  progressive events, strict build fingerprint, and patch-first rendering.
+- [Browser companion implementation](../crates/browser-companion/IMPLEMENTATION.md):
+  code-level daemon and pipeline behavior.
+- [Chapter 5 benchmark and evidence](chapter-5-benchmark.md): sole canonical
+  36-image gold corpus and measurement method.
+- [Model benchmark](model-benchmark.md): the locked translation model and
+  quality-evaluation requirements.
+- [External component evaluation](component-evaluation.md): established work
+  retained, rejected candidates, and cleanup policy.
+- [Firefox manual checklist](firefox-manual-test-checklist.md): packaged
+  browser checks that cannot be replaced by unit tests.
+- [Maintainer guide](maintainer-guide.md): invariants and documentation update
+  rules.
+- [Licence inventory](licence-inventory.md): runtime resource and data audit
+  status.
 
-## Hskify design and operation
+## Accepted decisions
 
-- [Architecture overview](architecture.md) — system boundaries, data flow,
-  security, and resource constraints.
-- [Maintainer guide](maintainer-guide.md) — upstream synchronization,
-  verification, and the fork-versus-package/service decision.
-- [Firefox manual test checklist](firefox-manual-test-checklist.md) — release
-  checks that require real Firefox and platform integration.
-- [Model benchmark](model-benchmark.md) — model evaluation criteria and
-  results.
-- [Licence inventory](licence-inventory.md) — code, models, fonts, datasets,
-  and redistribution status.
+- [Progressive story-region processing](architecture-decisions/0004-progressive-story-regions.md)
+- [Local Mandarin voice selection](architecture-decisions/0005-mandarin-pronunciation-voice-selection.md)
 
-Implementation details live close to the component they describe:
-
-- [`browser-companion` implementation](../crates/browser-companion/IMPLEMENTATION.md)
-- [`hsk-control` overview](../crates/hsk-control/README.md)
-- [`hsk-control` implementation](../crates/hsk-control/IMPLEMENTATION.md)
-- [Firefox extension implementation](../extensions/firefox/IMPLEMENTATION.md)
-- [Windows developer package](../installers/windows/README.md)
-
-## Architecture decisions
-
-- [ADR 0001: Koharu upstream pin](architecture-decisions/0001-koharu-upstream-pin.md)
-- [ADR 0002: Gate 0 contract and Firefox clarifications](architecture-decisions/0002-gate-zero-contract-clarifications.md)
-- [ADR 0003: Koharu extraction map](architecture-decisions/0003-koharu-extraction-map.md)
-- [ADR 0004: Dialogue-only webtoon cleaning](architecture-decisions/0004-dialogue-only-webtoon-cleaning.md)
-- [ADR 0005: Mandarin pronunciation and voice selection](architecture-decisions/0005-mandarin-pronunciation-voice-selection.md)
-
-## Implementation and compatibility notes
-
-- [Gate 0 evidence](implementation-notes/gate-0.md)
-- [Asura Comics structural compatibility](implementation-notes/asura-compatibility.md)
-
-These notes are point-in-time evidence, not evergreen support promises. Check
-their dates and the manual test checklist before relying on them for a release.
-
-## Inherited Koharu documentation
-
-The multilingual trees below document upstream Koharu concepts and workflows:
-
-- [English (United States)](en-US/index.md)
-- [Japanese](ja-JP/index.md)
-- [Portuguese (Brazil)](pt-BR/index.md)
-- [Simplified Chinese](zh-CN/index.md)
-
-They are useful when working on the inherited `crates/koharu-*` layers,
-especially the pipeline, models, rendering, API, and desktop build. Preserve
-Koharu's name and upstream links inside those trees unless Hskify has actually
-forked and verified the specific page.
+Historical gate notes and inherited desktop documentation were removed because
+they described a versioned, project-backed, page-result architecture that is
+not present in the current browser build.

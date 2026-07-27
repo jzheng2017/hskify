@@ -1,70 +1,273 @@
-import { readFile } from 'node:fs/promises'
+import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 
 import { describe, expect, it } from 'vitest'
 
 import {
+  BUILD_FINGERPRINT,
   parseBrowserJobCreated,
   parseBrowserJobRequest,
-  parseBrowserJobResult,
-  parseBrowserJobStatus,
-  parseBrowserJobStatusSequence,
   parseBrowserSetupStatus,
   parseErrorResponse,
   parseHealthResponse,
+  parseJobUpdateBatch,
   parseLookupResult,
   parseNativeHandshakeRequest,
   parseNativeReadyResponse,
-  parseRetranslateRequest,
+  parseViewportUpdate,
 } from '../../src/contracts/browser'
+import { createFixtureRegions } from '../../src/messaging/fixture-service'
 
-const fixtureRoot = resolve(import.meta.dirname, '../../../../fixtures/contracts')
-
-async function fixture(name: string): Promise<unknown> {
-  return JSON.parse(await readFile(resolve(fixtureRoot, name), 'utf8')) as unknown
+function sharedFixture(name: string): unknown {
+  const path = resolve(process.cwd(), '../../fixtures/contracts', name)
+  return JSON.parse(readFileSync(path, 'utf8')) as unknown
 }
 
-describe('shared protocol v1 fixtures', () => {
-  it('accepts the valid request and result', async () => {
-    expect(parseBrowserJobRequest(await fixture('job-request.valid.json')).protocolVersion).toBe(1)
-    expect(parseBrowserJobResult(await fixture('job-result.complete.json')).regions).toHaveLength(2)
-  })
+function pinnedResourceIdentities(): unknown[] {
+  return (sharedFixture('health.ready.json') as { resourceIdentities: unknown[] })
+    .resourceIdentities
+}
 
-  it('accepts monotonic status sequences', async () => {
-    for (const name of [
-      'progress.success.json',
-      'progress.failure.json',
-      'progress.cancellation.json',
-      'progress.reconnect.json',
-    ]) {
-      expect(parseBrowserJobStatusSequence(await fixture(name)).length).toBeGreaterThan(0)
-    }
-  })
+function jobRequest() {
+  return {
+    buildFingerprint: BUILD_FINGERPRINT,
+    clientImageId: 'page-0-hash',
+    sourceSha256: 'a'.repeat(64),
+    sourceMimeType: 'image/png',
+    naturalWidth: 1200,
+    naturalHeight: 1800,
+    pageSessionId: 'page',
+    pageIndex: 0,
+    visibleRects: [{ x: 0, y: 0.2, width: 1, height: 0.4 }],
+    properNameGlossary: [{ sourceEnglish: 'Cheon Yeo Woon', chinese: '天汝云' }],
+    settings: {
+      sourceLanguage: 'en',
+      targetLanguage: 'zh-CN',
+      hskStandard: '2.0',
+      hskLevel: 5,
+      readingDirection: 'auto',
+      translateSoundEffects: false,
+    },
+  } as const
+}
 
-  it('accepts native, setup, and lookup fixtures', async () => {
-    expect(parseNativeHandshakeRequest(await fixture('native-request.valid.json')).type).toBe(
-      'start-or-discover-daemon',
+function ready() {
+  return {
+    type: 'ready',
+    buildFingerprint: BUILD_FINGERPRINT,
+    engineVersion: '0.2.0',
+    port: 43127,
+    token: 'A'.repeat(43),
+    sessionExpiresAtUnixMs: 2_000_000,
+    capabilities: {
+      sourceLanguages: ['en'],
+      targetLanguages: ['zh-CN'],
+      hskLevels: [1, 2, 3, 4, 5, 6],
+      modelsReady: true,
+    },
+  }
+}
+
+describe('unversioned progressive browser contract', () => {
+  it('parses the repository-wide companion contract fixtures without adaptation', () => {
+    expect(parseBrowserJobRequest(sharedFixture('job-request.valid.json')).buildFingerprint).toBe(
+      BUILD_FINGERPRINT,
     )
-    expect(parseNativeReadyResponse(await fixture('native-ready.valid.json')).type).toBe('ready')
-    expect(parseHealthResponse(await fixture('health.ready.json')).status).toBe('ready')
-    expect(parseBrowserJobCreated(await fixture('job-created.valid.json')).jobId).toBe(
+    expect(parseBrowserJobCreated(sharedFixture('job-created.valid.json')).jobId).toBe(
       'fixture-job-0001',
     )
-    expect(parseRetranslateRequest(await fixture('retranslate.valid.json')).settings.hskLevel).toBe(
-      1,
+    expect(parseViewportUpdate(sharedFixture('viewport.valid.json')).active).toBe(true)
+    expect(
+      parseJobUpdateBatch(sharedFixture('job-updates.success.json')).updates.map(
+        (update) => update.type,
+      ),
+    ).toEqual(['progress', 'regionReady', 'regionRefined', 'complete'])
+    expect(
+      parseJobUpdateBatch(sharedFixture('job-updates.failure.json')).updates.at(-1)?.type,
+    ).toBe('failed')
+    expect(
+      parseJobUpdateBatch(sharedFixture('job-updates.cancelled.json')).updates.at(-1)?.type,
+    ).toBe('cancelled')
+    expect(parseNativeHandshakeRequest(sharedFixture('native-request.valid.json')).type).toBe(
+      'start-or-discover-daemon',
     )
-    expect(parseBrowserSetupStatus(await fixture('setup.ready.json')).state).toBe('ready')
-    expect(parseLookupResult(await fixture('lookup.valid.json')).tokens[0]?.simplified).toBe('离开')
-    expect(parseErrorResponse(await fixture('error.valid.json')).code).toBe('IMAGE_TOO_LARGE')
+    expect(parseNativeReadyResponse(sharedFixture('native-ready.valid.json')).type).toBe('ready')
+    expect(parseHealthResponse(sharedFixture('health.ready.json')).resourceIdentities).toHaveLength(
+      4,
+    )
+    expect(parseBrowserSetupStatus(sharedFixture('setup.ready.json'))).toMatchObject({
+      state: 'ready',
+      modelId: 'qwen3.5-4b',
+    })
+    expect(parseLookupResult(sharedFixture('lookup.valid.json')).tokens).toHaveLength(1)
+    expect(parseErrorResponse(sharedFixture('error.valid.json')).code).toBe('FIXTURE_ERROR')
   })
 
-  it('rejects semantic protocol violations', async () => {
-    const invalidRequest = await fixture('invalid/job-request.protocol-version.json')
-    const invalidResult = await fixture('invalid/job-result.out-of-range-point.json')
-    const invalidStatus = await fixture('invalid/progress.terminal-mismatch.json')
+  it('accepts job creation with visible source rectangles and a hard build match', () => {
+    expect(parseBrowserJobRequest(jobRequest())).toMatchObject({
+      buildFingerprint: BUILD_FINGERPRINT,
+      visibleRects: [{ y: 0.2, height: 0.4 }],
+      properNameGlossary: [{ sourceEnglish: 'Cheon Yeo Woon', chinese: '天汝云' }],
+    })
+    expect(
+      parseBrowserJobCreated({
+        buildFingerprint: BUILD_FINGERPRINT,
+        jobId: 'fixture-job',
+      }),
+    ).toEqual({ buildFingerprint: BUILD_FINGERPRINT, jobId: 'fixture-job' })
+  })
 
-    expect(() => parseBrowserJobRequest(invalidRequest)).toThrow(/protocolVersion/)
-    expect(() => parseBrowserJobResult(invalidResult)).toThrow(/textPolygon/)
-    expect(() => parseBrowserJobStatus(invalidStatus)).toThrow(/stage/)
+  it('parses monotonic progressive region, refinement, and terminal updates', () => {
+    const region = createFixtureRegions({
+      jobId: 'fixture-job',
+      sourceSha256: 'a'.repeat(64),
+      sourceWidth: 1200,
+      sourceHeight: 1800,
+    })[0]
+    const batch = parseJobUpdateBatch({
+      jobId: 'fixture-job',
+      nextSequence: 4,
+      updates: [
+        {
+          sequence: 1,
+          type: 'progress',
+          stage: 'ocr',
+          overallProgress: 0.3,
+          message: 'Reading text',
+        },
+        { sequence: 2, type: 'regionReady', region },
+        {
+          sequence: 3,
+          type: 'regionRefined',
+          regionId: region?.id,
+          displayedChinese: '我们现在就走！',
+          pinyin: 'wǒ men xiàn zài jiù zǒu',
+          hsk: {
+            requestedLevel: 2,
+            strictlyValid: true,
+            aboveLevelTokens: [],
+            repairState: 'accepted',
+          },
+        },
+        { sequence: 4, type: 'complete', message: 'Complete' },
+      ],
+    })
+    expect(batch.updates.map((update) => update.type)).toEqual([
+      'progress',
+      'regionReady',
+      'regionRefined',
+      'complete',
+    ])
+    expect(batch.nextSequence).toBe(4)
+  })
+
+  it('accepts build-matched native health, setup, lookup, and errors', () => {
+    expect(
+      parseNativeHandshakeRequest({
+        type: 'start-or-discover-daemon',
+        buildFingerprint: BUILD_FINGERPRINT,
+        extensionVersion: '0.1.0',
+        extensionOrigin: 'moz-extension://fixture',
+      }).type,
+    ).toBe('start-or-discover-daemon')
+    expect(parseNativeReadyResponse(ready()).buildFingerprint).toBe(BUILD_FINGERPRINT)
+    expect(
+      parseHealthResponse({
+        buildFingerprint: BUILD_FINGERPRINT,
+        engineVersion: '0.2.0',
+        status: 'ready',
+        setupState: 'ready',
+        resourceIdentities: pinnedResourceIdentities(),
+      }).status,
+    ).toBe('ready')
+    expect(
+      parseBrowserSetupStatus({
+        state: 'ready',
+        modelId: 'qwen3.5-4b',
+        message: 'Ready',
+      }).state,
+    ).toBe('ready')
+    expect(
+      parseLookupResult({
+        selectedText: '离开',
+        tokens: [
+          {
+            simplified: '离开',
+            pinyin: 'lí kāi',
+            definitions: ['leave'],
+            hskLevel: 2,
+            properName: false,
+          },
+        ],
+        region: {
+          displayedChinese: '我们现在要走！',
+          baseChinese: '我们得马上离开！',
+          sourceEnglish: 'We have to leave now!',
+        },
+      }).region?.baseChinese,
+    ).toBe('我们得马上离开！')
+    expect(
+      parseErrorResponse({ code: 'IMAGE_TOO_LARGE', message: 'Too large', retryable: false }).code,
+    ).toBe('IMAGE_TOO_LARGE')
+  })
+
+  it('rejects removed protocol fields, build mismatches, invalid geometry, and replayed updates', () => {
+    expect(() => parseBrowserJobRequest({ ...jobRequest(), protocolVersion: 1 })).toThrow(
+      /protocolVersion/,
+    )
+    expect(() => parseBrowserJobCreated({ buildFingerprint: 'other-build', jobId: 'job' })).toThrow(
+      /buildFingerprint/,
+    )
+    expect(() =>
+      parseBrowserJobRequest({
+        ...jobRequest(),
+        visibleRects: [{ x: 0.8, y: 0, width: 0.3, height: 1 }],
+      }),
+    ).toThrow(/image width/)
+    expect(() =>
+      parseJobUpdateBatch(
+        {
+          jobId: 'job',
+          nextSequence: 4,
+          updates: [{ sequence: 3, type: 'complete' }],
+        },
+        3,
+      ),
+    ).toThrow(/sequence/)
+  })
+
+  it('requires exact, lowercase, sorted resident resource identities', () => {
+    const health = {
+      buildFingerprint: BUILD_FINGERPRINT,
+      engineVersion: '0.2.0',
+      status: 'ready',
+      setupState: 'ready',
+      resourceIdentities: pinnedResourceIdentities(),
+    }
+    expect(parseHealthResponse(health).resourceIdentities.map(({ id }) => id)).toEqual([
+      'pp-ocr-v5-english-recognizer-config',
+      'pp-ocr-v5-english-recognizer-model',
+      'pp-ocr-v5-mobile-detector-model',
+      'translation-model',
+    ])
+    expect(() =>
+      parseHealthResponse({
+        ...health,
+        resourceIdentities: [...pinnedResourceIdentities()].reverse(),
+      }),
+    ).toThrow(/sorted/)
+    expect(() =>
+      parseHealthResponse({
+        ...health,
+        resourceIdentities: pinnedResourceIdentities().map((identity, index) =>
+          index === 0
+            ? {
+                ...(identity as Record<string, unknown>),
+                repositoryRevision: '16E8A622F91FABC6B5B65C96D32D1183F8843546',
+              }
+            : identity,
+        ),
+      }),
+    ).toThrow(/repositoryRevision/)
   })
 })

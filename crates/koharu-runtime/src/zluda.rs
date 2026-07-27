@@ -75,9 +75,7 @@ mod platform {
 
     pub(crate) async fn package_prepare(runtime: &Runtime) -> Result<()> {
         if let Err(err) = ensure_ready(runtime).await {
-            tracing::warn!(
-                "ZLUDA runtime is unavailable: {err:#}; falling back to CPU for unsupported Candle models."
-            );
+            tracing::warn!("ZLUDA runtime is unavailable: {err:#}");
         }
         Ok(())
     }

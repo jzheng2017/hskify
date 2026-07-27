@@ -1,0 +1,461 @@
+{
+  "schemaVersion": 1,
+  "page": {
+    "order": 11,
+    "file": "011.webp",
+    "width": 900,
+    "height": 3109,
+    "sourceSha256": "cef0a88034ebce1034e080d5efd3e5b478ea815b7f4118ad18cfca82ecde23f2"
+  },
+  "policy": {
+    "included": "English story text: dialogue, thoughts, narration, captions, and unbubbled spoken lines, including punctuation-only reactions and silent ellipses",
+    "excluded": "sound effects, credits, scanlation promotion, translator notes, series branding, decorative labels, ambiguous OCR, and non-English text",
+    "detectorUse": "proposal only; every region and omission was manually gated against the source image"
+  },
+  "regions": [
+    {
+      "id": "30ysp-ch5-p011-r00",
+      "kind": "dialogue",
+      "containerStyle": "standard",
+      "readingOrder": 0,
+      "sourceEnglish": "VENOM IS THE SOLE PRIVILEGE OF PREY...",
+      "normalizedEnglish": "VENOM IS THE SOLE PRIVILEGE OF PREY...",
+      "textPolygon": [
+        [
+          0.41336805,
+          0.01952497
+        ],
+        [
+          0.91024303,
+          0.01952497
+        ],
+        [
+          0.91024303,
+          0.08199481
+        ],
+        [
+          0.41336805,
+          0.08199481
+        ]
+      ],
+      "eraseMask": {
+        "encoding": "normalized-polygon-v1",
+        "polygon": [
+          [
+            0.41111112,
+            0.01736893
+          ],
+          [
+            0.91444445,
+            0.01736893
+          ],
+          [
+            0.91444445,
+            0.08362818
+          ],
+          [
+            0.41111112,
+            0.08362818
+          ]
+        ],
+        "operation": "erase every English glyph, outline, punctuation mark, and antialiased edge inside the polygon; preserve every pixel outside the erase mask"
+      },
+      "geometryAudit": "detector-adjusted",
+      "reviewProvenance": {
+        "type": "acceptedProposal",
+        "uncertainty": "low",
+        "proposalIndex": 1,
+        "reviewRegionId": "cef0a880-region-c3c727e436dccd38"
+      },
+      "bubblePolygon": [
+        [
+          0.346875,
+          0.00025129
+        ],
+        [
+          0.9767361,
+          0.00025129
+        ],
+        [
+          0.9767361,
+          0.13614708
+        ],
+        [
+          0.346875,
+          0.13614708
+        ]
+      ],
+      "productionMatch": {
+        "stableRegionId": "cef0a880-region-c3c727e436dccd38",
+        "method": "stable-region-id-and-text-geometry",
+        "textGeometryIou": 1.0
+      },
+      "simplifiedChinese": "毒牙是猎物的特权。。。。。。",
+      "pinyin": "dú yá shì liè wù de / dì / dí / dī tè quán",
+      "hskValidation": {
+        "requestedLevel": 5,
+        "strictlyValid": false,
+        "aboveLevelTokens": [
+          "毒牙",
+          "毒",
+          "牙",
+          "猎物",
+          "猎",
+          "物",
+          "特权",
+          "特",
+          "权"
+        ],
+        "repairState": "pending"
+      },
+      "hskTokens": [
+        {
+          "text": "毒牙",
+          "startChar": 0,
+          "endChar": 2,
+          "pinyin": "dú yá",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "是",
+          "startChar": 2,
+          "endChar": 3,
+          "pinyin": "shì",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "猎物",
+          "startChar": 3,
+          "endChar": 5,
+          "pinyin": "liè wù",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "的",
+          "startChar": 5,
+          "endChar": 6,
+          "pinyin": "de / dì / dí / dī",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "特权",
+          "startChar": 6,
+          "endChar": 8,
+          "pinyin": "tè quán",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        }
+      ]
+    },
+    {
+      "id": "30ysp-ch5-p011-r01",
+      "kind": "dialogue",
+      "containerStyle": "standard",
+      "readingOrder": 1,
+      "sourceEnglish": "DON'T WORRY ABOUT \"THAT CHILD.\"",
+      "normalizedEnglish": "DON'T WORRY ABOUT \"THAT CHILD.\"",
+      "textPolygon": [
+        [
+          0.44652778,
+          0.38380006
+        ],
+        [
+          0.86736107,
+          0.38380006
+        ],
+        [
+          0.86736107,
+          0.4421488
+        ],
+        [
+          0.44652778,
+          0.4421488
+        ]
+      ],
+      "eraseMask": {
+        "encoding": "normalized-polygon-v1",
+        "polygon": [
+          [
+            0.44333333,
+            0.3824381
+          ],
+          [
+            0.87666667,
+            0.3824381
+          ],
+          [
+            0.87666667,
+            0.44483758
+          ],
+          [
+            0.44333333,
+            0.44483758
+          ]
+        ],
+        "operation": "erase every English glyph, outline, punctuation mark, and antialiased edge inside the polygon; preserve every pixel outside the erase mask"
+      },
+      "geometryAudit": "detector-adjusted",
+      "reviewProvenance": {
+        "type": "acceptedProposal",
+        "uncertainty": "low",
+        "proposalIndex": 2,
+        "reviewRegionId": "cef0a880-region-6c35a55e6c1a2cfa"
+      },
+      "bubblePolygon": [
+        [
+          0.3689236,
+          0.33417097
+        ],
+        [
+          0.94913197,
+          0.33417097
+        ],
+        [
+          0.94913197,
+          0.492381
+        ],
+        [
+          0.3689236,
+          0.492381
+        ]
+      ],
+      "productionMatch": {
+        "stableRegionId": "cef0a880-region-6c35a55e6c1a2cfa",
+        "method": "stable-region-id-and-text-geometry",
+        "textGeometryIou": 1.0
+      },
+      "simplifiedChinese": "别担心“那个孩子”。",
+      "pinyin": "Bié / biè / bié dān xīn nà ge hái zi",
+      "hskValidation": {
+        "requestedLevel": 5,
+        "strictlyValid": false,
+        "aboveLevelTokens": [
+          "那个"
+        ],
+        "repairState": "pending"
+      },
+      "hskTokens": [
+        {
+          "text": "别",
+          "startChar": 0,
+          "endChar": 1,
+          "pinyin": "Bié / biè / bié",
+          "classification": "hsk",
+          "hskLevel": 2,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "担心",
+          "startChar": 1,
+          "endChar": 3,
+          "pinyin": "dān xīn",
+          "classification": "hsk",
+          "hskLevel": 3,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "那个",
+          "startChar": 4,
+          "endChar": 6,
+          "pinyin": "nà ge",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "孩子",
+          "startChar": 6,
+          "endChar": 8,
+          "pinyin": "hái zi",
+          "classification": "hsk",
+          "hskLevel": 2,
+          "aboveRequestedLevel": false
+        }
+      ]
+    },
+    {
+      "id": "30ysp-ch5-p011-r02",
+      "kind": "dialogue",
+      "containerStyle": "standard",
+      "readingOrder": 2,
+      "sourceEnglish": "I HAVEN'T BITTEN HER \"YET,\" AND I'M KEEPING HER SAFE.",
+      "normalizedEnglish": "I HAVEN'T BITTEN HER \"YET,\" AND I'M KEEPING HER SAFE.",
+      "textPolygon": [
+        [
+          0.16527778,
+          0.76399165
+        ],
+        [
+          0.6666667,
+          0.76399165
+        ],
+        [
+          0.6666667,
+          0.88058865
+        ],
+        [
+          0.16527778,
+          0.88058865
+        ]
+      ],
+      "eraseMask": {
+        "encoding": "normalized-polygon-v1",
+        "polygon": [
+          [
+            0.15888889,
+            0.7626246
+          ],
+          [
+            0.67555554,
+            0.7626246
+          ],
+          [
+            0.67555554,
+            0.88292051
+          ],
+          [
+            0.15888889,
+            0.88292051
+          ]
+        ],
+        "operation": "erase every English glyph, outline, punctuation mark, and antialiased edge inside the polygon; preserve every pixel outside the erase mask"
+      },
+      "geometryAudit": "detector-adjusted",
+      "reviewProvenance": {
+        "type": "acceptedProposal",
+        "uncertainty": "low",
+        "proposalIndex": 3,
+        "reviewRegionId": "cef0a880-region-d1a7b31a5f08ada6"
+      },
+      "bubblePolygon": [
+        [
+          0.04548611,
+          0.7284597
+        ],
+        [
+          0.7878472,
+          0.7284597
+        ],
+        [
+          0.7878472,
+          0.9201411
+        ],
+        [
+          0.04548611,
+          0.9201411
+        ]
+      ],
+      "productionMatch": {
+        "stableRegionId": "cef0a880-region-d1a7b31a5f08ada6",
+        "method": "stable-region-id-and-text-geometry",
+        "textGeometryIou": 1.0
+      },
+      "simplifiedChinese": "我还没咬她，而且我在保护她。",
+      "pinyin": "wǒ Huán / huán / hái méi / mò yǎo tā ér qiě wǒ zài bǎo hù tā",
+      "hskValidation": {
+        "requestedLevel": 5,
+        "strictlyValid": false,
+        "aboveLevelTokens": [
+          "没"
+        ],
+        "repairState": "pending"
+      },
+      "hskTokens": [
+        {
+          "text": "我",
+          "startChar": 0,
+          "endChar": 1,
+          "pinyin": "wǒ",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "还",
+          "startChar": 1,
+          "endChar": 2,
+          "pinyin": "Huán / huán / hái",
+          "classification": "hsk",
+          "hskLevel": 2,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "没",
+          "startChar": 2,
+          "endChar": 3,
+          "pinyin": "méi / mò",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "咬",
+          "startChar": 3,
+          "endChar": 4,
+          "pinyin": "yǎo",
+          "classification": "hsk",
+          "hskLevel": 5,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "她",
+          "startChar": 4,
+          "endChar": 5,
+          "pinyin": "tā",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "而且",
+          "startChar": 6,
+          "endChar": 8,
+          "pinyin": "ér qiě",
+          "classification": "hsk",
+          "hskLevel": 3,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "我",
+          "startChar": 8,
+          "endChar": 9,
+          "pinyin": "wǒ",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "在",
+          "startChar": 9,
+          "endChar": 10,
+          "pinyin": "zài",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "保护",
+          "startChar": 10,
+          "endChar": 12,
+          "pinyin": "bǎo hù",
+          "classification": "hsk",
+          "hskLevel": 4,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "她",
+          "startChar": 12,
+          "endChar": 13,
+          "pinyin": "tā",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        }
+      ]
+    }
+  ]
+}

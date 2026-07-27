@@ -18,11 +18,12 @@ describe('first-run background routing', () => {
     const companion = {
       getSetupStatus: vi.fn(async () => ({
         state: 'missing-models' as const,
+        modelId: 'qwen3.5-4b',
         message: 'Models are missing.',
       })),
       startModelSetup: vi.fn(async () => ({
         state: 'downloading' as const,
-        selectedPackId: 'standard-v1',
+        modelId: 'qwen3.5-4b',
         completedBytes: 0,
         totalBytes: 2048,
         message: 'Downloading.',

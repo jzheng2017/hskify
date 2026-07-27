@@ -2,7 +2,7 @@ import type { DiscoveredImage } from '../../src/discovery/images'
 import fixturePanelUrl from '../../../../fixtures/images/synthetic-panel-a.png?url'
 import longWebtoonUrl from '../../../../fixtures/images/synthetic-webtoon-long.webp?url'
 import {
-  createFixtureResult,
+  createFixtureRegions,
 } from '../../src/messaging/fixture-service'
 import {
   SelectableRenderer,
@@ -17,7 +17,7 @@ if (!source || !frame || !link || !navigationOutput) throw new Error('Harness DO
 
 source.src = fixturePanelUrl
 await source.decode()
-const cleanImage = await (await fetch(fixturePanelUrl)).arrayBuffer()
+const patchImage = await (await fetch(fixturePanelUrl)).arrayBuffer()
 const longWebtoonProbe = new Image()
 longWebtoonProbe.src = `${longWebtoonUrl}?chapter=synthetic&page=0`
 await longWebtoonProbe.decode()
@@ -42,14 +42,17 @@ if (query.get('fit') === 'contain' || query.get('fit') === 'cover') {
 }
 if (query.get('rotated') === '1') source.style.transform = 'rotate(3deg)'
 
-const result = createFixtureResult({
+const regions = createFixtureRegions({
   jobId: 'playwright-fixture',
   sourceSha256: 'b'.repeat(64),
   sourceWidth: 1200,
   sourceHeight: 1800,
 })
-if (query.get('vertical') === '1' && result.regions[0]) {
-  result.regions[0].style.writingMode = 'vertical-rl'
+if (query.get('vertical') === '1' && regions[0]) {
+  regions[0].style.writingMode = 'vertical-rl'
+}
+for (const region of regions) {
+  region.patch.rect = { x: 0, y: 0, width: 1, height: 1 }
 }
 const candidate: DiscoveredImage = {
   element: source,
@@ -79,14 +82,18 @@ try {
       ],
       region: {
         displayedChinese: '我们现在要走！',
-        faithfulChinese: '我们得马上离开！',
+        baseChinese: '我们得马上离开！',
         sourceEnglish: 'We have to leave now!',
       },
     }),
-  }).render(candidate, {
-    result,
-    cleanImage,
+  }).begin(candidate, {
+    jobId: 'playwright-fixture',
+    sourceWidth: 1200,
+    sourceHeight: 1800,
   })
+  for (const region of regions) {
+    await rendered.installRegion(region, patchImage)
+  }
 } catch (error) {
   errorCode =
     error instanceof Error && 'code' in error ? String(error.code) : 'UNKNOWN_RENDERER_ERROR'

@@ -1,4 +1,4 @@
-//! Frozen protocol-v1 fixture adapter used through Gate 2.
+//! Cross-language fixtures for the unversioned progressive browser contract.
 
 use std::sync::OnceLock;
 
@@ -6,14 +6,12 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 
 use crate::contracts::{
-    BrowserJobRequest, BrowserJobResult, BrowserJobStatus, BrowserSetupStatus, HealthResponse,
-    LookupResult, Validate,
+    BrowserSetupStatus, HealthResponse, JobUpdatesResponse, LookupResult, Validate,
 };
 
 const HEALTH: &str = include_str!("../../../fixtures/contracts/health.ready.json");
 const SETUP: &str = include_str!("../../../fixtures/contracts/setup.ready.json");
-const RESULT: &str = include_str!("../../../fixtures/contracts/job-result.complete.json");
-const PROGRESS: &str = include_str!("../../../fixtures/contracts/progress.success.json");
+const UPDATES: &str = include_str!("../../../fixtures/contracts/job-updates.success.json");
 const LOOKUP: &str = include_str!("../../../fixtures/contracts/lookup.valid.json");
 
 fn parse_valid<T>(json: &str, name: &str) -> T
@@ -42,50 +40,12 @@ pub fn setup() -> BrowserSetupStatus {
         .clone()
 }
 
-pub fn progress(job_id: &str) -> Vec<BrowserJobStatus> {
-    static VALUE: OnceLock<Vec<BrowserJobStatus>> = OnceLock::new();
-    VALUE
-        .get_or_init(|| {
-            let values: Vec<BrowserJobStatus> =
-                serde_json::from_str(PROGRESS).expect("parse progress.success.json");
-            for value in &values {
-                value
-                    .validate()
-                    .expect("validate progress.success.json entry");
-            }
-            values
-        })
-        .iter()
-        .cloned()
-        .map(|mut value| {
-            value.job_id = job_id.to_owned();
-            value
-        })
-        .collect()
-}
-
-pub fn result(job_id: &str, blob_id: &str, request: &BrowserJobRequest) -> BrowserJobResult {
-    static VALUE: OnceLock<BrowserJobResult> = OnceLock::new();
+pub fn updates(job_id: &str) -> JobUpdatesResponse {
+    static VALUE: OnceLock<JobUpdatesResponse> = OnceLock::new();
     let mut value = VALUE
-        .get_or_init(|| parse_valid(RESULT, "job-result.complete.json"))
+        .get_or_init(|| parse_valid(UPDATES, "job-updates.success.json"))
         .clone();
     value.job_id = job_id.to_owned();
-    value.clean_image_blob_id = blob_id.to_owned();
-    value.source_sha256.clone_from(&request.source_sha256);
-    value.source_width = request.natural_width;
-    value.source_height = request.natural_height;
-    let prefix = &request.source_sha256[..8];
-    for (index, region) in value.regions.iter_mut().enumerate() {
-        region.id = format!("{prefix}-region-{:04}", index + 1);
-        region.vocabulary.requested_hsk_level = request.settings.hsk_level;
-    }
-    for warning in &mut value.warnings {
-        if let Some(region_id) = &mut warning.region_id {
-            let suffix = region_id.rsplit('-').next().unwrap_or("0001");
-            *region_id = format!("{prefix}-region-{suffix}");
-        }
-    }
-    value.validate().expect("runtime fixture result is valid");
     value
 }
 
@@ -131,9 +91,7 @@ mod tests {
     fn all_embedded_fixtures_still_validate() {
         health().validate().unwrap();
         setup().validate().unwrap();
-        for value in progress("job") {
-            value.validate().unwrap();
-        }
+        updates("job").validate().unwrap();
         lookup("selected").validate().unwrap();
         assert_eq!(&font_bytes("fixture-sans").unwrap()[..4], &[0, 1, 0, 0]);
     }

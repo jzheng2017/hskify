@@ -1,5 +1,8 @@
-import type { BrowserJobStatus } from '../contracts/browser'
-import type { HskLevel } from '../contracts/browser'
+import {
+  parseBrowserJobRequest,
+  type BrowserJobRequest,
+  type HskLevel,
+} from '../contracts/browser'
 import type { StorageArea } from './settings'
 
 const ACTIVE_JOB_PREFIX = 'hmt.activeJob.'
@@ -18,12 +21,39 @@ export type ActiveJobRecord = {
   sourceHeight: number
   pageIndex: number
   hskLevel: HskLevel
+  submittedRequest: BrowserJobRequest
+  uploadedImageBytes: number
+  submittedAtUnixMs: number
+  acknowledgedSequence: number
+  deliveredSequence: number
+  regionIds: string[]
+  patchIds: string[]
+  fontIds: string[]
   createdAtUnixMs: number
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return (
+    Array.isArray(value) &&
+    value.length <= 10_000 &&
+    value.every(
+      (item) =>
+        typeof item === 'string' &&
+        item.length > 0 &&
+        item.length <= 512,
+    )
+  )
 }
 
 function isActiveJobRecord(value: unknown): value is ActiveJobRecord {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
   const record = value as Record<string, unknown>
+  let submittedRequest: BrowserJobRequest
+  try {
+    submittedRequest = parseBrowserJobRequest(record.submittedRequest)
+  } catch {
+    return false
+  }
   return (
     typeof record.tabId === 'number' &&
     Number.isSafeInteger(record.tabId) &&
@@ -50,15 +80,37 @@ function isActiveJobRecord(value: unknown): value is ActiveJobRecord {
     typeof record.pageIndex === 'number' &&
     Number.isSafeInteger(record.pageIndex) &&
     record.pageIndex >= 0 &&
+    submittedRequest.clientImageId === record.clientImageId &&
+    submittedRequest.sourceSha256 === record.sourceSha256 &&
+    submittedRequest.naturalWidth === record.sourceWidth &&
+    submittedRequest.naturalHeight === record.sourceHeight &&
+    submittedRequest.pageSessionId === record.pageSessionId &&
+    submittedRequest.pageIndex === record.pageIndex &&
+    submittedRequest.settings.hskLevel === record.hskLevel &&
     (record.hskLevel === 1 ||
       record.hskLevel === 2 ||
       record.hskLevel === 3 ||
       record.hskLevel === 4 ||
       record.hskLevel === 5 ||
       record.hskLevel === 6) &&
+    typeof record.uploadedImageBytes === 'number' &&
+    Number.isSafeInteger(record.uploadedImageBytes) &&
+    record.uploadedImageBytes > 0 &&
+    typeof record.submittedAtUnixMs === 'number' &&
+    Number.isSafeInteger(record.submittedAtUnixMs) &&
+    record.submittedAtUnixMs >= 0 &&
+    typeof record.acknowledgedSequence === 'number' &&
+    Number.isSafeInteger(record.acknowledgedSequence) &&
+    record.acknowledgedSequence >= 0 &&
+    typeof record.deliveredSequence === 'number' &&
+    Number.isSafeInteger(record.deliveredSequence) &&
+    record.deliveredSequence >= record.acknowledgedSequence &&
+    isStringArray(record.regionIds) &&
+    isStringArray(record.patchIds) &&
+    isStringArray(record.fontIds) &&
     typeof record.createdAtUnixMs === 'number' &&
     Number.isSafeInteger(record.createdAtUnixMs) &&
-    record.createdAtUnixMs >= 0
+    record.createdAtUnixMs >= record.submittedAtUnixMs
   )
 }
 
@@ -106,8 +158,6 @@ export class ActiveJobStore {
   }
 }
 
-export type JobStatusResolver = (record: ActiveJobRecord) => Promise<BrowserJobStatus>
-
 export type PageArtifactRecord = {
   tabId: number
   frameId: number
@@ -119,21 +169,9 @@ export type PageArtifactRecord = {
   sourceWidth: number
   sourceHeight: number
   regionIds: string[]
+  patchIds: string[]
   fontIds: string[]
   createdAtUnixMs: number
-}
-
-function isStringArray(value: unknown): value is string[] {
-  return (
-    Array.isArray(value) &&
-    value.length <= 10_000 &&
-    value.every(
-      (item) =>
-        typeof item === 'string' &&
-        item.length > 0 &&
-        item.length <= 512,
-    )
-  )
 }
 
 function isPageArtifactRecord(value: unknown): value is PageArtifactRecord {
@@ -161,6 +199,7 @@ function isPageArtifactRecord(value: unknown): value is PageArtifactRecord {
     Number.isSafeInteger(record.sourceHeight) &&
     record.sourceHeight > 0 &&
     isStringArray(record.regionIds) &&
+    isStringArray(record.patchIds) &&
     isStringArray(record.fontIds) &&
     typeof record.createdAtUnixMs === 'number' &&
     Number.isSafeInteger(record.createdAtUnixMs)

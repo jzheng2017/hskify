@@ -1,3 +1,6 @@
+#[cfg(not(all(target_os = "windows", target_arch = "x86_64")))]
+compile_error!("hsk-manga-native-host only supports 64-bit Windows");
+
 use std::ffi::OsString;
 use std::io;
 use std::path::PathBuf;

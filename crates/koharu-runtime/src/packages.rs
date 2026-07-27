@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use futures::future::BoxFuture;
 use indexmap::IndexMap;
 
@@ -69,6 +69,29 @@ impl PackageCatalog {
             (package.ensure)(runtime)
                 .await
                 .with_context(|| format!("failed to prepare package `{}`", package.id))?;
+        }
+
+        Ok(())
+    }
+
+    pub async fn prepare_preinstalled_bootstrap(&self, runtime: &Runtime) -> Result<()> {
+        for package in self
+            .all()
+            .filter(|package| package.bootstrap)
+            .filter(|package| (package.enabled)(runtime))
+        {
+            if !(package.present)(runtime)
+                .with_context(|| format!("failed to inspect package `{}`", package.id))?
+            {
+                bail!(
+                    "required preinstalled package `{}` is missing or has the wrong identity under `{}`",
+                    package.id,
+                    runtime.root().display()
+                );
+            }
+            (package.ensure)(runtime)
+                .await
+                .with_context(|| format!("failed to load package `{}`", package.id))?;
         }
 
         Ok(())

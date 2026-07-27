@@ -1,0 +1,302 @@
+{
+  "schemaVersion": 1,
+  "page": {
+    "order": 36,
+    "file": "036.webp",
+    "width": 900,
+    "height": 8515,
+    "sourceSha256": "5aadbdf5fe07dcf29b3406f3c151095d4c7a0239fb1e6af93c95be4985969304"
+  },
+  "policy": {
+    "included": "English story text: dialogue, thoughts, narration, captions, and unbubbled spoken lines, including punctuation-only reactions and silent ellipses",
+    "excluded": "sound effects, credits, scanlation promotion, translator notes, series branding, decorative labels, ambiguous OCR, and non-English text",
+    "detectorUse": "proposal only; every region and omission was manually gated against the source image"
+  },
+  "regions": [
+    {
+      "id": "30ysp-ch5-p036-r00",
+      "kind": "narration",
+      "containerStyle": "narration",
+      "readingOrder": 0,
+      "sourceEnglish": "Next is...",
+      "normalizedEnglish": "Next is...",
+      "textPolygon": [
+        [
+          0.28555556,
+          0.17298884
+        ],
+        [
+          0.71333333,
+          0.17298884
+        ],
+        [
+          0.71333333,
+          0.19260129
+        ],
+        [
+          0.28555556,
+          0.19260129
+        ]
+      ],
+      "eraseMask": {
+        "encoding": "normalized-polygon-v1",
+        "polygon": [
+          [
+            0.28222223,
+            0.17263652
+          ],
+          [
+            0.71666666,
+            0.17263652
+          ],
+          [
+            0.71666666,
+            0.19295361
+          ],
+          [
+            0.28222223,
+            0.19295361
+          ]
+        ],
+        "operation": "erase every English glyph, outline, punctuation mark, and antialiased edge inside the polygon; preserve every pixel outside the erase mask"
+      },
+      "geometryAudit": "manual",
+      "reviewProvenance": {
+        "type": "missedStoryTextRegion",
+        "uncertainty": "low",
+        "missedIndex": 1
+      },
+      "simplifiedChinese": "接下来是……",
+      "pinyin": "Jiēxiàlái shì...",
+      "hskTokens": [
+        {
+          "text": "接下来",
+          "startChar": 0,
+          "endChar": 3,
+          "pinyin": "jiē xià lái",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "是",
+          "startChar": 3,
+          "endChar": 4,
+          "pinyin": "shì",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        }
+      ]
+    },
+    {
+      "id": "30ysp-ch5-p036-r01",
+      "kind": "narration",
+      "containerStyle": "narration",
+      "readingOrder": 1,
+      "sourceEnglish": "Isabelle,",
+      "normalizedEnglish": "Isabelle,",
+      "textPolygon": [
+        [
+          0.21458334,
+          0.52869016
+        ],
+        [
+          0.7798611,
+          0.52869016
+        ],
+        [
+          0.7798611,
+          0.55102205
+        ],
+        [
+          0.21458334,
+          0.55102205
+        ]
+      ],
+      "eraseMask": {
+        "encoding": "normalized-polygon-v1",
+        "polygon": [
+          [
+            0.22888888,
+            0.529771
+          ],
+          [
+            0.76777778,
+            0.529771
+          ],
+          [
+            0.76777778,
+            0.54961833
+          ],
+          [
+            0.22888888,
+            0.54961833
+          ]
+        ],
+        "operation": "erase every English glyph, outline, punctuation mark, and antialiased edge inside the polygon; preserve every pixel outside the erase mask"
+      },
+      "geometryAudit": "detector-adjusted",
+      "reviewProvenance": {
+        "type": "acceptedProposal",
+        "uncertainty": "low",
+        "proposalIndex": 1,
+        "reviewRegionId": "5aadbdf5-region-c2035477a213afa7"
+      },
+      "bubblePolygon": [
+        [
+          0.0,
+          0.51985466
+        ],
+        [
+          1.0,
+          0.51985466
+        ],
+        [
+          1.0,
+          0.59479594
+        ],
+        [
+          0.0,
+          0.59479594
+        ]
+      ],
+      "productionMatch": {
+        "stableRegionId": "5aadbdf5-region-c2035477a213afa7",
+        "method": "stable-region-id-and-text-geometry",
+        "textGeometryIou": 1.0
+      },
+      "simplifiedChinese": "伊莎贝尔，",
+      "pinyin": "Yī / yī shā / suō Bèi ěr",
+      "hskValidation": {
+        "requestedLevel": 5,
+        "strictlyValid": false,
+        "aboveLevelTokens": [
+          "伊",
+          "莎",
+          "贝尔",
+          "贝",
+          "尔"
+        ],
+        "repairState": "pending"
+      },
+      "hskTokens": [
+        {
+          "text": "伊",
+          "startChar": 0,
+          "endChar": 1,
+          "pinyin": "Yī / yī",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "莎",
+          "startChar": 1,
+          "endChar": 2,
+          "pinyin": "shā / suō",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "贝尔",
+          "startChar": 2,
+          "endChar": 4,
+          "pinyin": "Bèi ěr",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        }
+      ]
+    },
+    {
+      "id": "30ysp-ch5-p036-r02",
+      "kind": "narration",
+      "containerStyle": "narration",
+      "readingOrder": 2,
+      "sourceEnglish": "Daughter of the Hero.",
+      "normalizedEnglish": "Daughter of the Hero.",
+      "textPolygon": [
+        [
+          0.12444444,
+          0.8
+        ],
+        [
+          0.86777778,
+          0.8
+        ],
+        [
+          0.86777778,
+          0.8380505
+        ],
+        [
+          0.12444444,
+          0.8380505
+        ]
+      ],
+      "eraseMask": {
+        "encoding": "normalized-polygon-v1",
+        "polygon": [
+          [
+            0.12111111,
+            0.79964768
+          ],
+          [
+            0.87111111,
+            0.79964768
+          ],
+          [
+            0.87111111,
+            0.83840282
+          ],
+          [
+            0.12111111,
+            0.83840282
+          ]
+        ],
+        "operation": "erase every English glyph, outline, punctuation mark, and antialiased edge inside the polygon; preserve every pixel outside the erase mask"
+      },
+      "geometryAudit": "manual",
+      "reviewProvenance": {
+        "type": "missedStoryTextRegion",
+        "uncertainty": "low",
+        "missedIndex": 2
+      },
+      "simplifiedChinese": "勇者的女儿。",
+      "pinyin": "Yǒngzhě de nǚ'ér.",
+      "hskTokens": [
+        {
+          "text": "勇",
+          "startChar": 0,
+          "endChar": 1,
+          "pinyin": "yǒng",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "者",
+          "startChar": 1,
+          "endChar": 2,
+          "pinyin": "zhě",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "的",
+          "startChar": 2,
+          "endChar": 3,
+          "pinyin": "de / dì / dí / dī",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "女儿",
+          "startChar": 3,
+          "endChar": 5,
+          "pinyin": "nǚ ér",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        }
+      ]
+    }
+  ]
+}

@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use crate::crypto::{CryptoError, generate_secret};
 use crate::discovery::{
-    DaemonRecord, DiscoveryError, STATE_VERSION, acquire_daemon_lock, prepare_state_paths,
+    DaemonRecord, DiscoveryError, acquire_daemon_lock, prepare_state_paths,
     remove_record_if_instance, write_daemon_record,
 };
 use crate::server::{BridgeConfig, BridgeState, router, wait_until_idle};
@@ -29,6 +29,8 @@ pub enum DaemonExit {
 
 #[derive(Debug, Error)]
 pub enum DaemonError {
+    #[error("browser daemon requires the exact Hskify CUDA target: {0:#}")]
+    CudaTarget(#[source] anyhow::Error),
     #[error(transparent)]
     Discovery(#[from] DiscoveryError),
     #[error(transparent)]
@@ -43,6 +45,7 @@ pub async fn bind_random_loopback() -> Result<TcpListener, std::io::Error> {
 }
 
 pub async fn run_daemon(options: DaemonOptions) -> Result<DaemonExit, DaemonError> {
+    koharu_runtime::require_hskify_cuda_target().map_err(DaemonError::CudaTarget)?;
     let paths = prepare_state_paths(options.state_dir)?;
     let daemon_lock = match acquire_daemon_lock(&paths) {
         Ok(lock) => lock,
@@ -59,7 +62,6 @@ pub async fn run_daemon(options: DaemonOptions) -> Result<DaemonExit, DaemonErro
     let started_at_unix_ms =
         u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or_default();
     let record = DaemonRecord {
-        state_version: STATE_VERSION,
         instance_id: instance_id.clone(),
         pid: std::process::id(),
         port,
@@ -96,5 +98,14 @@ mod tests {
             std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
         );
         assert_ne!(address.port(), 0);
+    }
+
+    #[test]
+    fn cuda_target_error_is_actionable() {
+        let error = DaemonError::CudaTarget(anyhow::anyhow!(
+            "Hskify requires NVIDIA GeForce RTX 4080 SUPER"
+        ));
+        assert!(error.to_string().contains("exact Hskify CUDA target"));
+        assert!(error.to_string().contains("RTX 4080 SUPER"));
     }
 }

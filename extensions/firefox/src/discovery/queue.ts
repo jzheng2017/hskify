@@ -31,7 +31,8 @@ export class VisibleFirstQueue<T> {
     if (
       this.failedIds.has(item.id) ||
       this.pendingIds.has(item.id) ||
-      this.active?.item.id === item.id
+      (this.active?.item.id === item.id &&
+        !this.active.controller.signal.aborted)
     ) {
       return false
     }
@@ -39,6 +40,7 @@ export class VisibleFirstQueue<T> {
     this.pending.push(item)
     this.pendingIds.add(item.id)
     this.sort()
+    this.preemptOffscreenForVisible()
     void this.drain()
     return true
   }
@@ -50,9 +52,10 @@ export class VisibleFirstQueue<T> {
 
   reprioritize(id: string, visible: boolean): void {
     const item = this.pending.find((entry) => entry.id === id)
-    if (!item) return
-    item.visible = visible
+    if (item) item.visible = visible
+    if (this.active?.item.id === id) this.active.item.visible = visible
     this.sort()
+    this.preemptOffscreenForVisible()
   }
 
   remove(id: string): void {
@@ -76,7 +79,13 @@ export class VisibleFirstQueue<T> {
   }
 
   get activeId(): string | undefined {
-    return this.active?.item.id
+    return this.active && !this.active.controller.signal.aborted
+      ? this.active.item.id
+      : undefined
+  }
+
+  get next(): QueueItem<T> | undefined {
+    return this.pending[0]
   }
 
   private sort(): void {
@@ -84,6 +93,26 @@ export class VisibleFirstQueue<T> {
       (left, right) =>
         Number(right.visible) - Number(left.visible) || left.order - right.order,
     )
+  }
+
+  private preemptOffscreenForVisible(): void {
+    const active = this.active
+    if (
+      !active ||
+      active.controller.signal.aborted ||
+      active.item.visible ||
+      !this.pending.some((item) => item.visible)
+    ) {
+      return
+    }
+    // Only one image is submitted at a time so decoded-image memory stays
+    // bounded. If the reader scrolls, put the interrupted offscreen image back
+    // in reading order and let the now-visible image start as soon as the
+    // daemon observes cancellation at its current batch boundary.
+    this.pending.push(active.item)
+    this.pendingIds.add(active.item.id)
+    this.sort()
+    active.controller.abort()
   }
 
   private async drain(): Promise<void> {

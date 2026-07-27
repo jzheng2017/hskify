@@ -1,0 +1,340 @@
+{
+  "schemaVersion": 1,
+  "page": {
+    "order": 31,
+    "file": "031.webp",
+    "width": 900,
+    "height": 3565,
+    "sourceSha256": "eec6a723ca2aa7f1273363e906818ccf5b8a15289236f425f997f3e04d8dcaa2"
+  },
+  "policy": {
+    "included": "English story text: dialogue, thoughts, narration, captions, and unbubbled spoken lines, including punctuation-only reactions and silent ellipses",
+    "excluded": "sound effects, credits, scanlation promotion, translator notes, series branding, decorative labels, ambiguous OCR, and non-English text",
+    "detectorUse": "proposal only; every region and omission was manually gated against the source image"
+  },
+  "regions": [
+    {
+      "id": "30ysp-ch5-p031-r00",
+      "kind": "dialogue",
+      "containerStyle": "standard",
+      "readingOrder": 0,
+      "sourceEnglish": "WHERE... WHERE ARE YOU GOING..?",
+      "normalizedEnglish": "WHERE... WHERE ARE YOU GOING..?",
+      "textPolygon": [
+        [
+          0.37395832,
+          0.02375526
+        ],
+        [
+          0.9149306,
+          0.02375526
+        ],
+        [
+          0.9149306,
+          0.08204769
+        ],
+        [
+          0.37395832,
+          0.08204769
+        ]
+      ],
+      "eraseMask": {
+        "encoding": "normalized-polygon-v1",
+        "polygon": [
+          [
+            0.38111112,
+            0.02328191
+          ],
+          [
+            0.91333332,
+            0.02328191
+          ],
+          [
+            0.91333332,
+            0.08302946
+          ],
+          [
+            0.38111112,
+            0.08302946
+          ]
+        ],
+        "operation": "erase every English glyph, outline, punctuation mark, and antialiased edge inside the polygon; preserve every pixel outside the erase mask"
+      },
+      "geometryAudit": "detector-adjusted",
+      "reviewProvenance": {
+        "type": "acceptedProposal",
+        "uncertainty": "low",
+        "proposalIndex": 1,
+        "reviewRegionId": "eec6a723-region-be88fe6cd101d906"
+      },
+      "bubblePolygon": [
+        [
+          0.31180555,
+          8.766e-05
+        ],
+        [
+          0.9798611,
+          8.766e-05
+        ],
+        [
+          0.9798611,
+          0.13271388
+        ],
+        [
+          0.31180555,
+          0.13271388
+        ]
+      ],
+      "productionMatch": {
+        "stableRegionId": "eec6a723-region-be88fe6cd101d906",
+        "method": "stable-region-id-and-text-geometry",
+        "textGeometryIou": 1.0
+      },
+      "simplifiedChinese": "。。。。。。你打算去哪里？",
+      "pinyin": "nǐ dǎ suàn qù nǎ lǐ",
+      "hskValidation": {
+        "requestedLevel": 5,
+        "strictlyValid": false,
+        "aboveLevelTokens": [
+          "哪里"
+        ],
+        "repairState": "pending"
+      },
+      "hskTokens": [
+        {
+          "text": "你",
+          "startChar": 6,
+          "endChar": 7,
+          "pinyin": "nǐ",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "打算",
+          "startChar": 7,
+          "endChar": 9,
+          "pinyin": "dǎ suàn",
+          "classification": "hsk",
+          "hskLevel": 3,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "去",
+          "startChar": 9,
+          "endChar": 10,
+          "pinyin": "qù",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "哪里",
+          "startChar": 10,
+          "endChar": 12,
+          "pinyin": "nǎ lǐ",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        }
+      ]
+    },
+    {
+      "id": "30ysp-ch5-p031-r01",
+      "kind": "dialogue",
+      "containerStyle": "standard",
+      "readingOrder": 1,
+      "sourceEnglish": "...",
+      "normalizedEnglish": "...",
+      "textPolygon": [
+        [
+          0.61666667,
+          0.42973352
+        ],
+        [
+          0.65333333,
+          0.42973352
+        ],
+        [
+          0.65333333,
+          0.43169705
+        ],
+        [
+          0.61666667,
+          0.43169705
+        ]
+      ],
+      "eraseMask": {
+        "encoding": "normalized-polygon-v1",
+        "polygon": [
+          [
+            0.61333334,
+            0.42889201
+          ],
+          [
+            0.65666666,
+            0.42889201
+          ],
+          [
+            0.65666666,
+            0.43253856
+          ],
+          [
+            0.61333334,
+            0.43253856
+          ]
+        ],
+        "operation": "erase every English glyph, outline, punctuation mark, and antialiased edge inside the polygon; preserve every pixel outside the erase mask"
+      },
+      "geometryAudit": "manual",
+      "reviewProvenance": {
+        "type": "missedStoryTextRegion",
+        "uncertainty": "medium",
+        "missedIndex": 1
+      },
+      "translationTarget": false
+    },
+    {
+      "id": "30ysp-ch5-p031-r02",
+      "kind": "thought",
+      "containerStyle": "thought",
+      "readingOrder": 2,
+      "sourceEnglish": "I CERTAINLY WANT TO LEAVE THIS OTHER WORLD.",
+      "normalizedEnglish": "I CERTAINLY WANT TO LEAVE THIS OTHER WORLD.",
+      "textPolygon": [
+        [
+          0.16770834,
+          0.83610183
+        ],
+        [
+          0.8420139,
+          0.83610183
+        ],
+        [
+          0.8420139,
+          0.91424876
+        ],
+        [
+          0.16770834,
+          0.91424876
+        ]
+      ],
+      "eraseMask": {
+        "encoding": "normalized-polygon-v1",
+        "polygon": [
+          [
+            0.17333333,
+            0.83702666
+          ],
+          [
+            0.82777779,
+            0.83702666
+          ],
+          [
+            0.82777779,
+            0.91051895
+          ],
+          [
+            0.17333333,
+            0.91051895
+          ]
+        ],
+        "operation": "erase every English glyph, outline, punctuation mark, and antialiased edge inside the polygon; preserve every pixel outside the erase mask"
+      },
+      "geometryAudit": "detector-adjusted",
+      "reviewProvenance": {
+        "type": "acceptedProposal",
+        "uncertainty": "low",
+        "proposalIndex": 2,
+        "reviewRegionId": "eec6a723-region-4d2ea1831d0f2c51"
+      },
+      "bubblePolygon": [
+        [
+          0.0,
+          0.82429
+        ],
+        [
+          1.0,
+          0.82429
+        ],
+        [
+          1.0,
+          1.0
+        ],
+        [
+          0.0,
+          1.0
+        ]
+      ],
+      "productionMatch": {
+        "stableRegionId": "eec6a723-region-4d2ea1831d0f2c51",
+        "method": "stable-region-id-and-text-geometry",
+        "textGeometryIou": 1.0
+      },
+      "simplifiedChinese": "我肯定想离开这个世界。",
+      "pinyin": "wǒ kěn dìng xiǎng lí kāi zhè ge shì jiè",
+      "hskValidation": {
+        "requestedLevel": 5,
+        "strictlyValid": false,
+        "aboveLevelTokens": [
+          "这个"
+        ],
+        "repairState": "pending"
+      },
+      "hskTokens": [
+        {
+          "text": "我",
+          "startChar": 0,
+          "endChar": 1,
+          "pinyin": "wǒ",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "肯定",
+          "startChar": 1,
+          "endChar": 3,
+          "pinyin": "kěn dìng",
+          "classification": "hsk",
+          "hskLevel": 4,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "想",
+          "startChar": 3,
+          "endChar": 4,
+          "pinyin": "xiǎng",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "离开",
+          "startChar": 4,
+          "endChar": 6,
+          "pinyin": "lí kāi",
+          "classification": "hsk",
+          "hskLevel": 3,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "这个",
+          "startChar": 6,
+          "endChar": 8,
+          "pinyin": "zhè ge",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "世界",
+          "startChar": 8,
+          "endChar": 10,
+          "pinyin": "shì jiè",
+          "classification": "hsk",
+          "hskLevel": 3,
+          "aboveRequestedLevel": false
+        }
+      ]
+    }
+  ]
+}

@@ -1,26 +1,28 @@
-//! Firefox browser-companion protocol and secure loopback adapter.
+//! Hskify's strict Firefox loopback companion.
 //!
-//! Protocol version 1 is frozen by the cross-language fixtures in
-//! `fixtures/contracts`. The HTTP service and native launcher build on these
-//! types; they must not accept a structurally valid value until semantic
-//! validation also succeeds.
+//! The extension and daemon must carry the exact same build fingerprint.
+//! There is no protocol negotiation, migration adapter, or legacy result API.
 
 pub mod contracts;
 pub mod crypto;
+mod cuda_scheduler;
 pub mod daemon;
+mod decoded_cache;
 pub mod discovery;
 pub mod fixtures;
 pub mod launcher;
 pub mod native_framing;
 pub mod origin;
 mod pipeline_adapter;
+mod result_cache;
 pub mod server;
 mod setup;
 
 pub use contracts::{
-    BrowserJobCreated, BrowserJobRequest, BrowserJobResult, BrowserJobStatus, BrowserSetupStatus,
-    ContractError, ErrorResponse, HealthResponse, LookupRequest, LookupResult,
-    NativeHandshakeRequest, NativeReadyResponse, RetranslateRequest, Validate,
+    BUILD_FINGERPRINT, BrowserJobCreated, BrowserSetupStatus, ContractError, CreateJobRequest,
+    ErrorResponse, HealthResponse, JobUpdate, JobUpdatesResponse, LookupRequest, LookupResult,
+    NativeHandshakeRequest, NativeReadyResponse, NormalizedRect, ProgressiveRegion, Validate,
+    ViewportUpdateRequest,
 };
 
 /// Permanent Firefox add-on ID frozen by ADR 0001.
@@ -28,9 +30,6 @@ pub const FIREFOX_EXTENSION_ID: &str = "hsk-manga-translator@local.hskify";
 
 /// Native host name frozen by ADR 0001.
 pub const NATIVE_HOST_NAME: &str = "local.hskify.hsk_manga";
-
-/// Browser protocol header name.
-pub const PROTOCOL_HEADER: &str = "x-hsk-manga-protocol";
 
 /// Explicit Firefox extension origin used when privileged extension fetches
 /// omit the standard `Origin` header.

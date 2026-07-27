@@ -32,7 +32,7 @@ pub struct LookupResult {
 #[serde(rename_all = "camelCase")]
 pub struct LookupRegionContext {
     pub displayed_chinese: String,
-    pub faithful_chinese: String,
+    pub base_chinese: String,
     pub source_english: String,
 }
 

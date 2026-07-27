@@ -549,7 +549,8 @@ impl RTDetrV2MultiheadAttention {
         let (batch_size, sequence_length, hidden_size) = hidden_states.dims3()?;
         let query_key_input = match position_embeddings {
             Some(position_embeddings) => hidden_states
-                .broadcast_add(&position_embeddings.to_dtype(hidden_states.dtype())?)?,
+                .broadcast_add(&position_embeddings.to_dtype(hidden_states.dtype())?)?
+                .force_contiguous()?,
             None => hidden_states.clone(),
         };
         let shape = (
@@ -1098,9 +1099,11 @@ impl RTDetrV2MultiscaleDeformableAttention {
     ) -> Result<Tensor> {
         let hidden_states = match position_embeddings {
             Some(position_embeddings) => hidden_states
-                .broadcast_add(&position_embeddings.to_dtype(hidden_states.dtype())?)?,
-            None => hidden_states.clone(),
+                .broadcast_add(&position_embeddings.to_dtype(hidden_states.dtype())?)?
+                .force_contiguous()?,
+            None => hidden_states.force_contiguous()?,
         };
+        let encoder_hidden_states = encoder_hidden_states.force_contiguous()?;
         let (batch_size, num_queries, _) = hidden_states.dims3()?;
         let (_, sequence_length, _) = encoder_hidden_states.dims3()?;
         let total_elements = spatial_shapes_list
@@ -1115,7 +1118,7 @@ impl RTDetrV2MultiscaleDeformableAttention {
             );
         }
 
-        let value = self.value_proj.forward(encoder_hidden_states)?.reshape((
+        let value = self.value_proj.forward(&encoder_hidden_states)?.reshape((
             batch_size,
             sequence_length,
             self.n_heads,
@@ -1490,14 +1493,16 @@ impl RTDetrV2Model {
             source_flatten.push(source.flatten_from(2)?.transpose(1, 2)?);
         }
         let source_refs = source_flatten.iter().collect::<Vec<_>>();
-        let source_flatten = Tensor::cat(&source_refs, 1)?;
+        let source_flatten = Tensor::cat(&source_refs, 1)?.force_contiguous()?;
 
         let (anchors, valid_mask) = generate_anchors(
             &spatial_shapes_list,
             source_flatten.device(),
             source_flatten.dtype(),
         )?;
-        let memory = source_flatten.broadcast_mul(&valid_mask)?;
+        let memory = source_flatten
+            .broadcast_mul(&valid_mask)?
+            .force_contiguous()?;
         let output_memory = self
             .enc_output_norm
             .forward(&self.enc_output_linear.forward(&memory)?)?;

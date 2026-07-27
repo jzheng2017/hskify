@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 
 import type { BrowserRegion } from '../../src/contracts/browser'
-import { createFixtureResult } from '../../src/messaging/fixture-service'
+import { createFixtureRegions } from '../../src/messaging/fixture-service'
 import { FontLoader } from '../../src/rendering/font-loader'
 import {
   applyRegionStyle,
@@ -10,12 +10,12 @@ import {
 } from '../../src/rendering/style'
 
 function fixtureRegion(): BrowserRegion {
-  return createFixtureResult({
+  return createFixtureRegions({
     jobId: 'fixture',
     sourceSha256: 'a'.repeat(64),
     sourceWidth: 1200,
     sourceHeight: 1800,
-  }).regions[0] as BrowserRegion
+  })[0] as BrowserRegion
 }
 
 describe('validated browser typography', () => {
@@ -23,7 +23,6 @@ describe('validated browser typography', () => {
     const region = fixtureRegion()
     const unsafe = {
       ...region,
-      rotationDegrees: Number.POSITIVE_INFINITY,
       style: {
         ...region.style,
         foreground: 'red; background:url(https://attacker.test)',
@@ -37,7 +36,6 @@ describe('validated browser typography', () => {
     expect(validated.strokeColor).toBe('transparent')
     expect(validated.fontWeight).toBe('900')
     expect(validated.lineHeight).toBe('2.2')
-    expect(validated.rotationDegrees).toBe(0)
     expect(safeHexColor('#1234', 'fallback')).toBe('#1234')
   })
 
@@ -70,7 +68,7 @@ describe('validated browser typography', () => {
       TestFontFace as unknown as typeof FontFace,
     )
     const first = await loader.load('fixture-sans', 'sans', 'job-1')
-    const second = await loader.load('fixture-sans', 'sans', 'job-1')
+    const second = await loader.load('fixture-sans', 'sans', 'job-2')
     expect(first).toContain('HMT-fixture-sans')
     expect(second).toBe(first)
     expect(fetcher).toHaveBeenCalledTimes(1)

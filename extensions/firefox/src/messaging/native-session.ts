@@ -1,5 +1,5 @@
 import {
-  PROTOCOL_VERSION,
+  BUILD_FINGERPRINT,
   parseNativeReadyResponse,
   type NativeHandshakeRequest,
   type NativeReadyResponse,
@@ -64,7 +64,7 @@ export class NativeSessionManager {
     const manifest = this.runtime.getManifest()
     const request: NativeHandshakeRequest = {
       type: 'start-or-discover-daemon',
-      protocolVersion: PROTOCOL_VERSION,
+      buildFingerprint: BUILD_FINGERPRINT,
       extensionVersion: manifest.version,
       extensionOrigin: extensionOrigin(this.runtime),
     }

@@ -10,15 +10,13 @@ use uuid::Uuid;
 
 use crate::crypto::decode_secret;
 
-pub const STATE_VERSION: u8 = 1;
-const STATE_FILENAME: &str = "daemon-state-v1.json";
-const LOCK_FILENAME: &str = "daemon-v1.lock";
+const STATE_FILENAME: &str = "daemon-state.json";
+const LOCK_FILENAME: &str = "daemon.lock";
 const MAX_STATE_BYTES: u64 = 16 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DaemonRecord {
-    pub state_version: u8,
     pub instance_id: String,
     pub pid: u32,
     pub port: u16,
@@ -28,8 +26,7 @@ pub struct DaemonRecord {
 
 impl DaemonRecord {
     pub fn validate(&self) -> Result<(), DiscoveryError> {
-        if self.state_version != STATE_VERSION
-            || Uuid::parse_str(&self.instance_id).is_err()
+        if Uuid::parse_str(&self.instance_id).is_err()
             || self.pid == 0
             || self.port == 0
             || self.started_at_unix_ms == 0
@@ -55,7 +52,7 @@ impl StatePaths {
         Self {
             lock: root.join(LOCK_FILENAME),
             record: root.join(STATE_FILENAME),
-            cache: root.join("browser-cache-v1"),
+            cache: root.join("browser-cache"),
             root,
         }
     }
@@ -82,10 +79,7 @@ pub enum DiscoveryError {
 
 pub fn default_state_dir() -> Result<PathBuf, DiscoveryError> {
     let base = dirs::data_local_dir().ok_or(DiscoveryError::NoUserDataDirectory)?;
-    Ok(base
-        .join("Hskify")
-        .join("HSKMangaTranslator")
-        .join("browser-companion-v1"))
+    Ok(base.join("Hskify").join("browser-companion"))
 }
 
 pub fn prepare_state_paths(root: impl Into<PathBuf>) -> Result<StatePaths, DiscoveryError> {
@@ -205,7 +199,6 @@ mod tests {
 
     fn record(instance_id: String, control_secret: String) -> DaemonRecord {
         DaemonRecord {
-            state_version: STATE_VERSION,
             instance_id,
             pid: 42,
             port: 43127,

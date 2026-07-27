@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import type { BrowserRegion } from '../../src/contracts/browser'
-import { createFixtureResult } from '../../src/messaging/fixture-service'
+import { createFixtureRegions } from '../../src/messaging/fixture-service'
 import {
   PolygonTextFitter,
   RectangleTextFitter,
@@ -12,12 +12,12 @@ import {
 } from '../../src/rendering/fitting'
 
 function fixtureRegion(): BrowserRegion {
-  return createFixtureResult({
+  return createFixtureRegions({
     jobId: 'fixture',
     sourceSha256: 'a'.repeat(64),
     sourceWidth: 1200,
     sourceHeight: 1800,
-  }).regions[0] as BrowserRegion
+  })[0] as BrowserRegion
 }
 
 describe('rectangle and polygon-aware text fitting', () => {

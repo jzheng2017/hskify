@@ -1,0 +1,552 @@
+{
+  "schemaVersion": 1,
+  "page": {
+    "order": 29,
+    "file": "029.webp",
+    "width": 900,
+    "height": 2743,
+    "sourceSha256": "6f3ae3bbe95cb297156168616d09d83847c9fd701c96ff48e85c159473e52b03"
+  },
+  "policy": {
+    "included": "English story text: dialogue, thoughts, narration, captions, and unbubbled spoken lines, including punctuation-only reactions and silent ellipses",
+    "excluded": "sound effects, credits, scanlation promotion, translator notes, series branding, decorative labels, ambiguous OCR, and non-English text",
+    "detectorUse": "proposal only; every region and omission was manually gated against the source image"
+  },
+  "regions": [
+    {
+      "id": "30ysp-ch5-p029-r00",
+      "kind": "thought",
+      "containerStyle": "thought",
+      "readingOrder": 0,
+      "sourceEnglish": "AND LATELY, I HAVE OFTEN BEEN AWAY FROM THE ORPHANAGE.",
+      "normalizedEnglish": "AND LATELY, I HAVE OFTEN BEEN AWAY FROM THE ORPHANAGE.",
+      "textPolygon": [
+        [
+          0.14201389,
+          0.00276271
+        ],
+        [
+          0.85520834,
+          0.00276271
+        ],
+        [
+          0.85520834,
+          0.10165079
+        ],
+        [
+          0.14201389,
+          0.10165079
+        ]
+      ],
+      "eraseMask": {
+        "encoding": "normalized-polygon-v1",
+        "polygon": [
+          [
+            0.14555556,
+            0.00546847
+          ],
+          [
+            0.85333336,
+            0.00546847
+          ],
+          [
+            0.85333336,
+            0.09733869
+          ],
+          [
+            0.14555556,
+            0.09733869
+          ]
+        ],
+        "operation": "erase every English glyph, outline, punctuation mark, and antialiased edge inside the polygon; preserve every pixel outside the erase mask"
+      },
+      "geometryAudit": "detector-adjusted",
+      "reviewProvenance": {
+        "type": "acceptedProposal",
+        "uncertainty": "low",
+        "proposalIndex": 1,
+        "reviewRegionId": "6f3ae3bb-region-c0b65dfc00ba8ec7"
+      },
+      "bubblePolygon": [
+        [
+          0.14201389,
+          0.00276271
+        ],
+        [
+          0.85520834,
+          0.00276271
+        ],
+        [
+          0.85520834,
+          0.10165079
+        ],
+        [
+          0.14201389,
+          0.10165079
+        ]
+      ],
+      "productionMatch": {
+        "stableRegionId": "6f3ae3bb-region-c0b65dfc00ba8ec7",
+        "method": "stable-region-id-and-text-geometry",
+        "textGeometryIou": 1.0
+      },
+      "simplifiedChinese": "最近，我经常离开孤儿院。",
+      "pinyin": "zuì jìn wǒ jīng cháng lí kāi gū ér yuàn",
+      "hskValidation": {
+        "requestedLevel": 5,
+        "strictlyValid": false,
+        "aboveLevelTokens": [
+          "孤儿院",
+          "孤儿",
+          "孤",
+          "儿",
+          "院"
+        ],
+        "repairState": "pending"
+      },
+      "hskTokens": [
+        {
+          "text": "最近",
+          "startChar": 0,
+          "endChar": 2,
+          "pinyin": "zuì jìn",
+          "classification": "hsk",
+          "hskLevel": 3,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "我",
+          "startChar": 3,
+          "endChar": 4,
+          "pinyin": "wǒ",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "经常",
+          "startChar": 4,
+          "endChar": 6,
+          "pinyin": "jīng cháng",
+          "classification": "hsk",
+          "hskLevel": 3,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "离开",
+          "startChar": 6,
+          "endChar": 8,
+          "pinyin": "lí kāi",
+          "classification": "hsk",
+          "hskLevel": 3,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "孤儿院",
+          "startChar": 8,
+          "endChar": 11,
+          "pinyin": "gū ér yuàn",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        }
+      ]
+    },
+    {
+      "id": "30ysp-ch5-p029-r01",
+      "kind": "thought",
+      "containerStyle": "thought",
+      "readingOrder": 1,
+      "sourceEnglish": "Is that why she thought I was going to leave?",
+      "normalizedEnglish": "Is that why she thought I was going to leave?",
+      "textPolygon": [
+        [
+          0.14888889,
+          0.22675902
+        ],
+        [
+          0.85,
+          0.22675902
+        ],
+        [
+          0.85,
+          0.33284725
+        ],
+        [
+          0.14888889,
+          0.33284725
+        ]
+      ],
+      "eraseMask": {
+        "encoding": "normalized-polygon-v1",
+        "polygon": [
+          [
+            0.14555556,
+            0.22566533
+          ],
+          [
+            0.85333333,
+            0.22566533
+          ],
+          [
+            0.85333333,
+            0.33394094
+          ],
+          [
+            0.14555556,
+            0.33394094
+          ]
+        ],
+        "operation": "erase every English glyph, outline, punctuation mark, and antialiased edge inside the polygon; preserve every pixel outside the erase mask"
+      },
+      "geometryAudit": "manual",
+      "reviewProvenance": {
+        "type": "missedStoryTextRegion",
+        "uncertainty": "low",
+        "missedIndex": 1
+      },
+      "simplifiedChinese": "她是因为这个才以为我要离开吗？",
+      "pinyin": "Tā shì yīnwèi zhège cái yǐwéi wǒ yào líkāi ma?",
+      "hskTokens": [
+        {
+          "text": "她",
+          "startChar": 0,
+          "endChar": 1,
+          "pinyin": "tā",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "是",
+          "startChar": 1,
+          "endChar": 2,
+          "pinyin": "shì",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "因为",
+          "startChar": 2,
+          "endChar": 4,
+          "pinyin": "yīn wèi",
+          "classification": "hsk",
+          "hskLevel": 2,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "这个",
+          "startChar": 4,
+          "endChar": 6,
+          "pinyin": "zhè ge",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "才",
+          "startChar": 6,
+          "endChar": 7,
+          "pinyin": "cái",
+          "classification": "hsk",
+          "hskLevel": 3,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "以为",
+          "startChar": 7,
+          "endChar": 9,
+          "pinyin": "yǐ wéi",
+          "classification": "hsk",
+          "hskLevel": 4,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "我",
+          "startChar": 9,
+          "endChar": 10,
+          "pinyin": "wǒ",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "要",
+          "startChar": 10,
+          "endChar": 11,
+          "pinyin": "yào / yāo",
+          "classification": "hsk",
+          "hskLevel": 2,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "离开",
+          "startChar": 11,
+          "endChar": 13,
+          "pinyin": "lí kāi",
+          "classification": "hsk",
+          "hskLevel": 3,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "吗",
+          "startChar": 13,
+          "endChar": 14,
+          "pinyin": "ma / má / mǎ",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        }
+      ]
+    },
+    {
+      "id": "30ysp-ch5-p029-r02",
+      "kind": "narration",
+      "containerStyle": "narration",
+      "readingOrder": 2,
+      "sourceEnglish": "Things to eat when...",
+      "normalizedEnglish": "Things to eat when...",
+      "textPolygon": [
+        [
+          0.06180555,
+          0.47779006
+        ],
+        [
+          0.46805555,
+          0.47779006
+        ],
+        [
+          0.46805555,
+          0.55064595
+        ],
+        [
+          0.06180555,
+          0.55064595
+        ]
+      ],
+      "eraseMask": {
+        "encoding": "normalized-polygon-v1",
+        "polygon": [
+          [
+            0.05555556,
+            0.47794387
+          ],
+          [
+            0.50888891,
+            0.47794387
+          ],
+          [
+            0.50888891,
+            0.55486695
+          ],
+          [
+            0.05555556,
+            0.55486695
+          ]
+        ],
+        "operation": "erase every English glyph, outline, punctuation mark, and antialiased edge inside the polygon; preserve every pixel outside the erase mask"
+      },
+      "geometryAudit": "detector-adjusted",
+      "reviewProvenance": {
+        "type": "acceptedProposal",
+        "uncertainty": "high",
+        "proposalIndex": 3,
+        "reviewRegionId": "6f3ae3bb-region-62c7db70f02ca3ce"
+      },
+      "productionMatch": {
+        "stableRegionId": "6f3ae3bb-region-62c7db70f02ca3ce",
+        "method": "stable-region-id-and-text-geometry",
+        "textGeometryIou": 1.0
+      },
+      "simplifiedChinese": "吃东西的时候，会发生什幺？",
+      "pinyin": "chī dōng xi / dōng xī de / dì / dí / dī shí hou huì / kuài fā shēng shén me",
+      "hskValidation": {
+        "requestedLevel": 5,
+        "strictlyValid": true,
+        "aboveLevelTokens": [],
+        "repairState": "accepted"
+      },
+      "hskTokens": [
+        {
+          "text": "吃",
+          "startChar": 0,
+          "endChar": 1,
+          "pinyin": "chī",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "东西",
+          "startChar": 1,
+          "endChar": 3,
+          "pinyin": "dōng xi / dōng xī",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "的",
+          "startChar": 3,
+          "endChar": 4,
+          "pinyin": "de / dì / dí / dī",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "时候",
+          "startChar": 4,
+          "endChar": 6,
+          "pinyin": "shí hou",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "会",
+          "startChar": 7,
+          "endChar": 8,
+          "pinyin": "huì / kuài",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "发生",
+          "startChar": 8,
+          "endChar": 10,
+          "pinyin": "fā shēng",
+          "classification": "hsk",
+          "hskLevel": 4,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "什幺",
+          "startChar": 10,
+          "endChar": 12,
+          "pinyin": "shén me",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        }
+      ]
+    },
+    {
+      "id": "30ysp-ch5-p029-r03",
+      "kind": "thought",
+      "containerStyle": "thought",
+      "readingOrder": 3,
+      "sourceEnglish": "NO, RATHER THAN THAT...",
+      "normalizedEnglish": "NO, RATHER THAN THAT...",
+      "textPolygon": [
+        [
+          0.21336806,
+          0.79382175
+        ],
+        [
+          0.78663194,
+          0.79382175
+        ],
+        [
+          0.78663194,
+          0.8912858
+        ],
+        [
+          0.21336806,
+          0.8912858
+        ]
+      ],
+      "eraseMask": {
+        "encoding": "normalized-polygon-v1",
+        "polygon": [
+          [
+            0.22333333,
+            0.7987605
+          ],
+          [
+            0.77777776,
+            0.7987605
+          ],
+          [
+            0.77777776,
+            0.88552682
+          ],
+          [
+            0.22333333,
+            0.88552682
+          ]
+        ],
+        "operation": "erase every English glyph, outline, punctuation mark, and antialiased edge inside the polygon; preserve every pixel outside the erase mask"
+      },
+      "geometryAudit": "detector-adjusted",
+      "reviewProvenance": {
+        "type": "acceptedProposal",
+        "uncertainty": "low",
+        "proposalIndex": 2,
+        "reviewRegionId": "6f3ae3bb-region-772b372c9e2ed363"
+      },
+      "bubblePolygon": [
+        [
+          0.21876141,
+          0.79052742
+        ],
+        [
+          0.78129078,
+          0.79052742
+        ],
+        [
+          0.78129078,
+          0.89697273
+        ],
+        [
+          0.21876141,
+          0.89697273
+        ]
+      ],
+      "productionMatch": {
+        "stableRegionId": "6f3ae3bb-region-772b372c9e2ed363",
+        "method": "stable-region-id-and-text-geometry",
+        "textGeometryIou": 1.0
+      },
+      "simplifiedChinese": "不，不如那样。。。。。。",
+      "pinyin": "bù bù rú nà yàng",
+      "hskValidation": {
+        "requestedLevel": 5,
+        "strictlyValid": false,
+        "aboveLevelTokens": [
+          "那样",
+          "样"
+        ],
+        "repairState": "pending"
+      },
+      "hskTokens": [
+        {
+          "text": "不",
+          "startChar": 0,
+          "endChar": 1,
+          "pinyin": "bù",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "不如",
+          "startChar": 2,
+          "endChar": 4,
+          "pinyin": "bù rú",
+          "classification": "hsk",
+          "hskLevel": 5,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "那样",
+          "startChar": 4,
+          "endChar": 6,
+          "pinyin": "nà yàng",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        }
+      ]
+    }
+  ]
+}

@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [string] $BundleRoot,
-    [string] $ProductRoot = (Join-Path $env:LOCALAPPDATA 'Hskify\HSKMangaTranslator'),
+    [string] $ProductRoot = (Join-Path $env:LOCALAPPDATA 'Hskify'),
     [Parameter(DontShow = $true)]
     [string] $RegistryPath = 'HKCU:\Software\Mozilla\NativeMessagingHosts\local.hskify.hsk_manga'
 )
@@ -51,6 +51,56 @@ function Copy-DirectoryContents {
     }
 }
 
+function Write-ModelReadinessMarker {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $Root,
+        [Parameter(Mandatory = $true)]
+        [object] $Bundle
+    )
+
+    $modelManifestPath = Join-Path $Root 'resources\model-packs\manifest.v1.json'
+    $modelManifest = Get-Content -LiteralPath $modelManifestPath -Raw | ConvertFrom-Json
+    $resourceIdentities = @(
+        foreach ($identity in @($modelManifest.resourceIdentities)) {
+            [ordered]@{
+                id = [string] $identity.id
+                repository = [string] $identity.repository
+                repositoryRevision = [string] $identity.repositoryRevision
+                filename = [string] $identity.filename
+                bytes = [uint64] $identity.bytes
+                sha256 = [string] $identity.sha256
+            }
+        }
+    )
+    $installations = @(
+        foreach ($identity in @($modelManifest.resourceIdentities)) {
+            $path = if ([string] $identity.id -ceq 'translation-model') {
+                Join-Path $Root 'resources\models\Qwen3.5-4B-Q4_K_M.gguf'
+            }
+            else {
+                Join-Path $Root "resources\models\resident\$($identity.id)\$($identity.filename)"
+            }
+            [ordered]@{
+                id = [string] $identity.id
+                path = $path
+            }
+        }
+    )
+    $marker = [ordered]@{
+        buildFingerprint = [string] $Bundle.buildFingerprint
+        resourceIdentities = $resourceIdentities
+        installations = $installations
+    }
+    $markerDirectory = Join-Path $Root 'browser-companion\browser-cache\browser-runtime'
+    [IO.Directory]::CreateDirectory($markerDirectory) | Out-Null
+    [IO.File]::WriteAllText(
+        (Join-Path $markerDirectory 'models.ready'),
+        ($marker | ConvertTo-Json -Depth 8 -Compress),
+        [Text.UTF8Encoding]::new($false)
+    )
+}
+
 $resolvedBundleRoot = (Resolve-Path -LiteralPath $BundleRoot).Path
 $bundleManifestPath = Join-Path $resolvedBundleRoot 'bundle-manifest.json'
 if (-not (Test-Path -LiteralPath $bundleManifestPath -PathType Leaf)) {
@@ -59,11 +109,22 @@ if (-not (Test-Path -LiteralPath $bundleManifestPath -PathType Leaf)) {
 $bundleManifest = Get-Content -LiteralPath $bundleManifestPath -Raw | ConvertFrom-Json
 if (
     $bundleManifest.bundleFormatVersion -ne 1 -or
-    $bundleManifest.product -ne 'HSK Manga Translator' -or
+    $bundleManifest.product -ne 'Hskify' -or
     $bundleManifest.nativeHostName -ne 'local.hskify.hsk_manga' -or
     $bundleManifest.firefoxExtensionId -ne 'hsk-manga-translator@local.hskify'
 ) {
-    throw 'the bundle manifest does not identify the frozen HSK Manga Translator product'
+    throw 'the bundle manifest does not identify Hskify'
+}
+if (
+    -not $bundleManifest.resources.hskBundled -or
+    -not $bundleManifest.resources.dictionaryBundled -or
+    -not $bundleManifest.resources.modelBundled -or
+    -not $bundleManifest.resources.residentModelsBundled -or
+    $bundleManifest.resources.residentModelCount -ne 3 -or
+    -not $bundleManifest.resources.residentRuntimeBundled -or
+    $bundleManifest.resources.residentRuntimeFileCount -ne 39
+) {
+    throw 'the bundle is missing mandatory HSK, dictionary, detector, OCR, translation, CUDA, or llama resources'
 }
 foreach ($entry in @($bundleManifest.files)) {
     Assert-BundleFile -Root $resolvedBundleRoot -Entry $entry
@@ -76,12 +137,18 @@ if ($resolvedProductRoot -eq $driveRoot) {
 }
 $appRoot = Join-Path $resolvedProductRoot 'app'
 $resourceRoot = Join-Path $resolvedProductRoot 'resources'
-if ((Test-Path -LiteralPath $appRoot) -or (Test-Path -LiteralPath $resourceRoot)) {
+$stateRoot = Join-Path $resolvedProductRoot 'browser-companion'
+if (
+    (Test-Path -LiteralPath $appRoot) -or
+    (Test-Path -LiteralPath $resourceRoot) -or
+    (Test-Path -LiteralPath $stateRoot)
+) {
     throw "an installation already exists under $resolvedProductRoot; run Uninstall.ps1 first"
 }
 
 $createdApp = $false
 $createdResources = $false
+$createdState = $false
 $registered = $false
 try {
     [IO.Directory]::CreateDirectory($appRoot) | Out-Null
@@ -89,6 +156,7 @@ try {
     foreach ($name in @(
         'companion',
         'extension',
+        'provenance',
         'native-host-registration',
         'Install.ps1',
         'Uninstall.ps1',
@@ -119,6 +187,9 @@ try {
         }
     }
 
+    Write-ModelReadinessMarker -Root $resolvedProductRoot -Bundle $bundleManifest
+    $createdState = $true
+
     $registerScript = Join-Path $appRoot 'native-host-registration\Register-NativeHost.ps1'
     $nativeHostPath = Join-Path $appRoot 'companion\hsk-manga-native-host.exe'
     & $registerScript -NativeHostPath $nativeHostPath -RegistryPath $RegistryPath | Out-Null
@@ -135,9 +206,12 @@ catch {
     if ($createdResources -and (Test-Path -LiteralPath $resourceRoot)) {
         Remove-Item -LiteralPath $resourceRoot -Recurse -Force
     }
+    if ($createdState -and (Test-Path -LiteralPath $stateRoot)) {
+        Remove-Item -LiteralPath $stateRoot -Recurse -Force
+    }
     throw
 }
 
-Write-Output "Installed HSK Manga Translator under $resolvedProductRoot"
-Write-Output "Firefox extension package: $(Join-Path $appRoot 'extension\hsk-manga-translator-firefox.zip')"
+Write-Output "Installed Hskify under $resolvedProductRoot"
+Write-Output "Firefox extension package: $(Join-Path $appRoot 'extension\hskify-firefox.zip')"
 Write-Output "Uninstall command: powershell -ExecutionPolicy Bypass -File `"$(Join-Path $appRoot 'Uninstall.ps1')`""

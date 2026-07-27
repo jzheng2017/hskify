@@ -10,9 +10,9 @@ use crate::{
     DictionaryArtifact, HSK_STANDARD, HskArtifact, HskDataset, HskException, HskLevel,
     HskViolation, JIEBA_CRATE_VERSION, JIEBA_EMBEDDED_DICTIONARY_SHA256, LOOKUP_REVISION,
     LoadPolicy, LocalDictionary, LookupRegionContext, LookupResult, LookupToken,
-    NORMALIZATION_REVISION, PRESERVATION_REVISION, ProperName, ProperNameReason, Result,
-    SEGMENTATION_REVISION, TextNormalizer, UNICODE_NORMALIZATION_CRATE_VERSION,
-    UNICODE_NORMALIZATION_TABLES_SHA256, ValidationReport, ViolationReason,
+    NORMALIZATION_REVISION, ProperName, ProperNameReason, Result, SEGMENTATION_REVISION,
+    TextNormalizer, UNICODE_NORMALIZATION_CRATE_VERSION, UNICODE_NORMALIZATION_TABLES_SHA256,
+    ValidationReport, ViolationReason,
     normalization::{is_all_han, is_ignorable_token},
     sha256_hex,
     trie::AllowedWordTrie,
@@ -112,7 +112,6 @@ impl HskControl {
             NORMALIZATION_REVISION,
             SEGMENTATION_REVISION,
             LOOKUP_REVISION,
-            PRESERVATION_REVISION,
             OPENCC_DEPENDENCY_REVISION,
             JIEBA_CRATE_VERSION,
             JIEBA_EMBEDDED_DICTIONARY_SHA256,
@@ -555,6 +554,9 @@ impl HskControl {
             merged.extend(entry.glosses.iter().cloned());
             definitions = merged.into_iter().collect();
         }
+        if proper_name && pinyin.is_empty() {
+            pinyin = self.composed_pinyin(word);
+        }
         if proper_name && definitions.is_empty() {
             definitions.push("Proper name · outside HSK list".into());
         }
@@ -565,6 +567,31 @@ impl HskControl {
             hsk_level: self.hsk.level_of(word),
             proper_name,
         }
+    }
+
+    fn composed_pinyin(&self, word: &str) -> String {
+        let characters = word.chars().collect::<Vec<_>>();
+        let mut parts = Vec::new();
+        let mut start = 0;
+        while start < characters.len() {
+            let end = self
+                .full_lexicon
+                .longest_match(&characters, start)
+                .unwrap_or(start + 1);
+            let component = characters[start..end].iter().collect::<String>();
+            let (mut pinyin, _) = self.dictionary.merged_fields(&component);
+            if pinyin.is_empty()
+                && let Some(entry) = self.hsk.entry(&component)
+            {
+                pinyin.clone_from(&entry.pinyin);
+            }
+            if pinyin.trim().is_empty() {
+                return String::new();
+            }
+            parts.push(pinyin);
+            start = end;
+        }
+        parts.join(" ")
     }
 
     fn normalize_names(&self, names: &[ProperName]) -> Vec<NormalizedName> {
@@ -589,20 +616,6 @@ impl HskControl {
         });
         result.dedup_by(|left, right| left.text == right.text);
         result
-    }
-
-    pub(crate) fn negation_markers(&self, text: &str) -> Vec<String> {
-        let normalized = self.normalizer.normalize(text);
-        let characters = normalized.chars().collect::<Vec<_>>();
-        self.jieba
-            .tokenize(&normalized, TokenizeMode::Default, true)
-            .into_iter()
-            .filter(|token| {
-                !token_is_fragment_of_lexicalized_prefix(&characters, token.start, token.end)
-            })
-            .flat_map(|token| negation_markers_in_token(token.word))
-            .map(str::to_owned)
-            .collect()
     }
 }
 
@@ -733,116 +746,5 @@ impl ScoredSuggestion {
             .then_with(|| left.level.cmp(&right.level))
             .then_with(|| left.frequency_rank.cmp(&right.frequency_rank))
             .then_with(|| left.word.cmp(&right.word))
-    }
-}
-
-// These are lexical words whose initial scalar only resembles a negation
-// marker. The surrounding-token check also recognizes them if user-dictionary
-// frequency causes Jieba to split the marker from the rest of the word.
-const LEXICALIZED_NEGATION_PREFIXES: &[&str] = &[
-    "非常", "非洲", "非凡", "非得", "未来", "别人", "别致", "别扭", "别墅", "没收", "没落", "莫名",
-    "不错",
-];
-
-fn token_is_fragment_of_lexicalized_prefix(
-    characters: &[char],
-    token_start: usize,
-    token_end: usize,
-) -> bool {
-    LEXICALIZED_NEGATION_PREFIXES.iter().any(|prefix| {
-        let prefix_length = prefix.chars().count();
-        token_end <= token_start + prefix_length
-            && token_start + prefix_length <= characters.len()
-            && prefix
-                .chars()
-                .eq(characters[token_start..token_start + prefix_length]
-                    .iter()
-                    .copied())
-    })
-}
-
-fn negation_markers_in_token(mut token: &str) -> Vec<&'static str> {
-    let mut markers = Vec::new();
-    while !token.is_empty() {
-        if let Some(prefix) = LEXICALIZED_NEGATION_PREFIXES
-            .iter()
-            .filter(|prefix| token.starts_with(**prefix))
-            .max_by_key(|prefix| prefix.len())
-        {
-            token = &token[prefix.len()..];
-            continue;
-        }
-        if token.starts_with("并非") || token.starts_with("绝非") {
-            markers.push("非");
-            token = &token["并非".len()..];
-            continue;
-        }
-        if token.starts_with("没有") {
-            markers.push("没");
-            token = &token["没有".len()..];
-            continue;
-        }
-        let Some(character) = token.chars().next() else {
-            break;
-        };
-        let marker = match character {
-            '不' => Some("不"),
-            '没' => Some("没"),
-            '别' => Some("别"),
-            '未' => Some("未"),
-            '非' => Some("非"),
-            '莫' => Some("莫"),
-            _ => None,
-        };
-        if let Some(marker) = marker {
-            markers.push(marker);
-        }
-        token = &token[character.len_utf8()..];
-    }
-    markers
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{negation_markers_in_token, token_is_fragment_of_lexicalized_prefix};
-
-    #[test]
-    fn negation_units_exclude_lexicalized_marker_prefixes() {
-        for word in [
-            "非常",
-            "非常好",
-            "非洲",
-            "未来",
-            "别人",
-            "没收",
-            "莫名其妙",
-            "不错",
-        ] {
-            assert!(negation_markers_in_token(word).is_empty(), "{word}");
-        }
-    }
-
-    #[test]
-    fn negation_units_keep_real_markers_and_contextual_compounds() {
-        assert_eq!(negation_markers_in_token("不"), ["不"]);
-        assert_eq!(negation_markers_in_token("不好"), ["不"]);
-        assert_eq!(negation_markers_in_token("没"), ["没"]);
-        assert_eq!(negation_markers_in_token("没有"), ["没"]);
-        assert_eq!(negation_markers_in_token("别走"), ["别"]);
-        assert_eq!(negation_markers_in_token("未完成"), ["未"]);
-        assert_eq!(negation_markers_in_token("非法"), ["非"]);
-        assert_eq!(negation_markers_in_token("莫走"), ["莫"]);
-        assert_eq!(negation_markers_in_token("并非"), ["非"]);
-        assert_eq!(negation_markers_in_token("绝非如此"), ["非"]);
-        assert_eq!(negation_markers_in_token("非常不好"), ["不"]);
-        assert_eq!(negation_markers_in_token("不吃也不喝"), ["不", "不"]);
-    }
-
-    #[test]
-    fn lexicalized_context_survives_a_split_marker_token() {
-        let characters = "非常不好".chars().collect::<Vec<_>>();
-        assert!(token_is_fragment_of_lexicalized_prefix(&characters, 0, 1));
-        assert!(token_is_fragment_of_lexicalized_prefix(&characters, 0, 2));
-        assert!(!token_is_fragment_of_lexicalized_prefix(&characters, 0, 3));
     }
 }

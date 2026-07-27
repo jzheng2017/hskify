@@ -25,6 +25,7 @@ export class SelectionController {
   private requestRevision = 0
   private destroyed = false
   private speechOwner: SpeechStateListener | undefined
+  private popoverPointerActive = false
 
   constructor(
     private readonly root: ShadowRoot,
@@ -36,13 +37,32 @@ export class SelectionController {
     root.addEventListener('mouseup', this.onSelectionComplete)
     root.addEventListener('keyup', this.onKeyUp)
     root.addEventListener('copy', this.onCopy)
-    root.addEventListener('pointerdown', this.onPointerDown)
     root.addEventListener('click', this.onClick, true)
+    root.host.ownerDocument.defaultView?.addEventListener('scroll', this.onViewportChange, true)
+    root.host.ownerDocument.defaultView?.addEventListener('resize', this.onViewportChange)
+    root.host.ownerDocument.addEventListener(
+      'pointerdown',
+      this.onDocumentPointerDown,
+      true,
+    )
+    root.host.ownerDocument.addEventListener('pointerup', this.onDocumentPointerUp, true)
+    root.host.ownerDocument.addEventListener(
+      'selectionchange',
+      this.onDocumentSelectionChange,
+    )
   }
 
   register(element: HTMLElement, jobId: string, regionId: string): void {
     this.regions.set(element, { element, jobId, regionId })
     element.addEventListener('keydown', this.onRegionKeyDown)
+  }
+
+  unregister(element: HTMLElement): void {
+    const region = this.regions.get(element)
+    if (!region) return
+    region.element.removeEventListener('keydown', this.onRegionKeyDown)
+    this.regions.delete(element)
+    this.dismiss()
   }
 
   destroy(): void {
@@ -51,8 +71,30 @@ export class SelectionController {
     this.root.removeEventListener('mouseup', this.onSelectionComplete)
     this.root.removeEventListener('keyup', this.onKeyUp)
     this.root.removeEventListener('copy', this.onCopy)
-    this.root.removeEventListener('pointerdown', this.onPointerDown)
     this.root.removeEventListener('click', this.onClick, true)
+    this.root.host.ownerDocument.defaultView?.removeEventListener(
+      'scroll',
+      this.onViewportChange,
+      true,
+    )
+    this.root.host.ownerDocument.defaultView?.removeEventListener(
+      'resize',
+      this.onViewportChange,
+    )
+    this.root.host.ownerDocument.removeEventListener(
+      'pointerdown',
+      this.onDocumentPointerDown,
+      true,
+    )
+    this.root.host.ownerDocument.removeEventListener(
+      'pointerup',
+      this.onDocumentPointerUp,
+      true,
+    )
+    this.root.host.ownerDocument.removeEventListener(
+      'selectionchange',
+      this.onDocumentSelectionChange,
+    )
     for (const region of this.regions.values()) {
       region.element.removeEventListener('keydown', this.onRegionKeyDown)
     }
@@ -86,11 +128,36 @@ export class SelectionController {
     return null
   }
 
-  private readonly onPointerDown = (event: Event): void => {
-    const target = event.target
-    if (target instanceof Node && !this.popover.contains(target)) {
-      this.dismiss()
+  private readonly onDocumentPointerDown = (event: Event): void => {
+    if (event.composedPath().includes(this.popover)) {
+      this.popoverPointerActive = true
+      return
     }
+    this.popoverPointerActive = false
+    this.dismiss()
+  }
+
+  private readonly onDocumentPointerUp = (): void => {
+    queueMicrotask(() => {
+      this.popoverPointerActive = false
+    })
+  }
+
+  private readonly onViewportChange = (): void => {
+    this.dismiss()
+  }
+
+  private readonly onDocumentSelectionChange = (): void => {
+    queueMicrotask(() => {
+      if (
+        this.destroyed ||
+        this.popoverPointerActive ||
+        this.selectionTouches(this.popover)
+      ) {
+        return
+      }
+      if (!this.selectedRegion()) this.dismiss()
+    })
   }
 
   private readonly onClick = (event: Event): void => {
@@ -180,10 +247,7 @@ export class SelectionController {
     const loading = document.createElement('span')
     loading.textContent = 'Looking up…'
     this.popover.append(heading, loading)
-    const rangeRect = selected.range.getBoundingClientRect()
-    const hostRect = this.root.host.getBoundingClientRect()
-    this.popover.style.left = `${Math.max(4, rangeRect.left - hostRect.left)}px`
-    this.popover.style.top = `${Math.max(4, rangeRect.bottom - hostRect.top + 6)}px`
+    this.positionPopover(selected.region.element)
     try {
       const result = await this.lookup({
         selectedText,
@@ -192,6 +256,7 @@ export class SelectionController {
       })
       if (revision !== this.requestRevision || this.destroyed) return
       this.renderResult(result, selectedText)
+      this.positionPopover(selected.region.element)
     } catch {
       if (revision !== this.requestRevision || this.destroyed) return
       const heading = this.popover.querySelector<HTMLElement>('.hmt-lookup-heading')
@@ -200,7 +265,50 @@ export class SelectionController {
       const message = document.createElement('span')
       message.textContent = 'Dictionary lookup unavailable.'
       this.popover.append(message)
+      this.positionPopover(selected.region.element)
     }
+  }
+
+  private selectionTouches(element: HTMLElement): boolean {
+    const selection = window.getSelection()
+    if (!selection || selection.rangeCount === 0) return false
+    const anchor = nodeElement(selection.anchorNode)
+    const focus = nodeElement(selection.focusNode)
+    return Boolean(
+      (anchor && element.contains(anchor)) || (focus && element.contains(focus)),
+    )
+  }
+
+  private positionPopover(region: HTMLElement): void {
+    const gap = 8
+    const edge = 4
+    const hostRect = this.root.host.getBoundingClientRect()
+    const regionRect = region.getBoundingClientRect()
+    const popoverRect = this.popover.getBoundingClientRect()
+    const popoverWidth = popoverRect.width || this.popover.offsetWidth
+    const popoverHeight = popoverRect.height || this.popover.offsetHeight
+    const viewportRight = Math.min(hostRect.right, window.innerWidth - edge)
+    const maximumLeft = Math.max(edge, viewportRight - hostRect.left - popoverWidth)
+    const left = Math.min(
+      maximumLeft,
+      Math.max(edge, regionRect.left - hostRect.left),
+    )
+    const below = regionRect.bottom - hostRect.top + gap
+    const belowSpace = Math.max(0, window.innerHeight - edge - regionRect.bottom - gap)
+    const aboveSpace = Math.max(0, regionRect.top - edge - gap)
+    const placeBelow = popoverHeight === 0 || belowSpace >= popoverHeight || belowSpace >= aboveSpace
+    const availableHeight = Math.max(1, placeBelow ? belowSpace : aboveSpace)
+    const renderedHeight = Math.min(popoverHeight || availableHeight, availableHeight)
+    const top = placeBelow
+      ? below
+      : regionRect.top - hostRect.top - gap - renderedHeight
+
+    this.popover.style.left = `${left}px`
+    this.popover.style.maxHeight = `${availableHeight}px`
+    // The whole translated region is the obstruction. If the panel cannot fit
+    // at its natural height, it scrolls in the larger outside space instead of
+    // covering any translated lettering.
+    this.popover.style.top = `${Math.max(edge - hostRect.top, top)}px`
   }
 
   private selectedText(selected: {
@@ -232,8 +340,17 @@ export class SelectionController {
     speak.title = speak.disabled
       ? 'Mandarin speech is not available in this Firefox profile.'
       : 'Play Mandarin pronunciation using the best available local voice.'
-    const updateSpeechState = (state: SpeechState): void => {
+    const updateSpeechState: SpeechStateListener = (state, voice): void => {
       if (!speak.isConnected) return
+      if (voice) {
+        speak.dataset.hmtVoiceName = voice.name
+        speak.dataset.hmtVoiceLang = voice.lang
+        speak.dataset.hmtVoiceLocalService = String(voice.localService)
+      } else if (state === 'unavailable' || state === 'error') {
+        delete speak.dataset.hmtVoiceName
+        delete speak.dataset.hmtVoiceLang
+        delete speak.dataset.hmtVoiceLocalService
+      }
       const active = state === 'loading' || state === 'speaking'
       const runtimeAvailable = this.speaker.isAvailable()
       speak.disabled = state === 'unavailable' && !runtimeAvailable
@@ -306,11 +423,11 @@ export class SelectionController {
     if (result.region) {
       const context = document.createElement('div')
       context.className = 'hmt-lookup-context'
-      const faithful = document.createElement('span')
-      faithful.textContent = result.region.faithfulChinese
+      const base = document.createElement('span')
+      base.textContent = result.region.baseChinese
       const source = document.createElement('span')
       source.textContent = result.region.sourceEnglish
-      context.append(faithful, source)
+      context.append(base, source)
       this.popover.append(context)
     }
   }

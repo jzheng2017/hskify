@@ -1,0 +1,769 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hskify.local/schemas/30-years-since-the-prologue-chapter-5-benchmark-evidence.json",
+  "title": "30 Years Since the Prologue chapter 5 packaged-Firefox benchmark evidence",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/completeRun"
+    },
+    {
+      "$ref": "#/$defs/cancellationRun"
+    },
+    {
+      "$ref": "#/$defs/summary"
+    }
+  ],
+  "$defs": {
+    "nonNegativeNumber": {
+      "type": "number",
+      "minimum": 0
+    },
+    "gate": {
+      "type": "object",
+      "required": ["id", "status"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "status": {
+          "enum": ["pass", "fail", "missing"]
+        },
+        "reason": {
+          "type": "string"
+        }
+      }
+    },
+    "timing": {
+      "type": "object",
+      "required": [
+        "scopeStart",
+        "includedProductPath",
+        "hudAcknowledgementMs",
+        "firstVisibleRegionMs",
+        "visibleRegionGroupMs",
+        "visibleRegionGroupCount",
+        "expectedViewportRegionIds",
+        "observedViewportRegionIds",
+        "firstLongImageCompleteMs",
+        "allImagesCompleteMs",
+        "jobCreatedAfterAcquisitionHashUpload"
+      ],
+      "properties": {
+        "scopeStart": {
+          "type": "object",
+          "required": ["event", "issuedAtEpochMs"],
+          "properties": {
+            "event": {
+              "const": "content:start browser.tabs.sendMessage invocation"
+            },
+            "issuedAtEpochMs": {
+              "$ref": "#/$defs/nonNegativeNumber"
+            }
+          }
+        },
+        "hudAcknowledgementMs": {
+          "$ref": "#/$defs/nonNegativeNumber"
+        },
+        "firstVisibleRegionMs": {
+          "$ref": "#/$defs/nonNegativeNumber"
+        },
+        "visibleRegionGroupMs": {
+          "$ref": "#/$defs/nonNegativeNumber"
+        },
+        "visibleRegionGroupCount": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 6
+        },
+        "expectedViewportRegionIds": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 6,
+          "uniqueItems": true
+        },
+        "observedViewportRegionIds": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 6,
+          "uniqueItems": true
+        },
+        "firstLongImageCompleteMs": {
+          "$ref": "#/$defs/nonNegativeNumber"
+        },
+        "allImagesCompleteMs": {
+          "$ref": "#/$defs/nonNegativeNumber"
+        },
+        "includedProductPath": {
+          "type": "array",
+          "contains": {
+            "const": "content source-byte acquisition"
+          }
+        },
+        "jobCreatedAfterAcquisitionHashUpload": {
+          "type": "array",
+          "minItems": 36,
+          "maxItems": 36
+        }
+      }
+    },
+    "resourceIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "repository", "repositoryRevision", "filename", "bytes", "sha256"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "repository": {
+          "type": "string",
+          "minLength": 1
+        },
+        "repositoryRevision": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "filename": {
+          "type": "string",
+          "minLength": 1
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "resourceIdentityEvidence": {
+      "type": "object",
+      "required": ["comparison", "expected", "actual", "gates"],
+      "properties": {
+        "comparison": {
+          "const": "JSON-deep-exact ordered projection from committed model manifest"
+        },
+        "expected": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/resourceIdentity"
+          }
+        },
+        "actual": {
+          "type": "array"
+        },
+        "gates": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1,
+          "items": {
+            "$ref": "#/$defs/gate"
+          }
+        }
+      }
+    },
+    "routeEvidence": {
+      "type": "object",
+      "required": [
+        "session",
+        "health",
+        "resourceIdentityEvidence",
+        "setup",
+        "actualExtensionRouteContract",
+        "jobs"
+      ],
+      "properties": {
+        "session": {
+          "type": "object"
+        },
+        "health": {
+          "type": "object",
+          "required": ["route", "httpStatus"],
+          "properties": {
+            "route": {
+              "const": "/health"
+            },
+            "httpStatus": {
+              "const": 200
+            }
+          }
+        },
+        "resourceIdentityEvidence": {
+          "$ref": "#/$defs/resourceIdentityEvidence"
+        },
+        "setup": {
+          "type": "object",
+          "required": ["route", "httpStatus", "downloadsInvoked"],
+          "properties": {
+            "route": {
+              "const": "/setup"
+            },
+            "httpStatus": {
+              "const": 200
+            },
+            "downloadsInvoked": {
+              "const": false
+            }
+          }
+        },
+        "actualExtensionRouteContract": {
+          "type": "object",
+          "required": ["health", "setup", "createJob", "viewport", "updates", "cancel", "patch"],
+          "properties": {
+            "health": {
+              "const": "GET /health"
+            },
+            "setup": {
+              "const": "GET /setup"
+            },
+            "createJob": {
+              "const": "POST /jobs"
+            },
+            "viewport": {
+              "const": "PUT /jobs/{job_id}/viewport"
+            },
+            "updates": {
+              "const": "GET /jobs/{job_id}/updates"
+            },
+            "cancel": {
+              "const": "DELETE /jobs/{job_id}"
+            },
+            "patch": {
+              "const": "GET /blobs/{patch_id}"
+            }
+          }
+        },
+        "jobs": {
+          "type": "array",
+          "minItems": 1
+        }
+      }
+    },
+    "correctness": {
+      "type": "object",
+      "required": [
+        "matcher",
+        "metricDefinitions",
+        "pages",
+        "totals",
+        "patchPng",
+        "commitOrdering",
+        "gates"
+      ],
+      "properties": {
+        "matcher": {
+          "type": "object"
+        },
+        "metricDefinitions": {
+          "type": "object",
+          "required": ["englishOcrCer", "falseTranslationRate"],
+          "properties": {
+            "englishOcrCer": {
+              "type": "object"
+            },
+            "falseTranslationRate": {
+              "type": "object"
+            }
+          }
+        },
+        "pages": {
+          "type": "array",
+          "minItems": 36,
+          "maxItems": 36
+        },
+        "totals": {
+          "type": "object",
+          "required": [
+            "expectedRegionCount",
+            "detectorGoldBubbleCount",
+            "expectedNarrationRegionCount",
+            "expectedEnglishTranslationTargetCount",
+            "expectedUntouchedExclusionCount",
+            "acceptedTranslationCount",
+            "matchedEnglishTargetCount",
+            "missingEnglishTargetCount",
+            "unmatchedAcceptedTranslationCount",
+            "untouchedExclusions",
+            "modifiedExclusions",
+            "ocrCharacterErrorNumerator",
+            "ocrReferenceCharacterDenominator",
+            "englishOcrCer",
+            "falseTranslationNumerator",
+            "falseTranslationDenominator",
+            "falseTranslationRate"
+          ],
+          "properties": {
+            "expectedRegionCount": {
+              "const": 218
+            },
+            "detectorGoldBubbleCount": {
+              "const": 165
+            },
+            "expectedNarrationRegionCount": {
+              "const": 53
+            },
+            "expectedEnglishTranslationTargetCount": {
+              "const": 214
+            },
+            "expectedUntouchedExclusionCount": {
+              "const": 4
+            },
+            "acceptedTranslationCount": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "matchedEnglishTargetCount": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "missingEnglishTargetCount": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "unmatchedAcceptedTranslationCount": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "untouchedExclusions": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "modifiedExclusions": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "ocrCharacterErrorNumerator": {
+              "$ref": "#/$defs/nonNegativeNumber"
+            },
+            "ocrReferenceCharacterDenominator": {
+              "$ref": "#/$defs/nonNegativeNumber"
+            },
+            "englishOcrCer": {
+              "$ref": "#/$defs/nonNegativeNumber"
+            },
+            "falseTranslationNumerator": {
+              "$ref": "#/$defs/nonNegativeNumber"
+            },
+            "falseTranslationDenominator": {
+              "$ref": "#/$defs/nonNegativeNumber"
+            },
+            "falseTranslationRate": {
+              "$ref": "#/$defs/nonNegativeNumber"
+            }
+          }
+        },
+        "patchPng": {
+          "type": "object",
+          "required": ["provenance", "rasterization", "totals", "regions", "gates"],
+          "properties": {
+            "provenance": {
+              "type": "object"
+            },
+            "rasterization": {
+              "type": "string"
+            },
+            "totals": {
+              "type": "object"
+            },
+            "regions": {
+              "type": "array"
+            },
+            "gates": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/gate"
+              }
+            }
+          }
+        },
+        "commitOrdering": {
+          "type": "object",
+          "required": [
+            "eventSource",
+            "invariant",
+            "orderedPairNumerator",
+            "orderedPairDenominator",
+            "pairs",
+            "gates"
+          ],
+          "properties": {
+            "eventSource": {
+              "type": "string"
+            },
+            "invariant": {
+              "type": "string"
+            },
+            "orderedPairNumerator": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "orderedPairDenominator": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "pairs": {
+              "type": "array"
+            },
+            "gates": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/gate"
+              }
+            }
+          }
+        },
+        "gates": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/gate"
+          }
+        }
+      }
+    },
+    "jobRequests": {
+      "type": "object",
+      "required": [
+        "captureMethod",
+        "maximumPrecedingContext",
+        "capturedRequestCount",
+        "uniquePageCount",
+        "pageSessionCount",
+        "mismatches",
+        "pages",
+        "gates"
+      ],
+      "properties": {
+        "captureMethod": {
+          "type": "string",
+          "minLength": 1
+        },
+        "maximumPrecedingContext": {
+          "const": 6
+        },
+        "capturedRequestCount": {
+          "const": 36
+        },
+        "uniquePageCount": {
+          "const": 36
+        },
+        "pageSessionCount": {
+          "const": 1
+        },
+        "mismatches": {
+          "type": "array",
+          "maxItems": 0
+        },
+        "pages": {
+          "type": "array",
+          "minItems": 36,
+          "maxItems": 36
+        },
+        "gates": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/gate"
+          }
+        }
+      }
+    },
+    "completeRun": {
+      "type": "object",
+      "required": [
+        "benchmarkId",
+        "runId",
+        "sequence",
+        "kind",
+        "measuredPhaseStartedAtEpochMs",
+        "measuredPhaseEndedAtEpochMs",
+        "action",
+        "extensionState",
+        "viewport",
+        "acquisition",
+        "jobRecords",
+        "jobMonitor",
+        "routes",
+        "dom",
+        "correctness",
+        "jobRequests",
+        "timing",
+        "performanceGates"
+      ],
+      "properties": {
+        "benchmarkId": {
+          "const": "30-years-since-the-prologue-chapter-5"
+        },
+        "runId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "kind": {
+          "enum": ["installed-cold", "warmup", "warm", "cache-replay"]
+        },
+        "measuredPhaseStartedAtEpochMs": {
+          "$ref": "#/$defs/nonNegativeNumber"
+        },
+        "measuredPhaseEndedAtEpochMs": {
+          "$ref": "#/$defs/nonNegativeNumber"
+        },
+        "action": {
+          "type": "object",
+          "required": ["type", "issuedAtEpochMs", "responseAtEpochMs", "responseLatencyMs"],
+          "properties": {
+            "type": {
+              "const": "content:start"
+            },
+            "issuedAtEpochMs": {
+              "$ref": "#/$defs/nonNegativeNumber"
+            },
+            "responseAtEpochMs": {
+              "$ref": "#/$defs/nonNegativeNumber"
+            },
+            "responseLatencyMs": {
+              "$ref": "#/$defs/nonNegativeNumber"
+            }
+          }
+        },
+        "extensionState": {
+          "type": "object",
+          "required": ["state"],
+          "properties": {
+            "state": {
+              "const": "complete"
+            }
+          }
+        },
+        "jobRecords": {
+          "type": "array",
+          "minItems": 36,
+          "maxItems": 36
+        },
+        "viewport": {
+          "type": "object"
+        },
+        "acquisition": {
+          "type": "object"
+        },
+        "jobMonitor": {
+          "type": "object"
+        },
+        "routes": {
+          "$ref": "#/$defs/routeEvidence"
+        },
+        "correctness": {
+          "$ref": "#/$defs/correctness"
+        },
+        "jobRequests": {
+          "$ref": "#/$defs/jobRequests"
+        },
+        "dom": {
+          "type": "object"
+        },
+        "timing": {
+          "$ref": "#/$defs/timing"
+        },
+        "performanceGates": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/gate"
+          }
+        }
+      }
+    },
+    "cancellationRun": {
+      "type": "object",
+      "required": [
+        "benchmarkId",
+        "runId",
+        "kind",
+        "measuredPhaseStartedAtEpochMs",
+        "measuredPhaseEndedAtEpochMs",
+        "cancelIssuedAtEpochMs",
+        "pageCancellationLatencyMs",
+        "daemonCancellationLatencyMs",
+        "extensionState",
+        "terminalRoutes",
+        "restoration",
+        "gates"
+      ],
+      "properties": {
+        "benchmarkId": {
+          "const": "30-years-since-the-prologue-chapter-5"
+        },
+        "runId": {
+          "const": "cancellation"
+        },
+        "kind": {
+          "const": "cancellation"
+        },
+        "measuredPhaseStartedAtEpochMs": {
+          "$ref": "#/$defs/nonNegativeNumber"
+        },
+        "measuredPhaseEndedAtEpochMs": {
+          "$ref": "#/$defs/nonNegativeNumber"
+        },
+        "cancelIssuedAtEpochMs": {
+          "$ref": "#/$defs/nonNegativeNumber"
+        },
+        "pageCancellationLatencyMs": {
+          "$ref": "#/$defs/nonNegativeNumber"
+        },
+        "daemonCancellationLatencyMs": {
+          "$ref": "#/$defs/nonNegativeNumber"
+        },
+        "extensionState": {
+          "type": "object",
+          "required": ["state"],
+          "properties": {
+            "state": {
+              "const": "cancelled"
+            }
+          }
+        },
+        "terminalRoutes": {
+          "$ref": "#/$defs/routeEvidence"
+        },
+        "restoration": {
+          "type": "object"
+        },
+        "gates": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/gate"
+          }
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "required": [
+        "status",
+        "benchmarkId",
+        "recordedAtUtc",
+        "warmRunCount",
+        "percentileMethod",
+        "warmTimingMs",
+        "installedColdTimingMs",
+        "exactCacheReplayTimingMs",
+        "cancellationTimingMs",
+        "resourceEvidence",
+        "residentReuseEvidence",
+        "detectorCorrectness",
+        "correctness",
+        "jobRequestEvidence",
+        "runtimeModelResourceIdentityEvidence",
+        "readerFeatures",
+        "overflow",
+        "sourceReplacement",
+        "runs",
+        "gateEvidence",
+        "liveNetworkSmokeIncluded"
+      ],
+      "properties": {
+        "status": {
+          "const": "pass"
+        },
+        "benchmarkId": {
+          "const": "30-years-since-the-prologue-chapter-5"
+        },
+        "warmRunCount": {
+          "type": "integer",
+          "minimum": 20
+        },
+        "percentileMethod": {
+          "const": "nearest-rank"
+        },
+        "recordedAtUtc": {
+          "type": "string",
+          "pattern": "Z$"
+        },
+        "warmTimingMs": {
+          "type": "object"
+        },
+        "installedColdTimingMs": {
+          "$ref": "#/$defs/timing"
+        },
+        "exactCacheReplayTimingMs": {
+          "$ref": "#/$defs/timing"
+        },
+        "cancellationTimingMs": {
+          "type": "object"
+        },
+        "resourceEvidence": {
+          "type": "object"
+        },
+        "residentReuseEvidence": {
+          "type": "object"
+        },
+        "detectorCorrectness": {
+          "type": "object",
+          "required": [
+            "evidenceFile",
+            "provenance",
+            "metricDefinitions",
+            "totals",
+            "gates",
+            "status"
+          ],
+          "properties": {
+            "evidenceFile": {
+              "type": "object"
+            },
+            "provenance": {
+              "type": "object"
+            },
+            "metricDefinitions": {
+              "type": "object"
+            },
+            "totals": {
+              "type": "object"
+            },
+            "gates": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/gate"
+              }
+            },
+            "status": {
+              "const": "pass"
+            }
+          }
+        },
+        "correctness": {
+          "$ref": "#/$defs/correctness"
+        },
+        "jobRequestEvidence": {
+          "$ref": "#/$defs/jobRequests"
+        },
+        "runtimeModelResourceIdentityEvidence": {
+          "$ref": "#/$defs/resourceIdentityEvidence"
+        },
+        "readerFeatures": {
+          "type": "object"
+        },
+        "overflow": {
+          "type": "object"
+        },
+        "sourceReplacement": {
+          "type": "object"
+        },
+        "gateEvidence": {
+          "const": "gate-evaluation.json"
+        },
+        "liveNetworkSmokeIncluded": {
+          "const": false
+        },
+        "runs": {
+          "type": "array",
+          "minItems": 24
+        }
+      }
+    }
+  }
+}

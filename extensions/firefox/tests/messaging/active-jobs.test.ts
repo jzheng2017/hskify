@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
+import { BUILD_FINGERPRINT } from '../../src/contracts/browser'
 import { ActiveJobStore, type ActiveJobRecord } from '../../src/messaging/active-jobs'
 import { FixtureService } from '../../src/messaging/fixture-service'
 import { MemoryStorage } from '../helpers/storage'
@@ -18,6 +19,32 @@ function record(overrides: Partial<ActiveJobRecord> = {}): ActiveJobRecord {
     sourceHeight: 16_000,
     pageIndex: 0,
     hskLevel: 5,
+    submittedRequest: {
+      buildFingerprint: BUILD_FINGERPRINT,
+      clientImageId: 'page-0-hash',
+      sourceSha256: 'a'.repeat(64),
+      sourceMimeType: 'image/webp',
+      naturalWidth: 900,
+      naturalHeight: 16_000,
+      pageSessionId: 'page',
+      pageIndex: 0,
+      visibleRects: [],
+      settings: {
+        sourceLanguage: 'en',
+        targetLanguage: 'zh-CN',
+        hskStandard: '2.0',
+        hskLevel: 5,
+        readingDirection: 'auto',
+        translateSoundEffects: false,
+      },
+    },
+    uploadedImageBytes: 123_456,
+    submittedAtUnixMs: 990,
+    acknowledgedSequence: 0,
+    deliveredSequence: 0,
+    regionIds: [],
+    patchIds: [],
+    fontIds: [],
     createdAtUnixMs: 1_000,
     ...overrides,
   }
@@ -37,14 +64,23 @@ describe('active-job recovery metadata', () => {
     expect(await restartedBackground.forTab(8)).toHaveLength(1)
   })
 
-  it('derives fixture progress after popup closure or background suspension', () => {
-    const running = new FixtureService(() => 1_600).status(record())
-    const reconstructed = new FixtureService(() => 2_300).status(record())
-    expect(running.state).toBe('running')
+  it('replays progressive updates from the persisted acknowledgement cursor', () => {
+    const running = new FixtureService(() => 1_600).updates(record(), 0)
+    const reconstructed = new FixtureService(() => 2_300).updates(
+      record({ acknowledgedSequence: 4, deliveredSequence: 4 }),
+      4,
+    )
+    expect(running.updates.map((update) => update.type)).toEqual([
+      'progress',
+      'progress',
+      'regionReady',
+    ])
     expect(reconstructed).toMatchObject({
-      state: 'complete',
-      stage: 'complete',
-      overallProgress: 1,
+      nextSequence: 6,
+      updates: [
+        { sequence: 5, type: 'regionRefined' },
+        { sequence: 6, type: 'complete' },
+      ],
     })
   })
 

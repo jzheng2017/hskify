@@ -4,11 +4,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 
 use koharu_runtime::RuntimeManager;
 
 use crate::prompt::PromptRenderer;
+use crate::safe::context::LlamaContext;
 use crate::safe::context::params::LlamaContextParams;
 use crate::safe::llama_backend::LlamaBackend;
 use crate::safe::llama_batch::LlamaBatch;
@@ -19,17 +20,32 @@ use crate::safe::token::LlamaToken;
 use crate::{Language, ModelId};
 
 const DEFAULT_GPU_LAYERS: u32 = 1000;
+const RESIDENT_CONTEXT_TOKENS: u32 = 4096;
+const RESIDENT_PROMPT_BATCH_TOKENS: usize = RESIDENT_CONTEXT_TOKENS as usize;
 const MAX_UBATCH: u32 = 512;
 const SAKURA_QWEN_CORRECT_EOS_ID: i32 = 151645;
 static NEVER_CANCELLED: AtomicBool = AtomicBool::new(false);
 
 pub struct Llm {
     model_id: ModelId,
-    backend: Arc<LlamaBackend>,
-    model: LlamaModel,
     prompt_renderer: PromptRenderer,
     eos_token: LlamaToken,
+    // SAFETY INVARIANT: `session_context` borrows the pointee in `model`.
+    // The model is boxed, so moving `Llm` never moves that pointee. Fields are
+    // dropped in declaration order, which releases the context before the
+    // model and the backend. `model` is never replaced while the context lives.
+    session_context: LlamaContext<'static>,
+    prompt_batch: LlamaBatch<'static>,
+    token_batch: LlamaBatch<'static>,
+    model: Box<LlamaModel>,
+    _backend: Arc<LlamaBackend>,
 }
+
+// The resident context and batches are private and can only be mutated through
+// generation methods that require `&mut Llm`. Shared methods access immutable
+// model metadata/tokenization only. Application code additionally serializes
+// generation behind its model-state write lock.
+unsafe impl Sync for Llm {}
 
 #[derive(Debug, Clone)]
 pub struct GenerateOptions {
@@ -71,6 +87,29 @@ impl Default for GenerateOptions {
     }
 }
 
+impl GenerateOptions {
+    /// Build deterministic, unpenalized greedy generation options.
+    ///
+    /// This is intentionally independent of model-family defaults: callers
+    /// that need reproducible structured output should not inherit sampling
+    /// filters or presence/repetition penalties from a model preset.
+    #[must_use]
+    pub fn greedy(max_tokens: usize) -> Self {
+        Self {
+            max_tokens,
+            temperature: 0.0,
+            top_k: None,
+            top_p: None,
+            min_p: None,
+            repeat_penalty: 1.0,
+            repeat_last_n: 0,
+            presence_penalty: 0.0,
+            grammar: None,
+            ..Self::default()
+        }
+    }
+}
+
 impl Llm {
     pub async fn load(
         runtime: &RuntimeManager,
@@ -82,7 +121,7 @@ impl Llm {
             .context("failed to initialize llama.cpp runtime bindings")?;
         let model_path = id.get(runtime).await?;
 
-        Self::load_owned_path(id, cpu, model_path, backend).await
+        Self::load_owned_path(id, cpu, model_path, backend, crate::inference_threads()).await
     }
 
     /// Load a known model family from an already-downloaded GGUF file.
@@ -99,7 +138,23 @@ impl Llm {
     ) -> Result<Self> {
         crate::sys::initialize(runtime)
             .context("failed to initialize llama.cpp runtime bindings")?;
-        Self::load_owned_path(id, cpu, model_path, backend).await
+        Self::load_owned_path(id, cpu, model_path, backend, crate::inference_threads()).await
+    }
+
+    pub async fn load_file_with_threads(
+        runtime: &RuntimeManager,
+        id: ModelId,
+        cpu: bool,
+        model_path: PathBuf,
+        backend: Arc<LlamaBackend>,
+        inference_threads: i32,
+    ) -> Result<Self> {
+        if inference_threads <= 0 {
+            bail!("llama.cpp inference thread count must be positive");
+        }
+        crate::sys::initialize(runtime)
+            .context("failed to initialize llama.cpp runtime bindings")?;
+        Self::load_owned_path(id, cpu, model_path, backend, inference_threads).await
     }
 
     async fn load_owned_path(
@@ -107,10 +162,13 @@ impl Llm {
         cpu: bool,
         model_path: PathBuf,
         backend: Arc<LlamaBackend>,
+        inference_threads: i32,
     ) -> Result<Self> {
-        tokio::task::spawn_blocking(move || Self::load_from_path(id, cpu, model_path, backend))
-            .await
-            .context("failed to join llama.cpp model loading task")?
+        tokio::task::spawn_blocking(move || {
+            Self::load_from_path(id, cpu, model_path, backend, inference_threads)
+        })
+        .await
+        .context("failed to join llama.cpp model loading task")?
     }
 
     fn load_from_path(
@@ -118,10 +176,13 @@ impl Llm {
         cpu: bool,
         model_path: PathBuf,
         backend: Arc<LlamaBackend>,
+        inference_threads: i32,
     ) -> Result<Self> {
-        let model_params = model_params(cpu, backend.as_ref());
-        let model = LlamaModel::load_from_file(backend.as_ref(), &model_path, &model_params)
-            .with_context(|| format!("unable to load model from `{}`", model_path.display()))?;
+        let model_params = model_params(cpu, backend.as_ref())?;
+        let model = Box::new(
+            LlamaModel::load_from_file(backend.as_ref(), &model_path, &model_params)
+                .with_context(|| format!("unable to load model from `{}`", model_path.display()))?,
+        );
 
         let chat_template = model
             .meta_val_str("tokenizer.ggml.chat_template")
@@ -131,18 +192,42 @@ impl Llm {
         let bos_token = token_text(&model, model.token_bos());
         let (eos_token, eos_text) = eos_token_for(id, &model);
         let prompt_renderer = PromptRenderer::new(id, chat_template, bos_token, eos_text);
+        let session_context = model
+            .new_context(backend.as_ref(), resident_context_params(inference_threads))
+            .context("unable to create permanent llama.cpp context")?;
+        // `LlamaContext` stores only a reference to the model pointee. The
+        // pointee is kept at a stable address by `Box`, and the field ordering
+        // above guarantees that the context is dropped first.
+        let session_context = unsafe {
+            std::mem::transmute::<LlamaContext<'_>, LlamaContext<'static>>(session_context)
+        };
 
         Ok(Self {
             model_id: id,
-            backend,
-            model,
             prompt_renderer,
             eos_token,
+            session_context,
+            prompt_batch: LlamaBatch::new(RESIDENT_PROMPT_BATCH_TOKENS, 1),
+            token_batch: LlamaBatch::new(1, 1),
+            model,
+            _backend: backend,
         })
     }
 
     pub fn id(&self) -> ModelId {
         self.model_id
+    }
+
+    /// Count model tokens without adding a beginning-of-sequence token.
+    ///
+    /// The direct browser translator uses this to enforce its context budget
+    /// against the resident model's real tokenizer rather than a character or
+    /// whitespace estimate.
+    pub fn token_count(&self, text: &str) -> Result<usize> {
+        self.model
+            .str_to_token(text, AddBos::Never)
+            .map(|tokens| tokens.len())
+            .context("failed to count model tokens")
     }
 
     pub fn generate(
@@ -171,7 +256,15 @@ impl Llm {
         system_prompt: Option<&str>,
         cancel: &AtomicBool,
     ) -> Result<String> {
-        self.generate_inner(prompt, opts, target_language, system_prompt, false, cancel)
+        self.generate_inner(
+            prompt,
+            opts,
+            target_language,
+            system_prompt,
+            false,
+            cancel,
+            |_| Ok(()),
+        )
     }
 
     /// Generate with an exact system prompt and optional GBNF constraint.
@@ -193,6 +286,33 @@ impl Llm {
             Some(system_prompt),
             true,
             cancel,
+            |_| Ok(()),
+        )
+    }
+
+    /// Generate with an exact system prompt and report decoded UTF-8 pieces as
+    /// soon as llama.cpp produces them.
+    ///
+    /// The callback runs synchronously on the sole inference worker. It must
+    /// therefore remain non-blocking; browser publication only appends to an
+    /// in-memory update log.
+    pub fn generate_constrained_streaming(
+        &mut self,
+        prompt: &str,
+        opts: &GenerateOptions,
+        target_language: Language,
+        system_prompt: &str,
+        cancel: &AtomicBool,
+        on_piece: impl FnMut(&str) -> Result<()>,
+    ) -> Result<String> {
+        self.generate_inner(
+            prompt,
+            opts,
+            target_language,
+            Some(system_prompt),
+            true,
+            cancel,
+            on_piece,
         )
     }
 
@@ -204,6 +324,7 @@ impl Llm {
         system_prompt: Option<&str>,
         exact_system_prompt: bool,
         cancel: &AtomicBool,
+        mut on_piece: impl FnMut(&str) -> Result<()>,
     ) -> Result<String> {
         check_cancelled(cancel)?;
         if opts.max_tokens == 0 {
@@ -234,21 +355,39 @@ impl Llm {
         }
         check_cancelled(cancel)?;
 
-        let mut ctx = self
-            .model
-            .new_context(
-                self.backend.as_ref(),
-                context_params(prompt_tokens.len(), opts.max_tokens)?,
-            )
-            .context("unable to create llama.cpp context")?;
+        ensure_generation_fits(
+            prompt_tokens.len(),
+            opts.max_tokens,
+            self.session_context.n_ctx(),
+        )?;
         let mut sampler = build_sampler(&self.model, opts)?;
         let mut decoder = encoding_rs::UTF_8.new_decoder();
+        // `llama_decode` may return while CUDA work is still queued. In
+        // particular, cancellation can return before sampling performs
+        // llama.cpp's implicit synchronization. Wait before clearing memory
+        // left by the previous generation.
+        self.session_context.synchronize();
+        self.session_context.clear_kv_cache();
+        self.prompt_batch.clear();
+        self.token_batch.clear();
 
         let start_prompt_processing = Instant::now();
         let mut next_token = if opts.split_prompt {
-            self.process_prompt_split(&mut ctx, &prompt_tokens, &mut sampler, cancel)?
+            process_prompt_split(
+                &mut self.session_context,
+                &prompt_tokens,
+                &mut sampler,
+                cancel,
+                &mut self.token_batch,
+            )?
         } else {
-            self.process_prompt_batch(&mut ctx, &prompt_tokens, &mut sampler, cancel)?
+            process_prompt_batch(
+                &mut self.session_context,
+                &prompt_tokens,
+                &mut sampler,
+                cancel,
+                &mut self.prompt_batch,
+            )?
         };
         check_cancelled(cancel)?;
         let prompt_dt = start_prompt_processing.elapsed();
@@ -259,7 +398,7 @@ impl Llm {
             rate(prompt_tokens.len(), prompt_dt)
         );
 
-        if self.should_stop(next_token) {
+        if should_stop(&self.model, self.eos_token, next_token) {
             tracing::warn!("Early stopping: EOS/EOG token generated at end of prompt");
             return Ok(String::new());
         }
@@ -268,28 +407,32 @@ impl Llm {
         let mut generated = String::new();
         let mut sampled = 0usize;
         let mut position = i32::try_from(prompt_tokens.len()).context("prompt is too long")?;
-        let mut batch = LlamaBatch::new(1, 1);
 
         while sampled < opts.max_tokens {
             check_cancelled(cancel)?;
-            generated.push_str(&decode_token(&self.model, next_token, &mut decoder)?);
+            let piece = decode_token(&self.model, next_token, &mut decoder)?;
+            generated.push_str(&piece);
+            if !piece.is_empty() {
+                on_piece(&piece)?;
+            }
             sampled += 1;
 
             if sampled >= opts.max_tokens {
                 break;
             }
 
-            batch.clear();
-            batch
+            self.token_batch.clear();
+            self.token_batch
                 .add(next_token, position, &[0], true)
                 .context("failed to add generated token to llama batch")?;
-            ctx.decode(&mut batch)
+            self.session_context
+                .decode(&mut self.token_batch)
                 .context("failed to decode generated token")?;
-            check_cancelled(cancel)?;
+            check_cancelled_after_decode(&mut self.session_context, cancel)?;
             position += 1;
 
-            next_token = sampler.sample(&ctx, batch.n_tokens() - 1);
-            if self.should_stop(next_token) {
+            next_token = sampler.sample(&self.session_context, self.token_batch.n_tokens() - 1);
+            if should_stop(&self.model, self.eos_token, next_token) {
                 break;
             }
         }
@@ -303,87 +446,117 @@ impl Llm {
 
         Ok(generated)
     }
+}
 
-    fn process_prompt_batch(
-        &self,
-        ctx: &mut crate::safe::context::LlamaContext<'_>,
-        prompt_tokens: &[LlamaToken],
-        sampler: &mut LlamaSampler,
-        cancel: &AtomicBool,
-    ) -> Result<LlamaToken> {
+fn process_prompt_batch(
+    ctx: &mut LlamaContext<'_>,
+    prompt_tokens: &[LlamaToken],
+    sampler: &mut LlamaSampler,
+    cancel: &AtomicBool,
+    batch: &mut LlamaBatch<'_>,
+) -> Result<LlamaToken> {
+    check_cancelled(cancel)?;
+    batch.clear();
+    batch
+        .add_sequence(prompt_tokens, 0, false)
+        .context("failed to build prompt batch")?;
+    ctx.decode(batch)
+        .context("failed to process prompt batch")?;
+    check_cancelled_after_decode(ctx, cancel)?;
+    Ok(sampler.sample(ctx, batch.n_tokens() - 1))
+}
+
+fn process_prompt_split(
+    ctx: &mut LlamaContext<'_>,
+    prompt_tokens: &[LlamaToken],
+    sampler: &mut LlamaSampler,
+    cancel: &AtomicBool,
+    batch: &mut LlamaBatch<'_>,
+) -> Result<LlamaToken> {
+    let last_index = prompt_tokens.len() - 1;
+
+    for (index, token) in prompt_tokens.iter().copied().enumerate() {
         check_cancelled(cancel)?;
-        let mut batch = LlamaBatch::new(prompt_tokens.len(), 1);
+        batch.clear();
         batch
-            .add_sequence(prompt_tokens, 0, false)
-            .context("failed to build prompt batch")?;
-        ctx.decode(&mut batch)
-            .context("failed to process prompt batch")?;
-        check_cancelled(cancel)?;
-        Ok(sampler.sample(ctx, batch.n_tokens() - 1))
-    }
+            .add(
+                token,
+                i32::try_from(index).context("prompt is too long")?,
+                &[0],
+                index == last_index,
+            )
+            .context("failed to build split prompt batch")?;
+        ctx.decode(batch)
+            .with_context(|| format!("failed to process prompt token {index}"))?;
+        check_cancelled_after_decode(ctx, cancel)?;
 
-    fn process_prompt_split(
-        &self,
-        ctx: &mut crate::safe::context::LlamaContext<'_>,
-        prompt_tokens: &[LlamaToken],
-        sampler: &mut LlamaSampler,
-        cancel: &AtomicBool,
-    ) -> Result<LlamaToken> {
-        let last_index = prompt_tokens.len() - 1;
-
-        for (index, token) in prompt_tokens.iter().copied().enumerate() {
-            check_cancelled(cancel)?;
-            let mut batch = LlamaBatch::new(1, 1);
-            batch
-                .add(
-                    token,
-                    i32::try_from(index).context("prompt is too long")?,
-                    &[0],
-                    index == last_index,
-                )
-                .context("failed to build split prompt batch")?;
-            ctx.decode(&mut batch)
-                .with_context(|| format!("failed to process prompt token {index}"))?;
-            check_cancelled(cancel)?;
-
-            if index == last_index {
-                return Ok(sampler.sample(ctx, batch.n_tokens() - 1));
-            }
+        if index == last_index {
+            return Ok(sampler.sample(ctx, batch.n_tokens() - 1));
         }
-
-        anyhow::bail!("split prompt processing did not produce a final token")
     }
 
-    fn should_stop(&self, token: LlamaToken) -> bool {
-        token == self.eos_token || self.model.is_eog_token(token)
-    }
+    anyhow::bail!("split prompt processing did not produce a final token")
 }
 
-fn model_params(cpu: bool, backend: &LlamaBackend) -> LlamaModelParams {
-    if !cpu && backend.supports_gpu_offload() {
-        LlamaModelParams::default().with_n_gpu_layers(DEFAULT_GPU_LAYERS)
-    } else {
+fn should_stop(model: &LlamaModel, eos_token: LlamaToken, token: LlamaToken) -> bool {
+    token == eos_token || model.is_eog_token(token)
+}
+
+fn model_params(cpu: bool, backend: &LlamaBackend) -> Result<LlamaModelParams> {
+    if cpu {
         // Issue #309: default n_gpu_layers is -1 (auto), which may still offload to GPU.
-        LlamaModelParams::default().with_n_gpu_layers(0)
+        return Ok(LlamaModelParams::default().with_n_gpu_layers(0));
     }
+
+    if !backend.supports_gpu_offload() {
+        bail!(
+            "Hskify's browser translation model requires llama.cpp CUDA offload; \
+             CPU fallback is disabled"
+        );
+    }
+
+    Ok(LlamaModelParams::default().with_n_gpu_layers(DEFAULT_GPU_LAYERS))
 }
 
-fn context_params(prompt_tokens: usize, max_tokens: usize) -> Result<LlamaContextParams> {
-    let required_ctx = prompt_tokens
-        .saturating_add(max_tokens)
-        .saturating_add(1)
-        .max(1);
-    let n_ctx = NonZeroU32::new(u32::try_from(required_ctx).context("context size exceeds u32")?)
-        .expect("required context is always non-zero");
-    let n_batch = u32::try_from(prompt_tokens.max(1)).context("prompt batch size exceeds u32")?;
-    let n_ubatch = n_batch.min(MAX_UBATCH);
-
-    Ok(LlamaContextParams::default()
+fn resident_context_params(inference_threads: i32) -> LlamaContextParams {
+    let n_ctx =
+        NonZeroU32::new(RESIDENT_CONTEXT_TOKENS).expect("resident context token count is non-zero");
+    let (n_threads, n_threads_batch) = resident_context_thread_counts(inference_threads);
+    LlamaContextParams::default()
         .with_n_ctx(Some(n_ctx))
-        .with_n_batch(n_batch)
-        .with_n_ubatch(n_ubatch)
-        .with_n_threads(crate::inference_threads())
-        .with_n_threads_batch(crate::inference_threads()))
+        .with_n_batch(RESIDENT_CONTEXT_TOKENS)
+        .with_n_ubatch(MAX_UBATCH)
+        .with_n_threads(n_threads)
+        .with_n_threads_batch(n_threads_batch)
+}
+
+fn resident_context_thread_counts(inference_threads: i32) -> (i32, i32) {
+    (inference_threads, inference_threads)
+}
+
+fn ensure_generation_fits(
+    prompt_tokens: usize,
+    max_tokens: usize,
+    context_tokens: u32,
+) -> Result<()> {
+    let required_ctx = prompt_tokens
+        .checked_add(max_tokens)
+        .and_then(|tokens| tokens.checked_add(1))
+        .context("generation token budget overflowed usize")?;
+    let context_tokens = usize::try_from(context_tokens).context("context size exceeds usize")?;
+    if required_ctx > context_tokens {
+        bail!(
+            "prompt plus output budget requires {required_ctx} tokens, exceeding Hskify's \
+             permanent {context_tokens}-token llama context"
+        );
+    }
+    if prompt_tokens > RESIDENT_PROMPT_BATCH_TOKENS {
+        bail!(
+            "prompt contains {prompt_tokens} tokens, exceeding Hskify's preallocated \
+             {RESIDENT_PROMPT_BATCH_TOKENS}-token prompt batch"
+        );
+    }
+    Ok(())
 }
 
 fn build_sampler(model: &LlamaModel, opts: &GenerateOptions) -> Result<LlamaSampler> {
@@ -436,6 +609,16 @@ fn check_cancelled(cancel: &AtomicBool) -> Result<()> {
     Ok(())
 }
 
+fn check_cancelled_after_decode(ctx: &mut LlamaContext<'_>, cancel: &AtomicBool) -> Result<()> {
+    if cancel.load(Ordering::Relaxed) {
+        // A decode may return while its CUDA graph is still queued. Do not
+        // release Hskify's sole CUDA permit until that work has stopped.
+        ctx.synchronize();
+        anyhow::bail!("cancelled");
+    }
+    Ok(())
+}
+
 fn eos_token_for(id: ModelId, model: &LlamaModel) -> (LlamaToken, String) {
     let token = match id {
         ModelId::Sakura1_5bQwen2_5v1_0 => LlamaToken::new(SAKURA_QWEN_CORRECT_EOS_ID),
@@ -467,5 +650,55 @@ fn rate(tokens: usize, duration: std::time::Duration) -> f64 {
         tokens as f64 / duration.as_secs_f64()
     } else {
         0.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        GenerateOptions, RESIDENT_CONTEXT_TOKENS, ensure_generation_fits,
+        resident_context_thread_counts,
+    };
+
+    #[test]
+    fn greedy_options_do_not_inherit_sampling_or_penalties() {
+        let options = GenerateOptions::greedy(73);
+
+        assert_eq!(options.max_tokens, 73);
+        assert_eq!(options.temperature, 0.0);
+        assert_eq!(options.top_k, None);
+        assert_eq!(options.top_p, None);
+        assert_eq!(options.min_p, None);
+        assert_eq!(options.repeat_penalty, 1.0);
+        assert_eq!(options.repeat_last_n, 0);
+        assert_eq!(options.presence_penalty, 0.0);
+        assert_eq!(options.grammar, None);
+    }
+
+    #[test]
+    fn resident_context_budget_accepts_its_exact_boundary() {
+        let context_tokens = RESIDENT_CONTEXT_TOKENS;
+        let prompt_tokens = context_tokens as usize - 2;
+
+        ensure_generation_fits(prompt_tokens, 1, context_tokens).unwrap();
+    }
+
+    #[test]
+    fn resident_context_budget_rejects_one_token_over_its_boundary() {
+        let context_tokens = RESIDENT_CONTEXT_TOKENS;
+        let prompt_tokens = context_tokens as usize - 1;
+
+        let error = ensure_generation_fits(prompt_tokens, 1, context_tokens).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("exceeding Hskify's permanent 4096-token llama context")
+        );
+    }
+
+    #[test]
+    fn resident_context_uses_the_explicit_thread_count() {
+        assert_eq!(resident_context_thread_counts(6), (6, 6));
     }
 }

@@ -1,5 +1,5 @@
 {
   "state": "ready",
-  "selectedPackId": "fixture-pack-v1",
+  "modelId": "qwen3.5-4b",
   "message": "Local models are ready."
 }

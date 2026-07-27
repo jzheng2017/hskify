@@ -11,16 +11,16 @@
 //! // then: llm.load_local(...) or llm.load_provider(...)
 //! ```
 
-mod faithful;
-mod hsk;
+mod direct_hsk;
 
-pub use faithful::{
-    FAITHFUL_PROMPT_REVISION, FAITHFUL_TRANSLATION_MODEL, FaithfulOcrRegion, FaithfulPageRequest,
-    FaithfulRegionKind, FaithfulTranslation, PrecedingPageContext, ProtectedName,
-};
-pub use hsk::{
-    HSK_REWRITE_PROMPT_REVISION, HskRewrite, HskRewritePageRequest, HskRewriteRegion,
-    HskValidatorFeedback,
+pub use direct_hsk::{
+    DirectHskTranslator, HSK_TRANSLATION_MODEL, HSK_TRANSLATION_MODEL_REVISION,
+    HSK_TRANSLATION_PROMPT_HASH, HSK_TRANSLATION_PROMPT_REVISION, HSK_TRANSLATION_VALIDATOR_HASH,
+    HskPrecedingUtterance, HskProtectedName, HskRepairUtterance, HskSourceUtterance,
+    HskTranslationBatchRequest, HskTranslationBatchResult, HskTranslationIssue,
+    HskTranslationOutcome, HskTranslationRepairRequest, HskUtteranceKind, MAX_HSK_CONTEXT_TOKENS,
+    MAX_HSK_PRECEDING_UTTERANCES, MAX_HSK_TRANSLATION_BATCH, direct_hsk_prompt_hash,
+    direct_hsk_validator_hash,
 };
 
 use std::path::PathBuf;
@@ -185,18 +185,29 @@ impl Model {
     /// Load a known local model family from an explicit, already-managed GGUF
     /// file and wait until the in-process llama runtime is ready.
     pub async fn load_local_file(&self, id: ModelId, model_path: PathBuf) -> Result<()> {
+        self.load_local_file_with_threads(id, model_path, koharu_llm::inference_threads())
+            .await
+    }
+
+    pub async fn load_local_file_with_threads(
+        &self,
+        id: ModelId,
+        model_path: PathBuf,
+        inference_threads: i32,
+    ) -> Result<()> {
         let target = local_target(id);
         *self.state.write().await = State::Loading {
             target: target.clone(),
         };
         self.emit_state().await;
 
-        let result = Llm::load_file(
+        let result = Llm::load_file_with_threads(
             &self.runtime,
             id,
             self.cpu,
             model_path,
             self.backend.clone(),
+            inference_threads,
         )
         .await;
         match result {

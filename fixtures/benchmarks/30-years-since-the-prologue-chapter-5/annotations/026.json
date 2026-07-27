@@ -1,0 +1,2221 @@
+{
+  "schemaVersion": 1,
+  "page": {
+    "order": 26,
+    "file": "026.webp",
+    "width": 900,
+    "height": 16000,
+    "sourceSha256": "42293a5fb4549fc831bb156921bb2629b3008db96d7a6656f87ffec24d780fc9"
+  },
+  "policy": {
+    "included": "English story text: dialogue, thoughts, narration, captions, and unbubbled spoken lines, including punctuation-only reactions and silent ellipses",
+    "excluded": "sound effects, credits, scanlation promotion, translator notes, series branding, decorative labels, ambiguous OCR, and non-English text",
+    "detectorUse": "proposal only; every region and omission was manually gated against the source image"
+  },
+  "regions": [
+    {
+      "id": "30ysp-ch5-p026-r00",
+      "kind": "dialogue",
+      "containerStyle": "standard",
+      "readingOrder": 0,
+      "sourceEnglish": "THIS IS SERIOUSLY DRAINING. IT'S ALWAYS LIKE THIS WHEN I TALK TO YOU.",
+      "normalizedEnglish": "THIS IS SERIOUSLY DRAINING. IT'S ALWAYS LIKE THIS WHEN I TALK TO YOU.",
+      "textPolygon": [
+        [
+          0.09722222,
+          0.00745605
+        ],
+        [
+          0.5451389,
+          0.00745605
+        ],
+        [
+          0.5451389,
+          0.0264502
+        ],
+        [
+          0.09722222,
+          0.0264502
+        ]
+      ],
+      "eraseMask": {
+        "encoding": "normalized-polygon-v1",
+        "polygon": [
+          [
+            0.09333333,
+            0.0074375
+          ],
+          [
+            0.55000001,
+            0.0074375
+          ],
+          [
+            0.55000001,
+            0.0269375
+          ],
+          [
+            0.09333333,
+            0.0269375
+          ]
+        ],
+        "operation": "erase every English glyph, outline, punctuation mark, and antialiased edge inside the polygon; preserve every pixel outside the erase mask"
+      },
+      "geometryAudit": "detector-adjusted",
+      "reviewProvenance": {
+        "type": "acceptedProposal",
+        "uncertainty": "low",
+        "proposalIndex": 1,
+        "reviewRegionId": "42293a5f-region-a10c9564141df03f"
+      },
+      "bubblePolygon": [
+        [
+          0.0203125,
+          0.0012207
+        ],
+        [
+          0.6206597,
+          0.0012207
+        ],
+        [
+          0.6206597,
+          0.02686524
+        ],
+        [
+          0.0203125,
+          0.02686524
+        ]
+      ],
+      "productionMatch": {
+        "stableRegionId": "42293a5f-region-a10c9564141df03f",
+        "method": "stable-region-id-and-text-geometry",
+        "textGeometryIou": 1.0
+      },
+      "simplifiedChinese": "这真的很累人。每次跟我说话都这样。",
+      "pinyin": "zhè / zhèi zhēn de hěn lèi / léi / lěi rén měi cì gēn wǒ shuō huà Dū / dōu / dū zhè yàng",
+      "hskValidation": {
+        "requestedLevel": 5,
+        "strictlyValid": false,
+        "aboveLevelTokens": [
+          "这真",
+          "真的",
+          "累人",
+          "每次",
+          "这样",
+          "样"
+        ],
+        "repairState": "pending"
+      },
+      "hskTokens": [
+        {
+          "text": "这",
+          "startChar": 0,
+          "endChar": 1,
+          "pinyin": "zhè / zhèi",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "真的",
+          "startChar": 1,
+          "endChar": 3,
+          "pinyin": "zhēn de",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "很",
+          "startChar": 3,
+          "endChar": 4,
+          "pinyin": "hěn",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "累",
+          "startChar": 4,
+          "endChar": 5,
+          "pinyin": "lèi / léi / lěi",
+          "classification": "hsk",
+          "hskLevel": 2,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "人",
+          "startChar": 5,
+          "endChar": 6,
+          "pinyin": "rén",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "每次",
+          "startChar": 7,
+          "endChar": 9,
+          "pinyin": "měi cì",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "跟",
+          "startChar": 9,
+          "endChar": 10,
+          "pinyin": "gēn",
+          "classification": "hsk",
+          "hskLevel": 3,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "我",
+          "startChar": 10,
+          "endChar": 11,
+          "pinyin": "wǒ",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "说话",
+          "startChar": 11,
+          "endChar": 13,
+          "pinyin": "shuō huà",
+          "classification": "hsk",
+          "hskLevel": 2,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "都",
+          "startChar": 13,
+          "endChar": 14,
+          "pinyin": "Dū / dōu / dū",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "这样",
+          "startChar": 14,
+          "endChar": 16,
+          "pinyin": "zhè yàng",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        }
+      ]
+    },
+    {
+      "id": "30ysp-ch5-p026-r01",
+      "kind": "dialogue",
+      "containerStyle": "standard",
+      "readingOrder": 1,
+      "sourceEnglish": "Why is God so fair? It would've been nice if he'd given you even a little gift for words.",
+      "normalizedEnglish": "Why is God so fair? It would've been nice if he'd given you even a little gift for words.",
+      "textPolygon": [
+        [
+          0.30364582,
+          0.03292481
+        ],
+        [
+          0.9324653,
+          0.03292481
+        ],
+        [
+          0.9324653,
+          0.05004395
+        ],
+        [
+          0.30364582,
+          0.05004395
+        ]
+      ],
+      "eraseMask": {
+        "encoding": "normalized-polygon-v1",
+        "polygon": [
+          [
+            0.29666665,
+            0.0329375
+          ],
+          [
+            0.94222221,
+            0.0329375
+          ],
+          [
+            0.94222221,
+            0.050375
+          ],
+          [
+            0.29666665,
+            0.050375
+          ]
+        ],
+        "operation": "erase every English glyph, outline, punctuation mark, and antialiased edge inside the polygon; preserve every pixel outside the erase mask"
+      },
+      "geometryAudit": "detector-adjusted",
+      "reviewProvenance": {
+        "type": "acceptedProposal",
+        "uncertainty": "low",
+        "proposalIndex": 11,
+        "reviewRegionId": "42293a5f-region-fe07dbff19c4cd35"
+      },
+      "bubblePolygon": [
+        [
+          0.2576389,
+          0.03208984
+        ],
+        [
+          0.9770833,
+          0.03208984
+        ],
+        [
+          0.9770833,
+          0.06056641
+        ],
+        [
+          0.2576389,
+          0.06056641
+        ]
+      ],
+      "productionMatch": {
+        "stableRegionId": "42293a5f-region-fe07dbff19c4cd35",
+        "method": "stable-region-id-and-text-geometry",
+        "textGeometryIou": 1.0
+      },
+      "simplifiedChinese": "WH4 是神吗？真希望祂给你哪怕一点点礼物。",
+      "pinyin": "W H 4 shì Shén / shén ma / má / mǎ zhēn xī wàng tā gěi / jǐ nǐ nǎ pà yī diǎn diǎn lǐ wù",
+      "hskValidation": {
+        "requestedLevel": 5,
+        "strictlyValid": false,
+        "aboveLevelTokens": [
+          "WH4",
+          "神",
+          "祂",
+          "一点点",
+          "一点",
+          "点点"
+        ],
+        "repairState": "rejected"
+      },
+      "hskTokens": [
+        {
+          "text": "W",
+          "startChar": 0,
+          "endChar": 1,
+          "pinyin": "W",
+          "classification": "non-lexical",
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "H",
+          "startChar": 1,
+          "endChar": 2,
+          "pinyin": "H",
+          "classification": "non-lexical",
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "4",
+          "startChar": 2,
+          "endChar": 3,
+          "pinyin": "4",
+          "classification": "non-lexical",
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "是",
+          "startChar": 4,
+          "endChar": 5,
+          "pinyin": "shì",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "神",
+          "startChar": 5,
+          "endChar": 6,
+          "pinyin": "Shén / shén",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "吗",
+          "startChar": 6,
+          "endChar": 7,
+          "pinyin": "ma / má / mǎ",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "真",
+          "startChar": 8,
+          "endChar": 9,
+          "pinyin": "zhēn",
+          "classification": "hsk",
+          "hskLevel": 2,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "希望",
+          "startChar": 9,
+          "endChar": 11,
+          "pinyin": "xī wàng",
+          "classification": "hsk",
+          "hskLevel": 2,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "祂",
+          "startChar": 11,
+          "endChar": 12,
+          "pinyin": "tā",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "给",
+          "startChar": 12,
+          "endChar": 13,
+          "pinyin": "gěi / jǐ",
+          "classification": "hsk",
+          "hskLevel": 2,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "你",
+          "startChar": 13,
+          "endChar": 14,
+          "pinyin": "nǐ",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "哪怕",
+          "startChar": 14,
+          "endChar": 16,
+          "pinyin": "nǎ pà",
+          "classification": "hsk",
+          "hskLevel": 5,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "一点点",
+          "startChar": 16,
+          "endChar": 19,
+          "pinyin": "yī diǎn diǎn",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "礼物",
+          "startChar": 19,
+          "endChar": 21,
+          "pinyin": "lǐ wù",
+          "classification": "hsk",
+          "hskLevel": 3,
+          "aboveRequestedLevel": false
+        }
+      ]
+    },
+    {
+      "id": "30ysp-ch5-p026-r02",
+      "kind": "dialogue",
+      "containerStyle": "standard",
+      "readingOrder": 2,
+      "sourceEnglish": "Um... That is not true.",
+      "normalizedEnglish": "Um... That is not true.",
+      "textPolygon": [
+        [
+          0.35444444,
+          0.1445
+        ],
+        [
+          0.87444444,
+          0.1445
+        ],
+        [
+          0.87444444,
+          0.164625
+        ],
+        [
+          0.35444444,
+          0.164625
+        ]
+      ],
+      "eraseMask": {
+        "encoding": "normalized-polygon-v1",
+        "polygon": [
+          [
+            0.35111111,
+            0.1443125
+          ],
+          [
+            0.87777777,
+            0.1443125
+          ],
+          [
+            0.87777777,
+            0.1648125
+          ],
+          [
+            0.35111111,
+            0.1648125
+          ]
+        ],
+        "operation": "erase every English glyph, outline, punctuation mark, and antialiased edge inside the polygon; preserve every pixel outside the erase mask"
+      },
+      "geometryAudit": "manual",
+      "reviewProvenance": {
+        "type": "missedStoryTextRegion",
+        "uncertainty": "low",
+        "missedIndex": 1
+      },
+      "simplifiedChinese": "那……并非如此。",
+      "pinyin": "Nà... bìngfēi rúcǐ.",
+      "hskTokens": [
+        {
+          "text": "那",
+          "startChar": 0,
+          "endChar": 1,
+          "pinyin": "Nuó / Nā / nuó / nà / nǎ",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "并非",
+          "startChar": 3,
+          "endChar": 5,
+          "pinyin": "bìng fēi",
+          "classification": "hsk",
+          "hskLevel": 6,
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "如此",
+          "startChar": 5,
+          "endChar": 7,
+          "pinyin": "rú cǐ",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        }
+      ]
+    },
+    {
+      "id": "30ysp-ch5-p026-r03",
+      "kind": "dialogue",
+      "containerStyle": "standard",
+      "readingOrder": 3,
+      "sourceEnglish": "I THINK YOU TWO MAKE A GOOD PAIR..!",
+      "normalizedEnglish": "I THINK YOU TWO MAKE A GOOD PAIR..!",
+      "textPolygon": [
+        [
+          0.23680556,
+          0.23499316
+        ],
+        [
+          0.7576389,
+          0.23499316
+        ],
+        [
+          0.7576389,
+          0.24775684
+        ],
+        [
+          0.23680556,
+          0.24775684
+        ]
+      ],
+      "eraseMask": {
+        "encoding": "normalized-polygon-v1",
+        "polygon": [
+          [
+            0.23333333,
+            0.2351875
+          ],
+          [
+            0.76444443,
+            0.2351875
+          ],
+          [
+            0.76444443,
+            0.248
+          ],
+          [
+            0.23333333,
+            0.248
+          ]
+        ],
+        "operation": "erase every English glyph, outline, punctuation mark, and antialiased edge inside the polygon; preserve every pixel outside the erase mask"
+      },
+      "geometryAudit": "detector-adjusted",
+      "reviewProvenance": {
+        "type": "acceptedProposal",
+        "uncertainty": "low",
+        "proposalIndex": 2,
+        "reviewRegionId": "42293a5f-region-2c7f174e1c52d96b"
+      },
+      "bubblePolygon": [
+        [
+          0.19131945,
+          0.22500782
+        ],
+        [
+          0.803125,
+          0.22500782
+        ],
+        [
+          0.803125,
+          0.25766405
+        ],
+        [
+          0.19131945,
+          0.25766405
+        ]
+      ],
+      "productionMatch": {
+        "stableRegionId": "42293a5f-region-2c7f174e1c52d96b",
+        "method": "stable-region-id-and-text-geometry",
+        "textGeometryIou": 1.0
+      },
+      "simplifiedChinese": "我觉得你们俩很般配。",
+      "pinyin": "wǒ jué de nǐ men liǎ / liǎng hěn bān pèi",
+      "hskValidation": {
+        "requestedLevel": 5,
+        "strictlyValid": false,
+        "aboveLevelTokens": [
+          "你们",
+          "们",
+          "般配",
+          "般",
+          "配"
+        ],
+        "repairState": "pending"
+      },
+      "hskTokens": [
+        {
+          "text": "我",
+          "startChar": 0,
+          "endChar": 1,
+          "pinyin": "wǒ",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "觉得",
+          "startChar": 1,
+          "endChar": 3,
+          "pinyin": "jué de",
+          "classification": "hsk",
+          "hskLevel": 2,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "你们",
+          "startChar": 3,
+          "endChar": 5,
+          "pinyin": "nǐ men",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "俩",
+          "startChar": 5,
+          "endChar": 6,
+          "pinyin": "liǎ / liǎng",
+          "classification": "hsk",
+          "hskLevel": 4,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "很",
+          "startChar": 6,
+          "endChar": 7,
+          "pinyin": "hěn",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "般配",
+          "startChar": 7,
+          "endChar": 9,
+          "pinyin": "bān pèi",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        }
+      ]
+    },
+    {
+      "id": "30ysp-ch5-p026-r04",
+      "kind": "dialogue",
+      "containerStyle": "standard",
+      "readingOrder": 4,
+      "sourceEnglish": "WHAT ARE YOU EVEN SAYING?!",
+      "normalizedEnglish": "WHAT ARE YOU EVEN SAYING?!",
+      "textPolygon": [
+        [
+          0.14427084,
+          0.35635155
+        ],
+        [
+          0.5786458,
+          0.35635155
+        ],
+        [
+          0.5786458,
+          0.36787498
+        ],
+        [
+          0.14427084,
+          0.36787498
+        ]
+      ],
+      "eraseMask": {
+        "encoding": "normalized-polygon-v1",
+        "polygon": [
+          [
+            0.13666667,
+            0.356375
+          ],
+          [
+            0.58777777,
+            0.356375
+          ],
+          [
+            0.58777777,
+            0.3683125
+          ],
+          [
+            0.13666667,
+            0.3683125
+          ]
+        ],
+        "operation": "erase every English glyph, outline, punctuation mark, and antialiased edge inside the polygon; preserve every pixel outside the erase mask"
+      },
+      "geometryAudit": "detector-adjusted",
+      "reviewProvenance": {
+        "type": "acceptedProposal",
+        "uncertainty": "low",
+        "proposalIndex": 3,
+        "reviewRegionId": "42293a5f-region-797ee66326b7f454"
+      },
+      "bubblePolygon": [
+        [
+          0.01927083,
+          0.34691796
+        ],
+        [
+          0.7126736,
+          0.34691796
+        ],
+        [
+          0.7126736,
+          0.37734765
+        ],
+        [
+          0.01927083,
+          0.37734765
+        ]
+      ],
+      "productionMatch": {
+        "stableRegionId": "42293a5f-region-797ee66326b7f454",
+        "method": "stable-region-id-and-text-geometry",
+        "textGeometryIou": 1.0
+      },
+      "simplifiedChinese": "你到底在说什幺？",
+      "pinyin": "nǐ dào dǐ zài shuì / shuō shén me",
+      "hskValidation": {
+        "requestedLevel": 5,
+        "strictlyValid": true,
+        "aboveLevelTokens": [],
+        "repairState": "not-needed"
+      },
+      "hskTokens": [
+        {
+          "text": "你",
+          "startChar": 0,
+          "endChar": 1,
+          "pinyin": "nǐ",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "到底",
+          "startChar": 1,
+          "endChar": 3,
+          "pinyin": "dào dǐ",
+          "classification": "hsk",
+          "hskLevel": 4,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "在",
+          "startChar": 3,
+          "endChar": 4,
+          "pinyin": "zài",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "说",
+          "startChar": 4,
+          "endChar": 5,
+          "pinyin": "shuì / shuō",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "什幺",
+          "startChar": 5,
+          "endChar": 7,
+          "pinyin": "shén me",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        }
+      ]
+    },
+    {
+      "id": "30ysp-ch5-p026-r05",
+      "kind": "thought",
+      "containerStyle": "thought",
+      "readingOrder": 5,
+      "sourceEnglish": "WITH THIS MUCH TENSION,",
+      "normalizedEnglish": "WITH THIS MUCH TENSION,",
+      "textPolygon": [
+        [
+          0.18975694,
+          0.4128574
+        ],
+        [
+          0.79913193,
+          0.4128574
+        ],
+        [
+          0.79913193,
+          0.42834568
+        ],
+        [
+          0.18975694,
+          0.42834568
+        ]
+      ],
+      "eraseMask": {
+        "encoding": "normalized-polygon-v1",
+        "polygon": [
+          [
+            0.20222223,
+            0.414125
+          ],
+          [
+            0.79777777,
+            0.414125
+          ],
+          [
+            0.79777777,
+            0.4288125
+          ],
+          [
+            0.20222223,
+            0.4288125
+          ]
+        ],
+        "operation": "erase every English glyph, outline, punctuation mark, and antialiased edge inside the polygon; preserve every pixel outside the erase mask"
+      },
+      "geometryAudit": "detector-adjusted",
+      "reviewProvenance": {
+        "type": "acceptedProposal",
+        "uncertainty": "low",
+        "proposalIndex": 4,
+        "reviewRegionId": "42293a5f-region-35cf863daaf7ae16"
+      },
+      "bubblePolygon": [
+        [
+          0.0,
+          0.384
+        ],
+        [
+          1.0,
+          0.384
+        ],
+        [
+          1.0,
+          0.43034765
+        ],
+        [
+          0.0,
+          0.43034765
+        ]
+      ],
+      "productionMatch": {
+        "stableRegionId": "42293a5f-region-35cf863daaf7ae16",
+        "method": "stable-region-id-and-text-geometry",
+        "textGeometryIou": 1.0
+      },
+      "simplifiedChinese": "这幺紧张，",
+      "pinyin": "zhè me jǐn zhāng",
+      "hskValidation": {
+        "requestedLevel": 5,
+        "strictlyValid": false,
+        "aboveLevelTokens": [
+          "这幺",
+          "幺"
+        ],
+        "repairState": "pending"
+      },
+      "hskTokens": [
+        {
+          "text": "这幺",
+          "startChar": 0,
+          "endChar": 2,
+          "pinyin": "zhè me",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "紧张",
+          "startChar": 2,
+          "endChar": 4,
+          "pinyin": "jǐn zhāng",
+          "classification": "hsk",
+          "hskLevel": 4,
+          "aboveRequestedLevel": false
+        }
+      ]
+    },
+    {
+      "id": "30ysp-ch5-p026-r06",
+      "kind": "thought",
+      "containerStyle": "thought",
+      "readingOrder": 6,
+      "sourceEnglish": "I OUGHT TO FILE FOR OVERTIME PAY WITH PRINCESS ELIZAVETA,",
+      "normalizedEnglish": "I OUGHT TO FILE FOR OVERTIME PAY WITH PRINCESS ELIZAVETA,",
+      "textPolygon": [
+        [
+          0.1625,
+          0.5050879
+        ],
+        [
+          0.8416667,
+          0.5050879
+        ],
+        [
+          0.8416667,
+          0.5312012
+        ],
+        [
+          0.1625,
+          0.5312012
+        ]
+      ],
+      "eraseMask": {
+        "encoding": "normalized-polygon-v1",
+        "polygon": [
+          [
+            0.1711111,
+            0.5058125
+          ],
+          [
+            0.8311111,
+            0.5058125
+          ],
+          [
+            0.8311111,
+            0.530375
+          ],
+          [
+            0.1711111,
+            0.530375
+          ]
+        ],
+        "operation": "erase every English glyph, outline, punctuation mark, and antialiased edge inside the polygon; preserve every pixel outside the erase mask"
+      },
+      "geometryAudit": "detector-adjusted",
+      "reviewProvenance": {
+        "type": "acceptedProposal",
+        "uncertainty": "low",
+        "proposalIndex": 5,
+        "reviewRegionId": "42293a5f-region-a6c2decdb8e7ce56"
+      },
+      "bubblePolygon": [
+        [
+          0.0,
+          0.5037109
+        ],
+        [
+          1.0,
+          0.5037109
+        ],
+        [
+          1.0,
+          0.5599609
+        ],
+        [
+          0.0,
+          0.5599609
+        ]
+      ],
+      "productionMatch": {
+        "stableRegionId": "42293a5f-region-a6c2decdb8e7ce56",
+        "method": "stable-region-id-and-text-geometry",
+        "textGeometryIou": 1.0
+      },
+      "simplifiedChinese": "我本该向伊丽莎白公主申请加班费。",
+      "pinyin": "wǒ běn gāi Xiàng / xiàng Yī lì shā bái gōng zhǔ shēn qǐng jiā bān fèi",
+      "hskValidation": {
+        "requestedLevel": 5,
+        "strictlyValid": false,
+        "aboveLevelTokens": [
+          "本该",
+          "该",
+          "伊丽莎白",
+          "伊",
+          "丽",
+          "莎",
+          "加班费",
+          "费"
+        ],
+        "repairState": "pending"
+      },
+      "hskTokens": [
+        {
+          "text": "我",
+          "startChar": 0,
+          "endChar": 1,
+          "pinyin": "wǒ",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "本",
+          "startChar": 1,
+          "endChar": 2,
+          "pinyin": "běn",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "该",
+          "startChar": 2,
+          "endChar": 3,
+          "pinyin": "gāi",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "向",
+          "startChar": 3,
+          "endChar": 4,
+          "pinyin": "Xiàng / xiàng",
+          "classification": "hsk",
+          "hskLevel": 3,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "伊丽莎白",
+          "startChar": 4,
+          "endChar": 8,
+          "pinyin": "Yī lì shā bái",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "公主",
+          "startChar": 8,
+          "endChar": 10,
+          "pinyin": "gōng zhǔ",
+          "classification": "hsk",
+          "hskLevel": 5,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "申请",
+          "startChar": 10,
+          "endChar": 12,
+          "pinyin": "shēn qǐng",
+          "classification": "hsk",
+          "hskLevel": 4,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "加班费",
+          "startChar": 12,
+          "endChar": 15,
+          "pinyin": "jiā bān fèi",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        }
+      ]
+    },
+    {
+      "id": "30ysp-ch5-p026-r07",
+      "kind": "thought",
+      "containerStyle": "thought",
+      "readingOrder": 7,
+      "sourceEnglish": "Either way, the problem is solved.",
+      "normalizedEnglish": "Either way, the problem is solved.",
+      "textPolygon": [
+        [
+          0.22777778,
+          0.652375
+        ],
+        [
+          0.77333333,
+          0.652375
+        ],
+        [
+          0.77333333,
+          0.6673125
+        ],
+        [
+          0.22777778,
+          0.6673125
+        ]
+      ],
+      "eraseMask": {
+        "encoding": "normalized-polygon-v1",
+        "polygon": [
+          [
+            0.22444445,
+            0.6521875
+          ],
+          [
+            0.77666666,
+            0.6521875
+          ],
+          [
+            0.77666666,
+            0.6675
+          ],
+          [
+            0.22444445,
+            0.6675
+          ]
+        ],
+        "operation": "erase every English glyph, outline, punctuation mark, and antialiased edge inside the polygon; preserve every pixel outside the erase mask"
+      },
+      "geometryAudit": "manual",
+      "reviewProvenance": {
+        "type": "missedStoryTextRegion",
+        "uncertainty": "low",
+        "missedIndex": 2
+      },
+      "simplifiedChinese": "不管怎样，问题已经解决了。",
+      "pinyin": "Bùguǎn zěnyàng, wèntí yǐjīng jiějué le.",
+      "hskTokens": [
+        {
+          "text": "不管怎样",
+          "startChar": 0,
+          "endChar": 4,
+          "pinyin": "bù guǎn zěn yàng",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "问题",
+          "startChar": 5,
+          "endChar": 7,
+          "pinyin": "wèn tí",
+          "classification": "hsk",
+          "hskLevel": 2,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "已经",
+          "startChar": 7,
+          "endChar": 9,
+          "pinyin": "yǐ jīng",
+          "classification": "hsk",
+          "hskLevel": 2,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "解决",
+          "startChar": 9,
+          "endChar": 11,
+          "pinyin": "jiě jué",
+          "classification": "hsk",
+          "hskLevel": 3,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "了",
+          "startChar": 11,
+          "endChar": 12,
+          "pinyin": "le / liào / liǎo",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        }
+      ]
+    },
+    {
+      "id": "30ysp-ch5-p026-r08",
+      "kind": "thought",
+      "containerStyle": "thought",
+      "readingOrder": 8,
+      "sourceEnglish": "EVEN IF THE \"TUTORIAL\" PROCEEDS, ENRIQUE'S DISCIPLE WON'T FALL INTO SERIOUS DANGER.",
+      "normalizedEnglish": "EVEN IF THE \"TUTORIAL\" PROCEEDS, ENRIQUE'S DISCIPLE WON'T FALL INTO SERIOUS DANGER.",
+      "textPolygon": [
+        [
+          0.08923611,
+          0.708709
+        ],
+        [
+          0.9149306,
+          0.708709
+        ],
+        [
+          0.9149306,
+          0.72904104
+        ],
+        [
+          0.08923611,
+          0.72904104
+        ]
+      ],
+      "eraseMask": {
+        "encoding": "normalized-polygon-v1",
+        "polygon": [
+          [
+            0.09111111,
+            0.709625
+          ],
+          [
+            0.91000001,
+            0.709625
+          ],
+          [
+            0.91000001,
+            0.7294375
+          ],
+          [
+            0.09111111,
+            0.7294375
+          ]
+        ],
+        "operation": "erase every English glyph, outline, punctuation mark, and antialiased edge inside the polygon; preserve every pixel outside the erase mask"
+      },
+      "geometryAudit": "detector-adjusted",
+      "reviewProvenance": {
+        "type": "acceptedProposal",
+        "uncertainty": "low",
+        "proposalIndex": 6,
+        "reviewRegionId": "42293a5f-region-a777ac557e8f19ef"
+      },
+      "bubblePolygon": [
+        [
+          0.05590278,
+          0.70820117
+        ],
+        [
+          0.96493053,
+          0.70820117
+        ],
+        [
+          0.96493053,
+          0.73025197
+        ],
+        [
+          0.05590278,
+          0.73025197
+        ]
+      ],
+      "productionMatch": {
+        "stableRegionId": "42293a5f-region-a777ac557e8f19ef",
+        "method": "stable-region-id-and-text-geometry",
+        "textGeometryIou": 1.0
+      },
+      "simplifiedChinese": "就算“指导”继续进行，恩里克的徒弟也不会陷入严重危险。",
+      "pinyin": "jiù suàn zhǐ dǎo jì xù jìn xíng ēn Lǐ / lǐ Kè / kè / kēi de / dì / dí / dī tú dì Yě / yě bù huì xiàn rù yán zhòng wēi xiǎn",
+      "hskValidation": {
+        "requestedLevel": 5,
+        "strictlyValid": false,
+        "aboveLevelTokens": [
+          "就算",
+          "算",
+          "恩里克",
+          "恩",
+          "徒弟",
+          "徒",
+          "弟",
+          "不会",
+          "陷入",
+          "陷",
+          "入"
+        ],
+        "repairState": "pending"
+      },
+      "hskTokens": [
+        {
+          "text": "就算",
+          "startChar": 0,
+          "endChar": 2,
+          "pinyin": "jiù suàn",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "指导",
+          "startChar": 3,
+          "endChar": 5,
+          "pinyin": "zhǐ dǎo",
+          "classification": "hsk",
+          "hskLevel": 5,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "继续",
+          "startChar": 6,
+          "endChar": 8,
+          "pinyin": "jì xù",
+          "classification": "hsk",
+          "hskLevel": 4,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "进行",
+          "startChar": 8,
+          "endChar": 10,
+          "pinyin": "jìn xíng",
+          "classification": "hsk",
+          "hskLevel": 4,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "恩",
+          "startChar": 11,
+          "endChar": 12,
+          "pinyin": "ēn",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "里",
+          "startChar": 12,
+          "endChar": 13,
+          "pinyin": "Lǐ / lǐ",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "克",
+          "startChar": 13,
+          "endChar": 14,
+          "pinyin": "Kè / kè / kēi",
+          "classification": "hsk",
+          "hskLevel": 5,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "的",
+          "startChar": 14,
+          "endChar": 15,
+          "pinyin": "de / dì / dí / dī",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "徒弟",
+          "startChar": 15,
+          "endChar": 17,
+          "pinyin": "tú dì",
+          "classification": "hsk",
+          "hskLevel": 6,
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "也",
+          "startChar": 17,
+          "endChar": 18,
+          "pinyin": "Yě / yě",
+          "classification": "hsk",
+          "hskLevel": 2,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "不会",
+          "startChar": 18,
+          "endChar": 20,
+          "pinyin": "bù huì",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "陷入",
+          "startChar": 20,
+          "endChar": 22,
+          "pinyin": "xiàn rù",
+          "classification": "hsk",
+          "hskLevel": 6,
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "严重",
+          "startChar": 22,
+          "endChar": 24,
+          "pinyin": "yán zhòng",
+          "classification": "hsk",
+          "hskLevel": 4,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "危险",
+          "startChar": 24,
+          "endChar": 26,
+          "pinyin": "wēi xiǎn",
+          "classification": "hsk",
+          "hskLevel": 4,
+          "aboveRequestedLevel": false
+        }
+      ]
+    },
+    {
+      "id": "30ysp-ch5-p026-r09",
+      "kind": "thought",
+      "containerStyle": "thought",
+      "readingOrder": 9,
+      "sourceEnglish": "BECAUSE ENRIQUE HERSELF WILL PROTECT HER.",
+      "normalizedEnglish": "BECAUSE ENRIQUE HERSELF WILL PROTECT HER.",
+      "textPolygon": [
+        [
+          0.12638889,
+          0.7691162
+        ],
+        [
+          0.8763889,
+          0.7691162
+        ],
+        [
+          0.8763889,
+          0.78760254
+        ],
+        [
+          0.12638889,
+          0.78760254
+        ]
+      ],
+      "eraseMask": {
+        "encoding": "normalized-polygon-v1",
+        "polygon": [
+          [
+            0.12666667,
+            0.7694375
+          ],
+          [
+            0.87555557,
+            0.7694375
+          ],
+          [
+            0.87555557,
+            0.787
+          ],
+          [
+            0.12666667,
+            0.787
+          ]
+        ],
+        "operation": "erase every English glyph, outline, punctuation mark, and antialiased edge inside the polygon; preserve every pixel outside the erase mask"
+      },
+      "geometryAudit": "detector-adjusted",
+      "reviewProvenance": {
+        "type": "acceptedProposal",
+        "uncertainty": "low",
+        "proposalIndex": 7,
+        "reviewRegionId": "42293a5f-region-6354993303cf1e5f"
+      },
+      "bubblePolygon": [
+        [
+          0.0,
+          0.7666699
+        ],
+        [
+          1.0,
+          0.7666699
+        ],
+        [
+          1.0,
+          0.7999707
+        ],
+        [
+          0.0,
+          0.7999707
+        ]
+      ],
+      "productionMatch": {
+        "stableRegionId": "42293a5f-region-6354993303cf1e5f",
+        "method": "stable-region-id-and-text-geometry",
+        "textGeometryIou": 1.0
+      },
+      "simplifiedChinese": "因为恩里克自己会保护她。",
+      "pinyin": "yīn wèi ēn Lǐ / lǐ Kè / kè / kēi zì jǐ huì / kuài bǎo hù tā",
+      "hskValidation": {
+        "requestedLevel": 5,
+        "strictlyValid": false,
+        "aboveLevelTokens": [
+          "恩里克",
+          "恩"
+        ],
+        "repairState": "pending"
+      },
+      "hskTokens": [
+        {
+          "text": "因为",
+          "startChar": 0,
+          "endChar": 2,
+          "pinyin": "yīn wèi",
+          "classification": "hsk",
+          "hskLevel": 2,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "恩",
+          "startChar": 2,
+          "endChar": 3,
+          "pinyin": "ēn",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "里",
+          "startChar": 3,
+          "endChar": 4,
+          "pinyin": "Lǐ / lǐ",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "克",
+          "startChar": 4,
+          "endChar": 5,
+          "pinyin": "Kè / kè / kēi",
+          "classification": "hsk",
+          "hskLevel": 5,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "自己",
+          "startChar": 5,
+          "endChar": 7,
+          "pinyin": "zì jǐ",
+          "classification": "hsk",
+          "hskLevel": 3,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "会",
+          "startChar": 7,
+          "endChar": 8,
+          "pinyin": "huì / kuài",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "保护",
+          "startChar": 8,
+          "endChar": 10,
+          "pinyin": "bǎo hù",
+          "classification": "hsk",
+          "hskLevel": 4,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "她",
+          "startChar": 10,
+          "endChar": 11,
+          "pinyin": "tā",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        }
+      ]
+    },
+    {
+      "id": "30ysp-ch5-p026-r10",
+      "kind": "narration",
+      "containerStyle": "narration",
+      "readingOrder": 10,
+      "sourceEnglish": "PROSPECTIVE STUDENT OF ST. JANSK UNIVERSITY, \"LUCIA\"",
+      "normalizedEnglish": "PROSPECTIVE STUDENT OF ST. JANSK UNIVERSITY, \"LUCIA\"",
+      "textPolygon": [
+        [
+          0.09965277,
+          0.8258633
+        ],
+        [
+          0.90590274,
+          0.8258633
+        ],
+        [
+          0.90590274,
+          0.8452188
+        ],
+        [
+          0.09965277,
+          0.8452188
+        ]
+      ],
+      "eraseMask": {
+        "encoding": "normalized-polygon-v1",
+        "polygon": [
+          [
+            0.10777777,
+            0.8266875
+          ],
+          [
+            0.89333331,
+            0.8266875
+          ],
+          [
+            0.89333331,
+            0.8459375
+          ],
+          [
+            0.10777777,
+            0.8459375
+          ]
+        ],
+        "operation": "erase every English glyph, outline, punctuation mark, and antialiased edge inside the polygon; preserve every pixel outside the erase mask"
+      },
+      "geometryAudit": "detector-adjusted",
+      "reviewProvenance": {
+        "type": "acceptedProposal",
+        "uncertainty": "low",
+        "proposalIndex": 8,
+        "reviewRegionId": "42293a5f-region-17443b02304e7941"
+      },
+      "bubblePolygon": [
+        [
+          0.00034722,
+          0.816
+        ],
+        [
+          1.0,
+          0.816
+        ],
+        [
+          1.0,
+          0.84797263
+        ],
+        [
+          0.00034722,
+          0.84797263
+        ]
+      ],
+      "productionMatch": {
+        "stableRegionId": "42293a5f-region-17443b02304e7941",
+        "method": "stable-region-id-and-text-geometry",
+        "textGeometryIou": 1.0
+      },
+      "simplifiedChinese": "圣扬斯科大学的准学生“露西亚”。",
+      "pinyin": "kū / shèng Yáng / yáng Sī / sī kē Dà xué / dà xué de / dì / dí / dī zhǔn xué sheng Lù xī Yà / yà",
+      "hskValidation": {
+        "requestedLevel": 5,
+        "strictlyValid": false,
+        "aboveLevelTokens": [
+          "圣",
+          "扬",
+          "斯",
+          "科",
+          "大学",
+          "学的准",
+          "学",
+          "准",
+          "露西",
+          "露",
+          "西亚",
+          "亚"
+        ],
+        "repairState": "pending"
+      },
+      "hskTokens": [
+        {
+          "text": "圣",
+          "startChar": 0,
+          "endChar": 1,
+          "pinyin": "kū / shèng",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "扬",
+          "startChar": 1,
+          "endChar": 2,
+          "pinyin": "Yáng / yáng",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "斯",
+          "startChar": 2,
+          "endChar": 3,
+          "pinyin": "Sī / sī",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "科",
+          "startChar": 3,
+          "endChar": 4,
+          "pinyin": "kē",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "大学",
+          "startChar": 4,
+          "endChar": 6,
+          "pinyin": "Dà xué / dà xué",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "的",
+          "startChar": 6,
+          "endChar": 7,
+          "pinyin": "de / dì / dí / dī",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "准",
+          "startChar": 7,
+          "endChar": 8,
+          "pinyin": "zhǔn",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "学生",
+          "startChar": 8,
+          "endChar": 10,
+          "pinyin": "xué sheng",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "露西",
+          "startChar": 11,
+          "endChar": 13,
+          "pinyin": "Lù xī",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "亚",
+          "startChar": 13,
+          "endChar": 14,
+          "pinyin": "Yà / yà",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        }
+      ]
+    },
+    {
+      "id": "30ysp-ch5-p026-r11",
+      "kind": "dialogue",
+      "containerStyle": "standard",
+      "readingOrder": 11,
+      "sourceEnglish": "Master, your bloodlust was intense. I expect nothing less from the former thief of the Hero's Party...!",
+      "normalizedEnglish": "Master, your bloodlust was intense. I expect nothing less from the former thief of the Hero's Party...!",
+      "textPolygon": [
+        [
+          0.38444444,
+          0.8625
+        ],
+        [
+          0.97222222,
+          0.8625
+        ],
+        [
+          0.97222222,
+          0.878625
+        ],
+        [
+          0.38444444,
+          0.878625
+        ]
+      ],
+      "eraseMask": {
+        "encoding": "normalized-polygon-v1",
+        "polygon": [
+          [
+            0.38111111,
+            0.8623125
+          ],
+          [
+            0.97555555,
+            0.8623125
+          ],
+          [
+            0.97555555,
+            0.8788125
+          ],
+          [
+            0.38111111,
+            0.8788125
+          ]
+        ],
+        "operation": "erase every English glyph, outline, punctuation mark, and antialiased edge inside the polygon; preserve every pixel outside the erase mask"
+      },
+      "geometryAudit": "manual",
+      "reviewProvenance": {
+        "type": "missedStoryTextRegion",
+        "uncertainty": "medium",
+        "missedIndex": 3
+      },
+      "simplifiedChinese": "师父，您刚才的杀气真重。不愧是勇者小队的前盗贼……！",
+      "pinyin": "Shīfu, nín gāngcái de shāqì zhēn zhòng. Bùkuì shì yǒngzhě xiǎoduì de qián dàozéi...!",
+      "hskTokens": [
+        {
+          "text": "师父",
+          "startChar": 0,
+          "endChar": 2,
+          "pinyin": "shī fu",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "您",
+          "startChar": 3,
+          "endChar": 4,
+          "pinyin": "nín",
+          "classification": "hsk",
+          "hskLevel": 2,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "刚才",
+          "startChar": 4,
+          "endChar": 6,
+          "pinyin": "gāng cái",
+          "classification": "hsk",
+          "hskLevel": 3,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "的",
+          "startChar": 6,
+          "endChar": 7,
+          "pinyin": "de / dì / dí / dī",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "杀气",
+          "startChar": 7,
+          "endChar": 9,
+          "pinyin": "shā qì",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "真",
+          "startChar": 9,
+          "endChar": 10,
+          "pinyin": "zhēn",
+          "classification": "hsk",
+          "hskLevel": 2,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "重",
+          "startChar": 10,
+          "endChar": 11,
+          "pinyin": "chóng / zhòng",
+          "classification": "hsk",
+          "hskLevel": 4,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "不愧",
+          "startChar": 12,
+          "endChar": 14,
+          "pinyin": "bù kuì",
+          "classification": "hsk",
+          "hskLevel": 6,
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "是",
+          "startChar": 14,
+          "endChar": 15,
+          "pinyin": "shì",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "勇",
+          "startChar": 15,
+          "endChar": 16,
+          "pinyin": "yǒng",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "者",
+          "startChar": 16,
+          "endChar": 17,
+          "pinyin": "zhě",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "小",
+          "startChar": 17,
+          "endChar": 18,
+          "pinyin": "xiǎo",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "队",
+          "startChar": 18,
+          "endChar": 19,
+          "pinyin": "duì",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "的",
+          "startChar": 19,
+          "endChar": 20,
+          "pinyin": "de / dì / dí / dī",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "前",
+          "startChar": 20,
+          "endChar": 21,
+          "pinyin": "qián",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "盗贼",
+          "startChar": 21,
+          "endChar": 23,
+          "pinyin": "dào zéi",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        }
+      ]
+    },
+    {
+      "id": "30ysp-ch5-p026-r12",
+      "kind": "dialogue",
+      "containerStyle": "standard",
+      "readingOrder": 12,
+      "sourceEnglish": "Haa... enough.",
+      "normalizedEnglish": "Haa... enough.",
+      "textPolygon": [
+        [
+          0.07795139,
+          0.8844126
+        ],
+        [
+          0.43246526,
+          0.8844126
+        ],
+        [
+          0.43246526,
+          0.89038426
+        ],
+        [
+          0.07795139,
+          0.89038426
+        ]
+      ],
+      "eraseMask": {
+        "encoding": "normalized-polygon-v1",
+        "polygon": [
+          [
+            0.08222222,
+            0.8849375
+          ],
+          [
+            0.42777776,
+            0.8849375
+          ],
+          [
+            0.42777776,
+            0.8901875
+          ],
+          [
+            0.08222222,
+            0.8901875
+          ]
+        ],
+        "operation": "erase every English glyph, outline, punctuation mark, and antialiased edge inside the polygon; preserve every pixel outside the erase mask"
+      },
+      "geometryAudit": "detector-adjusted",
+      "reviewProvenance": {
+        "type": "acceptedProposal",
+        "uncertainty": "low",
+        "proposalIndex": 9,
+        "reviewRegionId": "42293a5f-region-83c649cb2296b2b8"
+      },
+      "bubblePolygon": [
+        [
+          0.07795139,
+          0.8844126
+        ],
+        [
+          0.43246526,
+          0.8844126
+        ],
+        [
+          0.43246526,
+          0.89038426
+        ],
+        [
+          0.07795139,
+          0.89038426
+        ]
+      ],
+      "productionMatch": {
+        "stableRegionId": "42293a5f-region-83c649cb2296b2b8",
+        "method": "stable-region-id-and-text-geometry",
+        "textGeometryIou": 1.0
+      },
+      "simplifiedChinese": "哈。。。。。。够了。",
+      "pinyin": "Hā / hā / hǎ gòu le / liào / liǎo",
+      "hskValidation": {
+        "requestedLevel": 5,
+        "strictlyValid": true,
+        "aboveLevelTokens": [],
+        "repairState": "not-needed"
+      },
+      "hskTokens": [
+        {
+          "text": "哈",
+          "startChar": 0,
+          "endChar": 1,
+          "pinyin": "Hā / hā / hǎ",
+          "classification": "hsk",
+          "hskLevel": 5,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "够",
+          "startChar": 7,
+          "endChar": 8,
+          "pinyin": "gòu",
+          "classification": "hsk",
+          "hskLevel": 4,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "了",
+          "startChar": 8,
+          "endChar": 9,
+          "pinyin": "le / liào / liǎo",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        }
+      ]
+    },
+    {
+      "id": "30ysp-ch5-p026-r13",
+      "kind": "narration",
+      "containerStyle": "narration",
+      "readingOrder": 13,
+      "sourceEnglish": "AND HER MASTER, \"ENRIQUE.\" THEY SEEM CLOSER TO PARENT AND CHILD THAN",
+      "normalizedEnglish": "AND HER MASTER, \"ENRIQUE.\" THEY SEEM CLOSER TO PARENT AND CHILD THAN",
+      "textPolygon": [
+        [
+          0.05451389,
+          0.94986326
+        ],
+        [
+          0.9482639,
+          0.94986326
+        ],
+        [
+          0.9482639,
+          1.0
+        ],
+        [
+          0.05451389,
+          1.0
+        ]
+      ],
+      "eraseMask": {
+        "encoding": "normalized-polygon-v1",
+        "polygon": [
+          [
+            0.06555556,
+            0.9505
+          ],
+          [
+            0.93555556,
+            0.9505
+          ],
+          [
+            0.93555556,
+            0.99825
+          ],
+          [
+            0.06555556,
+            0.99825
+          ]
+        ],
+        "operation": "erase every English glyph, outline, punctuation mark, and antialiased edge inside the polygon; preserve every pixel outside the erase mask"
+      },
+      "geometryAudit": "detector-adjusted",
+      "reviewProvenance": {
+        "type": "acceptedProposal",
+        "uncertainty": "low",
+        "proposalIndex": 10,
+        "reviewRegionId": "42293a5f-region-5f1e2cf9867a6f78"
+      },
+      "bubblePolygon": [
+        [
+          0.0,
+          0.9480078
+        ],
+        [
+          1.0,
+          0.9480078
+        ],
+        [
+          1.0,
+          1.0
+        ],
+        [
+          0.0,
+          1.0
+        ]
+      ],
+      "productionMatch": {
+        "stableRegionId": "42293a5f-region-5f1e2cf9867a6f78",
+        "method": "stable-region-id-and-text-geometry",
+        "textGeometryIou": 1.0
+      },
+      "simplifiedChinese": "还有她的师傅“恩里克”。他们看起来比",
+      "pinyin": "hái yǒu tā de / dì / dí / dī shī fu ēn Lǐ / lǐ Kè / kè / kēi tā men kàn qǐ lai Bǐ / bī / bǐ",
+      "hskValidation": {
+        "requestedLevel": 5,
+        "strictlyValid": false,
+        "aboveLevelTokens": [
+          "还有",
+          "恩里克",
+          "恩",
+          "他们",
+          "们",
+          "看起来"
+        ],
+        "repairState": "pending"
+      },
+      "hskTokens": [
+        {
+          "text": "还有",
+          "startChar": 0,
+          "endChar": 2,
+          "pinyin": "hái yǒu",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "她",
+          "startChar": 2,
+          "endChar": 3,
+          "pinyin": "tā",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "的",
+          "startChar": 3,
+          "endChar": 4,
+          "pinyin": "de / dì / dí / dī",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "师傅",
+          "startChar": 4,
+          "endChar": 6,
+          "pinyin": "shī fu",
+          "classification": "hsk",
+          "hskLevel": 4,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "恩",
+          "startChar": 7,
+          "endChar": 8,
+          "pinyin": "ēn",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "里",
+          "startChar": 8,
+          "endChar": 9,
+          "pinyin": "Lǐ / lǐ",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "克",
+          "startChar": 9,
+          "endChar": 10,
+          "pinyin": "Kè / kè / kēi",
+          "classification": "hsk",
+          "hskLevel": 5,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "他们",
+          "startChar": 12,
+          "endChar": 14,
+          "pinyin": "tā men",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "看起来",
+          "startChar": 14,
+          "endChar": 17,
+          "pinyin": "kàn qǐ lai",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "比",
+          "startChar": 17,
+          "endChar": 18,
+          "pinyin": "Bǐ / bī / bǐ",
+          "classification": "hsk",
+          "hskLevel": 2,
+          "aboveRequestedLevel": false
+        }
+      ]
+    }
+  ]
+}

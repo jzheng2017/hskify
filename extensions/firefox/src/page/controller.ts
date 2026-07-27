@@ -1,5 +1,7 @@
 import type {
   BrowserJobRequest,
+  JobUpdateBatch,
+  JobUpdate,
   LookupRequest,
 } from '../contracts/browser'
 import { sha256Hex } from '../acquisition/hash'
@@ -26,10 +28,12 @@ import {
   SelectableRenderer,
   type RenderedImage,
 } from '../rendering/renderer'
+import { visibleImageRects } from '../rendering/geometry'
 
 const PAGE_SESSION_KEY = 'hmt.pageSessionId'
 const CONTENT_BYTE_LIMIT = 25 * 1024 * 1024
 const NAVIGATION_CHECK_INTERVAL_MS = 250
+const VIEWPORT_THROTTLE_MS = 100
 
 type TranslationCandidate = {
   candidate: DiscoveredImage
@@ -53,24 +57,6 @@ function abortError(): Error {
 
 function throwIfAborted(signal: AbortSignal): void {
   if (signal.aborted) throw abortError()
-}
-
-function delay(milliseconds: number, signal: AbortSignal): Promise<void> {
-  return new Promise((resolve, reject) => {
-    if (signal.aborted) {
-      reject(abortError())
-      return
-    }
-    const timer = setTimeout(resolve, milliseconds)
-    signal.addEventListener(
-      'abort',
-      () => {
-        clearTimeout(timer)
-        reject(abortError())
-      },
-      { once: true },
-    )
-  })
 }
 
 function createPageSessionId(reuseStored: boolean): string {
@@ -193,6 +179,73 @@ export async function tryContentBytes(candidate: DiscoveredImage): Promise<
   }
 }
 
+class ViewportReporter {
+  private timer: number | undefined
+  private lastPayload = ''
+  private stopped = false
+  private inFlight: Promise<void> = Promise.resolve()
+  private readonly resizeObserver: ResizeObserver | undefined
+
+  constructor(
+    private readonly jobId: string,
+    private readonly image: HTMLImageElement,
+    private readonly sourceWidth: number,
+    private readonly sourceHeight: number,
+  ) {
+    addEventListener('scroll', this.schedule, true)
+    addEventListener('resize', this.schedule)
+    document.addEventListener('visibilitychange', this.schedule)
+    this.resizeObserver =
+      typeof ResizeObserver === 'undefined'
+        ? undefined
+        : new ResizeObserver(this.schedule)
+    this.resizeObserver?.observe(image)
+    this.send(true, true)
+  }
+
+  private readonly schedule = (): void => {
+    if (this.stopped || this.timer !== undefined) return
+    this.timer = window.setTimeout(() => {
+      this.timer = undefined
+      this.send(true)
+    }, VIEWPORT_THROTTLE_MS)
+  }
+
+  private send(active: boolean, force = false): void {
+    const visibleRects = visibleImageRects(
+      this.image,
+      this.sourceWidth,
+      this.sourceHeight,
+    )
+    const payloadKey = JSON.stringify({ visibleRects, active })
+    if (!force && payloadKey === this.lastPayload) return
+    this.lastPayload = payloadKey
+    this.inFlight = this.inFlight
+      .catch(() => undefined)
+      .then(() =>
+        sendBackgroundMessage({
+          type: 'job:viewport',
+          jobId: this.jobId,
+          visibleRects,
+          active,
+        }),
+      )
+  }
+
+  async stop(): Promise<void> {
+    if (this.stopped) return
+    this.stopped = true
+    if (this.timer !== undefined) window.clearTimeout(this.timer)
+    this.timer = undefined
+    removeEventListener('scroll', this.schedule, true)
+    removeEventListener('resize', this.schedule)
+    document.removeEventListener('visibilitychange', this.schedule)
+    this.resizeObserver?.disconnect()
+    this.send(false, true)
+    await this.inFlight
+  }
+}
+
 function errorMessage(error: unknown): string {
   if (error instanceof RuntimeMessageError || error instanceof Error) return error.message
   return 'This image could not be translated.'
@@ -211,16 +264,22 @@ export class PageTranslationController {
   private readonly processed = new Set<HTMLImageElement>()
   private readonly failedImages = new Set<HTMLImageElement>()
   private readonly context: NonNullable<BrowserJobRequest['precedingContext']> = []
+  private properNameGlossary: NonNullable<
+    BrowserJobRequest['properNameGlossary']
+  > = []
   private readonly navigationTimer: number
   private hud: PageHud | undefined
   private scope: TranslationScope | undefined
   private hskLevel: 1 | 2 | 3 | 4 | 5 | 6 = 5
   private activeJobId: string | undefined
+  private prefetchTargetId: string | undefined
+  private prefetchEnabled = false
   private completed = 0
   private failed = 0
   private total = 0
   private current = 0
   private cancelledState = false
+  private destroyed = false
 
   constructor() {
     this.renderer = new SelectableRenderer({
@@ -286,24 +345,22 @@ export class PageTranslationController {
     }
   }
 
-  async start(scope: TranslationScope, hskLevel: 1 | 2 | 3 | 4 | 5 | 6): Promise<PageState> {
+  async start(
+    scope: TranslationScope,
+    hskLevel: 1 | 2 | 3 | 4 | 5 | 6,
+    properNameGlossary: BrowserJobRequest['properNameGlossary'] = [],
+  ): Promise<PageState> {
     const replacingRun = this.scope !== undefined
     this.generation += 1
-    if (replacingRun) this.cancelIncomplete()
+    if (replacingRun) this.restoreAll()
     this.scope = scope
     this.hskLevel = hskLevel
+    this.properNameGlossary = properNameGlossary.slice()
     this.cancelledState = false
     this.completed = 0
     this.failed = 0
     this.total = 0
     this.current = 0
-    this.processed.clear()
-    this.failedImages.clear()
-    for (const rendered of this.rendered.values()) rendered.destroy()
-    this.rendered.clear()
-    for (const badge of this.badges.values()) badge.destroy()
-    this.badges.clear()
-    this.queueIds.clear()
     this.context.splice(0)
     this.hud?.destroy()
     this.hud = new PageHud(() => this.cancel())
@@ -371,7 +428,7 @@ export class PageTranslationController {
 
   cancel(): PageState {
     this.generation += 1
-    this.cancelIncomplete()
+    this.restoreAll()
     this.cancelledState = true
     this.hud?.cancelled(this.completed, this.total)
     return this.snapshot()
@@ -389,15 +446,14 @@ export class PageTranslationController {
   }
 
   destroy(): void {
+    if (this.destroyed) return
+    this.destroyed = true
     this.generation += 1
-    this.cancelIncomplete()
     this.discovery.stop()
     window.clearInterval(this.navigationTimer)
-    for (const rendered of this.rendered.values()) rendered.destroy()
-    for (const badge of this.badges.values()) badge.destroy()
-    this.rendered.clear()
-    this.badges.clear()
+    this.restoreAll()
     this.hud?.destroy()
+    this.hud = undefined
   }
 
   private async buildRecoveryCandidate(
@@ -430,8 +486,9 @@ export class PageTranslationController {
     return { ...identity, sourceSha256 }
   }
 
-  private cancelIncomplete(): void {
+  private restoreAll(): void {
     this.queue.cancelAll()
+    this.clearPrefetch()
     if (this.activeJobId) {
       void sendBackgroundMessage({
         type: 'job:cancel',
@@ -439,14 +496,61 @@ export class PageTranslationController {
       }).catch(() => undefined)
       this.activeJobId = undefined
     }
-    for (const [image, badge] of this.badges) {
-      if (!this.rendered.has(image)) {
-        badge.destroy()
-        this.badges.delete(image)
+    const renderedImages = [...this.rendered.values()]
+    this.rendered.clear()
+    for (const rendered of renderedImages) rendered.destroy()
+    const badges = [...this.badges.values()]
+    this.badges.clear()
+    for (const badge of badges) badge.destroy()
+    this.queueIds.clear()
+    this.processed.clear()
+    this.failedImages.clear()
+    this.context.splice(0)
+  }
+
+  private clearPrefetch(): void {
+    this.prefetchEnabled = false
+    this.prefetchTargetId = undefined
+    void sendBackgroundMessage({
+      type: 'image:prefetch-cancel',
+      pageSessionId: this.sessionId,
+      pageUrl: this.navigationUrl,
+    }).catch(() => undefined)
+  }
+
+  private refreshPrefetch(): void {
+    if (!this.prefetchEnabled || this.cancelledState) return
+    const next = this.queue.next
+    const candidate = next?.value.recovered ? undefined : next?.value.candidate
+    let supported = false
+    if (candidate) {
+      try {
+        const protocol = new URL(candidate.sourceUrl, location.href).protocol
+        supported = protocol === 'http:' || protocol === 'https:'
+      } catch {
+        supported = false
       }
     }
-    this.queueIds.clear()
-    this.failedImages.clear()
+    const targetId = supported ? next?.id : undefined
+    if (targetId === this.prefetchTargetId) return
+    this.prefetchTargetId = targetId
+    if (!candidate || !targetId) {
+      void sendBackgroundMessage({
+        type: 'image:prefetch-cancel',
+        pageSessionId: this.sessionId,
+        pageUrl: this.navigationUrl,
+      }).catch(() => undefined)
+      return
+    }
+    void sendBackgroundMessage({
+      type: 'image:prefetch',
+      pageSessionId: this.sessionId,
+      pageIndex: candidate.domIndex,
+      imageUrl: candidate.sourceUrl,
+      pageUrl: this.navigationUrl,
+      naturalWidth: candidate.element.naturalWidth,
+      naturalHeight: candidate.element.naturalHeight,
+    }).catch(() => undefined)
   }
 
   private enqueue(candidate: DiscoveredImage, recovered?: RecoveredJob): void {
@@ -469,7 +573,7 @@ export class PageTranslationController {
     const id = candidateKey(candidate)
     this.queueIds.set(candidate.element, id)
     this.total += 1
-    this.badge(candidate.element).update(recovered ? recovered.status : 'Queued')
+    this.badge(candidate.element).update(recovered ? 'Resuming' : 'Queued')
     const accepted = this.queue.enqueue({
       id,
       value: {
@@ -482,6 +586,8 @@ export class PageTranslationController {
     if (!accepted) {
       this.queueIds.delete(candidate.element)
       this.total = Math.max(0, this.total - 1)
+    } else {
+      this.refreshPrefetch()
     }
   }
 
@@ -520,6 +626,7 @@ export class PageTranslationController {
       this.total = Math.max(0, this.total - 1)
       return
     }
+    this.refreshPrefetch()
   }
 
   private sourceSnapshot(candidate: DiscoveredImage): SourceSnapshot {
@@ -559,6 +666,13 @@ export class PageTranslationController {
     signal: AbortSignal,
   ): Promise<void> {
     const { candidate, recovered } = item.value
+    // Recovery is a one-shot attempt. If viewport preemption requeues this
+    // item, its recovered daemon job has been cancelled and the retry must
+    // submit a fresh job rather than polling a terminal identity.
+    delete item.value.recovered
+    const consumesPrefetch = this.prefetchTargetId === item.id
+    if (consumesPrefetch) this.prefetchTargetId = undefined
+    this.prefetchEnabled = false
     const snapshot = this.sourceSnapshot(candidate)
     const badge = this.badge(candidate.element)
     let jobId = recovered?.jobId
@@ -566,7 +680,9 @@ export class PageTranslationController {
     let sourceUrl = recovered?.sourceUrl
     let sourceWidth = recovered?.sourceWidth
     let sourceHeight = recovered?.sourceHeight
-    let status = recovered?.status
+    let after = recovered?.acknowledgedSequence ?? 0
+    let rendered: RenderedImage | undefined
+    let viewportReporter: ViewportReporter | undefined
     const cancelOnAbort = (): void => {
       if (jobId) {
         void sendBackgroundMessage({ type: 'job:cancel', jobId }).catch(() => undefined)
@@ -577,7 +693,7 @@ export class PageTranslationController {
       this.assertCurrent(candidate, snapshot, signal)
       if (!jobId) {
         badge.update('Reading image bytes')
-        const inline = await tryContentBytes(candidate)
+        const inline = consumesPrefetch ? undefined : await tryContentBytes(candidate)
         this.assertCurrent(candidate, snapshot, signal)
         const submitted = await sendBackgroundMessage({
           type: 'job:submit',
@@ -590,7 +706,15 @@ export class PageTranslationController {
           ...(inline?.mimeType ? { sourceMimeType: inline.mimeType } : {}),
           ...(inline ? { sourceBytes: inline.bytes } : {}),
           hskLevel: this.hskLevel,
-          ...(this.context.length ? { precedingContext: this.context.slice(-12) } : {}),
+          visibleRects: visibleImageRects(
+            candidate.element,
+            snapshot.naturalWidth,
+            snapshot.naturalHeight,
+          ),
+          ...(this.context.length ? { precedingContext: this.context.slice(-6) } : {}),
+          ...(this.properNameGlossary.length
+            ? { properNameGlossary: this.properNameGlossary }
+            : {}),
         })
         // Retain the identity before checking the live DOM so a navigation or
         // source replacement that happened during submission can cancel the
@@ -600,10 +724,11 @@ export class PageTranslationController {
         sourceUrl = submitted.sourceUrl
         sourceWidth = submitted.sourceWidth
         sourceHeight = submitted.sourceHeight
+        after = submitted.acknowledgedSequence
         this.assertCurrent(candidate, snapshot, signal)
       }
 
-      if (!sourceSha256 || !sourceUrl || !sourceWidth || !sourceHeight) {
+      if (!jobId || !sourceSha256 || !sourceUrl || !sourceWidth || !sourceHeight) {
         throw new RuntimeMessageError(
           'JOB_SOURCE_IDENTITY_MISSING',
           'The translation job source identity is incomplete.',
@@ -621,80 +746,125 @@ export class PageTranslationController {
           false,
         )
       }
-
-      this.activeJobId = jobId
-      while (!status || status.state === 'running') {
-        this.assertCurrent(candidate, snapshot, signal)
-        status = await sendBackgroundMessage({ type: 'job:poll', jobId })
-        this.assertCurrent(candidate, snapshot, signal)
-        if (status.jobId !== jobId) {
-          throw new RuntimeMessageError(
-            'STATUS_IDENTITY_MISMATCH',
-            'The job status did not match the active image.',
-            false,
-          )
-        }
-        badge.update(status)
-        this.hud?.update({
-          current: this.current,
-          total: this.total,
-          status,
-        })
-        if (status.state !== 'running') break
-        await delay(
-          document.visibilityState === 'visible' ? 1_000 : 4_000,
-          signal,
-        )
-        this.assertCurrent(candidate, snapshot, signal)
-      }
-      if (status.state === 'failed') {
+      if (recovered?.terminalType) {
         throw new RuntimeMessageError(
-          status.errorCode ?? 'JOB_FAILED',
-          status.message,
+          'TERMINAL_JOB_RECOVERED',
+          'A completed translation was recovered without an active page overlay.',
           true,
         )
       }
-      if (status.state === 'cancelled') throw abortError()
-      this.assertCurrent(candidate, snapshot, signal)
-      const delivered = await sendBackgroundMessage({
-        type: 'job:result',
-        jobId,
-        pageSessionId: snapshot.pageSessionId,
-        sourceUrl,
-        sourceSha256,
-        sourceWidth,
-        sourceHeight,
-      })
-      this.assertCurrent(candidate, snapshot, signal)
-      if (
-        delivered.result.jobId !== jobId ||
-        delivered.result.sourceSha256 !== sourceSha256 ||
-        delivered.result.sourceWidth !== sourceWidth ||
-        delivered.result.sourceHeight !== sourceHeight
-      ) {
-        throw new RuntimeMessageError(
-          'RESULT_IDENTITY_MISMATCH',
-          'The completed result did not match the live source image.',
-          false,
-        )
-      }
-      let rendered: RenderedImage | undefined
-      try {
-        rendered = await this.renderer.render(candidate, delivered, {
+
+      this.activeJobId = jobId
+      this.prefetchEnabled = true
+      this.refreshPrefetch()
+      rendered = this.renderer.begin(
+        candidate,
+        {
+          jobId,
+          sourceWidth,
+          sourceHeight,
+        },
+        {
           signal,
           validate: () => this.assertCurrent(candidate, snapshot, signal),
+        },
+      )
+      this.rendered.set(candidate.element, rendered)
+      viewportReporter = new ViewportReporter(
+        jobId,
+        candidate.element,
+        sourceWidth,
+        sourceHeight,
+      )
+
+      let complete = false
+      while (!complete) {
+        this.assertCurrent(candidate, snapshot, signal)
+        const batch: JobUpdateBatch = await sendBackgroundMessage({
+          type: 'job:updates',
+          jobId,
+          after,
         })
         this.assertCurrent(candidate, snapshot, signal)
-        this.rendered.set(candidate.element, rendered)
-      } catch (error) {
-        rendered?.destroy()
-        throw error
+        if (batch.jobId !== jobId) {
+          throw new RuntimeMessageError(
+            'UPDATE_IDENTITY_MISMATCH',
+            'The job updates did not match the active image.',
+            false,
+          )
+        }
+        if (batch.updates.length === 0) continue
+        let terminal: Extract<
+          JobUpdate,
+          { type: 'complete' | 'failed' | 'cancelled' }
+        > | undefined
+        for (const update of batch.updates) {
+          this.assertCurrent(candidate, snapshot, signal)
+          switch (update.type) {
+            case 'progress':
+              badge.update(update)
+              this.hud?.update({
+                current: this.current,
+                total: this.total,
+                status: update,
+              })
+              break
+            case 'regionReady': {
+              badge.update('Installing translated region')
+              const patch = await sendBackgroundMessage({
+                type: 'job:patch',
+                jobId,
+                patchId: update.region.patch.blobId,
+                mimeType: update.region.patch.mimeType,
+              })
+              this.assertCurrent(candidate, snapshot, signal)
+              if (patch.patchId !== update.region.patch.blobId) {
+                throw new RuntimeMessageError(
+                  'PATCH_IDENTITY_MISMATCH',
+                  'The translated patch did not match its region update.',
+                  false,
+                )
+              }
+              await rendered.installRegion(update.region, patch.bytes, {
+                signal,
+                validate: () => this.assertCurrent(candidate, snapshot, signal),
+              })
+              break
+            }
+            case 'regionRefined':
+              rendered.refineRegion(update)
+              break
+            case 'complete':
+            case 'failed':
+            case 'cancelled':
+              terminal = update
+              break
+          }
+        }
+        after = batch.nextSequence
+        await sendBackgroundMessage({
+          type: 'job:ack',
+          jobId,
+          sequence: after,
+          ...(terminal ? { terminalType: terminal.type } : {}),
+        })
+        if (terminal?.type === 'failed') {
+          throw new RuntimeMessageError(
+            terminal.code,
+            terminal.message,
+            terminal.retryable,
+          )
+        }
+        if (terminal?.type === 'cancelled') throw abortError()
+        complete = terminal?.type === 'complete'
       }
+
+      await viewportReporter.stop().catch(() => undefined)
+      viewportReporter = undefined
+      this.assertCurrent(candidate, snapshot, signal)
       this.processed.add(candidate.element)
-      for (const region of [...delivered.result.regions].sort(
-        (left, right) => left.readingOrder - right.readingOrder,
-      )) {
-        if (region.kind === 'sfx' || !region.displayedChinese || !region.sourceEnglish) continue
+      for (const region of rendered.regionsInReadingOrder()) {
+        if (!region.displayedChinese || !region.sourceEnglish) continue
         this.context.push({
           sourceEnglish: region.sourceEnglish,
           chinese: region.displayedChinese,
@@ -704,11 +874,20 @@ export class PageTranslationController {
       badge.destroy()
       this.badges.delete(candidate.element)
     } catch (error) {
+      await viewportReporter?.stop().catch(() => undefined)
+      viewportReporter = undefined
       if (jobId) {
         await sendBackgroundMessage({ type: 'job:cancel', jobId }).catch(() => undefined)
       }
+      if (rendered && !this.processed.has(candidate.element)) {
+        rendered.destroy()
+        if (this.rendered.get(candidate.element) === rendered) {
+          this.rendered.delete(candidate.element)
+        }
+      }
       throw error
     } finally {
+      this.prefetchEnabled = false
       signal.removeEventListener('abort', cancelOnAbort)
       if (this.activeJobId === jobId) this.activeJobId = undefined
     }
@@ -724,10 +903,10 @@ export class PageTranslationController {
     }
     const rendered = this.rendered.get(image)
     if (rendered) {
+      const wasProcessed = this.processed.delete(image)
       rendered.destroy()
       this.rendered.delete(image)
-      this.processed.delete(image)
-      this.completed = Math.max(0, this.completed - 1)
+      if (wasProcessed) this.completed = Math.max(0, this.completed - 1)
       tracked = true
     }
     if (this.failedImages.delete(image)) {
@@ -754,21 +933,35 @@ export class PageTranslationController {
       ) {
         this.enqueue(event.candidate)
       }
+      this.refreshPrefetch()
       return
     }
     if (event.type === 'removed') {
       this.removeTracked(image)
+      this.refreshPrefetch()
       return
     }
     if (event.type === 'updated') {
-      this.removeTracked(image)
-      if (
-        !this.cancelledState &&
-        (this.scope === 'all' ||
-          (this.scope === 'visible' && event.candidate.visible))
-      ) {
-        this.enqueue(event.candidate)
+      if (this.scope === undefined) {
+        this.removeTracked(image)
+        return
       }
+      const previousSession = this.sessionId
+      this.generation += 1
+      this.restoreAll()
+      this.completed = 0
+      this.failed = 0
+      this.total = 0
+      this.current = 0
+      this.scope = undefined
+      this.cancelledState = false
+      this.hud?.destroy()
+      this.hud = undefined
+      this.sessionId = createPageSessionId(false)
+      void sendBackgroundMessage({
+        type: 'jobs:cancel-page',
+        pageSessionId: previousSession,
+      }).catch(() => undefined)
       return
     }
     if (
@@ -785,15 +978,7 @@ export class PageTranslationController {
     if (location.href === this.navigationUrl) return
     const previousSession = this.sessionId
     this.generation += 1
-    this.cancelIncomplete()
-    for (const rendered of this.rendered.values()) rendered.destroy()
-    for (const badge of this.badges.values()) badge.destroy()
-    this.rendered.clear()
-    this.badges.clear()
-    this.processed.clear()
-    this.failedImages.clear()
-    this.queueIds.clear()
-    this.context.splice(0)
+    this.restoreAll()
     this.completed = 0
     this.failed = 0
     this.total = 0
@@ -864,7 +1049,11 @@ export function bootContentRuntime(): void {
       case 'content:prepare':
         return controller.permissionPlan()
       case 'content:start':
-        return controller.start(message.scope, message.hskLevel)
+        return controller.start(
+          message.scope,
+          message.hskLevel,
+          message.properNameGlossary,
+        )
       case 'content:cancel':
         return controller.cancel()
       case 'content:state':

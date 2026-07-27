@@ -1,7 +1,7 @@
 #![cfg(feature = "test-seeds")]
 
 use hsk_control::{
-    AllowedWordTrie, CorrectionOutcome, DatasetCompleteness, DictionaryArtifact, DictionaryEntry,
+    AllowedWordTrie, DatasetCompleteness, DictionaryArtifact, DictionaryEntry,
     EMBEDDED_DICTIONARY_TEST_SEED, EMBEDDED_HSK_TEST_SEED, HSK_STANDARD, HskArtifact, HskControl,
     HskControlError, HskEntry, HskLevel, LicenceAudit, ProperName, ProperNameReason, SourceAudit,
     TextNormalizer, ViolationReason,
@@ -204,43 +204,34 @@ fn lookup_marks_only_explicit_proper_names() {
 }
 
 #[test]
+fn lookup_composes_pinyin_for_a_proper_name_missing_as_a_whole_dictionary_entry() {
+    let control = custom_control(
+        "proper-name-pinyin",
+        vec![entry("我", HskLevel::ONE, &["I"])],
+        vec![
+            dictionary_entry("阿", "ā", &["prefix used in names"]),
+            dictionary_entry("忠", "zhōng", &["loyal"]),
+        ],
+    );
+    let names = [ProperName {
+        text: "阿忠".into(),
+        reason: ProperNameReason::PersonName,
+    }];
+
+    let lookup = control.lookup("阿忠", &names);
+
+    assert_eq!(lookup.tokens.len(), 1);
+    assert_eq!(lookup.tokens[0].pinyin, "ā zhōng");
+    assert!(lookup.tokens[0].proper_name);
+}
+
+#[test]
 fn cache_revision_changes_when_a_dataset_revision_changes() {
     let hsk = vec![entry("我", HskLevel::ONE, &["I"])];
     let dictionary = vec![dictionary_entry("我", "wǒ", &["I", "me"])];
     let first = custom_control("revision-a", hsk.clone(), dictionary.clone());
     let second = custom_control("revision-b", hsk, dictionary);
     assert_ne!(first.cache_revision(), second.cache_revision());
-}
-
-#[test]
-fn correction_loop_stops_after_initial_plus_two_corrections() {
-    let control = seed();
-    let mut corrections = control.correction_loop(HskLevel::ONE, "我不离开2个", &[]);
-
-    for expected_attempt in 1..=2 {
-        let outcome = corrections.evaluate("我斡旋3个");
-        match outcome {
-            CorrectionOutcome::Retry {
-                correction_attempt,
-                preservation_violations,
-                ..
-            } => {
-                assert_eq!(correction_attempt, expected_attempt);
-                assert!(!preservation_violations.is_empty());
-            }
-            other => panic!("expected retry, got {other:?}"),
-        }
-    }
-    assert!(matches!(
-        corrections.evaluate("我斡旋3个"),
-        CorrectionOutcome::Failed { .. }
-    ));
-    assert!(corrections.is_terminal());
-    assert_eq!(corrections.corrections_issued(), 2);
-    assert_eq!(
-        corrections.evaluate("我现在有2个"),
-        CorrectionOutcome::Terminated
-    );
 }
 
 fn seed() -> HskControl {

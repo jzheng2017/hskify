@@ -9,8 +9,8 @@ mod runtime;
 mod zluda;
 
 pub use cuda::{
-    CudaDriverVersion, check_cuda_driver_support, compute_capability,
-    driver_version as nvidia_driver_version,
+    CudaDeviceInfo, CudaDriverVersion, compute_capability, cuda_device_info,
+    driver_version as nvidia_driver_version, require_hskify_cuda_target,
 };
 pub use hf_hub;
 pub use inventory;

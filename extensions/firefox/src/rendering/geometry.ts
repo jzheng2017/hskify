@@ -1,4 +1,4 @@
-import type { Point } from '../contracts/browser'
+import type { NormalizedRect, Point } from '../contracts/browser'
 
 export type Rect = {
   left: number
@@ -200,6 +200,107 @@ export function calculateImageGeometry(
       height: fitted.height,
     },
   }
+}
+
+function intersection(left: Rect, right: Rect): Rect | undefined {
+  const x = Math.max(left.left, right.left)
+  const y = Math.max(left.top, right.top)
+  const rightEdge = Math.min(left.left + left.width, right.left + right.width)
+  const bottomEdge = Math.min(left.top + left.height, right.top + right.height)
+  if (rightEdge <= x || bottomEdge <= y) return undefined
+  return {
+    left: x,
+    top: y,
+    width: rightEdge - x,
+    height: bottomEdge - y,
+  }
+}
+
+function clampUnit(value: number): number {
+  return Math.min(1, Math.max(0, value))
+}
+
+/**
+ * Maps the currently visible portion of an <img> back into normalized source
+ * coordinates. The rectangle accounts for borders, padding, object-fit,
+ * object-position, cover cropping, and the browser viewport.
+ */
+export function visibleImageRects(
+  image: HTMLImageElement,
+  sourceWidth = image.naturalWidth,
+  sourceHeight = image.naturalHeight,
+): NormalizedRect[] {
+  if (
+    !image.isConnected ||
+    sourceWidth <= 0 ||
+    sourceHeight <= 0 ||
+    document.visibilityState === 'hidden'
+  ) {
+    return []
+  }
+  const rect = image.getBoundingClientRect()
+  const style = getComputedStyle(image)
+  const borderLeft = finiteCssPixels(style.borderLeftWidth)
+  const borderRight = finiteCssPixels(style.borderRightWidth)
+  const borderTop = finiteCssPixels(style.borderTopWidth)
+  const borderBottom = finiteCssPixels(style.borderBottomWidth)
+  const paddingLeft = finiteCssPixels(style.paddingLeft)
+  const paddingRight = finiteCssPixels(style.paddingRight)
+  const paddingTop = finiteCssPixels(style.paddingTop)
+  const paddingBottom = finiteCssPixels(style.paddingBottom)
+  const content: Rect = {
+    left: rect.left + borderLeft + paddingLeft,
+    top: rect.top + borderTop + paddingTop,
+    width: Math.max(
+      0,
+      rect.width - borderLeft - borderRight - paddingLeft - paddingRight,
+    ),
+    height: Math.max(
+      0,
+      rect.height - borderTop - borderBottom - paddingTop - paddingBottom,
+    ),
+  }
+  if (content.width <= 0 || content.height <= 0) return []
+  const fitted = objectFitRect(
+    content.width,
+    content.height,
+    sourceWidth,
+    sourceHeight,
+    style.objectFit || 'fill',
+    style.objectPosition || '50% 50%',
+  )
+  const drawn: Rect = {
+    left: content.left + fitted.left,
+    top: content.top + fitted.top,
+    width: fitted.width,
+    height: fitted.height,
+  }
+  if (drawn.width <= 0 || drawn.height <= 0) return []
+  const browserViewport: Rect = {
+    left: 0,
+    top: 0,
+    width: Math.max(0, window.innerWidth || document.documentElement.clientWidth),
+    height: Math.max(0, window.innerHeight || document.documentElement.clientHeight),
+  }
+  const clippedToImage = intersection(drawn, content)
+  const visible = clippedToImage && intersection(clippedToImage, browserViewport)
+  if (!visible) return []
+  const x = clampUnit((visible.left - drawn.left) / drawn.width)
+  const y = clampUnit((visible.top - drawn.top) / drawn.height)
+  const width = clampUnit(visible.width / drawn.width)
+  const height = clampUnit(visible.height / drawn.height)
+  if (width <= 0 || height <= 0) return []
+  const containedWidth = Math.min(width, 1 - x)
+  const containedHeight = Math.min(height, 1 - y)
+  if (containedWidth <= 0 || containedHeight <= 0) return []
+  return [
+    {
+      x,
+      y,
+      width: containedWidth,
+      height: containedHeight,
+    },
+  ]
 }
 
 export function rectDifference(left: DOMRect, right: DOMRect): number {

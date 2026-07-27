@@ -19,7 +19,7 @@ export class FontLoader {
   ) {}
 
   load(fontId: string, category: FontCategory, jobId: string): Promise<string> {
-    const cacheKey = `${jobId}:${fontId}`
+    const cacheKey = `${category}:${fontId}`
     const cached = this.cache.get(cacheKey)
     if (cached) return cached
     const task = this.loadUncached(fontId, category, jobId)

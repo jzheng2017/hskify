@@ -170,7 +170,7 @@ fn apply_rope(xs: &Tensor, freq_cis: &Tensor) -> Result<Tensor> {
 fn scaled_dot_product_attention(q: &Tensor, k: &Tensor, v: &Tensor) -> Result<Tensor> {
     let dim = q.dim(D::Minus1)?;
     let scale = 1.0 / (dim as f64).sqrt();
-    #[cfg(feature = "cuda")]
+    #[cfg(feature = "candle-flash-attn")]
     if q.device().is_cuda() {
         let q = q.transpose(1, 2)?.contiguous()?;
         let k = k.transpose(1, 2)?.contiguous()?;

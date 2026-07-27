@@ -4,7 +4,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$manifestPath = Join-Path $env:LOCALAPPDATA 'Hskify\HSKMangaTranslator\native-host\local.hskify.hsk_manga.json'
+$manifestPath = Join-Path $env:LOCALAPPDATA 'Hskify\native-host\local.hskify.hsk_manga.json'
 
 if (Test-Path -LiteralPath $RegistryPath) {
     Remove-Item -LiteralPath $RegistryPath -Force

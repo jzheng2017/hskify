@@ -1,5 +1,5 @@
 {
-  "protocolVersion": 1,
+  "buildFingerprint": "hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-07-26-r2",
   "clientImageId": "fixture-page-0001-image-0001",
   "sourceSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "sourceMimeType": "image/png",
@@ -15,10 +15,24 @@
     "readingDirection": "auto",
     "translateSoundEffects": false
   },
+  "visibleRects": [
+    {
+      "x": 0,
+      "y": 0,
+      "width": 1,
+      "height": 0.45
+    }
+  ],
   "precedingContext": [
     {
       "sourceEnglish": "Are you ready?",
       "chinese": "你准备好了吗？"
+    }
+  ],
+  "properNameGlossary": [
+    {
+      "sourceEnglish": "Cheon Yeo Woon",
+      "chinese": "天汝云"
     }
   ]
 }

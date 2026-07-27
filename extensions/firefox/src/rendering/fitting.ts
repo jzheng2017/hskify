@@ -6,6 +6,7 @@ const OPENING_PUNCTUATION = new Set([...'（《【「『“‘'])
 const FIT_CONTENT_RATIO = 0.88
 const MINIMUM_FONT_TO_IMAGE_WIDTH = 0.006
 const ABSOLUTE_MINIMUM_FONT_PX = 1
+const BINARY_SEARCH_STEPS = 20
 
 export type TextFit = {
   fontSize: number
@@ -56,7 +57,7 @@ function breakAtIndices(text: string, indices: readonly number[]): string[] {
 export function nearbyLineCandidates(
   text: string,
   suggested: readonly string[],
-  maximumLines = 6,
+  maximumLines = 12,
 ): string[][] {
   const characters = [...text]
   const candidates: string[][] = []
@@ -226,32 +227,39 @@ function chooseFit(
     ABSOLUTE_MINIMUM_FONT_PX,
     region.layout.fontSizeToImageWidth * imageWidth,
   )
-  const minimum = Math.min(initial, minimumFontSizeForImage(imageWidth))
   let best: TextFit | undefined
   for (const lines of candidates) {
-    for (let fontSize = initial; fontSize >= minimum; fontSize -= 0.5) {
-      const fits = usePolygon
+    const fits = (fontSize: number): boolean =>
+      usePolygon
         ? polygonFits(lines, fontSize, points, box, region)
         : rectangleFits(lines, fontSize, box, region)
-      if (!fits) continue
-      const candidate = {
-        fontSize,
-        lines,
-        degraded: false,
-        usedPolygon: usePolygon,
+    let low = 0
+    let high = initial
+    if (fits(initial)) {
+      low = initial
+    } else {
+      for (let iteration = 0; iteration < BINARY_SEARCH_STEPS; iteration += 1) {
+        const midpoint = (low + high) / 2
+        if (fits(midpoint)) low = midpoint
+        else high = midpoint
       }
-      if (
-        !best ||
-        candidate.fontSize > best.fontSize
-      ) {
-        best = candidate
-      }
-      break
+    }
+    // Stay fractionally inside the mathematical boundary so subpixel
+    // rounding cannot create a one-pixel scroll overflow.
+    const fontSize = low === initial ? initial : low * 0.997
+    const candidate = {
+      fontSize,
+      lines,
+      degraded: fontSize + Number.EPSILON < minimumFontSizeForImage(imageWidth),
+      usedPolygon: usePolygon,
+    }
+    if (!best || candidate.fontSize > best.fontSize) {
+      best = candidate
     }
   }
   return (
     best ?? {
-      fontSize: minimum,
+      fontSize: 0,
       lines: candidates[0] ?? [text],
       degraded: true,
       usedPolygon: usePolygon,

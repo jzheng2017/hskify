@@ -2,9 +2,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use browser_companion::contracts::{
-    BrowserJobCreated, BrowserJobRequest, BrowserJobResult, BrowserJobStatus, BrowserSetupStatus,
-    ErrorResponse, HealthResponse, LookupResult, NativeHandshakeRequest, NativeReadyResponse,
-    RetranslateRequest, Validate,
+    BrowserJobCreated, BrowserSetupStatus, CreateJobRequest, ErrorResponse, HealthResponse,
+    JobUpdatesResponse, LookupResult, NativeHandshakeRequest, NativeReadyResponse, Validate,
+    ViewportUpdateRequest,
 };
 use serde::de::DeserializeOwned;
 
@@ -22,77 +22,100 @@ fn read<T: DeserializeOwned>(name: &str) -> T {
         .unwrap_or_else(|error| panic!("parse {}: {error}", path.display()))
 }
 
-fn validate_sequence(name: &str) {
-    let values: Vec<BrowserJobStatus> = read(name);
-    let mut previous_revision = 0;
-    let mut previous_overall = 0.0;
-    for status in values {
-        status.validate().expect("valid progress status");
-        assert!(status.revision > previous_revision);
-        if let Some(overall) = status.overall_progress {
-            assert!(overall >= previous_overall);
-            previous_overall = overall;
-        }
-        previous_revision = status.revision;
+#[test]
+fn job_request_and_viewport_are_unversioned_and_valid() {
+    let request: CreateJobRequest = read("job-request.valid.json");
+    request.validate().expect("valid job request");
+    let viewport: ViewportUpdateRequest = read("viewport.valid.json");
+    viewport.validate().expect("valid viewport");
+
+    let serialized = serde_json::to_value(request).unwrap();
+    assert_eq!(
+        serialized["buildFingerprint"],
+        "hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-07-26-r2"
+    );
+    assert!(serialized.get("protocolVersion").is_none());
+}
+
+#[test]
+fn progressive_sequences_are_monotonic_and_replayable() {
+    for name in [
+        "job-updates.success.json",
+        "job-updates.failure.json",
+        "job-updates.cancelled.json",
+        "job-updates.replay.json",
+    ] {
+        let response: JobUpdatesResponse = read(name);
+        response
+            .validate()
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
     }
 }
 
 #[test]
-fn valid_job_request_is_shared_contract() {
-    let value: BrowserJobRequest = read("job-request.valid.json");
-    value.validate().expect("valid job request");
+fn progressive_region_payloads_use_the_compact_wire_shapes() {
+    let response: JobUpdatesResponse = read("job-updates.success.json");
+    let serialized = serde_json::to_value(response).unwrap();
+    let ready = &serialized["updates"][1];
+    assert_eq!(ready["type"], "regionReady");
+    assert!(ready["region"].get("textPolygon").is_some());
+    assert!(ready["region"].get("kind").is_none());
+    assert!(ready["region"].get("geometry").is_none());
+    assert!(ready["region"].get("rotationDegrees").is_none());
+
+    let refined = &serialized["updates"][2];
+    assert_eq!(refined["type"], "regionRefined");
+    assert_eq!(refined["regionId"], "aaaaaaaa-region-0001");
+    assert!(refined.get("region").is_none());
+    assert!(refined.get("patch").is_none());
 }
 
 #[test]
-fn complete_result_is_shared_contract() {
-    let value: BrowserJobResult = read("job-result.complete.json");
-    value.validate().expect("valid result");
-}
-
-#[test]
-fn progress_sequences_are_monotonic_and_valid() {
-    validate_sequence("progress.success.json");
-    validate_sequence("progress.failure.json");
-    validate_sequence("progress.cancellation.json");
-    validate_sequence("progress.reconnect.json");
-}
-
-#[test]
-fn lookup_and_setup_fixtures_are_valid() {
+fn lookup_setup_health_created_and_errors_are_valid() {
     let lookup: LookupResult = read("lookup.valid.json");
     lookup.validate().expect("valid lookup");
     let setup: BrowserSetupStatus = read("setup.ready.json");
     setup.validate().expect("valid setup");
-}
-
-#[test]
-fn supporting_http_fixtures_are_valid() {
+    assert_eq!(setup.model_id, "qwen3.5-4b");
     let health: HealthResponse = read("health.ready.json");
     health.validate().expect("valid health response");
     let created: BrowserJobCreated = read("job-created.valid.json");
     created.validate().expect("valid job-created response");
-    let retranslate: RetranslateRequest = read("retranslate.valid.json");
-    retranslate.validate().expect("valid retranslate request");
     let error: ErrorResponse = read("error.valid.json");
     error.validate().expect("valid error response");
 }
 
 #[test]
-fn native_fixtures_are_valid() {
+fn native_handshake_uses_exact_build_affinity() {
     let request: NativeHandshakeRequest = read("native-request.valid.json");
     request.validate().expect("valid native request");
     let ready: NativeReadyResponse = read("native-ready.valid.json");
     ready.validate().expect("valid native response");
+
+    let serialized = serde_json::to_value(ready).unwrap();
+    assert!(serialized.get("protocolVersion").is_none());
+    assert_eq!(serialized["engineVersion"], "0.61.2");
+
+    let serialized = serde_json::to_value(request).unwrap();
+    assert_eq!(serialized["extensionVersion"], "0.1.0");
+    assert!(serialized.get("protocolVersion").is_none());
 }
 
 #[test]
 fn invalid_semantic_fixtures_are_rejected() {
-    let request: BrowserJobRequest = read("invalid/job-request.protocol-version.json");
+    let request: CreateJobRequest = read("invalid/job-request.build-fingerprint.json");
     assert!(request.validate().is_err());
 
-    let result: BrowserJobResult = read("invalid/job-result.out-of-range-point.json");
-    assert!(result.validate().is_err());
+    let viewport: ViewportUpdateRequest = read("invalid/viewport.out-of-bounds.json");
+    assert!(viewport.validate().is_err());
 
-    let status: BrowserJobStatus = read("invalid/progress.terminal-mismatch.json");
-    assert!(status.validate().is_err());
+    let updates: JobUpdatesResponse = read("invalid/job-updates.nonmonotonic.json");
+    assert!(updates.validate().is_err());
+}
+
+#[test]
+fn removed_protocol_fields_are_not_accepted() {
+    let mut value: serde_json::Value = read("job-request.valid.json");
+    value["protocolVersion"] = 1.into();
+    assert!(serde_json::from_value::<CreateJobRequest>(value).is_err());
 }

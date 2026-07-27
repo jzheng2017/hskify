@@ -1,0 +1,756 @@
+{
+  "schemaVersion": 1,
+  "page": {
+    "order": 12,
+    "file": "012.webp",
+    "width": 900,
+    "height": 16000,
+    "sourceSha256": "d6e02ebc989a116267d4a3189ed2689aae5a8362fcdc17006d78db5d9a2d956a"
+  },
+  "policy": {
+    "included": "English story text: dialogue, thoughts, narration, captions, and unbubbled spoken lines, including punctuation-only reactions and silent ellipses",
+    "excluded": "sound effects, credits, scanlation promotion, translator notes, series branding, decorative labels, ambiguous OCR, and non-English text",
+    "detectorUse": "proposal only; every region and omission was manually gated against the source image"
+  },
+  "regions": [
+    {
+      "id": "30ysp-ch5-p012-r00",
+      "kind": "thought",
+      "containerStyle": "thought",
+      "readingOrder": 0,
+      "sourceEnglish": "Killing intent...!",
+      "normalizedEnglish": "Killing intent...!",
+      "textPolygon": [
+        [
+          0.27604166,
+          0.06491406
+        ],
+        [
+          0.70729166,
+          0.06491406
+        ],
+        [
+          0.70729166,
+          0.07671094
+        ],
+        [
+          0.27604166,
+          0.07671094
+        ]
+      ],
+      "eraseMask": {
+        "encoding": "normalized-polygon-v1",
+        "polygon": [
+          [
+            0.27222222,
+            0.0650625
+          ],
+          [
+            0.71333334,
+            0.0650625
+          ],
+          [
+            0.71333334,
+            0.07675
+          ],
+          [
+            0.27222222,
+            0.07675
+          ]
+        ],
+        "operation": "erase every English glyph, outline, punctuation mark, and antialiased edge inside the polygon; preserve every pixel outside the erase mask"
+      },
+      "geometryAudit": "detector-adjusted",
+      "reviewProvenance": {
+        "type": "acceptedProposal",
+        "uncertainty": "low",
+        "proposalIndex": 1,
+        "reviewRegionId": "d6e02ebc-region-393d8450e35332f7"
+      },
+      "bubblePolygon": [
+        [
+          0.16909721,
+          0.05351758
+        ],
+        [
+          0.81562495,
+          0.05351758
+        ],
+        [
+          0.81562495,
+          0.08810742
+        ],
+        [
+          0.16909721,
+          0.08810742
+        ]
+      ],
+      "productionMatch": {
+        "stableRegionId": "d6e02ebc-region-393d8450e35332f7",
+        "method": "stable-region-id-and-text-geometry",
+        "textGeometryIou": 1.0
+      },
+      "simplifiedChinese": "杀人意图。。。。。。！",
+      "pinyin": "shā rén yì tú",
+      "hskValidation": {
+        "requestedLevel": 5,
+        "strictlyValid": false,
+        "aboveLevelTokens": [
+          "杀人",
+          "人意",
+          "意图",
+          "意",
+          "图"
+        ],
+        "repairState": "pending"
+      },
+      "hskTokens": [
+        {
+          "text": "杀人",
+          "startChar": 0,
+          "endChar": 2,
+          "pinyin": "shā rén",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "意图",
+          "startChar": 2,
+          "endChar": 4,
+          "pinyin": "yì tú",
+          "classification": "hsk",
+          "hskLevel": 6,
+          "aboveRequestedLevel": true
+        }
+      ]
+    },
+    {
+      "id": "30ysp-ch5-p012-r01",
+      "kind": "dialogue",
+      "containerStyle": "standard",
+      "readingOrder": 1,
+      "sourceEnglish": "NOW THEN, ANSWER ME.",
+      "normalizedEnglish": "NOW THEN, ANSWER ME.",
+      "textPolygon": [
+        [
+          0.28020832,
+          0.21012989
+        ],
+        [
+          0.71979165,
+          0.21012989
+        ],
+        [
+          0.71979165,
+          0.21984668
+        ],
+        [
+          0.28020832,
+          0.21984668
+        ]
+      ],
+      "eraseMask": {
+        "encoding": "normalized-polygon-v1",
+        "polygon": [
+          [
+            0.27333334,
+            0.2101875
+          ],
+          [
+            0.72555557,
+            0.2101875
+          ],
+          [
+            0.72555557,
+            0.220125
+          ],
+          [
+            0.27333334,
+            0.220125
+          ]
+        ],
+        "operation": "erase every English glyph, outline, punctuation mark, and antialiased edge inside the polygon; preserve every pixel outside the erase mask"
+      },
+      "geometryAudit": "detector-adjusted",
+      "reviewProvenance": {
+        "type": "acceptedProposal",
+        "uncertainty": "low",
+        "proposalIndex": 2,
+        "reviewRegionId": "d6e02ebc-region-c1ce868f1bfe05f7"
+      },
+      "bubblePolygon": [
+        [
+          0.17951389,
+          0.19814257
+        ],
+        [
+          0.82048607,
+          0.19814257
+        ],
+        [
+          0.82048607,
+          0.22456835
+        ],
+        [
+          0.17951389,
+          0.22456835
+        ]
+      ],
+      "productionMatch": {
+        "stableRegionId": "d6e02ebc-region-c1ce868f1bfe05f7",
+        "method": "stable-region-id-and-text-geometry",
+        "textGeometryIou": 1.0
+      },
+      "simplifiedChinese": "那幺，回答我。",
+      "pinyin": "nà me huí dá wǒ",
+      "hskValidation": {
+        "requestedLevel": 5,
+        "strictlyValid": false,
+        "aboveLevelTokens": [
+          "那幺",
+          "幺"
+        ],
+        "repairState": "pending"
+      },
+      "hskTokens": [
+        {
+          "text": "那幺",
+          "startChar": 0,
+          "endChar": 2,
+          "pinyin": "nà me",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "回答",
+          "startChar": 3,
+          "endChar": 5,
+          "pinyin": "huí dá",
+          "classification": "hsk",
+          "hskLevel": 3,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "我",
+          "startChar": 5,
+          "endChar": 6,
+          "pinyin": "wǒ",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        }
+      ]
+    },
+    {
+      "id": "30ysp-ch5-p012-r02",
+      "kind": "dialogue",
+      "containerStyle": "standard",
+      "readingOrder": 2,
+      "sourceEnglish": "WHAT ARE YOU PLOTTING?",
+      "normalizedEnglish": "WHAT ARE YOU PLOTTING?",
+      "textPolygon": [
+        [
+          0.35,
+          0.41409278
+        ],
+        [
+          0.9041667,
+          0.41409278
+        ],
+        [
+          0.9041667,
+          0.42640722
+        ],
+        [
+          0.35,
+          0.42640722
+        ]
+      ],
+      "eraseMask": {
+        "encoding": "normalized-polygon-v1",
+        "polygon": [
+          [
+            0.3422222,
+            0.4139375
+          ],
+          [
+            0.9122222,
+            0.4139375
+          ],
+          [
+            0.9122222,
+            0.4265
+          ],
+          [
+            0.3422222,
+            0.4265
+          ]
+        ],
+        "operation": "erase every English glyph, outline, punctuation mark, and antialiased edge inside the polygon; preserve every pixel outside the erase mask"
+      },
+      "geometryAudit": "detector-adjusted",
+      "reviewProvenance": {
+        "type": "acceptedProposal",
+        "uncertainty": "low",
+        "proposalIndex": 3,
+        "reviewRegionId": "d6e02ebc-region-1e5eb0cfbbb63518"
+      },
+      "bubblePolygon": [
+        [
+          0.2796875,
+          0.40163672
+        ],
+        [
+          0.9717014,
+          0.40163672
+        ],
+        [
+          0.9717014,
+          0.43847266
+        ],
+        [
+          0.2796875,
+          0.43847266
+        ]
+      ],
+      "productionMatch": {
+        "stableRegionId": "d6e02ebc-region-1e5eb0cfbbb63518",
+        "method": "stable-region-id-and-text-geometry",
+        "textGeometryIou": 1.0
+      },
+      "simplifiedChinese": "你在策划什幺？",
+      "pinyin": "nǐ zài cè huà shén me",
+      "hskValidation": {
+        "requestedLevel": 5,
+        "strictlyValid": false,
+        "aboveLevelTokens": [
+          "策划",
+          "策"
+        ],
+        "repairState": "pending"
+      },
+      "hskTokens": [
+        {
+          "text": "你",
+          "startChar": 0,
+          "endChar": 1,
+          "pinyin": "nǐ",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "在",
+          "startChar": 1,
+          "endChar": 2,
+          "pinyin": "zài",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "策划",
+          "startChar": 2,
+          "endChar": 4,
+          "pinyin": "cè huà",
+          "classification": "hsk",
+          "hskLevel": 6,
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "什幺",
+          "startChar": 4,
+          "endChar": 6,
+          "pinyin": "shén me",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        }
+      ]
+    },
+    {
+      "id": "30ysp-ch5-p012-r03",
+      "kind": "dialogue",
+      "containerStyle": "standard",
+      "readingOrder": 3,
+      "sourceEnglish": "I'm asking what you're plotting by gathering orphans.",
+      "normalizedEnglish": "I'm asking what you're plotting by gathering orphans.",
+      "textPolygon": [
+        [
+          0.23055555,
+          0.6303379
+        ],
+        [
+          0.76666665,
+          0.6303379
+        ],
+        [
+          0.76666665,
+          0.65580666
+        ],
+        [
+          0.23055555,
+          0.65580666
+        ]
+      ],
+      "eraseMask": {
+        "encoding": "normalized-polygon-v1",
+        "polygon": [
+          [
+            0.22777778,
+            0.6304375
+          ],
+          [
+            0.77111113,
+            0.6304375
+          ],
+          [
+            0.77111113,
+            0.6558125
+          ],
+          [
+            0.22777778,
+            0.6558125
+          ]
+        ],
+        "operation": "erase every English glyph, outline, punctuation mark, and antialiased edge inside the polygon; preserve every pixel outside the erase mask"
+      },
+      "geometryAudit": "detector-adjusted",
+      "reviewProvenance": {
+        "type": "acceptedProposal",
+        "uncertainty": "low",
+        "proposalIndex": 4,
+        "reviewRegionId": "d6e02ebc-region-2e1ba625c8212c54"
+      },
+      "bubblePolygon": [
+        [
+          0.11840278,
+          0.62403905
+        ],
+        [
+          0.8829861,
+          0.62403905
+        ],
+        [
+          0.8829861,
+          0.6631211
+        ],
+        [
+          0.11840278,
+          0.6631211
+        ]
+      ],
+      "productionMatch": {
+        "stableRegionId": "d6e02ebc-region-2e1ba625c8212c54",
+        "method": "stable-region-id-and-text-geometry",
+        "textGeometryIou": 1.0
+      },
+      "simplifiedChinese": "我在问你，为什幺要把孤儿聚在一起。",
+      "pinyin": "wǒ zài wèn nǐ wèi shén me yào / yāo bà / bǎ gū ér jù zài yī qǐ",
+      "hskValidation": {
+        "requestedLevel": 5,
+        "strictlyValid": false,
+        "aboveLevelTokens": [
+          "孤儿",
+          "孤",
+          "儿",
+          "聚在一起",
+          "聚",
+          "在一起"
+        ],
+        "repairState": "pending"
+      },
+      "hskTokens": [
+        {
+          "text": "我",
+          "startChar": 0,
+          "endChar": 1,
+          "pinyin": "wǒ",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "在",
+          "startChar": 1,
+          "endChar": 2,
+          "pinyin": "zài",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "问",
+          "startChar": 2,
+          "endChar": 3,
+          "pinyin": "wèn",
+          "classification": "hsk",
+          "hskLevel": 2,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "你",
+          "startChar": 3,
+          "endChar": 4,
+          "pinyin": "nǐ",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "为什幺",
+          "startChar": 5,
+          "endChar": 8,
+          "pinyin": "wèi shén me",
+          "classification": "hsk",
+          "hskLevel": 2,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "要",
+          "startChar": 8,
+          "endChar": 9,
+          "pinyin": "yào / yāo",
+          "classification": "hsk",
+          "hskLevel": 2,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "把",
+          "startChar": 9,
+          "endChar": 10,
+          "pinyin": "bà / bǎ",
+          "classification": "hsk",
+          "hskLevel": 3,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "孤儿",
+          "startChar": 10,
+          "endChar": 12,
+          "pinyin": "gū ér",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "聚在一起",
+          "startChar": 12,
+          "endChar": 16,
+          "pinyin": "jù zài yī qǐ",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        }
+      ]
+    },
+    {
+      "id": "30ysp-ch5-p012-r04",
+      "kind": "thought",
+      "containerStyle": "thought",
+      "readingOrder": 4,
+      "sourceEnglish": "You bastard...",
+      "normalizedEnglish": "You bastard...",
+      "textPolygon": [
+        [
+          0.06777778,
+          0.8781875
+        ],
+        [
+          0.52555556,
+          0.8781875
+        ],
+        [
+          0.52555556,
+          0.884625
+        ],
+        [
+          0.06777778,
+          0.884625
+        ]
+      ],
+      "eraseMask": {
+        "encoding": "normalized-polygon-v1",
+        "polygon": [
+          [
+            0.06444445,
+            0.878
+          ],
+          [
+            0.52888889,
+            0.878
+          ],
+          [
+            0.52888889,
+            0.8848125
+          ],
+          [
+            0.06444445,
+            0.8848125
+          ]
+        ],
+        "operation": "erase every English glyph, outline, punctuation mark, and antialiased edge inside the polygon; preserve every pixel outside the erase mask"
+      },
+      "geometryAudit": "manual",
+      "reviewProvenance": {
+        "type": "missedStoryTextRegion",
+        "uncertainty": "low",
+        "missedIndex": 1
+      },
+      "simplifiedChinese": "你这混蛋……",
+      "pinyin": "Nǐ zhè húndàn...",
+      "hskTokens": [
+        {
+          "text": "你",
+          "startChar": 0,
+          "endChar": 1,
+          "pinyin": "nǐ",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "这",
+          "startChar": 1,
+          "endChar": 2,
+          "pinyin": "zhè / zhèi",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "混蛋",
+          "startChar": 2,
+          "endChar": 4,
+          "pinyin": "hún dàn",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        }
+      ]
+    },
+    {
+      "id": "30ysp-ch5-p012-r05",
+      "kind": "thought",
+      "containerStyle": "thought",
+      "readingOrder": 5,
+      "sourceEnglish": "When I heard you were taking in orphans after retirement,",
+      "normalizedEnglish": "When I heard you were taking in orphans after retirement,",
+      "textPolygon": [
+        [
+          0.38666667,
+          0.8925625
+        ],
+        [
+          0.87444444,
+          0.8925625
+        ],
+        [
+          0.87444444,
+          0.9105625
+        ],
+        [
+          0.38666667,
+          0.9105625
+        ]
+      ],
+      "eraseMask": {
+        "encoding": "normalized-polygon-v1",
+        "polygon": [
+          [
+            0.38333334,
+            0.892375
+          ],
+          [
+            0.87777777,
+            0.892375
+          ],
+          [
+            0.87777777,
+            0.91075
+          ],
+          [
+            0.38333334,
+            0.91075
+          ]
+        ],
+        "operation": "erase every English glyph, outline, punctuation mark, and antialiased edge inside the polygon; preserve every pixel outside the erase mask"
+      },
+      "geometryAudit": "manual",
+      "reviewProvenance": {
+        "type": "missedStoryTextRegion",
+        "uncertainty": "low",
+        "missedIndex": 2
+      },
+      "productionMatch": {
+        "stableRegionId": "d6e02ebc-region-c3efd7dc0a99f8df",
+        "method": "stable-region-id-source-text-and-geometry",
+        "textGeometryIou": 0.96298728
+      },
+      "simplifiedChinese": "听说你退休后收留孤儿，",
+      "pinyin": "tīng shuō nǐ tuì xiū Hòu / hòu shōu liú gū ér",
+      "hskValidation": {
+        "requestedLevel": 5,
+        "strictlyValid": false,
+        "aboveLevelTokens": [
+          "听说",
+          "后",
+          "收留",
+          "孤儿",
+          "孤",
+          "儿"
+        ],
+        "repairState": "pending"
+      },
+      "hskTokens": [
+        {
+          "text": "听说",
+          "startChar": 0,
+          "endChar": 2,
+          "pinyin": "tīng shuō",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "你",
+          "startChar": 2,
+          "endChar": 3,
+          "pinyin": "nǐ",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "退休",
+          "startChar": 3,
+          "endChar": 5,
+          "pinyin": "tuì xiū",
+          "classification": "hsk",
+          "hskLevel": 5,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "后",
+          "startChar": 5,
+          "endChar": 6,
+          "pinyin": "Hòu / hòu",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "收留",
+          "startChar": 6,
+          "endChar": 8,
+          "pinyin": "shōu liú",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "孤儿",
+          "startChar": 8,
+          "endChar": 10,
+          "pinyin": "gū ér",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        }
+      ]
+    }
+  ]
+}

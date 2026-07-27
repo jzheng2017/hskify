@@ -5,7 +5,7 @@ export default defineConfig({
   outDir: '.output',
   manifestVersion: 3,
   manifest: {
-    name: 'HSK Manga Translator',
+    name: 'Hskify',
     description: 'Translate English manga lettering into selectable, HSK-controlled Chinese.',
     version: '0.1.0',
     permissions: ['activeTab', 'scripting', 'storage', 'nativeMessaging'],

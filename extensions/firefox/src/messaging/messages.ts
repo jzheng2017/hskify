@@ -1,16 +1,18 @@
 import {
-  parseBrowserJobResult,
-  parseBrowserJobStatus,
+  MAX_PRECEDING_CONTEXT,
+  MAX_PROPER_NAME_GLOSSARY,
   parseBrowserSetupStatus,
+  parseJobUpdateBatch,
   parseLookupRequest,
   parseLookupResult,
+  parseViewportUpdate,
   type BrowserJobRequest,
-  type BrowserJobResult,
-  type BrowserJobStatus,
   type BrowserSetupStatus,
   type HskLevel,
+  type JobUpdateBatch,
   type LookupRequest,
   type LookupResult,
+  type NormalizedRect,
 } from '../contracts/browser'
 
 const MAX_RUNTIME_BINARY_BYTES = 25 * 1024 * 1024
@@ -41,6 +43,7 @@ export type ContentStartMessage = {
   type: 'content:start'
   scope: TranslationScope
   hskLevel: HskLevel
+  properNameGlossary?: BrowserJobRequest['properNameGlossary']
 }
 export type ContentCancelMessage = { type: 'content:cancel' }
 export type ContentStateMessage = { type: 'content:state' }
@@ -56,22 +59,52 @@ export type SubmitImageMessage = {
   sourceMimeType?: string
   sourceBytes?: ArrayBuffer
   hskLevel: HskLevel
+  visibleRects: NormalizedRect[]
   precedingContext?: BrowserJobRequest['precedingContext']
+  properNameGlossary?: BrowserJobRequest['properNameGlossary']
 }
 
-export type PollJobMessage = { type: 'job:poll'; jobId: string }
-
-export type JobSourceIdentity = {
+export type PrefetchImageMessage = {
+  type: 'image:prefetch'
   pageSessionId: string
-  sourceUrl: string
-  sourceSha256: string
-  sourceWidth: number
-  sourceHeight: number
+  pageIndex: number
+  imageUrl: string
+  pageUrl: string
+  naturalWidth: number
+  naturalHeight: number
 }
 
-export type GetJobResultMessage = JobSourceIdentity & {
-  type: 'job:result'
+export type CancelImagePrefetchMessage = {
+  type: 'image:prefetch-cancel'
+  pageSessionId: string
+  pageUrl: string
+}
+
+export type JobUpdatesMessage = {
+  type: 'job:updates'
   jobId: string
+  after: number
+}
+
+export type JobAckMessage = {
+  type: 'job:ack'
+  jobId: string
+  sequence: number
+  terminalType?: 'complete' | 'failed' | 'cancelled'
+}
+
+export type JobViewportMessage = {
+  type: 'job:viewport'
+  jobId: string
+  visibleRects: NormalizedRect[]
+  active: boolean
+}
+
+export type JobPatchMessage = {
+  type: 'job:patch'
+  jobId: string
+  patchId: string
+  mimeType: 'image/png'
 }
 
 export type CancelJobMessage = { type: 'job:cancel'; jobId: string }
@@ -114,9 +147,13 @@ export type BackgroundRequest =
   | SetupStatusMessage
   | SetupStartMessage
   | SetupOpenInstallerMessage
+  | PrefetchImageMessage
+  | CancelImagePrefetchMessage
   | SubmitImageMessage
-  | PollJobMessage
-  | GetJobResultMessage
+  | JobUpdatesMessage
+  | JobAckMessage
+  | JobViewportMessage
+  | JobPatchMessage
   | CancelJobMessage
   | RecoverJobsMessage
   | CancelPageJobsMessage
@@ -144,11 +181,13 @@ export type SubmittedJob = {
   sourceUrl: string
   sourceWidth: number
   sourceHeight: number
+  acknowledgedSequence: number
 }
 
-export type DeliveredJobResult = {
-  result: BrowserJobResult
-  cleanImage: ArrayBuffer
+export type PatchPayload = {
+  patchId: string
+  mimeType: 'image/png'
+  bytes: ArrayBuffer
 }
 
 export type FontPayload = {
@@ -164,7 +203,8 @@ export type RecoveredJob = {
   sourceWidth: number
   sourceHeight: number
   pageIndex: number
-  status: BrowserJobStatus
+  acknowledgedSequence: number
+  terminalType?: 'complete' | 'failed' | 'cancelled'
 }
 
 export type PopupState = PageState & { hskLevel: HskLevel }
@@ -187,9 +227,13 @@ export type MessageResultMap = {
   'setup:status': BrowserSetupStatus
   'setup:start': BrowserSetupStatus
   'setup:open-installer': undefined
+  'image:prefetch': undefined
+  'image:prefetch-cancel': undefined
   'job:submit': SubmittedJob
-  'job:poll': BrowserJobStatus
-  'job:result': DeliveredJobResult
+  'job:updates': JobUpdateBatch
+  'job:ack': undefined
+  'job:viewport': undefined
+  'job:patch': PatchPayload
   'job:cancel': undefined
   'jobs:recover': RecoveredJob[]
   'jobs:cancel-page': undefined
@@ -237,11 +281,7 @@ function exact(item: UnknownRecord, allowed: readonly string[], path = '$'): voi
   }
 }
 
-function string(
-  value: unknown,
-  path: string,
-  maximum = 4_096,
-): string {
+function string(value: unknown, path: string, maximum = 4_096): string {
   if (typeof value !== 'string' || value.length === 0 || value.length > maximum) {
     throw new RuntimeMessageValidationError(
       `${path} must be a non-empty string no longer than ${maximum} characters.`,
@@ -292,6 +332,16 @@ function translationScope(value: unknown, path: string): TranslationScope {
   return value
 }
 
+function terminalType(
+  value: unknown,
+  path: string,
+): 'complete' | 'failed' | 'cancelled' {
+  if (value !== 'complete' && value !== 'failed' && value !== 'cancelled') {
+    throw new RuntimeMessageValidationError(`${path} must be a terminal update type.`)
+  }
+  return value
+}
+
 function sha256(value: unknown, path: string): string {
   const parsed = string(value, path, 64)
   if (!/^[a-f0-9]{64}$/u.test(parsed)) {
@@ -314,6 +364,23 @@ function stringArray(value: unknown, path: string): string[] {
     throw new RuntimeMessageValidationError(`${path} must be a bounded string array.`)
   }
   return value.map((entry, index) => string(entry, `${path}[${index}]`, 512))
+}
+
+function normalizedRect(value: unknown, path: string): NormalizedRect {
+  try {
+    return parseViewportUpdate({ visibleRects: [value], active: true }).visibleRects[0]!
+  } catch (error) {
+    throw new RuntimeMessageValidationError(
+      `${path} is invalid: ${error instanceof Error ? error.message : 'invalid rectangle'}`,
+    )
+  }
+}
+
+function normalizedRects(value: unknown, path: string): NormalizedRect[] {
+  if (!Array.isArray(value) || value.length > 64) {
+    throw new RuntimeMessageValidationError(`${path} must be a bounded rectangle array.`)
+  }
+  return value.map((item, index) => normalizedRect(item, `${path}[${index}]`))
 }
 
 export function parsePageState(value: unknown): PageState {
@@ -350,8 +417,10 @@ function pageState(value: unknown, includeHsk = false): PopupState | PageState {
 }
 
 function parsePrecedingContext(value: unknown): BrowserJobRequest['precedingContext'] {
-  if (!Array.isArray(value) || value.length > 12) {
-    throw new RuntimeMessageValidationError('$.precedingContext must contain at most 12 entries.')
+  if (!Array.isArray(value) || value.length > MAX_PRECEDING_CONTEXT) {
+    throw new RuntimeMessageValidationError(
+      `$.precedingContext must contain at most ${MAX_PRECEDING_CONTEXT} entries.`,
+    )
   }
   return value.map((entry, index) => {
     const item = record(entry, `$.precedingContext[${index}]`)
@@ -363,6 +432,37 @@ function parsePrecedingContext(value: unknown): BrowserJobRequest['precedingCont
         4_096,
       ),
       chinese: string(item.chinese, `$.precedingContext[${index}].chinese`, 4_096),
+    }
+  })
+}
+
+function parseProperNameGlossary(
+  value: unknown,
+): BrowserJobRequest['properNameGlossary'] {
+  if (!Array.isArray(value) || value.length > MAX_PROPER_NAME_GLOSSARY) {
+    throw new RuntimeMessageValidationError(
+      `$.properNameGlossary must contain at most ${MAX_PROPER_NAME_GLOSSARY} entries.`,
+    )
+  }
+  const seen = new Set<string>()
+  return value.map((entry, index) => {
+    const item = record(entry, `$.properNameGlossary[${index}]`)
+    exact(item, ['sourceEnglish', 'chinese'], `$.properNameGlossary[${index}]`)
+    const sourceEnglish = string(
+      item.sourceEnglish,
+      `$.properNameGlossary[${index}].sourceEnglish`,
+      256,
+    )
+    const normalized = sourceEnglish.trim().toLocaleLowerCase('en-US')
+    if (seen.has(normalized)) {
+      throw new RuntimeMessageValidationError(
+        `$.properNameGlossary[${index}].sourceEnglish must be unique ignoring ASCII case.`,
+      )
+    }
+    seen.add(normalized)
+    return {
+      sourceEnglish,
+      chinese: string(item.chinese, `$.properNameGlossary[${index}].chinese`, 128),
     }
   })
 }
@@ -400,6 +500,32 @@ export function parseBackgroundRequest(value: unknown): BackgroundRequest {
         scope: translationScope(item.scope, '$.scope'),
         hskLevel: hskLevel(item.hskLevel, '$.hskLevel'),
       }
+    case 'image:prefetch':
+      exact(item, [
+        'type',
+        'pageSessionId',
+        'pageIndex',
+        'imageUrl',
+        'pageUrl',
+        'naturalWidth',
+        'naturalHeight',
+      ])
+      return {
+        type,
+        pageSessionId: string(item.pageSessionId, '$.pageSessionId', 256),
+        pageIndex: integer(item.pageIndex, '$.pageIndex', 0, 100_000),
+        imageUrl: string(item.imageUrl, '$.imageUrl', 8_192),
+        pageUrl: string(item.pageUrl, '$.pageUrl', 8_192),
+        naturalWidth: integer(item.naturalWidth, '$.naturalWidth', 1, 32_768),
+        naturalHeight: integer(item.naturalHeight, '$.naturalHeight', 1, 32_768),
+      }
+    case 'image:prefetch-cancel':
+      exact(item, ['type', 'pageSessionId', 'pageUrl'])
+      return {
+        type,
+        pageSessionId: string(item.pageSessionId, '$.pageSessionId', 256),
+        pageUrl: string(item.pageUrl, '$.pageUrl', 8_192),
+      }
     case 'job:submit': {
       exact(item, [
         'type',
@@ -412,7 +538,9 @@ export function parseBackgroundRequest(value: unknown): BackgroundRequest {
         'sourceMimeType',
         'sourceBytes',
         'hskLevel',
+        'visibleRects',
         'precedingContext',
+        'properNameGlossary',
       ])
       const sourceBytes =
         item.sourceBytes === undefined
@@ -426,6 +554,10 @@ export function parseBackgroundRequest(value: unknown): BackgroundRequest {
         item.precedingContext === undefined
           ? undefined
           : parsePrecedingContext(item.precedingContext)
+      const properNameGlossary =
+        item.properNameGlossary === undefined
+          ? undefined
+          : parseProperNameGlossary(item.properNameGlossary)
       return {
         type,
         pageSessionId: string(item.pageSessionId, '$.pageSessionId', 256),
@@ -437,32 +569,53 @@ export function parseBackgroundRequest(value: unknown): BackgroundRequest {
         ...(sourceMimeType === undefined ? {} : { sourceMimeType }),
         ...(sourceBytes === undefined ? {} : { sourceBytes }),
         hskLevel: hskLevel(item.hskLevel, '$.hskLevel'),
+        visibleRects: normalizedRects(item.visibleRects, '$.visibleRects'),
         ...(precedingContext === undefined ? {} : { precedingContext }),
+        ...(properNameGlossary === undefined ? {} : { properNameGlossary }),
       }
     }
-    case 'job:poll':
-    case 'job:cancel':
-      exact(item, ['type', 'jobId'])
-      return { type, jobId: string(item.jobId, '$.jobId', 512) }
-    case 'job:result':
-      exact(item, [
-        'type',
-        'jobId',
-        'pageSessionId',
-        'sourceUrl',
-        'sourceSha256',
-        'sourceWidth',
-        'sourceHeight',
-      ])
+    case 'job:updates':
+      exact(item, ['type', 'jobId', 'after'])
       return {
         type,
         jobId: string(item.jobId, '$.jobId', 512),
-        pageSessionId: string(item.pageSessionId, '$.pageSessionId', 256),
-        sourceUrl: string(item.sourceUrl, '$.sourceUrl', 8_192),
-        sourceSha256: sha256(item.sourceSha256, '$.sourceSha256'),
-        sourceWidth: integer(item.sourceWidth, '$.sourceWidth', 1, 32_768),
-        sourceHeight: integer(item.sourceHeight, '$.sourceHeight', 1, 32_768),
+        after: integer(item.after, '$.after', 0, Number.MAX_SAFE_INTEGER),
       }
+    case 'job:ack': {
+      exact(item, ['type', 'jobId', 'sequence', 'terminalType'])
+      const parsedTerminal =
+        item.terminalType === undefined
+          ? undefined
+          : terminalType(item.terminalType, '$.terminalType')
+      return {
+        type,
+        jobId: string(item.jobId, '$.jobId', 512),
+        sequence: integer(item.sequence, '$.sequence', 0, Number.MAX_SAFE_INTEGER),
+        ...(parsedTerminal === undefined ? {} : { terminalType: parsedTerminal }),
+      }
+    }
+    case 'job:viewport':
+      exact(item, ['type', 'jobId', 'visibleRects', 'active'])
+      return {
+        type,
+        jobId: string(item.jobId, '$.jobId', 512),
+        visibleRects: normalizedRects(item.visibleRects, '$.visibleRects'),
+        active: boolean(item.active, '$.active'),
+      }
+    case 'job:patch':
+      exact(item, ['type', 'jobId', 'patchId', 'mimeType'])
+      if (item.mimeType !== 'image/png') {
+        throw new RuntimeMessageValidationError('$.mimeType must be "image/png".')
+      }
+      return {
+        type,
+        jobId: string(item.jobId, '$.jobId', 512),
+        patchId: string(item.patchId, '$.patchId', 512),
+        mimeType: 'image/png',
+      }
+    case 'job:cancel':
+      exact(item, ['type', 'jobId'])
+      return { type, jobId: string(item.jobId, '$.jobId', 512) }
     case 'jobs:recover': {
       exact(item, ['type', 'pageSessionId', 'pageUrl', 'candidates'])
       if (!Array.isArray(item.candidates) || item.candidates.length > MAX_RECOVERY_CANDIDATES) {
@@ -513,11 +666,16 @@ export function parseContentRequest(value: unknown): ContentRequest {
       exact(item, ['type'])
       return { type }
     case 'content:start':
-      exact(item, ['type', 'scope', 'hskLevel'])
+      exact(item, ['type', 'scope', 'hskLevel', 'properNameGlossary'])
+      const properNameGlossary =
+        item.properNameGlossary === undefined
+          ? undefined
+          : parseProperNameGlossary(item.properNameGlossary)
       return {
         type,
         scope: translationScope(item.scope, '$.scope'),
         hskLevel: hskLevel(item.hskLevel, '$.hskLevel'),
+        ...(properNameGlossary === undefined ? {} : { properNameGlossary }),
       }
     default:
       throw new RuntimeMessageValidationError(`$.type "${type}" is not supported.`)
@@ -548,6 +706,7 @@ function submittedJob(value: unknown): SubmittedJob {
     'sourceUrl',
     'sourceWidth',
     'sourceHeight',
+    'acknowledgedSequence',
   ])
   return {
     jobId: string(item.jobId, '$.jobId', 512),
@@ -556,6 +715,12 @@ function submittedJob(value: unknown): SubmittedJob {
     sourceUrl: string(item.sourceUrl, '$.sourceUrl', 8_192),
     sourceWidth: integer(item.sourceWidth, '$.sourceWidth', 1, 32_768),
     sourceHeight: integer(item.sourceHeight, '$.sourceHeight', 1, 32_768),
+    acknowledgedSequence: integer(
+      item.acknowledgedSequence,
+      '$.acknowledgedSequence',
+      0,
+      Number.MAX_SAFE_INTEGER,
+    ),
   }
 }
 
@@ -573,8 +738,13 @@ function recoveredJobs(value: unknown): RecoveredJob[] {
       'sourceWidth',
       'sourceHeight',
       'pageIndex',
-      'status',
+      'acknowledgedSequence',
+      'terminalType',
     ])
+    const parsedTerminal =
+      item.terminalType === undefined
+        ? undefined
+        : terminalType(item.terminalType, `$[${index}].terminalType`)
     return {
       jobId: string(item.jobId, `$[${index}].jobId`, 512),
       clientImageId: string(item.clientImageId, `$[${index}].clientImageId`, 512),
@@ -583,17 +753,23 @@ function recoveredJobs(value: unknown): RecoveredJob[] {
       sourceWidth: integer(item.sourceWidth, `$[${index}].sourceWidth`, 1, 32_768),
       sourceHeight: integer(item.sourceHeight, `$[${index}].sourceHeight`, 1, 32_768),
       pageIndex: integer(item.pageIndex, `$[${index}].pageIndex`, 0, 100_000),
-      status: parseBrowserJobStatus(item.status),
+      acknowledgedSequence: integer(
+        item.acknowledgedSequence,
+        `$[${index}].acknowledgedSequence`,
+        0,
+        Number.MAX_SAFE_INTEGER,
+      ),
+      ...(parsedTerminal === undefined ? {} : { terminalType: parsedTerminal }),
     }
   })
 }
 
 function parseResult<T extends BackgroundRequest['type']>(
-  type: T,
+  request: Extract<BackgroundRequest, { type: T }>,
   value: unknown,
 ): MessageResultMap[T] {
   let parsed: unknown
-  switch (type) {
+  switch (request.type) {
     case 'popup:prepare':
       parsed = parsePermissionPlan(value)
       break
@@ -611,20 +787,31 @@ function parseResult<T extends BackgroundRequest['type']>(
     case 'job:submit':
       parsed = submittedJob(value)
       break
-    case 'job:poll':
-      parsed = parseBrowserJobStatus(value)
+    case 'job:updates':
+      parsed = parseJobUpdateBatch(
+        value,
+        (request as Extract<BackgroundRequest, { type: 'job:updates' }>).after,
+      )
       break
-    case 'job:result': {
+    case 'job:patch': {
       const item = record(value)
-      exact(item, ['result', 'cleanImage'])
+      exact(item, ['patchId', 'mimeType', 'bytes'])
+      if (item.mimeType !== 'image/png') {
+        throw new RuntimeMessageValidationError('$.mimeType must be "image/png".')
+      }
       parsed = {
-        result: parseBrowserJobResult(item.result),
-        cleanImage: arrayBuffer(item.cleanImage, '$.cleanImage', MAX_RUNTIME_BINARY_BYTES),
-      } satisfies DeliveredJobResult
+        patchId: string(item.patchId, '$.patchId', 512),
+        mimeType: 'image/png',
+        bytes: arrayBuffer(item.bytes, '$.bytes', MAX_RUNTIME_BINARY_BYTES),
+      } satisfies PatchPayload
       break
     }
+    case 'job:ack':
+    case 'job:viewport':
     case 'job:cancel':
     case 'jobs:cancel-page':
+    case 'image:prefetch':
+    case 'image:prefetch-cancel':
     case 'setup:open-installer':
       if (value !== undefined) {
         throw new RuntimeMessageValidationError('$ must be undefined.')
@@ -651,13 +838,17 @@ function parseResult<T extends BackgroundRequest['type']>(
 }
 
 export async function sendBackgroundMessage<T extends BackgroundRequest['type']>(
-  message: RequestOfType<T>,
+  message: Extract<BackgroundRequest, { type: T }>,
 ): Promise<MessageResultMap[T]> {
-  const raw = await browser.runtime.sendMessage(message)
-  const response = record(raw)
-  exact(response, response.ok === true ? ['ok', 'value'] : ['ok', 'error'])
-  if (response.ok === false) {
-    const error = record(response.error, '$.error')
+  const response = (await browser.runtime.sendMessage(message)) as unknown
+  const envelope = record(response)
+  if (envelope.ok === true) {
+    exact(envelope, ['ok', 'value'])
+    return parseResult(message, envelope.value)
+  }
+  if (envelope.ok === false) {
+    exact(envelope, ['ok', 'error'])
+    const error = record(envelope.error, '$.error')
     exact(error, ['code', 'message', 'retryable'], '$.error')
     throw new RuntimeMessageError(
       string(error.code, '$.error.code', 256),
@@ -665,20 +856,5 @@ export async function sendBackgroundMessage<T extends BackgroundRequest['type']>
       boolean(error.retryable, '$.error.retryable'),
     )
   }
-  if (response.ok !== true) {
-    throw new RuntimeMessageError(
-      'INVALID_BACKGROUND_RESPONSE',
-      'The extension background returned an invalid response.',
-      true,
-    )
-  }
-  try {
-    return parseResult(message.type, response.value)
-  } catch (error) {
-    throw new RuntimeMessageError(
-      'INVALID_BACKGROUND_RESPONSE',
-      error instanceof Error ? error.message : 'The background response was invalid.',
-      true,
-    )
-  }
+  throw new RuntimeMessageValidationError('The background response envelope is invalid.')
 }

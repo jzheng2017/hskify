@@ -5,7 +5,6 @@
 //! The repository's embedded, explicitly incomplete fixtures are compiled only
 //! when the non-default `test-seeds` feature is enabled.
 
-mod correction;
 mod dataset;
 mod dictionary;
 mod error;
@@ -15,10 +14,6 @@ mod normalization;
 mod trie;
 mod validator;
 
-pub use correction::{
-    CorrectionContext, CorrectionLoop, CorrectionOutcome, MAX_CORRECTION_ATTEMPTS,
-    PreservationViolation,
-};
 pub use dataset::HskDataset;
 pub use dictionary::{LocalDictionary, LookupRegionContext, LookupResult, LookupToken};
 pub use error::{HskControlError, Result};
@@ -50,10 +45,8 @@ pub const SEGMENTATION_REVISION: &str =
     "jieba-full-lexicon-boundary-independent-conservative-span-guard-v2";
 
 /// Dictionary lookup policy revision included in cache identities.
-pub const LOOKUP_REVISION: &str = "longest-match-simplified-optional-region-context-v2";
-
-/// Correction-preservation policy revision included in cache identities.
-pub const PRESERVATION_REVISION: &str = "numbers-name-occurrences-ordered-negation-markers-v3";
+pub const LOOKUP_REVISION: &str =
+    "longest-match-simplified-optional-region-context-composed-name-pinyin-v3";
 
 /// Exact `jieba-rs` release whose segmentation behavior is cache-relevant.
 pub const JIEBA_CRATE_VERSION: &str = "0.10.1";

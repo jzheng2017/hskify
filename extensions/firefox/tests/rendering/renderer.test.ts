@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { DiscoveredImage } from '../../src/discovery/images'
-import { createFixtureResult } from '../../src/messaging/fixture-service'
-import { SelectableRenderer } from '../../src/rendering/renderer'
+import { createFixtureRegions } from '../../src/messaging/fixture-service'
+import { SelectableRenderer, type RenderedImage } from '../../src/rendering/renderer'
 import type { TextSpeaker } from '../../src/selection/speech'
 import { loadedImage, pngHeader } from '../helpers/images'
 
@@ -10,10 +10,10 @@ class TestResizeObserver {
   static instances: TestResizeObserver[] = []
   readonly observe = vi.fn()
   readonly disconnect = vi.fn()
+  readonly unobserve = vi.fn()
   constructor(readonly callback: ResizeObserverCallback) {
     TestResizeObserver.instances.push(this)
   }
-  unobserve = vi.fn()
   trigger(): void {
     this.callback([], this as unknown as ResizeObserver)
   }
@@ -29,32 +29,69 @@ function candidate(image: HTMLImageElement): DiscoveredImage {
   }
 }
 
-function fixturePayload() {
-  return {
-    result: createFixtureResult({
-      jobId: 'fixture-job',
-      sourceSha256: 'a'.repeat(64),
-      sourceWidth: 1200,
-      sourceHeight: 1800,
-    }),
-    cleanImage: pngHeader(1, 1),
-  }
-}
-
-async function decodeFixtureImage(image: HTMLImageElement): Promise<void> {
-  Object.defineProperties(image, {
-    complete: { configurable: true, value: true },
-    naturalWidth: { configurable: true, value: 1200 },
-    naturalHeight: { configurable: true, value: 1800 },
+function fixtureRegions() {
+  return createFixtureRegions({
+    jobId: 'fixture-job',
+    sourceSha256: 'a'.repeat(64),
+    sourceWidth: 1200,
+    sourceHeight: 1800,
   })
 }
 
-function shadowOf(wrapper: HTMLElement): ShadowRoot {
-  const host = [...wrapper.children].find(
+function shadowOf(rendered: RenderedImage): ShadowRoot {
+  const host = [...rendered.wrapper.children].find(
     (element) => element instanceof HTMLElement && element.shadowRoot,
   ) as HTMLElement | undefined
   if (!host?.shadowRoot) throw new Error('Renderer shadow root not found.')
   return host.shadowRoot
+}
+
+function controlsHost(): HTMLElement {
+  const host = document.querySelector<HTMLElement>('[data-hmt-mode-controls="true"]')
+  if (!host?.shadowRoot) throw new Error('Fixed mode controls were not found.')
+  return host
+}
+
+async function decodeFixturePatch(image: HTMLImageElement): Promise<void> {
+  const second = image.dataset.patchId?.endsWith('-2')
+  Object.defineProperties(image, {
+    complete: { configurable: true, value: true },
+    naturalWidth: { configurable: true, value: second ? 432 : 456 },
+    naturalHeight: { configurable: true, value: second ? 468 : 396 },
+  })
+}
+
+function renderer(
+  lookup: ConstructorParameters<typeof SelectableRenderer>[0]['lookup'] = async (
+    request,
+  ) => ({ selectedText: request.selectedText, tokens: [] }),
+  decoder = decodeFixturePatch,
+  speaker?: TextSpeaker,
+): SelectableRenderer {
+  return new SelectableRenderer(
+    {
+      fetchFont: async () => new ArrayBuffer(1),
+      lookup,
+    },
+    TestResizeObserver as unknown as typeof ResizeObserver,
+    decoder,
+    speaker,
+  )
+}
+
+async function renderAll(
+  image: HTMLImageElement,
+  selectedRenderer = renderer(),
+): Promise<RenderedImage> {
+  const rendered = selectedRenderer.begin(candidate(image), {
+    jobId: 'fixture-job',
+    sourceWidth: 1200,
+    sourceHeight: 1800,
+  })
+  for (const region of fixtureRegions()) {
+    await rendered.installRegion(region, pngHeader())
+  }
+  return rendered
 }
 
 beforeEach(() => {
@@ -72,7 +109,8 @@ beforeEach(() => {
       value: () => undefined,
     })
   }
-  vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:fixture')
+  let blob = 0
+  vi.spyOn(URL, 'createObjectURL').mockImplementation(() => `blob:fixture-${++blob}`)
   vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => undefined)
   if (!Range.prototype.getBoundingClientRect) {
     Object.defineProperty(Range.prototype, 'getBoundingClientRect', {
@@ -95,113 +133,121 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
-describe('selectable image renderer', () => {
-  it('delays wrapping until render, moves the live image, and creates only real Chinese text', async () => {
+describe('progressive selectable image renderer', () => {
+  it('keeps the live original visible and inserts Chinese only after patch decode', async () => {
     const image = loadedImage()
-    const clickListener = vi.fn()
-    image.addEventListener('custom-live-listener', clickListener)
+    const liveListener = vi.fn()
+    image.addEventListener('custom-live-listener', liveListener)
     document.body.append(image)
-    const renderer = new SelectableRenderer(
-      {
-        fetchFont: async () => new ArrayBuffer(0),
-        lookup: async (request) => ({
-          selectedText: request.selectedText,
-          tokens: [],
-        }),
-      },
-      TestResizeObserver as unknown as typeof ResizeObserver,
-      decodeFixtureImage,
-    )
-    expect(image.parentElement).toBe(document.body)
-    const payload = fixturePayload()
-    const rendered = await renderer.render(candidate(image), payload)
-    expect(rendered.wrapper.contains(image)).toBe(true)
+    let releaseDecode!: () => void
+    const gate = new Promise<void>((resolve) => {
+      releaseDecode = resolve
+    })
+    const selectedRenderer = renderer(undefined, async (patch) => {
+      await gate
+      await decodeFixturePatch(patch)
+    })
+    const rendered = selectedRenderer.begin(candidate(image), {
+      jobId: 'fixture-job',
+      sourceWidth: 1200,
+      sourceHeight: 1800,
+    })
+    const shadow = shadowOf(rendered)
+    const installing = rendered.installRegion(fixtureRegions()[0]!, pngHeader())
+
+    expect(image.isConnected).toBe(true)
+    expect(image.style.opacity).toBe('')
+    expect(shadow.querySelector('.hmt-patch')).toBeNull()
+    expect(shadow.querySelector('.hmt-region')).toBeNull()
+    releaseDecode()
+    await installing
+    expect(shadow.querySelector('.hmt-patch')).not.toBeNull()
+    expect(shadow.querySelector('.hmt-region')?.textContent).toBe('我们现在要走！')
     image.dispatchEvent(new Event('custom-live-listener'))
-    expect(clickListener).toHaveBeenCalledTimes(1)
-
-    const shadow = shadowOf(rendered.wrapper)
-    const regions = [...shadow.querySelectorAll<HTMLElement>('.hmt-region')]
-    expect(regions.map((region) => region.textContent)).toEqual([
-      '我们现在要走！',
-      '等我！',
-    ])
-    expect(shadow.textContent).not.toContain('We have to leave now!')
-    expect(regions[0]?.lang).toBe('zh-CN')
-    expect(regions[0]?.classList.contains('hmt-region')).toBe(true)
-    expect(regions[0]?.style.left).toBe('18%')
-    expect(
-      [...(regions[0]?.querySelectorAll('.hmt-region-line') ?? [])].map(
-        (line) => line.textContent,
-      ),
-    ).toEqual(payload.result.regions[0]?.layout.suggestedLines)
-    expect(image.style.opacity).toBe('0')
+    expect(liveListener).toHaveBeenCalledTimes(1)
   })
 
-  it('supports original, Chinese, and press-to-compare modes', async () => {
+  it('shares one fixed, synchronized mode control across a long multi-image reader', async () => {
+    const first = loadedImage()
+    const second = loadedImage('https://reader.test/panel-2.png')
+    document.body.append(first, second)
+    const selectedRenderer = renderer()
+    const firstRendered = await renderAll(first, selectedRenderer)
+    const firstViewport = shadowOf(firstRendered).querySelector<HTMLElement>('.hmt-viewport')
+    const host = controlsHost()
+    const controls = host.shadowRoot
+    const button = (name: string) =>
+      [...(controls?.querySelectorAll('button') ?? [])].find(
+        (item) => item.textContent === name,
+      )
+
+    expect(document.querySelectorAll('[data-hmt-mode-controls="true"]')).toHaveLength(1)
+    expect(host.style.position).toBe('fixed')
+    button('Original')?.click()
+    expect(firstRendered.currentMode).toBe('original')
+    expect(firstViewport?.hidden).toBe(true)
+
+    const secondRendered = await renderAll(second, selectedRenderer)
+    const secondViewport = shadowOf(secondRendered).querySelector<HTMLElement>('.hmt-viewport')
+    expect(document.querySelectorAll('[data-hmt-mode-controls="true"]')).toHaveLength(1)
+    expect(secondRendered.currentMode).toBe('original')
+    expect(secondViewport?.hidden).toBe(true)
+    expect(first.style.opacity).toBe('')
+    expect(second.style.opacity).toBe('')
+    button('Chinese')?.click()
+    expect(firstViewport?.hidden).toBe(false)
+    expect(secondViewport?.hidden).toBe(false)
+    button('Hold to compare')?.dispatchEvent(
+      new Event('pointerdown', { bubbles: true, composed: true }),
+    )
+    expect(firstViewport?.hidden).toBe(true)
+    expect(secondViewport?.hidden).toBe(true)
+    button('Hold to compare')?.dispatchEvent(
+      new Event('pointerup', { bubbles: true, composed: true }),
+    )
+    expect(firstViewport?.hidden).toBe(false)
+    expect(secondViewport?.hidden).toBe(false)
+    expect(first.isConnected).toBe(true)
+    expect(second.isConnected).toBe(true)
+
+    firstRendered.destroy()
+    expect(document.querySelectorAll('[data-hmt-mode-controls="true"]')).toHaveLength(1)
+    secondRendered.destroy()
+    expect(document.querySelector('[data-hmt-mode-controls="true"]')).toBeNull()
+  })
+
+  it('refines only selectable text, pinyin, and HSK metadata without replacing the patch', async () => {
     const image = loadedImage()
     document.body.append(image)
-    const rendered = await new SelectableRenderer(
-      {
-        fetchFont: async () => new ArrayBuffer(0),
-        lookup: async (request) => ({ selectedText: request.selectedText, tokens: [] }),
+    const rendered = await renderAll(image)
+    const shadow = shadowOf(rendered)
+    const region = fixtureRegions()[0]!
+    const patch = shadow.querySelector(`[data-patch-id="${region.patch.blobId}"]`)
+    rendered.refineRegion({
+      sequence: 9,
+      type: 'regionRefined',
+      regionId: region.id,
+      displayedChinese: '我们现在就走！',
+      pinyin: 'wǒ men xiàn zài jiù zǒu',
+      hsk: {
+        requestedLevel: 2,
+        strictlyValid: true,
+        aboveLevelTokens: [],
+        repairState: 'accepted',
       },
-      TestResizeObserver as unknown as typeof ResizeObserver,
-      decodeFixtureImage,
-    ).render(candidate(image), fixturePayload())
-    const shadow = shadowOf(rendered.wrapper)
-    const buttons = [...shadow.querySelectorAll('button')]
-    const original = buttons.find((button) => button.textContent === 'Original')
-    const chinese = buttons.find((button) => button.textContent === 'Chinese')
-    const compare = buttons.find((button) => button.textContent === 'Hold to compare')
-    original?.click()
-    expect(rendered.currentMode).toBe('original')
-    expect(image.style.opacity).toBe('')
-    chinese?.click()
-    expect(rendered.currentMode).toBe('chinese')
-    expect(image.style.opacity).toBe('0')
-    compare?.dispatchEvent(new Event('pointerdown', { bubbles: true, composed: true }))
-    expect(image.style.opacity).toBe('')
-    compare?.dispatchEvent(new Event('pointerup', { bubbles: true, composed: true }))
-    expect(image.style.opacity).toBe('0')
+    })
+    const refined = shadow.querySelector<HTMLElement>(`[data-region-id="${region.id}"]`)
+    expect(refined?.textContent).toBe('我们现在就走！')
+    expect(refined?.dataset.pinyin).toBe('wǒ men xiàn zài jiù zǒu')
+    expect(refined?.dataset.hskRepairState).toBe('accepted')
+    expect(shadow.querySelector(`[data-patch-id="${region.patch.blobId}"]`)).toBe(patch)
   })
 
-  it('preserves normal link clicks but prevents a click produced by text selection', async () => {
-    const link = document.createElement('a')
-    link.href = '#next'
-    const image = loadedImage()
-    link.append(image)
-    document.body.append(link)
-    const navigated = vi.fn((event: Event) => event.preventDefault())
-    const directImageClick = vi.fn()
-    link.addEventListener('click', navigated)
-    image.addEventListener('click', directImageClick)
-    const rendered = await new SelectableRenderer(
-      {
-        fetchFont: async () => new ArrayBuffer(0),
-        lookup: async (request) => ({ selectedText: request.selectedText, tokens: [] }),
-      },
-      TestResizeObserver as unknown as typeof ResizeObserver,
-      decodeFixtureImage,
-    ).render(candidate(image), fixturePayload())
-    const region = shadowOf(rendered.wrapper).querySelector<HTMLElement>('.hmt-region')
-    region?.click()
-    expect(navigated).toHaveBeenCalledTimes(1)
-    expect(directImageClick).toHaveBeenCalledTimes(1)
-
-    const range = document.createRange()
-    range.selectNodeContents(region as HTMLElement)
-    window.getSelection()?.removeAllRanges()
-    window.getSelection()?.addRange(range)
-    region?.click()
-    expect(navigated).toHaveBeenCalledTimes(1)
-    expect(directImageClick).toHaveBeenCalledTimes(1)
-  })
-
-  it('copies exactly selected Chinese and opens the local lookup popover', async () => {
+  it('keeps selection, dictionary pinyin, and Mandarin speech wired to progressive text', async () => {
     const image = loadedImage()
     document.body.append(image)
     const lookup = vi.fn(async (request) => ({
-      selectedText: `untrusted-${request.selectedText}`,
+      selectedText: request.selectedText,
       tokens: [
         {
           simplified: '离开',
@@ -213,7 +259,7 @@ describe('selectable image renderer', () => {
       ],
       region: {
         displayedChinese: '我们现在要走！',
-        faithfulChinese: '我们得马上离开！',
+        baseChinese: '我们得马上离开！',
         sourceEnglish: 'We have to leave now!',
       },
     }))
@@ -222,73 +268,23 @@ describe('selectable image renderer', () => {
       isAvailable: () => true,
       toggle: vi.fn((_text, onStateChange) => {
         speaking = !speaking
-        onStateChange(speaking ? 'speaking' : 'idle')
+        onStateChange(
+          speaking ? 'speaking' : 'idle',
+          speaking
+            ? {
+                name: 'Microsoft Yunxi',
+                lang: 'zh-CN',
+                localService: true,
+              }
+            : undefined,
+        )
       }),
       stop: vi.fn(() => {
         speaking = false
       }),
     }
-    const rendered = await new SelectableRenderer(
-      { fetchFont: async () => new ArrayBuffer(0), lookup },
-      TestResizeObserver as unknown as typeof ResizeObserver,
-      decodeFixtureImage,
-      speaker,
-    ).render(candidate(image), fixturePayload())
-    const shadow = shadowOf(rendered.wrapper)
-    const region = shadow.querySelector<HTMLElement>('.hmt-region')
-    const text = region?.querySelector('.hmt-region-line')?.firstChild
-    if (!region || !text) throw new Error('Fixture region missing.')
-    const range = document.createRange()
-    range.setStart(text, 0)
-    range.setEnd(text, 2)
-    window.getSelection()?.removeAllRanges()
-    window.getSelection()?.addRange(range)
-
-    const clipboard = { setData: vi.fn() }
-    const copy = new Event('copy', { bubbles: true, composed: true, cancelable: true })
-    Object.defineProperty(copy, 'clipboardData', { value: clipboard })
-    region.dispatchEvent(copy)
-    expect(clipboard.setData).toHaveBeenCalledWith('text/plain', '我们')
-
-    region.dispatchEvent(new Event('mouseup', { bubbles: true, composed: true }))
-    await vi.waitFor(() => expect(lookup).toHaveBeenCalled())
-    const popover = shadow.querySelector<HTMLElement>('.hmt-lookup')
-    await vi.waitFor(() => expect(popover?.textContent).toContain('lí kāi'))
-    expect(popover?.textContent).toContain('We have to leave now!')
-    const speak = popover?.querySelector<HTMLButtonElement>('.hmt-speak')
-    expect(speak?.textContent).toBe('Listen')
-    speak?.click()
-    expect(speaker.toggle).toHaveBeenCalledWith('我们', expect.any(Function))
-    expect(popover?.textContent).not.toContain('untrusted-我们')
-    expect(speak?.textContent).toBe('Stop')
-    expect(speak?.getAttribute('aria-pressed')).toBe('true')
-    speak?.click()
-    expect(speak?.textContent).toBe('Listen')
-    expect(speak?.getAttribute('aria-pressed')).toBe('false')
-  })
-
-  it('offers pronunciation while dictionary lookup is pending and keeps it on failure', async () => {
-    const image = loadedImage()
-    document.body.append(image)
-    let rejectLookup!: (reason: unknown) => void
-    const lookup = vi.fn(
-      () =>
-        new Promise<never>((_resolve, reject) => {
-          rejectLookup = reject
-        }),
-    )
-    const speaker: TextSpeaker = {
-      isAvailable: () => true,
-      toggle: vi.fn((_text, onStateChange) => onStateChange('speaking')),
-      stop: vi.fn(),
-    }
-    const rendered = await new SelectableRenderer(
-      { fetchFont: async () => new ArrayBuffer(0), lookup },
-      TestResizeObserver as unknown as typeof ResizeObserver,
-      decodeFixtureImage,
-      speaker,
-    ).render(candidate(image), fixturePayload())
-    const shadow = shadowOf(rendered.wrapper)
+    const rendered = await renderAll(image, renderer(lookup, decodeFixturePatch, speaker))
+    const shadow = shadowOf(rendered)
     const region = shadow.querySelector<HTMLElement>('.hmt-region')
     if (!region) throw new Error('Fixture region missing.')
     const range = document.createRange()
@@ -299,96 +295,95 @@ describe('selectable image renderer', () => {
 
     await vi.waitFor(() => expect(lookup).toHaveBeenCalled())
     const popover = shadow.querySelector<HTMLElement>('.hmt-lookup')
+    await vi.waitFor(() => expect(popover?.textContent).toContain('lí kāi'))
+    expect(popover?.textContent).toContain('We have to leave now!')
     const speak = popover?.querySelector<HTMLButtonElement>('.hmt-speak')
-    expect(popover?.textContent).toContain('Looking up…')
     speak?.click()
     expect(speaker.toggle).toHaveBeenCalledWith('我们现在要走！', expect.any(Function))
-
-    rejectLookup(new Error('dictionary offline'))
-    await vi.waitFor(() =>
-      expect(popover?.textContent).toContain('Dictionary lookup unavailable.'),
-    )
-    expect(speak?.isConnected).toBe(true)
     expect(speak?.textContent).toBe('Stop')
+    expect(speak?.dataset.hmtVoiceName).toBe('Microsoft Yunxi')
+    expect(speak?.dataset.hmtVoiceLang).toBe('zh-CN')
+    expect(speak?.dataset.hmtVoiceLocalService).toBe('true')
   })
 
-  it('refits on resize and restores the exact original node', async () => {
+  it('forwards unselected primary clicks to reader navigation', async () => {
+    const link = document.createElement('a')
+    link.href = '#next'
+    const image = loadedImage()
+    link.append(image)
+    document.body.append(link)
+    const navigated = vi.fn((event: Event) => event.preventDefault())
+    const imageClicked = vi.fn()
+    link.addEventListener('click', navigated)
+    image.addEventListener('click', imageClicked)
+    const rendered = await renderAll(image)
+    shadowOf(rendered).querySelector<HTMLElement>('.hmt-region')?.click()
+    expect(navigated).toHaveBeenCalledTimes(1)
+    expect(imageClicked).toHaveBeenCalledTimes(1)
+  })
+
+  it('uses measured binary search and leaves no scroll overflow', async () => {
+    const image = loadedImage()
+    document.body.append(image)
+    const rendered = await renderAll(image)
+    const region = shadowOf(rendered).querySelector<HTMLElement>('.hmt-region')
+    if (!region) throw new Error('Fixture region missing.')
+    Object.defineProperties(region, {
+      clientWidth: { configurable: true, value: 100 },
+      clientHeight: { configurable: true, value: 40 },
+      scrollWidth: {
+        configurable: true,
+        get: () => Number.parseFloat(region.style.fontSize || '0') * 12,
+      },
+      scrollHeight: {
+        configurable: true,
+        get: () => Number.parseFloat(region.style.fontSize || '0') * 3,
+      },
+    })
+    rendered.refit()
+    expect(region.scrollWidth).toBeLessThanOrEqual(region.clientWidth + 0.5)
+    expect(region.scrollHeight).toBeLessThanOrEqual(region.clientHeight + 0.5)
+  })
+
+  it('never installs text for a corrupt patch and restores the exact original node', async () => {
     const before = document.createElement('span')
     const image = loadedImage()
+    image.srcset =
+      'https://reader.test/panel-small.png 480w, https://reader.test/panel.png 1200w'
+    image.sizes = '(max-width: 800px) 100vw, 800px'
+    image.className = 'webtoon-page preserved-class'
+    image.setAttribute('style', 'display: block; width: 100%; height: auto;')
+    image.setAttribute('data-reader-page', '7')
     const after = document.createElement('span')
     document.body.append(before, image, after)
-    const restored = vi.fn()
-    const rendered = await new SelectableRenderer(
-      {
-        fetchFont: async () => new ArrayBuffer(0),
-        lookup: async (request) => ({ selectedText: request.selectedText, tokens: [] }),
-        onRestore: restored,
-      },
-      TestResizeObserver as unknown as typeof ResizeObserver,
-      decodeFixtureImage,
-    ).render(candidate(image), fixturePayload())
-    expect(TestResizeObserver.instances[0]?.observe).toHaveBeenCalledWith(image)
-    TestResizeObserver.instances[0]?.trigger()
+    const exactHtml = document.body.innerHTML
+    const exactChildren = [...document.body.childNodes]
+    const rendered = renderer(undefined, async () => {
+      throw new Error('corrupt patch')
+    }).begin(candidate(image), {
+      jobId: 'fixture-job',
+      sourceWidth: 1200,
+      sourceHeight: 1800,
+    })
+    await expect(
+      rendered.installRegion(fixtureRegions()[0]!, pngHeader()),
+    ).rejects.toMatchObject({ code: 'PATCH_DECODE_FAILED' })
+    expect(shadowOf(rendered).querySelector('.hmt-region')).toBeNull()
+    expect(image.style.opacity).toBe('')
     rendered.destroy()
+    rendered.destroy()
+    expect(document.body.innerHTML).toBe(exactHtml)
+    expect([...document.body.childNodes]).toEqual(exactChildren)
     expect(document.body.children[1]).toBe(image)
     expect(image.nextSibling).toBe(after)
+    expect(image.getAttribute('src')).toBe('https://reader.test/panel.png')
+    expect(image.getAttribute('srcset')).toBe(
+      'https://reader.test/panel-small.png 480w, https://reader.test/panel.png 1200w',
+    )
+    expect(image.getAttribute('sizes')).toBe('(max-width: 800px) 100vw, 800px')
+    expect(image.className).toBe('webtoon-page preserved-class')
+    expect(image.getAttribute('style')).toBe('display: block; width: 100%; height: auto;')
     expect(image.hasAttribute('data-hmt-original')).toBe(false)
-    expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:fixture')
-    expect(restored).toHaveBeenCalled()
-  })
-
-  it('keeps the original untouched when the clean image cannot decode', async () => {
-    const image = loadedImage()
-    document.body.append(image)
-    const renderer = new SelectableRenderer(
-      {
-        fetchFont: async () => new ArrayBuffer(0),
-        lookup: async (request) => ({ selectedText: request.selectedText, tokens: [] }),
-      },
-      TestResizeObserver as unknown as typeof ResizeObserver,
-      async () => {
-        throw new Error('corrupt fixture bytes')
-      },
-    )
-    await expect(renderer.render(candidate(image), fixturePayload())).rejects.toMatchObject({
-      code: 'CLEAN_IMAGE_DECODE_FAILED',
-    })
-    expect(image.parentElement).toBe(document.body)
-    expect(image.style.opacity).toBe('')
-    expect(document.querySelector('.hmt-wrapper')).toBeNull()
-    expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:fixture')
-  })
-
-  it('revalidates cancellation and source identity after awaited font work', async () => {
-    const image = loadedImage()
-    document.body.append(image)
-    let releaseFont!: () => void
-    const fontGate = new Promise<void>((resolve) => {
-      releaseFont = resolve
-    })
-    let current = true
-    const renderer = new SelectableRenderer(
-      {
-        fetchFont: async () => {
-          await fontGate
-          return new ArrayBuffer(0)
-        },
-        lookup: async (request) => ({ selectedText: request.selectedText, tokens: [] }),
-      },
-      TestResizeObserver as unknown as typeof ResizeObserver,
-      decodeFixtureImage,
-    )
-    const rendering = renderer.render(candidate(image), fixturePayload(), {
-      validate: () => {
-        if (!current) throw new Error('stale render')
-      },
-    })
-    await vi.waitFor(() => expect(URL.createObjectURL).toHaveBeenCalled())
-    current = false
-    releaseFont()
-    await expect(rendering).rejects.toThrow(/stale render/i)
-    expect(image.parentElement).toBe(document.body)
-    expect(image.style.opacity).toBe('')
-    expect(document.querySelector('.hmt-wrapper')).toBeNull()
+    expect(URL.revokeObjectURL).toHaveBeenCalled()
   })
 })

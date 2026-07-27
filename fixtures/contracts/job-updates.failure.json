@@ -1,0 +1,22 @@
+{
+  "jobId": "fixture-job-failed",
+  "nextSequence": 2,
+  "updates": [
+    {
+      "sequence": 1,
+      "type": "progress",
+      "stage": "ocr",
+      "overallProgress": 0.3,
+      "current": 1,
+      "total": 2,
+      "message": "Reading text"
+    },
+    {
+      "sequence": 2,
+      "type": "failed",
+      "code": "OCR_FAILED",
+      "message": "The local OCR stage failed.",
+      "retryable": false
+    }
+  ]
+}

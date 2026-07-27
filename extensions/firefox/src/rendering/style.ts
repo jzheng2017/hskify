@@ -19,7 +19,6 @@ export type AppliedRegionStyle = {
   shadowColor: string
   shadowXRatio: number
   shadowYRatio: number
-  rotationDegrees: number
   italicDegrees: number
 }
 
@@ -45,7 +44,6 @@ export function validateRegionStyle(region: BrowserRegion): AppliedRegionStyle {
     shadowColor: safeHexColor(style.shadowColor, 'transparent'),
     shadowXRatio: bounded(style.shadowXRatio, -0.3, 0.3, 0),
     shadowYRatio: bounded(style.shadowYRatio, -0.3, 0.3, 0),
-    rotationDegrees: bounded(region.rotationDegrees, -180, 180, 0),
     italicDegrees: bounded(style.italicDegrees, -30, 30, 0),
   }
 }
@@ -74,5 +72,5 @@ export function applyRegionStyle(
   element.style.textShadow = `${fontSize * style.shadowXRatio}px ${
     fontSize * style.shadowYRatio
   }px ${Math.max(0, fontSize * 0.025)}px ${style.shadowColor}`
-  element.style.transform = `rotate(${style.rotationDegrees}deg) skewX(${style.italicDegrees}deg)`
+  element.style.transform = `skewX(${style.italicDegrees}deg)`
 }

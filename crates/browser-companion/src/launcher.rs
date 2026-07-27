@@ -195,7 +195,7 @@ pub fn request_session(
         .map_err(|_| LauncherError::InvalidControlResponse)?;
     write!(
         stream,
-        "POST /browser-internal/v1/session HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n{}: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "POST /browser-internal/session HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n{}: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         record.port,
         CONTROL_HEADER,
         record.control_secret,
@@ -366,7 +366,7 @@ mod tests {
             &mut frame,
             &json!({
                 "type": "start-or-discover-daemon",
-                "protocolVersion": 1,
+                "buildFingerprint": "hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-07-26-r2",
                 "extensionVersion": "0.1.0",
                 "extensionOrigin": "moz-extension://00000000-0000-4000-8000-000000000001"
             }),

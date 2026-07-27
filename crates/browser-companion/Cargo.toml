@@ -2,7 +2,7 @@
 name = "browser-companion"
 version.workspace = true
 edition.workspace = true
-description = "Authenticated Firefox browser adapter for Koharu"
+description = "Authenticated Firefox browser adapter for Hskify"
 license.workspace = true
 authors.workspace = true
 homepage.workspace = true
@@ -21,10 +21,13 @@ fs4 = { workspace = true }
 getrandom = "0.3"
 http-body = "1"
 image = { workspace = true }
+imageproc = { workspace = true }
 hsk-control = { path = "../hsk-control" }
 koharu-app = { workspace = true }
 koharu-core = { workspace = true }
 koharu-runtime = { workspace = true }
+ort = { workspace = true }
+rayon = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = "0.10"
@@ -33,6 +36,10 @@ tempfile = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 uuid = { workspace = true }
+
+[features]
+default = ["cuda"]
+cuda = ["koharu-app/cuda", "ort/cuda"]
 
 [dev-dependencies]
 serde_json = { workspace = true }
@@ -51,7 +58,9 @@ windows-sys = { workspace = true, features = [
 [[bin]]
 name = "hsk-manga-native-host"
 path = "src/bin/hsk-manga-native-host.rs"
+required-features = ["cuda"]
 
 [[bin]]
 name = "hsk-manga-browser-daemon"
 path = "src/bin/hsk-manga-browser-daemon.rs"
+required-features = ["cuda"]

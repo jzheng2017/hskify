@@ -1,0 +1,99 @@
+{
+  "jobId": "fixture-job-0001",
+  "nextSequence": 4,
+  "updates": [
+    {
+      "sequence": 1,
+      "type": "progress",
+      "stage": "detecting",
+      "stageProgress": 0.4,
+      "overallProgress": 0.12,
+      "message": "Finding text regions"
+    },
+    {
+      "sequence": 2,
+      "type": "regionReady",
+      "region": {
+        "id": "aaaaaaaa-region-0001",
+        "textPolygon": [
+          { "x": 0.19, "y": 0.12 },
+          { "x": 0.46, "y": 0.12 },
+          { "x": 0.46, "y": 0.25 },
+          { "x": 0.19, "y": 0.25 }
+        ],
+        "bubblePolygon": [
+          { "x": 0.16, "y": 0.09 },
+          { "x": 0.49, "y": 0.09 },
+          { "x": 0.51, "y": 0.27 },
+          { "x": 0.16, "y": 0.28 }
+        ],
+        "patch": {
+          "blobId": "patch-fixture-0001",
+          "mimeType": "image/png",
+          "rect": {
+            "x": 0.18,
+            "y": 0.11,
+            "width": 0.29,
+            "height": 0.15
+          }
+        },
+        "sourceEnglish": "We have to leave now!",
+        "baseChinese": "我们得马上离开！",
+        "displayedChinese": "我们得马上离开！",
+        "pinyin": "wǒ men děi mǎ shàng lí kāi",
+        "ocrConfidence": 0.97,
+        "readingOrder": 0,
+        "style": {
+          "fontId": "fixture-sans",
+          "category": "sans",
+          "foreground": "#151515",
+          "weight": 700,
+          "italicDegrees": 0,
+          "outlineColor": "#ffffff",
+          "outlineWidthRatio": 0.035,
+          "shadowColor": "#00000033",
+          "shadowXRatio": 0.01,
+          "shadowYRatio": 0.015,
+          "alignment": "center",
+          "writingMode": "horizontal-tb",
+          "lineHeight": 1.12,
+          "letterSpacingEm": 0
+        },
+        "layout": {
+          "suggestedLines": ["我们得马上", "离开！"],
+          "fontSizeToImageWidth": 0.034,
+          "safePolygon": [
+            { "x": 0.18, "y": 0.11 },
+            { "x": 0.48, "y": 0.11 },
+            { "x": 0.48, "y": 0.26 },
+            { "x": 0.18, "y": 0.26 }
+          ]
+        },
+        "hsk": {
+          "requestedLevel": 2,
+          "strictlyValid": false,
+          "aboveLevelTokens": ["马上"],
+          "repairState": "pending"
+        }
+      }
+    },
+    {
+      "sequence": 3,
+      "type": "regionRefined",
+      "regionId": "aaaaaaaa-region-0001",
+      "displayedChinese": "我们现在要走！",
+      "pinyin": "wǒ men xiàn zài yào zǒu",
+      "hsk": {
+        "requestedLevel": 2,
+        "strictlyValid": true,
+        "aboveLevelTokens": [],
+        "repairState": "accepted"
+      }
+    },
+    {
+      "sequence": 4,
+      "type": "complete",
+      "message": "Local cleaning and HSK translation complete"
+    }
+  ]
+}

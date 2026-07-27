@@ -39,14 +39,9 @@ objc2-foundation = { workspace = true, optional = true }
 [features]
 cuda = [
     "candle-core/cuda",
-    "candle-core/cudnn",
     "candle-nn/cuda",
-    "candle-nn/cudnn",
     "candle-transformers/cuda",
-    "candle-transformers/cudnn",
     "cudarc",
-    "candle-flash-attn",
-    "candle-flash-attn/cudnn",
 ]
 metal = [
     "candle-core/metal",

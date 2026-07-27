@@ -27,7 +27,7 @@ mkdir -p "$manifest_directory"
 {
     printf '%s\n' '{'
     printf '%s\n' '  "name": "local.hskify.hsk_manga",'
-    printf '%s\n' '  "description": "HSK Manga Translator local browser companion",'
+    printf '%s\n' '  "description": "Hskify local browser companion",'
     printf '  "path": "%s",\n' "$escaped_path"
     printf '%s\n' '  "type": "stdio",'
     printf '%s\n' '  "allowed_extensions": ["hsk-manga-translator@local.hskify"]'

@@ -1,0 +1,555 @@
+{
+  "schemaVersion": 1,
+  "page": {
+    "order": 13,
+    "file": "013.webp",
+    "width": 900,
+    "height": 1798,
+    "sourceSha256": "bbec91aaaf8132c46538bef897c1a3c50474c71b60444fa6dd2efa5506e72f45"
+  },
+  "policy": {
+    "included": "English story text: dialogue, thoughts, narration, captions, and unbubbled spoken lines, including punctuation-only reactions and silent ellipses",
+    "excluded": "sound effects, credits, scanlation promotion, translator notes, series branding, decorative labels, ambiguous OCR, and non-English text",
+    "detectorUse": "proposal only; every region and omission was manually gated against the source image"
+  },
+  "regions": [
+    {
+      "id": "30ysp-ch5-p013-r00",
+      "kind": "thought",
+      "containerStyle": "thought",
+      "readingOrder": 0,
+      "sourceEnglish": "I THOUGHT IT WAS ADORABLE...",
+      "normalizedEnglish": "I THOUGHT IT WAS ADORABLE...",
+      "textPolygon": [
+        [
+          0.2595486,
+          0.01885776
+        ],
+        [
+          0.732118,
+          0.01885776
+        ],
+        [
+          0.732118,
+          0.08568548
+        ],
+        [
+          0.2595486,
+          0.08568548
+        ]
+      ],
+      "eraseMask": {
+        "encoding": "normalized-polygon-v1",
+        "polygon": [
+          [
+            0.26222223,
+            0.01835373
+          ],
+          [
+            0.73222223,
+            0.01835373
+          ],
+          [
+            0.73222223,
+            0.08565073
+          ],
+          [
+            0.26222223,
+            0.08565073
+          ]
+        ],
+        "operation": "erase every English glyph, outline, punctuation mark, and antialiased edge inside the polygon; preserve every pixel outside the erase mask"
+      },
+      "geometryAudit": "detector-adjusted",
+      "reviewProvenance": {
+        "type": "acceptedProposal",
+        "uncertainty": "low",
+        "proposalIndex": 1,
+        "reviewRegionId": "bbec91aa-region-1bb230ab5ab2d4bc"
+      },
+      "bubblePolygon": [
+        [
+          0.171875,
+          0.0
+        ],
+        [
+          0.8197917,
+          0.0
+        ],
+        [
+          0.8197917,
+          0.20986861
+        ],
+        [
+          0.171875,
+          0.20986861
+        ]
+      ],
+      "productionMatch": {
+        "stableRegionId": "bbec91aa-region-1bb230ab5ab2d4bc",
+        "method": "stable-region-id-and-text-geometry",
+        "textGeometryIou": 1.0
+      },
+      "simplifiedChinese": "我以为这太可爱了。。。。。。",
+      "pinyin": "wǒ yǐ wéi zhè / zhèi tài kě ài le / liào / liǎo",
+      "hskValidation": {
+        "requestedLevel": 5,
+        "strictlyValid": false,
+        "aboveLevelTokens": [
+          "这太"
+        ],
+        "repairState": "pending"
+      },
+      "hskTokens": [
+        {
+          "text": "我",
+          "startChar": 0,
+          "endChar": 1,
+          "pinyin": "wǒ",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "以为",
+          "startChar": 1,
+          "endChar": 3,
+          "pinyin": "yǐ wéi",
+          "classification": "hsk",
+          "hskLevel": 4,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "这",
+          "startChar": 3,
+          "endChar": 4,
+          "pinyin": "zhè / zhèi",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "太",
+          "startChar": 4,
+          "endChar": 5,
+          "pinyin": "tài",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "可爱",
+          "startChar": 5,
+          "endChar": 7,
+          "pinyin": "kě ài",
+          "classification": "hsk",
+          "hskLevel": 3,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "了",
+          "startChar": 7,
+          "endChar": 8,
+          "pinyin": "le / liào / liǎo",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        }
+      ]
+    },
+    {
+      "id": "30ysp-ch5-p013-r01",
+      "kind": "thought",
+      "containerStyle": "thought",
+      "readingOrder": 1,
+      "sourceEnglish": "BUT IN JUST TWO YEARS, YOU RAISED SOMEONE WHO CAN USE AMBUSH TECHNIQUES PERFECTLY",
+      "normalizedEnglish": "BUT IN JUST TWO YEARS, YOU RAISED SOMEONE WHO CAN USE AMBUSH TECHNIQUES PERFECTLY",
+      "textPolygon": [
+        [
+          0.08489583,
+          0.5243413
+        ],
+        [
+          0.67690974,
+          0.5243413
+        ],
+        [
+          0.67690974,
+          0.6924969
+        ],
+        [
+          0.08489583,
+          0.6924969
+        ]
+      ],
+      "eraseMask": {
+        "encoding": "normalized-polygon-v1",
+        "polygon": [
+          [
+            0.07222223,
+            0.5189099
+          ],
+          [
+            0.68999998,
+            0.5189099
+          ],
+          [
+            0.68999998,
+            0.6974416
+          ],
+          [
+            0.07222223,
+            0.6974416
+          ]
+        ],
+        "operation": "erase every English glyph, outline, punctuation mark, and antialiased edge inside the polygon; preserve every pixel outside the erase mask"
+      },
+      "geometryAudit": "detector-adjusted",
+      "reviewProvenance": {
+        "type": "acceptedProposal",
+        "uncertainty": "low",
+        "proposalIndex": 2,
+        "reviewRegionId": "bbec91aa-region-a90320ca02f52471"
+      },
+      "bubblePolygon": [
+        [
+          0.028125,
+          0.42974833
+        ],
+        [
+          0.7454861,
+          0.42974833
+        ],
+        [
+          0.7454861,
+          0.7710998
+        ],
+        [
+          0.028125,
+          0.7710998
+        ]
+      ],
+      "productionMatch": {
+        "stableRegionId": "bbec91aa-region-a90320ca02f52471",
+        "method": "stable-region-id-and-text-geometry",
+        "textGeometryIou": 1.0
+      },
+      "simplifiedChinese": "但仅仅两年，你培养了一个能完美使用伏击战术的人",
+      "pinyin": "dàn jǐn jǐn liǎng Nián / nián nǐ péi yǎng le / liào / liǎo yī ge Néng / néng wán měi shǐ yòng fú jī zhàn shù de / dì / dí / dī rén",
+      "hskValidation": {
+        "requestedLevel": 5,
+        "strictlyValid": false,
+        "aboveLevelTokens": [
+          "但",
+          "仅仅",
+          "仅",
+          "两年",
+          "一个",
+          "伏击",
+          "伏",
+          "击",
+          "战术",
+          "战",
+          "术"
+        ],
+        "repairState": "pending"
+      },
+      "hskTokens": [
+        {
+          "text": "但",
+          "startChar": 0,
+          "endChar": 1,
+          "pinyin": "dàn",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "仅仅",
+          "startChar": 1,
+          "endChar": 3,
+          "pinyin": "jǐn jǐn",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "两",
+          "startChar": 3,
+          "endChar": 4,
+          "pinyin": "liǎng",
+          "classification": "hsk",
+          "hskLevel": 2,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "年",
+          "startChar": 4,
+          "endChar": 5,
+          "pinyin": "Nián / nián",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "你",
+          "startChar": 6,
+          "endChar": 7,
+          "pinyin": "nǐ",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "培养",
+          "startChar": 7,
+          "endChar": 9,
+          "pinyin": "péi yǎng",
+          "classification": "hsk",
+          "hskLevel": 5,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "了",
+          "startChar": 9,
+          "endChar": 10,
+          "pinyin": "le / liào / liǎo",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "一个",
+          "startChar": 10,
+          "endChar": 12,
+          "pinyin": "yī ge",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "能",
+          "startChar": 12,
+          "endChar": 13,
+          "pinyin": "Néng / néng",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "完美",
+          "startChar": 13,
+          "endChar": 15,
+          "pinyin": "wán měi",
+          "classification": "hsk",
+          "hskLevel": 5,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "使用",
+          "startChar": 15,
+          "endChar": 17,
+          "pinyin": "shǐ yòng",
+          "classification": "hsk",
+          "hskLevel": 4,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "伏击",
+          "startChar": 17,
+          "endChar": 19,
+          "pinyin": "fú jī",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "战术",
+          "startChar": 19,
+          "endChar": 21,
+          "pinyin": "zhàn shù",
+          "classification": "hsk",
+          "hskLevel": 6,
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "的",
+          "startChar": 21,
+          "endChar": 22,
+          "pinyin": "de / dì / dí / dī",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "人",
+          "startChar": 22,
+          "endChar": 23,
+          "pinyin": "rén",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        }
+      ]
+    },
+    {
+      "id": "30ysp-ch5-p013-r02",
+      "kind": "thought",
+      "containerStyle": "thought",
+      "readingOrder": 2,
+      "sourceEnglish": "AND SENT THAT \"AGENT\" TO ME.",
+      "normalizedEnglish": "AND SENT THAT \"AGENT\" TO ME.",
+      "textPolygon": [
+        [
+          0.40868056,
+          0.75671756
+        ],
+        [
+          0.8940972,
+          0.75671756
+        ],
+        [
+          0.8940972,
+          0.869951
+        ],
+        [
+          0.40868056,
+          0.869951
+        ]
+      ],
+      "eraseMask": {
+        "encoding": "normalized-polygon-v1",
+        "polygon": [
+          [
+            0.40444446,
+            0.75139046
+          ],
+          [
+            0.9066667,
+            0.75139046
+          ],
+          [
+            0.9066667,
+            0.87374863
+          ],
+          [
+            0.40444446,
+            0.87374863
+          ]
+        ],
+        "operation": "erase every English glyph, outline, punctuation mark, and antialiased edge inside the polygon; preserve every pixel outside the erase mask"
+      },
+      "geometryAudit": "detector-adjusted",
+      "reviewProvenance": {
+        "type": "acceptedProposal",
+        "uncertainty": "low",
+        "proposalIndex": 3,
+        "reviewRegionId": "bbec91aa-region-6a2e5a4441dd2185"
+      },
+      "bubblePolygon": [
+        [
+          0.31979167,
+          0.6680339
+        ],
+        [
+          0.9829861,
+          0.6680339
+        ],
+        [
+          0.9829861,
+          0.9690628
+        ],
+        [
+          0.31979167,
+          0.9690628
+        ]
+      ],
+      "productionMatch": {
+        "stableRegionId": "bbec91aa-region-6a2e5a4441dd2185",
+        "method": "stable-region-id-and-text-geometry",
+        "textGeometryIou": 1.0
+      },
+      "simplifiedChinese": "并把那个“特工”派给了我。",
+      "pinyin": "Bīng / bìng bà / bǎ nà ge tè gōng pài / pā gěi / jǐ le / liào / liǎo wǒ",
+      "hskValidation": {
+        "requestedLevel": 5,
+        "strictlyValid": false,
+        "aboveLevelTokens": [
+          "并",
+          "那个",
+          "特工",
+          "特",
+          "工"
+        ],
+        "repairState": "pending"
+      },
+      "hskTokens": [
+        {
+          "text": "并",
+          "startChar": 0,
+          "endChar": 1,
+          "pinyin": "Bīng / bìng",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "把",
+          "startChar": 1,
+          "endChar": 2,
+          "pinyin": "bà / bǎ",
+          "classification": "hsk",
+          "hskLevel": 3,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "那个",
+          "startChar": 2,
+          "endChar": 4,
+          "pinyin": "nà ge",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "特工",
+          "startChar": 5,
+          "endChar": 7,
+          "pinyin": "tè gōng",
+          "classification": "non-hsk",
+          "aboveRequestedLevel": true
+        },
+        {
+          "text": "派",
+          "startChar": 8,
+          "endChar": 9,
+          "pinyin": "pài / pā",
+          "classification": "hsk",
+          "hskLevel": 5,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "给",
+          "startChar": 9,
+          "endChar": 10,
+          "pinyin": "gěi / jǐ",
+          "classification": "hsk",
+          "hskLevel": 2,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "了",
+          "startChar": 10,
+          "endChar": 11,
+          "pinyin": "le / liào / liǎo",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        },
+        {
+          "text": "我",
+          "startChar": 11,
+          "endChar": 12,
+          "pinyin": "wǒ",
+          "classification": "hsk",
+          "hskLevel": 1,
+          "aboveRequestedLevel": false
+        }
+      ]
+    }
+  ]
+}

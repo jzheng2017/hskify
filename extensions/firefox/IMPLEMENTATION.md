@@ -1,223 +1,101 @@
-# Firefox production extension implementation
+# Firefox extension implementation
 
-## Scope
+The Firefox MV3 extension is a direct client of the local, unversioned
+progressive companion API. There is no legacy result download or full cleaned
+image path.
 
-This directory contains the Firefox side of the HSK Manga Translator, including
-the browser interaction layer, secure native/loopback client, recovery queue,
-selectable renderer, setup UI, and packaged-extension assets. It retains the
-frozen protocol parser and shared contract fixtures.
+## Companion contract
 
-The extension uses WXT Manifest V3, TypeScript, DOM, and CSS. The page runtime
-is built as the unlisted `translator.js` artifact and is injected only after a
-popup action using `activeTab` and `scripting`. It is not a static content
-script, and the manifest does not request broad webpage access at install time.
+Every native and HTTP handshake is pinned to the build fingerprint
+`hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-07-26-r2`. A different fingerprint is a hard failure,
+not a negotiated compatibility mode.
 
-## Permission and message boundary
+The background worker uses these loopback routes:
 
-- Opening the popup injects the page runtime and precomputes the cross-origin
-  image hosts required for visible and all-image actions.
-- Firefox match patterns are exact, deduplicated, and portless
-  (`https://cdn.example/*`). The manifest merely declares the optional
-  HTTP/HTTPS pattern scope; a concrete subset is requested at runtime.
-- `browser.permissions.request()` is invoked directly in the translate button's
-  click stack. The popup does not await background or content work before that
-  call, and it suppresses duplicate starts while the request is pending.
-- Background acquisition only checks `permissions.contains()`. It never tries
-  to open an optional-permission prompt from an asynchronous message handler.
-- If a redirect or newly loaded image reveals another hostname, that exact
-  pattern is retained in `storage.session` and merged into the next popup
-  click's permission plan.
-- Every known background and content message is parsed into an exact shape.
-  Unknown fields, invalid bounds, malformed hashes, oversized runtime buffers,
-  and page-controlled fixture switches are rejected.
-- Active-job operations require the originating tab, frame, and document URL.
-  Completed lookup/font operations additionally require a small
-  owner-and-artifact record that lists the result's allowed region and font
-  IDs.
+- `POST /jobs` uploads the original image and JSON metadata as multipart
+  `image` and `request` parts.
+- `PUT /jobs/{jobId}/viewport` sends normalized visible source rectangles and
+  whether the image is actively being processed.
+- `GET /jobs/{jobId}/updates?after={sequence}&waitMs=20000` long-polls
+  monotonic updates.
+- `GET /blobs/{patchId}` downloads a region's transparent PNG patch.
+- `DELETE /jobs/{jobId}` cancels and releases a job.
 
-Production has no page-controlled fixture mode. The deterministic backend is a
-constructor-injected test dependency, and no fixture adapter or fixture marker
-is present in the production WXT output.
+Setup, dictionary, and font requests remain authenticated root routes:
+`/setup`, `/setup/models`, `/lookup`, and `/fonts/{fontId}`.
 
-## Image and companion lifecycle
+`JobUpdate` is the discriminated union `progress`, `regionReady`,
+`regionRefined`, `complete`, `failed`, and `cancelled`. `regionReady` carries
+geometry, patch identity and rectangle, English/base/displayed Chinese,
+pinyin, OCR confidence, reading order, typography/layout, and HSK validation
+and repair state. `regionRefined` can change only displayed Chinese, pinyin,
+and HSK state.
 
-The content runtime attempts bounded byte acquisition for same-origin,
-`data:`, and `blob:` sources. It streams those responses and stops before
-materializing a payload over 25 MiB. When background acquisition is needed, it:
+## MV3 recovery and ownership
 
-1. validates HTTP(S) URLs and each redirect;
-2. verifies a pre-granted exact host pattern for each cross-origin hop;
-3. fetches without credentials first and retries with credentials only after
-   401/403;
-4. rejects unsafe credentialed cross-origin redirects;
-5. streams with a byte ceiling;
-6. sniffs PNG, JPEG, WebP, or GIF signatures and checks declared MIME,
-   dimensions, pixel count, and configured limits;
-7. hashes the actual bytes with Web Crypto SHA-256; and
-8. uploads bytes plus the frozen request metadata as multipart form data.
+Active job records are stored in `browser.storage.local`. They contain the
+tab/frame/page/source identity, the last delivered sequence, the last
+page-acknowledged sequence, and the region/patch/font IDs observed so far.
+The page acknowledges a batch only after every patch and text mutation in it
+has completed. After background suspension, recovery resumes from that
+installed sequence; an unacknowledged batch is safely replayed.
 
-The companion never receives a page-controlled remote URL to fetch.
+All job, patch, font, and lookup messages are checked against the owning
+tab/frame/document URL and persisted source URL/hash/dimensions. Runtime
+messages use strict allowlists and bounded binary payloads. Page navigation,
+source replacement, cancellation, disposal, or ownership mismatch uses one
+idempotent restore-all path: completed and partial overlays are both destroyed,
+every original image returns to its exact parent/sibling position with its
+original attributes intact, and the companion job is released.
 
-Native session endpoints remain in `storage.session`. A background instance
-that reuses a cached endpoint first validates `/health`. A failed transport or
-401 invalidates the lease, performs one fresh native handshake, and retries
-once. Clean-image and font responses are streamed with 25 MiB and 32 MiB
-ceilings respectively before an `ArrayBuffer` is created.
+## Progressive rendering
 
-Before result delivery, the background verifies:
+The renderer keeps the exact original `<img>` node connected and visible. A
+layout-preserving wrapper adds a Shadow DOM containing:
 
-- the caller's full page/source identity;
-- result job ID, source hash, and decoded source dimensions;
-- cleaned-image signature and declared MIME; and
-- cleaned-image dimensions equal to the submitted source.
+- a transparent patch layer;
+- selectable Chinese text;
+- Original, Chinese, and hold-to-compare controls; and
+- the dictionary/pinyin/Mandarin-speech popover.
 
-Only then is the result transferred to the page runtime.
+For each `regionReady`, the patch blob is downloaded and decoded completely
+off-DOM. Only then is the patch synchronously installed, followed by its text
+node. A corrupt, stale, or cancelled patch can therefore never expose Chinese
+over source lettering. `regionRefined` replaces text-node content and updates
+pinyin/HSK metadata without changing geometry, styling, or the installed
+patch.
 
-## Recovery, navigation, cancellation, and retry
+Original and compare modes hide only the overlay. They never hide or replace
+the page image. Destroying the renderer restores the original node to its
+exact parent and sibling position.
 
-`storage.local` holds only small active-job recovery records. Each record
-includes tab, frame, page session, normalized document/source URLs, source
-hash, decoded dimensions, page index, selected HSK level, and creation time.
-Completed-result authorization records use `storage.session`, so tab IDs
-cannot accidentally inherit them across browser restarts.
+## Geometry, viewport priority, and fitting
 
-Recovery is scoped to tab, frame, page session, and document URL. URL,
-dimensions, and SHA-256 must match the live image. For an HTTP(S) candidate
-whose content script cannot supply a hash, the background reacquires and hashes
-the bytes. DOM index is only an additional mapping key; it is never sufficient
-identity by itself.
+Image geometry accounts for borders, padding, `object-fit`, and
+`object-position`. Visible source rectangles also account for cover cropping
+and browser viewport intersection. Scroll, resize, visibility, and image-size
+changes are coalesced into viewport updates at roughly 100 ms.
 
-The page runtime checks generation, page-session ID, document URL, source URL,
-intrinsic dimensions, connectivity, and cancellation after every awaited
-operation and immediately before renderer commit. If navigation or source
-replacement happens while submission is awaited, the returned job identity is
-retained long enough to cancel that newly created companion job.
+Text fitting tests nearby legal Chinese line breaks against the safe polygon.
+Model fitting and final DOM measurement both use bounded binary searches.
+The final measurement pass checks scroll dimensions, stays inside the
+subpixel boundary, and has a zero-size fallback only for degenerate geometry,
+so selectable text never overflows its region.
 
-Full and same-document navigation cancel the old page session, remove its
-completed authorization records, restore rendered originals, and create a new
-page-session ID. `tabs.onUpdated` URL changes and `tabs.onRemoved` provide a
-background-side cleanup path as well.
+## Verification
 
-The queue is one-at-a-time and visible-first. Failed queue IDs remain failed;
-visibility and mutation callbacks cannot silently enqueue them again. Only the
-image Retry action clears the failed state. Source removal/replacement aborts
-the affected active item and updates `current`, `failed`, `completed`, and
-`total` without double-counting.
-
-## Selectable renderer
-
-The original live `<img>` or `<picture>` remains unchanged while work is in
-progress. The renderer:
-
-- browser-decodes the cleaned Blob image and verifies its actual intrinsic
-  dimensions before creating a wrapper;
-- awaits result-owned font loading and `document.fonts.ready`;
-- rechecks the stale-render guard after every wait and immediately before DOM
-  mutation;
-- moves the original live owner instead of cloning it;
-- rejects a wrapper that changes controlled layout by more than two CSS pixels;
-- keeps the original as the layout anchor and restores it on every failure;
-- uses a Shadow DOM for the clean image, text, controls, and lookup popover; and
-- inserts Chinese only with `textContent`.
-
-Suggested line breaks are represented by real `.hmt-region-line` spans while
-the region's text content remains exactly `displayedChinese`. A genuinely
-inset companion safe polygon is preferred. When the companion repeats the
-complete bubble hull as its safe polygon, the renderer instead uses the
-original OCR text polygon so outlines and speech tails cannot be treated as
-text space. Fitting reserves an inner margin, permits up to six legal CJK
-lines, rejects whitespace at line boundaries, and keeps font scaling
-proportional instead of enforcing an eight-pixel floor. After the font is
-loaded, real DOM overflow is measured and the font is reduced in small steps;
-the region clips any residual ink rather than allowing it to spill outside.
-
-An unselected primary click in translated text dispatches exactly one
-non-bubbling click to the original image, preserving direct image listeners.
-The overlay click itself continues to the reader ancestor exactly once.
-Selected text, controls, and the dictionary popover suppress reader navigation.
-Copy reads the selected range's text content so visual line spans add no hidden
-English or layout whitespace.
-
-The lookup popover also has a Listen/Stop control for the exact selected
-Chinese. It uses the Web Speech API with `zh-CN`, preferring a Mainland
-Mandarin voice and then natural/neural voice variants when Firefox exposes
-them. Playback is delegated to Firefox and the operating system, so no speech
-model, service key, extension permission, or companion memory is added. The
-installed voice ultimately determines audio quality.
-
-## Synthetic browser fixtures
-
-The browser pages use actual generated PNG/WebP assets, not SVG page inputs or
-header-only fake buffers. The source artwork is original synthetic geometry.
-
-`fixtures/browser-pages/webtoon.html` models a long reader with:
-
-- 20 query-string WebP chapter images at 900×16,000 intrinsic pixels;
-- one cover and 133 generated comment avatars, for 154 page images total;
-- page-image width capped at 720 CSS pixels; and
-- a 465 CSS-pixel responsive width at a 480-pixel viewport.
-
-Discovery regression coverage selects exactly the 20 chapter pages while
-excluding the cover and comment/user images. Firefox Playwright also decodes
-the long WebP at its production dimensions.
-
-## Local verification
-
-Run from `extensions/firefox`:
+From `extensions/firefox`:
 
 ```text
 npm run typecheck
-npm run test
+npm test -- --run
 npm run test:e2e
 npm run build
-npm run lint:extension
 ```
 
-Latest evidence for this branch:
-
-- strict TypeScript/WXT typecheck: passed;
-- Vitest: 91 tests passed across 20 files;
-- Playwright Firefox renderer harness: 6 tests passed;
-- WXT Firefox MV3 production build: passed;
-- production-output fixture-marker scan: no matches;
-- `web-ext lint`: 0 errors, 0 notices, 2 compatibility warnings;
-- bounded `web-ext run` packaged launch: passed using a temporary profile,
-  pre-installed extension, headless Firefox, and an auto-exiting screenshot
-  smoke.
-- live Nano Machine chapter 100 page 1: 11 English speech-bubble regions,
-  non-bubble sound effects retained, and 11 real selectable Chinese regions
-  rendered with no degraded fit. A post-correction replay measured zero DOM
-  overflow, at least 6.9 CSS pixels of inset inside every conservative text
-  region, and reduced the crowded long-bubble fonts from about 50–52 pixels to
-  37–39 pixels.
-- installed packaged-extension E2E: a fresh disposable Firefox profile used a
-  trusted click on the real popup, the registered native host, the installed
-  daemon, cached clean-image reuse, and HSK 5 correction to finish 11 regions
-  with zero degraded fits in 186.7 seconds.
-
-The two lint warnings are the known compatibility interaction between retained
-Firefox 128 support and the newer
-`browser_specific_settings.gecko.data_collection_permissions` declaration.
-
-## Unclaimed integration work
-
-The primary Windows installed path is proven, but the implementation is not
-claiming every release edge case. In particular:
-
-- the installed native launcher/daemon and real companion endpoints completed
-  one full Firefox translation; explicit duplicate-launch, idle-cleanup,
-  authentication-rejection, suspension, and reconnect probes remain;
-- practical 5–20 MiB Firefox extension runtime-message ceilings still require
-  an installed packaged-extension probe; unit cloning is not evidence for that
-  browser limit;
-- popup permission UI, denial, and a redirect to a newly required hostname
-  still need an interactive packaged Firefox run;
-- the packaged Noto CJK font bytes and production companion endpoints are
-  implemented, but broader font-category and golden-set clipping review
-  remains pending; and
-- live OCR, speech-bubble cleanup, local translation, bounded HSK correction,
-  and cache reuse are implemented, while representative fluent-reader quality
-  review remains release work.
-
-The exact manual matrix is maintained in
-`docs/firefox-manual-test-checklist.md`.
+The Vitest suite covers strict progressive contracts, exact root endpoints,
+update acknowledgement/recovery, patch ownership, atomic patch installation,
+refinement, viewport messages, measured fitting, selection, dictionary
+pinyin, and Mandarin speech. The Playwright Firefox harness covers real image
+decode, normalized geometry, object-fit mapping, compare modes, navigation,
+selection, vertical text, and long WebP dimensions.

@@ -14,13 +14,13 @@ if ([IO.Path]::GetFileName($resolvedHost) -ne 'hsk-manga-native-host.exe') {
     throw 'NativeHostPath must name hsk-manga-native-host.exe'
 }
 
-$manifestDirectory = Join-Path $env:LOCALAPPDATA 'Hskify\HSKMangaTranslator\native-host'
+$manifestDirectory = Join-Path $env:LOCALAPPDATA 'Hskify\native-host'
 $manifestPath = Join-Path $manifestDirectory 'local.hskify.hsk_manga.json'
 
 [IO.Directory]::CreateDirectory($manifestDirectory) | Out-Null
 $manifest = [ordered]@{
     name = 'local.hskify.hsk_manga'
-    description = 'HSK Manga Translator local browser companion'
+    description = 'Hskify local browser companion'
     path = $resolvedHost
     type = 'stdio'
     allowed_extensions = @('hsk-manga-translator@local.hskify')

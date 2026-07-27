@@ -1,19 +1,16 @@
 import { describe, expect, it, vi } from 'vitest'
 
+import { BUILD_FINGERPRINT, type BrowserJobRequest } from '../../src/contracts/browser'
 import { CompanionClient } from '../../src/messaging/companion-client'
-import {
-  NativeSessionManager,
-  SESSION_STORAGE_KEY,
-} from '../../src/messaging/native-session'
-import type { BrowserJobRequest } from '../../src/contracts/browser'
+import { NativeSessionManager, SESSION_STORAGE_KEY } from '../../src/messaging/native-session'
 import { pngHeader } from '../helpers/images'
 import { MemoryStorage } from '../helpers/storage'
 
 function ready(token: string) {
   return {
     type: 'ready',
-    protocolVersion: 1,
-    engineVersion: '0.1.0',
+    buildFingerprint: BUILD_FINGERPRINT,
+    engineVersion: '0.2.0',
     port: 43127,
     token,
     sessionExpiresAtUnixMs: Date.now() + 60_000,
@@ -31,50 +28,59 @@ function sessionManager() {
   const runtime = {
     getManifest: () => ({ version: '0.1.0' }),
     getURL: () => 'moz-extension://fixture/',
-    sendNativeMessage: vi.fn(async () =>
-      ready((calls++ === 0 ? 'A' : 'B').repeat(43)),
-    ),
+    sendNativeMessage: vi.fn(async () => ready((calls++ === 0 ? 'A' : 'B').repeat(43))),
   }
   return { manager: new NativeSessionManager(new MemoryStorage(), runtime), runtime }
 }
 
-describe('authenticated localhost companion client', () => {
-  it('re-handshakes and retries exactly once after a 401', async () => {
+function request(): BrowserJobRequest {
+  return {
+    buildFingerprint: BUILD_FINGERPRINT,
+    clientImageId: 'page-0-hash',
+    sourceSha256: 'a'.repeat(64),
+    sourceMimeType: 'image/png',
+    naturalWidth: 1200,
+    naturalHeight: 1800,
+    pageSessionId: 'page',
+    pageIndex: 0,
+    visibleRects: [{ x: 0, y: 0, width: 1, height: 0.5 }],
+    settings: {
+      sourceLanguage: 'en',
+      targetLanguage: 'zh-CN',
+      hskStandard: '2.0',
+      hskLevel: 5,
+      readingDirection: 'auto',
+      translateSoundEffects: false,
+    },
+  }
+}
+
+function emptyUpdates(jobId = 'job', nextSequence = 0): Response {
+  return new Response(JSON.stringify({ jobId, nextSequence, updates: [] }), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' },
+  })
+}
+
+describe('authenticated unversioned companion client', () => {
+  it('re-handshakes and retries exactly once after a 401 without a protocol header', async () => {
     const { manager, runtime } = sessionManager()
     const authorizations: string[] = []
     const fetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
       authorizations.push(new Headers(init?.headers).get('Authorization') ?? '')
       if (authorizations.length === 1) return new Response(null, { status: 401 })
-      return new Response(
-        JSON.stringify({
-          revision: 1,
-          jobId: 'job',
-          state: 'running',
-          stage: 'queued',
-          message: 'Queued',
-        }),
-        { status: 200, headers: { 'Content-Type': 'application/json' } },
-      )
+      return emptyUpdates()
     })
     const client = new CompanionClient(manager, fetcher)
-    expect((await client.getJobStatus('job')).stage).toBe('queued')
-    expect(authorizations).toEqual([
-      `Bearer ${'A'.repeat(43)}`,
-      `Bearer ${'B'.repeat(43)}`,
-    ])
+    expect((await client.getJobUpdates('job', 0)).updates).toEqual([])
+    expect(authorizations).toEqual([`Bearer ${'A'.repeat(43)}`, `Bearer ${'B'.repeat(43)}`])
     expect(runtime.sendNativeMessage).toHaveBeenCalledTimes(2)
-    expect(fetcher).toHaveBeenCalledTimes(2)
-    expect(
-      new Headers(fetcher.mock.calls[1]?.[1]?.headers).get('X-HSK-Manga-Protocol'),
-    ).toBe('1')
-    expect(
-      new Headers(fetcher.mock.calls[1]?.[1]?.headers).get(
-        'X-HSK-Manga-Extension-Origin',
-      ),
-    ).toBe('moz-extension://fixture')
+    const headers = new Headers(fetcher.mock.calls[1]?.[1]?.headers)
+    expect(headers.has('X-HSK-Manga-Protocol')).toBe(false)
+    expect(headers.get('X-HSK-Manga-Extension-Origin')).toBe('moz-extension://fixture')
   })
 
-  it('health-checks a cached endpoint and re-handshakes after transport failure', async () => {
+  it('health-checks a cached root endpoint and re-handshakes after transport failure', async () => {
     const storage = new MemoryStorage()
     storage.values[SESSION_STORAGE_KEY] = ready('A'.repeat(43))
     const runtime = {
@@ -82,174 +88,149 @@ describe('authenticated localhost companion client', () => {
       getURL: () => 'moz-extension://fixture/',
       sendNativeMessage: vi.fn(async () => ready('B'.repeat(43))),
     }
-    const manager = new NativeSessionManager(storage, runtime)
     const requests: string[] = []
-    const fetcher = vi.fn(async (input: RequestInfo | URL) => {
-      requests.push(String(input))
-      if (requests.length === 1) throw new TypeError('stale cached port')
-      return new Response(
-        JSON.stringify({
-          revision: 1,
-          jobId: 'job',
-          state: 'running',
-          stage: 'queued',
-          message: 'Queued',
-        }),
-        { status: 200, headers: { 'Content-Type': 'application/json' } },
-      )
-    })
-    const client = new CompanionClient(manager, fetcher)
-    expect((await client.getJobStatus('job')).jobId).toBe('job')
-    expect(requests[0]).toContain('/health')
-    expect(requests[1]).toContain('/jobs/job')
+    const client = new CompanionClient(
+      new NativeSessionManager(storage, runtime),
+      async (input) => {
+        requests.push(String(input))
+        if (requests.length === 1) throw new TypeError('stale cached port')
+        return emptyUpdates()
+      },
+    )
+    expect((await client.getJobUpdates('job', 0)).jobId).toBe('job')
+    expect(requests).toEqual([
+      'http://127.0.0.1:43127/health',
+      'http://127.0.0.1:43127/jobs/job/updates?after=0&waitMs=20000',
+    ])
     expect(runtime.sendNativeMessage).toHaveBeenCalledTimes(1)
   })
 
-  it('invalidates and retries once when an established request loses transport', async () => {
-    const { manager, runtime } = sessionManager()
-    let calls = 0
-    const client = new CompanionClient(manager, async () => {
-      calls += 1
-      if (calls === 1) throw new TypeError('connection refused')
+  it('uploads original bytes and the exact build-fingerprinted request', async () => {
+    const { manager } = sessionManager()
+    let body: FormData | undefined
+    const client = new CompanionClient(manager, async (input, init) => {
+      expect(String(input)).toBe('http://127.0.0.1:43127/jobs')
+      body = init?.body as FormData
       return new Response(
         JSON.stringify({
-          revision: 1,
-          jobId: 'job',
-          state: 'running',
-          stage: 'queued',
-          message: 'Queued',
+          buildFingerprint: BUILD_FINGERPRINT,
+          jobId: 'fixture-job',
         }),
         { status: 200, headers: { 'Content-Type': 'application/json' } },
       )
     })
-    expect((await client.getJobStatus('job')).stage).toBe('queued')
-    expect(runtime.sendNativeMessage).toHaveBeenCalledTimes(2)
-    expect(calls).toBe(2)
-  })
-
-  it('sends original bytes and frozen metadata as multipart form data', async () => {
-    const { manager } = sessionManager()
-    let body: FormData | undefined
-    const client = new CompanionClient(manager, async (_input, init) => {
-      body = init?.body as FormData
-      return new Response(JSON.stringify({ protocolVersion: 1, jobId: 'fixture-job' }), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-      })
-    })
-    const request: BrowserJobRequest = {
-      protocolVersion: 1,
-      clientImageId: 'page-0-hash',
-      sourceSha256: 'a'.repeat(64),
-      sourceMimeType: 'image/png',
-      naturalWidth: 1200,
-      naturalHeight: 1800,
-      pageSessionId: 'page',
-      pageIndex: 0,
-      settings: {
-        sourceLanguage: 'en',
-        targetLanguage: 'zh-CN',
-        hskStandard: '2.0',
-        hskLevel: 5,
-        readingDirection: 'auto',
-        translateSoundEffects: false,
-      },
-    }
-    expect(await client.createJob(pngHeader(), request)).toBe('fixture-job')
+    const metadata = request()
+    expect(await client.createJob(pngHeader(), metadata)).toBe('fixture-job')
     expect(body?.get('image')).toBeInstanceOf(Blob)
     const requestPart = body?.get('request')
     expect(requestPart).toBeInstanceOf(Blob)
-    expect(JSON.parse(await (requestPart as Blob).text())).toEqual(request)
+    expect(JSON.parse(await (requestPart as Blob).text())).toEqual(metadata)
   })
 
-  it('reads setup state and starts model setup through authenticated endpoints', async () => {
+  it('uses only progressive viewport, update, patch, and delete root routes', async () => {
     const { manager } = sessionManager()
-    const requests: Array<{ url: string; method: string }> = []
+    const requests: Array<{ url: string; method: string; body?: string }> = []
     const client = new CompanionClient(manager, async (input, init) => {
-      requests.push({ url: String(input), method: init?.method ?? 'GET' })
-      const downloading = init?.method === 'POST'
-      return new Response(
-        JSON.stringify({
-          state: downloading ? 'downloading' : 'missing-models',
-          selectedPackId: 'standard-v1',
-          currentFile: downloading ? 'Qwen.gguf' : undefined,
-          completedBytes: downloading ? 1024 : 0,
-          totalBytes: 2048,
-          requiredDiskBytes: 4096,
-          message: downloading ? 'Downloading.' : 'Models are missing.',
-        }),
-        { status: 200, headers: { 'Content-Type': 'application/json' } },
-      )
+      const url = String(input)
+      const method = init?.method ?? 'GET'
+      requests.push({
+        url,
+        method,
+        ...(typeof init?.body === 'string' ? { body: init.body } : {}),
+      })
+      if (url.includes('/updates?')) {
+        return new Response(
+          JSON.stringify({
+            jobId: 'job',
+            nextSequence: 5,
+            updates: [
+              {
+                sequence: 5,
+                type: 'progress',
+                stage: 'ocr',
+                message: 'Reading',
+              },
+            ],
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        )
+      }
+      if (url.includes('/blobs/')) {
+        return new Response(Uint8Array.of(137, 80, 78, 71), {
+          status: 200,
+          headers: { 'Content-Type': 'image/png' },
+        })
+      }
+      return new Response(null, { status: 204 })
     })
 
-    expect((await client.getSetupStatus()).state).toBe('missing-models')
-    expect((await client.startModelSetup()).state).toBe('downloading')
+    await client.updateViewport('job', {
+      visibleRects: [{ x: 0, y: 0.2, width: 1, height: 0.4 }],
+      active: true,
+    })
+    expect((await client.getJobUpdates('job', 4)).nextSequence).toBe(5)
+    expect(await client.getPatch('patch/1', 'image/png')).toBeInstanceOf(ArrayBuffer)
+    await client.cancelJob('job')
+
     expect(requests).toEqual([
-      { url: 'http://127.0.0.1:43127/browser/v1/setup', method: 'GET' },
-      { url: 'http://127.0.0.1:43127/browser/v1/setup/models', method: 'POST' },
+      {
+        url: 'http://127.0.0.1:43127/jobs/job/viewport',
+        method: 'PUT',
+        body: JSON.stringify({
+          visibleRects: [{ x: 0, y: 0.2, width: 1, height: 0.4 }],
+          active: true,
+        }),
+      },
+      {
+        url: 'http://127.0.0.1:43127/jobs/job/updates?after=4&waitMs=20000',
+        method: 'GET',
+      },
+      {
+        url: 'http://127.0.0.1:43127/blobs/patch%2F1',
+        method: 'GET',
+      },
+      {
+        url: 'http://127.0.0.1:43127/jobs/job',
+        method: 'DELETE',
+      },
     ])
+    expect(requests.some(({ url }) => url.includes('/result'))).toBe(false)
+    expect(requests.some(({ url }) => url.includes('/browser/v1'))).toBe(false)
   })
 
-  it('returns clean-image and font bytes as ArrayBuffers with MIME checks', async () => {
+  it('keeps setup, lookup, and fonts on authenticated root routes', async () => {
     const { manager } = sessionManager()
-    const fiveMegabytes = new Uint8Array(5 * 1024 * 1024)
-    fiveMegabytes[0] = 137
-    const client = new CompanionClient(manager, async (input) => {
-      const isFont = String(input).includes('/fonts/')
-      return new Response(isFont ? Uint8Array.of(1, 2, 3) : fiveMegabytes, {
+    const requests: string[] = []
+    const client = new CompanionClient(manager, async (input, init) => {
+      const url = String(input)
+      requests.push(`${init?.method ?? 'GET'} ${url}`)
+      if (url.endsWith('/setup')) {
+        return new Response(
+          JSON.stringify({ state: 'ready', modelId: 'qwen3.5-4b', message: 'Ready' }),
+          {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          },
+        )
+      }
+      if (url.endsWith('/lookup')) {
+        return new Response(JSON.stringify({ selectedText: '我', tokens: [] }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      return new Response(Uint8Array.of(0, 1, 0, 0), {
         status: 200,
-        headers: {
-          'Content-Type': isFont ? 'font/woff2' : 'image/png',
-        },
+        headers: { 'Content-Type': 'font/ttf' },
       })
     })
-    const clean = await client.getCleanImage('blob', 'image/png')
-    const font = await client.getFont('fixture')
-    expect(clean).toBeInstanceOf(ArrayBuffer)
-    expect(clean.byteLength).toBe(5 * 1024 * 1024)
-    expect(new Uint8Array(clean)[0]).toBe(137)
-    expect(font).toBeInstanceOf(ArrayBuffer)
-    expect([...new Uint8Array(font)]).toEqual([1, 2, 3])
-  })
-
-  it('accepts packaged TrueType CJK fonts', async () => {
-    const { manager } = sessionManager()
-    const client = new CompanionClient(
-      manager,
-      async () =>
-        new Response(Uint8Array.of(0, 1, 0, 0), {
-          status: 200,
-          headers: { 'Content-Type': 'font/ttf' },
-        }),
-    )
+    expect((await client.getSetupStatus()).state).toBe('ready')
+    expect((await client.lookup({ selectedText: '我' })).selectedText).toBe('我')
     expect([...new Uint8Array(await client.getFont('hmt-sans'))]).toEqual([0, 1, 0, 0])
-  })
-
-  it('enforces binary caps while streaming before materializing the response', async () => {
-    const { manager } = sessionManager()
-    let produced = 0
-    const body = new ReadableStream<Uint8Array>({
-      pull(controller) {
-        if (produced >= 9) {
-          controller.close()
-          return
-        }
-        produced += 1
-        controller.enqueue(new Uint8Array(4 * 1024 * 1024))
-      },
-      cancel() {},
-    })
-    const client = new CompanionClient(
-      manager,
-      async () =>
-        new Response(body, {
-          status: 200,
-          headers: { 'Content-Type': 'font/woff2' },
-        }),
-    )
-    await expect(client.getFont('oversized')).rejects.toMatchObject({
-      code: 'BINARY_RESPONSE_TOO_LARGE',
-    })
-    expect(produced).toBeLessThan(12)
+    expect(requests).toEqual([
+      'GET http://127.0.0.1:43127/setup',
+      'POST http://127.0.0.1:43127/lookup',
+      'GET http://127.0.0.1:43127/fonts/hmt-sans',
+    ])
   })
 })

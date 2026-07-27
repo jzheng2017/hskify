@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>HSK Manga Translator</title>
+    <title>Hskify</title>
     <link rel="stylesheet" href="./style.css" />
   </head>
   <body>
@@ -11,7 +11,7 @@
       <header>
         <span class="mark" aria-hidden="true">译</span>
         <span>
-          <strong>HSK Manga Translator</strong>
+          <strong>Hskify</strong>
           <small>Local · selectable Chinese</small>
         </span>
       </header>
@@ -28,10 +28,13 @@
       <small id="hsk-help">Grammar is targeted to this level; vocabulary is cumulative.</small>
 
       <section class="actions" aria-label="Translation actions">
-        <button id="translate-visible" type="button">Translate visible manga</button>
-        <button id="translate-all" type="button" class="secondary">
-          Translate all manga on page
+        <button id="translate-all" type="button">
+          Translate chapter · viewport first
         </button>
+        <button id="translate-visible" type="button" class="secondary">
+          Translate only visible manga
+        </button>
+        <small>Start reading as bubbles appear; the rest continues in the background.</small>
       </section>
 
       <section class="status" aria-live="polite">

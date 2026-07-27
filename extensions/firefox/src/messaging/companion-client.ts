@@ -1,25 +1,24 @@
 import {
-  PROTOCOL_VERSION,
   parseBrowserJobCreated,
-  parseBrowserJobResult,
-  parseBrowserJobStatus,
   parseBrowserSetupStatus,
   parseErrorResponse,
   parseHealthResponse,
+  parseJobUpdateBatch,
   parseLookupResult,
   type BrowserJobRequest,
-  type BrowserJobResult,
-  type BrowserJobStatus,
+  type JobUpdateBatch,
   type BrowserSetupStatus,
   type LookupRequest,
   type LookupResult,
   type NativeReadyResponse,
+  type ViewportUpdate,
 } from '../contracts/browser'
 import { NativeSessionManager } from './native-session'
 
-const MAX_CLEAN_IMAGE_BYTES = 25 * 1024 * 1024
+const MAX_PATCH_BYTES = 25 * 1024 * 1024
 const MAX_FONT_BYTES = 32 * 1024 * 1024
 const EXTENSION_ORIGIN_HEADER = 'X-HSK-Manga-Extension-Origin'
+export const UPDATE_WAIT_MS = 20_000
 
 export class CompanionHttpError extends Error {
   constructor(
@@ -137,7 +136,6 @@ export class CompanionClient {
   private headers(session: NativeReadyResponse, init: RequestInit): Headers {
     const headers = new Headers(init.headers)
     headers.set('Authorization', `Bearer ${session.token}`)
-    headers.set('X-HSK-Manga-Protocol', String(PROTOCOL_VERSION))
     headers.set(EXTENSION_ORIGIN_HEADER, this.sessions.origin())
     return headers
   }
@@ -148,7 +146,7 @@ export class CompanionClient {
     init: RequestInit,
   ): Promise<Response> {
     return this.fetcher(
-      `http://127.0.0.1:${session.port}/browser/v1${path}`,
+      `http://127.0.0.1:${session.port}${path}`,
       {
         ...init,
         headers: this.headers(session, init),
@@ -239,14 +237,27 @@ export class CompanionClient {
     return parseBrowserJobCreated(await parseJsonResponse(response)).jobId
   }
 
-  async getJobStatus(jobId: string): Promise<BrowserJobStatus> {
-    const response = await this.request(`/jobs/${encodeURIComponent(jobId)}`)
-    return parseBrowserJobStatus(await parseJsonResponse(response))
+  async updateViewport(jobId: string, viewport: ViewportUpdate): Promise<void> {
+    await this.request(`/jobs/${encodeURIComponent(jobId)}/viewport`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(viewport),
+    })
   }
 
-  async getJobResult(jobId: string): Promise<BrowserJobResult> {
-    const response = await this.request(`/jobs/${encodeURIComponent(jobId)}/result`)
-    return parseBrowserJobResult(await parseJsonResponse(response))
+  async getJobUpdates(
+    jobId: string,
+    after: number,
+    waitMs = UPDATE_WAIT_MS,
+  ): Promise<JobUpdateBatch> {
+    const query = new URLSearchParams({
+      after: String(after),
+      waitMs: String(waitMs),
+    })
+    const response = await this.request(
+      `/jobs/${encodeURIComponent(jobId)}/updates?${query.toString()}`,
+    )
+    return parseJobUpdateBatch(await parseJsonResponse(response), after)
   }
 
   async cancelJob(jobId: string): Promise<void> {
@@ -272,17 +283,17 @@ export class CompanionClient {
     return parseLookupResult(await parseJsonResponse(response))
   }
 
-  async getCleanImage(blobId: string, expectedMimeType: string): Promise<ArrayBuffer> {
+  async getPatch(blobId: string, expectedMimeType: 'image/png'): Promise<ArrayBuffer> {
     const response = await this.request(`/blobs/${encodeURIComponent(blobId)}`)
     const mimeType = response.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase()
     if (mimeType !== expectedMimeType) {
       throw new CompanionHttpError(
-        'INVALID_CLEAN_IMAGE_MIME',
-        'The local translation engine returned an unexpected clean-image type.',
+        'INVALID_PATCH_MIME',
+        'The local translation engine returned an unexpected patch image type.',
         false,
       )
     }
-    return boundedArrayBuffer(response, MAX_CLEAN_IMAGE_BYTES)
+    return boundedArrayBuffer(response, MAX_PATCH_BYTES)
   }
 
   async getFont(fontId: string): Promise<ArrayBuffer> {

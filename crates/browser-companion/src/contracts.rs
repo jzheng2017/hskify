@@ -3,11 +3,17 @@ use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub const PROTOCOL_VERSION: u8 = 1;
+/// Exact build affinity shared by the extension, native host, and daemon.
+///
+/// This is deliberately not a negotiable protocol version. A mismatched build
+/// must restart the native/daemon pair that shipped with the extension.
+pub const BUILD_FINGERPRINT: &str = "hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-07-26-r2";
 pub const HSK_STANDARD: &str = "2.0";
 pub const SOURCE_LANGUAGE: &str = "en";
 pub const TARGET_LANGUAGE: &str = "zh-CN";
-pub const MAX_PRECEDING_CONTEXT: usize = 12;
+pub const MAX_PRECEDING_CONTEXT: usize = 6;
+pub const MAX_PROPER_NAME_GLOSSARY: usize = 64;
+pub const MAX_VISIBLE_RECTS: usize = 64;
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 #[error("{path}: {message}")]
@@ -29,13 +35,13 @@ pub trait Validate {
     fn validate(&self) -> Result<(), ContractError>;
 }
 
-fn require_protocol(value: u8) -> Result<(), ContractError> {
-    if value == PROTOCOL_VERSION {
+fn require_build_fingerprint(path: &str, value: &str) -> Result<(), ContractError> {
+    if value == BUILD_FINGERPRINT {
         Ok(())
     } else {
         Err(ContractError::at(
-            "protocolVersion",
-            format!("expected {PROTOCOL_VERSION}, got {value}"),
+            path,
+            format!("expected exact build fingerprint {BUILD_FINGERPRINT}"),
         ))
     }
 }
@@ -43,6 +49,18 @@ fn require_protocol(value: u8) -> Result<(), ContractError> {
 fn require_nonempty(path: &str, value: &str) -> Result<(), ContractError> {
     if value.trim().is_empty() {
         Err(ContractError::at(path, "must not be empty"))
+    } else {
+        Ok(())
+    }
+}
+
+fn require_nonempty_at_most(path: &str, value: &str, maximum: usize) -> Result<(), ContractError> {
+    require_nonempty(path, value)?;
+    if value.chars().count() > maximum {
+        Err(ContractError::at(
+            path,
+            format!("must contain at most {maximum} characters"),
+        ))
     } else {
         Ok(())
     }
@@ -121,15 +139,15 @@ impl From<HskLevel> for u8 {
 pub struct NativeHandshakeRequest {
     #[serde(rename = "type")]
     pub message_type: NativeRequestType,
-    pub protocol_version: u8,
+    pub build_fingerprint: String,
     pub extension_version: String,
     pub extension_origin: String,
 }
 
 impl Validate for NativeHandshakeRequest {
     fn validate(&self) -> Result<(), ContractError> {
-        require_protocol(self.protocol_version)?;
-        require_nonempty("extensionVersion", &self.extension_version)?;
+        require_build_fingerprint("buildFingerprint", &self.build_fingerprint)?;
+        require_nonempty_at_most("extensionVersion", &self.extension_version, 128)?;
         if !self.extension_origin.starts_with("moz-extension://")
             || self.extension_origin.len() <= "moz-extension://".len()
         {
@@ -159,7 +177,7 @@ pub enum NativeRequestType {
 pub struct NativeReadyResponse {
     #[serde(rename = "type")]
     pub message_type: NativeReadyType,
-    pub protocol_version: u8,
+    pub build_fingerprint: String,
     pub engine_version: String,
     pub port: u16,
     pub token: String,
@@ -169,8 +187,8 @@ pub struct NativeReadyResponse {
 
 impl Validate for NativeReadyResponse {
     fn validate(&self) -> Result<(), ContractError> {
-        require_protocol(self.protocol_version)?;
-        require_nonempty("engineVersion", &self.engine_version)?;
+        require_build_fingerprint("buildFingerprint", &self.build_fingerprint)?;
+        require_nonempty_at_most("engineVersion", &self.engine_version, 128)?;
         if self.port == 0 {
             return Err(ContractError::at("port", "must be non-zero"));
         }
@@ -215,13 +233,13 @@ impl Validate for BrowserCapabilities {
         if self.source_languages != [SOURCE_LANGUAGE] {
             return Err(ContractError::at(
                 "capabilities.sourceLanguages",
-                "protocol v1 supports English only",
+                "this build supports English only",
             ));
         }
         if self.target_languages != [TARGET_LANGUAGE] {
             return Err(ContractError::at(
                 "capabilities.targetLanguages",
-                "protocol v1 supports Simplified Chinese only",
+                "this build supports Simplified Chinese only",
             ));
         }
         let expected = [
@@ -244,17 +262,142 @@ impl Validate for BrowserCapabilities {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResourceIdentity {
+    pub id: String,
+    pub repository: String,
+    pub repository_revision: String,
+    pub filename: String,
+    pub bytes: u64,
+    pub sha256: String,
+}
+
+impl ResourceIdentity {
+    fn validate_at(&self, index: usize) -> Result<(), ContractError> {
+        let path = format!("resourceIdentities[{index}]");
+        if self.id.is_empty()
+            || self.id.len() > 128
+            || self.id.split('-').any(|part| {
+                part.is_empty()
+                    || !part
+                        .bytes()
+                        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+            })
+        {
+            return Err(ContractError::at(
+                format!("{path}.id"),
+                "must be a lowercase kebab-case identifier",
+            ));
+        }
+        let mut repository_parts = self.repository.split('/');
+        let valid_repository_part = |part: &str| {
+            part.bytes()
+                .next()
+                .is_some_and(|byte| byte.is_ascii_alphanumeric())
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        };
+        if self.repository.len() > 256
+            || !repository_parts.next().is_some_and(valid_repository_part)
+            || !repository_parts.next().is_some_and(valid_repository_part)
+            || repository_parts.next().is_some()
+        {
+            return Err(ContractError::at(
+                format!("{path}.repository"),
+                "must contain exactly one owner/name repository",
+            ));
+        }
+        if self.repository_revision.len() != 40
+            || !self
+                .repository_revision
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+        {
+            return Err(ContractError::at(
+                format!("{path}.repositoryRevision"),
+                "must be a lowercase 40-character hexadecimal revision",
+            ));
+        }
+        if self.filename.is_empty()
+            || self.filename.len() > 255
+            || matches!(self.filename.as_str(), "." | "..")
+            || !self
+                .filename
+                .bytes()
+                .next()
+                .is_some_and(|byte| byte.is_ascii_alphanumeric())
+            || !self
+                .filename
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        {
+            return Err(ContractError::at(
+                format!("{path}.filename"),
+                "must be a safe ASCII filename",
+            ));
+        }
+        if self.bytes == 0 || self.bytes > 9_007_199_254_740_991 {
+            return Err(ContractError::at(
+                format!("{path}.bytes"),
+                "must be a positive JavaScript-safe integer",
+            ));
+        }
+        if self.sha256.len() != 64
+            || !self
+                .sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+        {
+            return Err(ContractError::at(
+                format!("{path}.sha256"),
+                "must be a lowercase 64-character hexadecimal SHA-256",
+            ));
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn validate_resource_identities(
+    resource_identities: &[ResourceIdentity],
+) -> Result<(), ContractError> {
+    if resource_identities.is_empty() {
+        return Err(ContractError::at("resourceIdentities", "must not be empty"));
+    }
+    if resource_identities.len() > 256 {
+        return Err(ContractError::at(
+            "resourceIdentities",
+            "must contain at most 256 entries",
+        ));
+    }
+    let mut previous_id: Option<&str> = None;
+    for (index, identity) in resource_identities.iter().enumerate() {
+        identity.validate_at(index)?;
+        if previous_id.is_some_and(|previous| previous >= identity.id.as_str()) {
+            return Err(ContractError::at(
+                format!("resourceIdentities[{index}].id"),
+                "must be unique and sorted in ascending ordinal order",
+            ));
+        }
+        previous_id = Some(identity.id.as_str());
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct HealthResponse {
-    pub protocol_version: u8,
+    pub build_fingerprint: String,
     pub engine_version: String,
     pub status: HealthStatus,
     pub setup_state: BrowserSetupState,
+    pub resource_identities: Vec<ResourceIdentity>,
 }
 
 impl Validate for HealthResponse {
     fn validate(&self) -> Result<(), ContractError> {
-        require_protocol(self.protocol_version)?;
-        require_nonempty("engineVersion", &self.engine_version)
+        require_build_fingerprint("buildFingerprint", &self.build_fingerprint)?;
+        require_nonempty_at_most("engineVersion", &self.engine_version, 128)?;
+        validate_resource_identities(&self.resource_identities)
     }
 }
 
@@ -264,10 +407,50 @@ pub enum HealthStatus {
     Ready,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NormalizedRect {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+impl NormalizedRect {
+    pub fn validate_at(&self, path: &str) -> Result<(), ContractError> {
+        for (field, value) in [
+            ("x", self.x),
+            ("y", self.y),
+            ("width", self.width),
+            ("height", self.height),
+        ] {
+            if !value.is_finite() {
+                return Err(ContractError::at(
+                    format!("{path}.{field}"),
+                    "must be finite",
+                ));
+            }
+        }
+        if self.x < 0.0
+            || self.y < 0.0
+            || self.width <= 0.0
+            || self.height <= 0.0
+            || self.x + self.width > 1.0 + f32::EPSILON
+            || self.y + self.height > 1.0 + f32::EPSILON
+        {
+            return Err(ContractError::at(
+                path,
+                "must be a positive rectangle contained in normalized image space",
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct BrowserJobRequest {
-    pub protocol_version: u8,
+pub struct CreateJobRequest {
+    pub build_fingerprint: String,
     pub client_image_id: String,
     pub source_sha256: String,
     pub source_mime_type: String,
@@ -276,112 +459,141 @@ pub struct BrowserJobRequest {
     pub page_session_id: String,
     pub page_index: u32,
     pub settings: BrowserJobSettings,
+    pub visible_rects: Vec<NormalizedRect>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preceding_context: Option<Vec<DialogueContext>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proper_name_glossary: Option<Vec<ProperNameGlossaryEntry>>,
 }
 
-impl Validate for BrowserJobRequest {
+impl Validate for CreateJobRequest {
     fn validate(&self) -> Result<(), ContractError> {
-        require_protocol(self.protocol_version)?;
-        require_nonempty("clientImageId", &self.client_image_id)?;
-        require_sha256("sourceSha256", &self.source_sha256)?;
-        if !matches!(
-            self.source_mime_type.as_str(),
-            "image/png" | "image/jpeg" | "image/webp" | "image/gif"
-        ) {
+        require_build_fingerprint("buildFingerprint", &self.build_fingerprint)?;
+        validate_job_fields(self)?;
+        if self.visible_rects.len() > MAX_VISIBLE_RECTS {
             return Err(ContractError::at(
-                "sourceMimeType",
-                "must be a supported raster image MIME type",
+                "visibleRects",
+                format!("must contain at most {MAX_VISIBLE_RECTS} rectangles"),
             ));
         }
-        if self.natural_width == 0 || self.natural_height == 0 {
-            return Err(ContractError::at(
-                "naturalWidth",
-                "decoded image dimensions must be non-zero",
-            ));
-        }
-        require_nonempty("pageSessionId", &self.page_session_id)?;
-        self.settings.validate()?;
-        if self
-            .preceding_context
-            .as_ref()
-            .is_some_and(|items| items.len() > MAX_PRECEDING_CONTEXT)
-        {
-            return Err(ContractError::at(
-                "precedingContext",
-                format!("must contain at most {MAX_PRECEDING_CONTEXT} entries"),
-            ));
-        }
-        if let Some(items) = &self.preceding_context {
-            for (index, item) in items.iter().enumerate() {
-                require_nonempty(
-                    &format!("precedingContext[{index}].sourceEnglish"),
-                    &item.source_english,
-                )?;
-                require_nonempty(&format!("precedingContext[{index}].chinese"), &item.chinese)?;
-            }
+        for (index, rect) in self.visible_rects.iter().enumerate() {
+            rect.validate_at(&format!("visibleRects[{index}]"))?;
         }
         Ok(())
+    }
+}
+
+fn validate_job_fields(request: &CreateJobRequest) -> Result<(), ContractError> {
+    require_nonempty("clientImageId", &request.client_image_id)?;
+    require_sha256("sourceSha256", &request.source_sha256)?;
+    if !matches!(
+        request.source_mime_type.as_str(),
+        "image/png" | "image/jpeg" | "image/webp" | "image/gif"
+    ) {
+        return Err(ContractError::at(
+            "sourceMimeType",
+            "must be a supported raster image MIME type",
+        ));
+    }
+    if request.natural_width == 0 || request.natural_height == 0 {
+        return Err(ContractError::at(
+            "naturalWidth",
+            "decoded image dimensions must be non-zero",
+        ));
+    }
+    require_nonempty("pageSessionId", &request.page_session_id)?;
+    request.settings.validate()?;
+    if request
+        .preceding_context
+        .as_ref()
+        .is_some_and(|items| items.len() > MAX_PRECEDING_CONTEXT)
+    {
+        return Err(ContractError::at(
+            "precedingContext",
+            format!("must contain at most {MAX_PRECEDING_CONTEXT} entries"),
+        ));
+    }
+    if let Some(items) = &request.preceding_context {
+        for (index, item) in items.iter().enumerate() {
+            require_nonempty(
+                &format!("precedingContext[{index}].sourceEnglish"),
+                &item.source_english,
+            )?;
+            require_nonempty(&format!("precedingContext[{index}].chinese"), &item.chinese)?;
+        }
+    }
+    if request
+        .proper_name_glossary
+        .as_ref()
+        .is_some_and(|items| items.len() > MAX_PROPER_NAME_GLOSSARY)
+    {
+        return Err(ContractError::at(
+            "properNameGlossary",
+            format!("must contain at most {MAX_PROPER_NAME_GLOSSARY} entries"),
+        ));
+    }
+    if let Some(items) = &request.proper_name_glossary {
+        let mut source_names = HashSet::with_capacity(items.len());
+        for (index, item) in items.iter().enumerate() {
+            require_nonempty_at_most(
+                &format!("properNameGlossary[{index}].sourceEnglish"),
+                &item.source_english,
+                256,
+            )?;
+            require_nonempty_at_most(
+                &format!("properNameGlossary[{index}].chinese"),
+                &item.chinese,
+                128,
+            )?;
+            let normalized = item.source_english.trim().to_ascii_lowercase();
+            if !source_names.insert(normalized) {
+                return Err(ContractError::at(
+                    format!("properNameGlossary[{index}].sourceEnglish"),
+                    "must be unique ignoring ASCII case",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Validated input passed from the HTTP boundary into the cleaning pipeline.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct BrowserJobRequest {
+    pub source_sha256: String,
+    pub source_mime_type: String,
+    pub natural_width: u32,
+    pub natural_height: u32,
+    pub settings: BrowserJobSettings,
+    pub preceding_context: Option<Vec<DialogueContext>>,
+    pub proper_name_glossary: Option<Vec<ProperNameGlossaryEntry>>,
+}
+
+impl CreateJobRequest {
+    pub(crate) fn pipeline_request(&self) -> BrowserJobRequest {
+        BrowserJobRequest {
+            source_sha256: self.source_sha256.clone(),
+            source_mime_type: self.source_mime_type.clone(),
+            natural_width: self.natural_width,
+            natural_height: self.natural_height,
+            settings: self.settings.clone(),
+            preceding_context: self.preceding_context.clone(),
+            proper_name_glossary: self.proper_name_glossary.clone(),
+        }
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct BrowserJobCreated {
-    pub protocol_version: u8,
+    pub build_fingerprint: String,
     pub job_id: String,
 }
 
 impl Validate for BrowserJobCreated {
     fn validate(&self) -> Result<(), ContractError> {
-        require_protocol(self.protocol_version)?;
+        require_build_fingerprint("buildFingerprint", &self.build_fingerprint)?;
         require_nonempty("jobId", &self.job_id)
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct RetranslateRequest {
-    pub protocol_version: u8,
-    pub settings: RetranslateSettings,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub preceding_context: Option<Vec<DialogueContext>>,
-}
-
-impl Validate for RetranslateRequest {
-    fn validate(&self) -> Result<(), ContractError> {
-        require_protocol(self.protocol_version)?;
-        self.settings.validate()?;
-        if self
-            .preceding_context
-            .as_ref()
-            .is_some_and(|items| items.len() > MAX_PRECEDING_CONTEXT)
-        {
-            return Err(ContractError::at(
-                "precedingContext",
-                format!("must contain at most {MAX_PRECEDING_CONTEXT} entries"),
-            ));
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct RetranslateSettings {
-    pub hsk_standard: String,
-    pub hsk_level: HskLevel,
-}
-
-impl Validate for RetranslateSettings {
-    fn validate(&self) -> Result<(), ContractError> {
-        if self.hsk_standard != HSK_STANDARD {
-            return Err(ContractError::at(
-                "settings.hskStandard",
-                "protocol v1 supports HSK 2.0 only",
-            ));
-        }
-        Ok(())
     }
 }
 
@@ -401,25 +613,25 @@ impl Validate for BrowserJobSettings {
         if self.source_language != SOURCE_LANGUAGE {
             return Err(ContractError::at(
                 "settings.sourceLanguage",
-                "protocol v1 supports English only",
+                "this build supports English only",
             ));
         }
         if self.target_language != TARGET_LANGUAGE {
             return Err(ContractError::at(
                 "settings.targetLanguage",
-                "protocol v1 supports Simplified Chinese only",
+                "this build supports Simplified Chinese only",
             ));
         }
         if self.hsk_standard != HSK_STANDARD {
             return Err(ContractError::at(
                 "settings.hskStandard",
-                "protocol v1 supports HSK 2.0 only",
+                "this build supports HSK 2.0 only",
             ));
         }
         if self.translate_sound_effects {
             return Err(ContractError::at(
                 "settings.translateSoundEffects",
-                "sound-effect translation is disabled in protocol v1",
+                "sound-effect translation is disabled in this build",
             ));
         }
         Ok(())
@@ -443,62 +655,9 @@ pub struct DialogueContext {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct BrowserJobResult {
-    pub protocol_version: u8,
-    pub job_id: String,
-    pub source_sha256: String,
-    pub source_width: u32,
-    pub source_height: u32,
-    pub clean_image_blob_id: String,
-    pub clean_image_mime_type: CleanImageMimeType,
-    pub regions: Vec<BrowserRegion>,
-    pub warnings: Vec<BrowserWarning>,
-    pub cache: BrowserCacheStatus,
-}
-
-impl Validate for BrowserJobResult {
-    fn validate(&self) -> Result<(), ContractError> {
-        require_protocol(self.protocol_version)?;
-        require_nonempty("jobId", &self.job_id)?;
-        require_sha256("sourceSha256", &self.source_sha256)?;
-        if self.source_width == 0 || self.source_height == 0 {
-            return Err(ContractError::at(
-                "sourceWidth",
-                "source dimensions must be non-zero",
-            ));
-        }
-        require_nonempty("cleanImageBlobId", &self.clean_image_blob_id)?;
-        let mut ids = HashSet::with_capacity(self.regions.len());
-        for (index, region) in self.regions.iter().enumerate() {
-            region.validate_at(index)?;
-            if !ids.insert(region.id.as_str()) {
-                return Err(ContractError::at(
-                    format!("regions[{index}].id"),
-                    "region IDs must be unique",
-                ));
-            }
-        }
-        for (index, warning) in self.warnings.iter().enumerate() {
-            require_nonempty(&format!("warnings[{index}].message"), &warning.message)?;
-            if let Some(region_id) = &warning.region_id
-                && !ids.contains(region_id.as_str())
-            {
-                return Err(ContractError::at(
-                    format!("warnings[{index}].regionId"),
-                    "must reference a region in this result",
-                ));
-            }
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum CleanImageMimeType {
-    #[serde(rename = "image/png")]
-    Png,
-    #[serde(rename = "image/webp")]
-    Webp,
+pub struct ProperNameGlossaryEntry {
+    pub source_english: String,
+    pub chinese: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -513,107 +672,6 @@ impl Point {
         require_unit(&format!("{path}.x"), self.x)?;
         require_unit(&format!("{path}.y"), self.y)
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct BrowserRegion {
-    pub id: String,
-    pub kind: RegionKind,
-    pub text_polygon: Vec<Point>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub bubble_polygon: Option<Vec<Point>>,
-    pub rotation_degrees: f32,
-    pub source_english: String,
-    pub faithful_chinese: String,
-    pub displayed_chinese: String,
-    pub pinyin: String,
-    pub ocr_confidence: f32,
-    pub reading_order: u32,
-    pub vocabulary: VocabularyStatus,
-    pub style: BrowserTextStyle,
-    pub layout: BrowserTextLayout,
-}
-
-impl BrowserRegion {
-    fn validate_at(&self, index: usize) -> Result<(), ContractError> {
-        let path = format!("regions[{index}]");
-        require_nonempty(&format!("{path}.id"), &self.id)?;
-        require_polygon(&format!("{path}.textPolygon"), &self.text_polygon)?;
-        if let Some(points) = &self.bubble_polygon {
-            require_polygon(&format!("{path}.bubblePolygon"), points)?;
-        }
-        if !self.rotation_degrees.is_finite() {
-            return Err(ContractError::at(
-                format!("{path}.rotationDegrees"),
-                "must be finite",
-            ));
-        }
-        require_unit(&format!("{path}.ocrConfidence"), self.ocr_confidence)?;
-        if self.kind != RegionKind::Sfx {
-            require_nonempty(&format!("{path}.sourceEnglish"), &self.source_english)?;
-            require_nonempty(&format!("{path}.faithfulChinese"), &self.faithful_chinese)?;
-            require_nonempty(&format!("{path}.displayedChinese"), &self.displayed_chinese)?;
-        }
-        self.vocabulary.validate_at(&format!("{path}.vocabulary"))?;
-        self.style.validate_at(&format!("{path}.style"))?;
-        self.layout.validate_at(&format!("{path}.layout"))
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum RegionKind {
-    Dialogue,
-    Caption,
-    Thought,
-    Sfx,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct VocabularyStatus {
-    pub requested_hsk_level: HskLevel,
-    pub strictly_valid: bool,
-    pub exceptions: Vec<VocabularyException>,
-}
-
-impl VocabularyStatus {
-    fn validate_at(&self, path: &str) -> Result<(), ContractError> {
-        let mut texts = HashSet::new();
-        for (index, exception) in self.exceptions.iter().enumerate() {
-            require_nonempty(&format!("{path}.exceptions[{index}].text"), &exception.text)?;
-            if !texts.insert(exception.text.as_str()) {
-                return Err(ContractError::at(
-                    format!("{path}.exceptions[{index}].text"),
-                    "duplicate exception",
-                ));
-            }
-        }
-        if self.strictly_valid && !self.exceptions.is_empty() {
-            return Err(ContractError::at(
-                format!("{path}.strictlyValid"),
-                "cannot be strict when vocabulary exceptions are present",
-            ));
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct VocabularyException {
-    pub text: String,
-    pub reason: VocabularyExceptionReason,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum VocabularyExceptionReason {
-    PersonName,
-    PlaceName,
-    Title,
-    UnavoidableProperNoun,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -757,108 +815,297 @@ impl BrowserTextLayout {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct BrowserWarning {
-    pub code: BrowserWarningCode,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub region_id: Option<String>,
-    pub message: String,
+pub struct ViewportUpdateRequest {
+    pub visible_rects: Vec<NormalizedRect>,
+    pub active: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum BrowserWarningCode {
-    LowOcrConfidence,
-    HskException,
-    HskRewriteFailed,
-    TextFitDegraded,
-    StyleLowConfidence,
-    SfxSkipped,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct BrowserCacheStatus {
-    pub detection_hit: bool,
-    pub ocr_hit: bool,
-    pub inpaint_hit: bool,
-    pub translation_hit: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct BrowserJobStatus {
-    pub revision: u64,
-    pub job_id: String,
-    pub state: BrowserJobState,
-    pub stage: BrowserJobStage,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stage_progress: Option<f32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub overall_progress: Option<f32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub current: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub total: Option<u32>,
-    pub message: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error_code: Option<String>,
-}
-
-impl Validate for BrowserJobStatus {
+impl Validate for ViewportUpdateRequest {
     fn validate(&self) -> Result<(), ContractError> {
-        if self.revision == 0 {
-            return Err(ContractError::at("revision", "must start at 1"));
-        }
-        require_nonempty("jobId", &self.job_id)?;
-        require_nonempty("message", &self.message)?;
-        if let Some(value) = self.stage_progress {
-            require_unit("stageProgress", value)?;
-        }
-        if let Some(value) = self.overall_progress {
-            require_unit("overallProgress", value)?;
-        }
-        if self.current.is_some() != self.total.is_some() {
+        if self.visible_rects.len() > MAX_VISIBLE_RECTS {
             return Err(ContractError::at(
-                "current",
-                "current and total must be present together",
+                "visibleRects",
+                format!("must contain at most {MAX_VISIBLE_RECTS} rectangles"),
             ));
         }
-        if let (Some(current), Some(total)) = (self.current, self.total)
-            && (total == 0 || current > total)
-        {
-            return Err(ContractError::at(
-                "current",
-                "must be less than or equal to a non-zero total",
-            ));
-        }
-        let stage_matches = match self.state {
-            BrowserJobState::Running => !self.stage.is_terminal(),
-            BrowserJobState::Complete => self.stage == BrowserJobStage::Complete,
-            BrowserJobState::Failed => self.stage == BrowserJobStage::Failed,
-            BrowserJobState::Cancelled => self.stage == BrowserJobStage::Cancelled,
-        };
-        if !stage_matches {
-            return Err(ContractError::at("stage", "must agree with the job state"));
-        }
-        if self.state == BrowserJobState::Failed
-            && self.error_code.as_deref().is_none_or(str::is_empty)
-        {
-            return Err(ContractError::at(
-                "errorCode",
-                "failed jobs require an error code",
-            ));
+        for (index, rect) in self.visible_rects.iter().enumerate() {
+            rect.validate_at(&format!("visibleRects[{index}]"))?;
         }
         Ok(())
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum BrowserJobState {
-    Running,
-    Complete,
-    Failed,
-    Cancelled,
+pub enum PatchMimeType {
+    #[serde(rename = "image/png")]
+    Png,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RegionPatch {
+    pub blob_id: String,
+    pub mime_type: PatchMimeType,
+    pub rect: NormalizedRect,
+}
+
+impl RegionPatch {
+    fn validate_at(&self, path: &str) -> Result<(), ContractError> {
+        require_nonempty(&format!("{path}.blobId"), &self.blob_id)?;
+        self.rect.validate_at(&format!("{path}.rect"))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum HskRepairState {
+    NotNeeded,
+    Pending,
+    Accepted,
+    Rejected,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProgressiveHskStatus {
+    pub requested_level: HskLevel,
+    pub strictly_valid: bool,
+    pub above_level_tokens: Vec<String>,
+    pub repair_state: HskRepairState,
+}
+
+impl ProgressiveHskStatus {
+    fn validate_at(&self, path: &str) -> Result<(), ContractError> {
+        let mut tokens = HashSet::with_capacity(self.above_level_tokens.len());
+        for (index, token) in self.above_level_tokens.iter().enumerate() {
+            require_nonempty(&format!("{path}.aboveLevelTokens[{index}]"), token)?;
+            if !tokens.insert(token.as_str()) {
+                return Err(ContractError::at(
+                    format!("{path}.aboveLevelTokens[{index}]"),
+                    "duplicate above-level token",
+                ));
+            }
+        }
+        if self.strictly_valid && !self.above_level_tokens.is_empty() {
+            return Err(ContractError::at(
+                format!("{path}.strictlyValid"),
+                "strictly valid text cannot retain above-level tokens",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProgressiveRegion {
+    pub id: String,
+    pub text_polygon: Vec<Point>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bubble_polygon: Option<Vec<Point>>,
+    pub patch: RegionPatch,
+    pub source_english: String,
+    pub base_chinese: String,
+    pub displayed_chinese: String,
+    pub pinyin: String,
+    pub ocr_confidence: f32,
+    pub reading_order: u32,
+    pub style: BrowserTextStyle,
+    pub layout: BrowserTextLayout,
+    pub hsk: ProgressiveHskStatus,
+}
+
+impl ProgressiveRegion {
+    fn validate_at(&self, path: &str) -> Result<(), ContractError> {
+        require_nonempty(&format!("{path}.id"), &self.id)?;
+        require_polygon(&format!("{path}.textPolygon"), &self.text_polygon)?;
+        if let Some(points) = &self.bubble_polygon {
+            require_polygon(&format!("{path}.bubblePolygon"), points)?;
+        }
+        self.patch.validate_at(&format!("{path}.patch"))?;
+        require_nonempty(&format!("{path}.sourceEnglish"), &self.source_english)?;
+        require_nonempty(&format!("{path}.baseChinese"), &self.base_chinese)?;
+        require_nonempty(&format!("{path}.displayedChinese"), &self.displayed_chinese)?;
+        require_nonempty(&format!("{path}.pinyin"), &self.pinyin)?;
+        require_unit(&format!("{path}.ocrConfidence"), self.ocr_confidence)?;
+        self.style.validate_at(&format!("{path}.style"))?;
+        self.layout.validate_at(&format!("{path}.layout"))?;
+        self.hsk.validate_at(&format!("{path}.hsk"))
+    }
+}
+
+impl Validate for ProgressiveRegion {
+    fn validate(&self) -> Result<(), ContractError> {
+        self.validate_at("region")
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum JobUpdate {
+    Progress {
+        sequence: u64,
+        stage: BrowserJobStage,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stage_progress: Option<f32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        overall_progress: Option<f32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        current: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        total: Option<u32>,
+        message: String,
+    },
+    RegionReady {
+        sequence: u64,
+        region: Box<ProgressiveRegion>,
+    },
+    RegionRefined {
+        sequence: u64,
+        region_id: String,
+        displayed_chinese: String,
+        pinyin: String,
+        hsk: ProgressiveHskStatus,
+    },
+    Complete {
+        sequence: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+    },
+    Failed {
+        sequence: u64,
+        code: String,
+        message: String,
+        retryable: bool,
+    },
+    Cancelled {
+        sequence: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+    },
+}
+
+impl JobUpdate {
+    pub fn sequence(&self) -> u64 {
+        match self {
+            Self::Progress { sequence, .. }
+            | Self::RegionReady { sequence, .. }
+            | Self::RegionRefined { sequence, .. }
+            | Self::Complete { sequence, .. }
+            | Self::Failed { sequence, .. }
+            | Self::Cancelled { sequence, .. } => *sequence,
+        }
+    }
+
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            Self::Complete { .. } | Self::Failed { .. } | Self::Cancelled { .. }
+        )
+    }
+}
+
+impl Validate for JobUpdate {
+    fn validate(&self) -> Result<(), ContractError> {
+        if self.sequence() == 0 {
+            return Err(ContractError::at("sequence", "must start at 1"));
+        }
+        match self {
+            Self::Progress {
+                stage: _,
+                stage_progress,
+                overall_progress,
+                current,
+                total,
+                message,
+                ..
+            } => {
+                if let Some(value) = stage_progress {
+                    require_unit("stageProgress", *value)?;
+                }
+                if let Some(value) = overall_progress {
+                    require_unit("overallProgress", *value)?;
+                }
+                if current.is_some() != total.is_some() {
+                    return Err(ContractError::at(
+                        "current",
+                        "current and total must be present together",
+                    ));
+                }
+                if let (Some(current), Some(total)) = (current, total)
+                    && (*total == 0 || current > total)
+                {
+                    return Err(ContractError::at(
+                        "current",
+                        "must be less than or equal to a non-zero total",
+                    ));
+                }
+                require_nonempty("message", message)
+            }
+            Self::RegionReady { region, .. } => region.validate(),
+            Self::RegionRefined {
+                region_id,
+                displayed_chinese,
+                pinyin,
+                hsk,
+                ..
+            } => {
+                require_nonempty("regionId", region_id)?;
+                require_nonempty("displayedChinese", displayed_chinese)?;
+                require_nonempty("pinyin", pinyin)?;
+                hsk.validate_at("hsk")
+            }
+            Self::Complete { message, .. } | Self::Cancelled { message, .. } => {
+                if let Some(message) = message {
+                    require_nonempty("message", message)?;
+                }
+                Ok(())
+            }
+            Self::Failed { code, message, .. } => {
+                require_nonempty("code", code)?;
+                require_nonempty("message", message)
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct JobUpdatesResponse {
+    pub job_id: String,
+    pub next_sequence: u64,
+    pub updates: Vec<JobUpdate>,
+}
+
+impl Validate for JobUpdatesResponse {
+    fn validate(&self) -> Result<(), ContractError> {
+        require_nonempty("jobId", &self.job_id)?;
+        let mut previous = 0;
+        for update in &self.updates {
+            update.validate()?;
+            if update.sequence() <= previous {
+                return Err(ContractError::at(
+                    "updates",
+                    "update sequences must be strictly increasing",
+                ));
+            }
+            previous = update.sequence();
+        }
+        if let Some(last) = self.updates.last()
+            && self.next_sequence != last.sequence()
+        {
+            return Err(ContractError::at(
+                "nextSequence",
+                "must equal the last returned update sequence",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -870,27 +1117,16 @@ pub enum BrowserJobStage {
     Ocr,
     Inpainting,
     Translating,
-    HskRewriting,
     HskValidating,
     Styling,
     Packaging,
-    Complete,
-    Failed,
-    Cancelled,
-}
-
-impl BrowserJobStage {
-    fn is_terminal(self) -> bool {
-        matches!(self, Self::Complete | Self::Failed | Self::Cancelled)
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct BrowserSetupStatus {
     pub state: BrowserSetupState,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub selected_pack_id: Option<String>,
+    pub model_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_file: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -906,6 +1142,13 @@ pub struct BrowserSetupStatus {
 
 impl Validate for BrowserSetupStatus {
     fn validate(&self) -> Result<(), ContractError> {
+        require_nonempty_at_most("modelId", &self.model_id, 128)?;
+        if self.model_id != "qwen3.5-4b" {
+            return Err(ContractError::at(
+                "modelId",
+                "must identify the mandatory qwen3.5-4b model",
+            ));
+        }
         require_nonempty("message", &self.message)?;
         if self.completed_bytes.is_some() != self.total_bytes.is_some() {
             return Err(ContractError::at(
@@ -1015,14 +1258,13 @@ pub struct LookupToken {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LookupRegion {
     pub displayed_chinese: String,
-    pub faithful_chinese: String,
+    pub base_chinese: String,
     pub source_english: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ErrorResponse {
-    pub protocol_version: u8,
     pub code: String,
     pub message: String,
     pub retryable: bool,
@@ -1030,7 +1272,6 @@ pub struct ErrorResponse {
 
 impl Validate for ErrorResponse {
     fn validate(&self) -> Result<(), ContractError> {
-        require_protocol(self.protocol_version)?;
         require_nonempty("code", &self.code)?;
         require_nonempty("message", &self.message)
     }
@@ -1040,8 +1281,19 @@ impl Validate for ErrorResponse {
 mod tests {
     use super::*;
 
+    fn resource_identity(id: &str) -> ResourceIdentity {
+        ResourceIdentity {
+            id: id.to_owned(),
+            repository: "owner/repository".to_owned(),
+            repository_revision: "a".repeat(40),
+            filename: "model.bin".to_owned(),
+            bytes: 1,
+            sha256: "b".repeat(64),
+        }
+    }
+
     #[test]
-    fn hsk_level_rejects_values_outside_v2_range() {
+    fn hsk_level_rejects_values_outside_supported_range() {
         assert!(HskLevel::try_from(0).is_err());
         assert!(HskLevel::try_from(7).is_err());
     }
@@ -1053,5 +1305,28 @@ mod tests {
         assert!(is_css_color("#112233"));
         assert!(is_css_color("#11223344"));
         assert!(!is_css_color("red"));
+    }
+
+    #[test]
+    fn health_requires_lowercase_sorted_exact_resource_identities() {
+        let valid = HealthResponse {
+            build_fingerprint: BUILD_FINGERPRINT.to_owned(),
+            engine_version: "test".to_owned(),
+            status: HealthStatus::Ready,
+            setup_state: BrowserSetupState::Ready,
+            resource_identities: vec![
+                resource_identity("detector-config"),
+                resource_identity("translation-model"),
+            ],
+        };
+        valid.validate().unwrap();
+
+        let mut unsorted = valid.clone();
+        unsorted.resource_identities.reverse();
+        assert!(unsorted.validate().is_err());
+
+        let mut uppercase_digest = valid;
+        uppercase_digest.resource_identities[0].sha256 = "B".repeat(64);
+        assert!(uppercase_digest.validate().is_err());
     }
 }

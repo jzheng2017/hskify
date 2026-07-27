@@ -1,3 +1,0 @@
-sample_id,candidate_label,meaning_1_to_5,natural_dialogue_1_to_5,voice_tone_1_to_5,names_pronouns_1_to_5,numbers_negation_1_to_5,critical_failure_yes_no,hsk_rewrite_naturalness_1_to_5,hsk_meaning_retention_1_to_5,notes
-gate0-synthetic-001,candidate-A,,,,,,,,,
-gate0-synthetic-001,candidate-B,,,,,,,,,

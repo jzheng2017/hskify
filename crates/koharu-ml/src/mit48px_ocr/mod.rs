@@ -14,7 +14,7 @@ use model::{Mit48pxModel, RawPrediction};
 
 use crate::{comic_text_detector::extract_text_block_regions, device, loading, types::TextRegion};
 
-const OCR_CHUNK_SIZE: usize = 16;
+const OCR_CHUNK_SIZE: usize = 8;
 const HF_REPO: &str = "mayocream/mit48px-ocr";
 
 koharu_runtime::declare_hf_model_package!(id: "model:mit48px-ocr:config", repo: HF_REPO, file: "config.json", bootstrap: false, order: 210);

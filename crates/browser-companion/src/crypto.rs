@@ -28,7 +28,7 @@ pub fn generate_secret() -> Result<([u8; SECRET_BYTES], String), CryptoError> {
     Ok((raw, encoded))
 }
 
-/// Decode the exact token representation accepted by protocol v1.
+/// Decode the exact token representation accepted by Hskify.
 pub fn decode_secret(value: &str) -> Result<[u8; SECRET_BYTES], CryptoError> {
     if value.len() != ENCODED_SECRET_LEN
         || !value

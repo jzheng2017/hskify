@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string] $ProductRoot = (Join-Path $env:LOCALAPPDATA 'Hskify\HSKMangaTranslator'),
+    [string] $ProductRoot = (Join-Path $env:LOCALAPPDATA 'Hskify'),
     [Parameter(DontShow = $true)]
     [string] $RegistryPath = 'HKCU:\Software\Mozilla\NativeMessagingHosts\local.hskify.hsk_manga',
     [switch] $KeepCache
@@ -27,7 +27,7 @@ if ($resolvedProductRoot -eq $driveRoot) {
 
 $appRoot = Join-Path $resolvedProductRoot 'app'
 $resourceRoot = Join-Path $resolvedProductRoot 'resources'
-$stateRoot = Join-Path $resolvedProductRoot 'browser-companion-v1'
+$stateRoot = Join-Path $resolvedProductRoot 'browser-companion'
 $bundleManifestPath = Join-Path $appRoot 'bundle-manifest.json'
 $hasInstalledApp = Test-Path -LiteralPath $appRoot -PathType Container
 if ($hasInstalledApp) {
@@ -37,7 +37,7 @@ if ($hasInstalledApp) {
     $bundleManifest = Get-Content -LiteralPath $bundleManifestPath -Raw | ConvertFrom-Json
     if (
         $bundleManifest.bundleFormatVersion -ne 1 -or
-        $bundleManifest.product -ne 'HSK Manga Translator' -or
+        $bundleManifest.product -ne 'Hskify' -or
         $bundleManifest.nativeHostName -ne 'local.hskify.hsk_manga'
     ) {
         throw "refusing to remove an application directory with an unexpected marker: $appRoot"
@@ -45,7 +45,7 @@ if ($hasInstalledApp) {
 }
 
 $daemonPath = Join-Path $appRoot 'companion\hsk-manga-browser-daemon.exe'
-$daemonRecordPath = Join-Path $stateRoot 'daemon-state-v1.json'
+$daemonRecordPath = Join-Path $stateRoot 'daemon-state.json'
 if (
     (Test-Path -LiteralPath $daemonPath -PathType Leaf) -and
     (Test-Path -LiteralPath $daemonRecordPath -PathType Leaf)
@@ -104,4 +104,4 @@ if (-not $KeepCache -and (Test-Path -LiteralPath $stateRoot)) {
 
 Remove-DirectoryIfEmpty -Path (Join-Path $resolvedProductRoot 'native-host')
 Remove-DirectoryIfEmpty -Path $resolvedProductRoot
-Write-Output "Uninstalled HSK Manga Translator from $resolvedProductRoot"
+Write-Output "Uninstalled Hskify from $resolvedProductRoot"

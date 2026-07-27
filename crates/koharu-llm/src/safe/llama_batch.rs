@@ -17,6 +17,12 @@ pub struct LlamaBatch<'a> {
     phantom: PhantomData<&'a [LlamaToken]>,
 }
 
+// The batch owns its llama.cpp allocation (or borrows a `LlamaToken` slice,
+// whose elements are plain integer token IDs) and can move between threads.
+// It remains !Sync so callers cannot use the underlying mutable buffers
+// concurrently.
+unsafe impl Send for LlamaBatch<'_> {}
+
 /// Errors that can occur when adding a token to a batch.
 #[derive(thiserror::Error, Debug, PartialEq, Eq)]
 pub enum BatchAddError {

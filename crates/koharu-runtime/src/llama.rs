@@ -9,86 +9,51 @@ use crate::loader::{add_runtime_search_path, preload_library};
 
 const LLAMA_CPP_TAG: &str = env!("LLAMA_CPP_TAG");
 const RELEASE_BASE_URL: &str = "https://github.com/ggml-org/llama.cpp/releases/download";
+const LLAMA_EXTRACT_REVISION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 enum LlamaDistribution {
     WindowsCuda13X64,
-    WindowsVulkanX64,
-    LinuxVulkanX64,
-    LinuxVulkanArm64,
-    MacosArm64,
 }
 
 impl LlamaDistribution {
     #[allow(clippy::needless_return)]
-    fn detect(_runtime: &Runtime) -> Result<Self> {
+    fn detect(runtime: &Runtime) -> Result<Self> {
         #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-        return Ok(Self::windows_x64(_runtime));
+        {
+            if !runtime.wants_gpu() {
+                bail!("Hskify's llama runtime requires CUDA; CPU mode is disabled");
+            }
+            crate::cuda::require_hskify_cuda_target()
+                .context("Hskify's llama runtime requires the exact CUDA target")?;
+            return Ok(Self::WindowsCuda13X64);
+        }
 
-        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-        return Ok(Self::LinuxVulkanX64);
-
-        #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
-        return Ok(Self::LinuxVulkanArm64);
-
-        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-        return Ok(Self::MacosArm64);
-
-        #[cfg(not(any(
-            all(target_os = "windows", target_arch = "x86_64"),
-            all(target_os = "linux", target_arch = "x86_64"),
-            all(target_os = "linux", target_arch = "aarch64"),
-            all(target_os = "macos", target_arch = "aarch64")
-        )))]
+        #[cfg(not(all(target_os = "windows", target_arch = "x86_64")))]
         bail!(
-            "unsupported platform: os={}, arch={}",
+            "Hskify's performance build requires 64-bit Windows with NVIDIA CUDA 13.1; \
+             detected os={}, arch={}",
             std::env::consts::OS,
             std::env::consts::ARCH
         )
     }
 
-    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-    fn windows_x64(runtime: &Runtime) -> Self {
-        if crate::zluda::package_enabled(runtime) {
-            Self::WindowsVulkanX64
-        } else if crate::cuda::llama_cuda_enabled(runtime) {
-            Self::WindowsCuda13X64
-        } else {
-            Self::WindowsVulkanX64
-        }
-    }
-
     fn id(self) -> &'static str {
         match self {
             Self::WindowsCuda13X64 => "windows-cuda13-x64",
-            Self::WindowsVulkanX64 => "windows-vulkan-x64",
-            Self::LinuxVulkanX64 => "linux-vulkan-x64",
-            Self::LinuxVulkanArm64 => "linux-vulkan-arm64",
-            Self::MacosArm64 => "macos-arm64",
         }
     }
 
     fn assets(self) -> Vec<String> {
         let tag = LLAMA_CPP_TAG;
         match self {
-            Self::WindowsCuda13X64 => vec![
-                format!("llama-{tag}-bin-win-cuda-13.1-x64.zip"),
-                "cudart-llama-bin-win-cuda-13.1-x64.zip".to_string(),
-            ],
-            Self::WindowsVulkanX64 => vec![format!("llama-{tag}-bin-win-vulkan-x64.zip")],
-            Self::LinuxVulkanX64 => vec![format!("llama-{tag}-bin-ubuntu-vulkan-x64.tar.gz")],
-            Self::LinuxVulkanArm64 => vec![format!("llama-{tag}-bin-ubuntu-vulkan-arm64.tar.gz")],
-            Self::MacosArm64 => vec![format!("llama-{tag}-bin-macos-arm64.tar.gz")],
+            Self::WindowsCuda13X64 => vec![format!("llama-{tag}-bin-win-cuda-13.1-x64.zip")],
         }
     }
 
     fn libraries(self) -> &'static [&'static str] {
         match self {
             Self::WindowsCuda13X64 => &[
-                "cudart64_13.dll",
-                "cublasLt64_13.dll",
-                "cublas64_13.dll",
                 "libomp140.x86_64.dll",
                 "ggml-base.dll",
                 "ggml.dll",
@@ -111,77 +76,6 @@ impl LlamaDistribution {
                 "llama.dll",
                 "mtmd.dll",
             ],
-            Self::WindowsVulkanX64 => &[
-                "libomp140.x86_64.dll",
-                "ggml-base.dll",
-                "ggml.dll",
-                "ggml-cpu-alderlake.dll",
-                "ggml-cpu-cannonlake.dll",
-                "ggml-cpu-cascadelake.dll",
-                "ggml-cpu-cooperlake.dll",
-                "ggml-cpu-haswell.dll",
-                "ggml-cpu-icelake.dll",
-                "ggml-cpu-ivybridge.dll",
-                "ggml-cpu-piledriver.dll",
-                "ggml-cpu-sandybridge.dll",
-                "ggml-cpu-sapphirerapids.dll",
-                "ggml-cpu-skylakex.dll",
-                "ggml-cpu-sse42.dll",
-                "ggml-cpu-x64.dll",
-                "ggml-cpu-zen4.dll",
-                "ggml-rpc.dll",
-                "ggml-vulkan.dll",
-                "llama.dll",
-                "mtmd.dll",
-            ],
-            Self::LinuxVulkanX64 => &[
-                "libggml-base.so",
-                "libggml.so",
-                "libggml-cpu-alderlake.so",
-                "libggml-cpu-cannonlake.so",
-                "libggml-cpu-cascadelake.so",
-                "libggml-cpu-cooperlake.so",
-                "libggml-cpu-haswell.so",
-                "libggml-cpu-icelake.so",
-                "libggml-cpu-ivybridge.so",
-                "libggml-cpu-piledriver.so",
-                "libggml-cpu-sandybridge.so",
-                "libggml-cpu-sapphirerapids.so",
-                "libggml-cpu-skylakex.so",
-                "libggml-cpu-sse42.so",
-                "libggml-cpu-x64.so",
-                "libggml-cpu-zen4.so",
-                "libggml-rpc.so",
-                "libggml-vulkan.so",
-                "libllama.so",
-                "libmtmd.so",
-            ],
-            Self::LinuxVulkanArm64 => &[
-                "libggml-base.so",
-                "libggml.so",
-                "libggml-cpu-armv8.0_1.so",
-                "libggml-cpu-armv8.2_1.so",
-                "libggml-cpu-armv8.2_2.so",
-                "libggml-cpu-armv8.2_3.so",
-                "libggml-cpu-armv8.6_1.so",
-                "libggml-cpu-armv8.6_2.so",
-                "libggml-cpu-armv9.2_1.so",
-                "libggml-cpu-armv9.2_2.so",
-                "libggml-rpc.so",
-                "libggml-vulkan.so",
-                "libllama.so",
-                "libmtmd.so",
-            ],
-            Self::MacosArm64 => &[
-                "libggml-base.dylib",
-                "libggml.dylib",
-                "libggml-blas.dylib",
-                "libggml-cpu.dylib",
-                "libggml-metal.dylib",
-                "libggml-rpc.dylib",
-                "libllama.dylib",
-                "libmtmd.dylib",
-            ],
         }
     }
 
@@ -195,12 +89,15 @@ impl LlamaDistribution {
     }
 
     fn source_id(self) -> String {
-        format!("llama-{LLAMA_CPP_TAG}-{}", self.id())
+        format!(
+            "llama-{LLAMA_CPP_TAG}-{}-extract-{LLAMA_EXTRACT_REVISION}",
+            self.id()
+        )
     }
 }
 
 pub(crate) fn package_enabled(runtime: &Runtime) -> bool {
-    LlamaDistribution::detect(runtime).is_ok()
+    runtime.cuda_required() || LlamaDistribution::detect(runtime).is_ok()
 }
 
 pub(crate) fn package_present(runtime: &Runtime) -> Result<bool> {
@@ -291,26 +188,37 @@ mod tests {
         fs::write(path, b"ok").unwrap();
     }
 
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
     #[test]
+    #[ignore = "requires the exact Hskify CUDA target"]
     fn detect_returns_a_variant_for_current_platform() {
         let runtime = Runtime::new("/tmp/koharu-runtime", crate::ComputePolicy::PreferGpu).unwrap();
         let distribution = LlamaDistribution::detect(&runtime).unwrap();
-        assert!(!distribution.id().is_empty());
+        assert_eq!(distribution.id(), "windows-cuda13-x64");
         assert!(!distribution.assets().is_empty());
         assert!(!distribution.libraries().is_empty());
     }
 
     #[test]
     fn install_dir_includes_tag_and_id() {
-        let runtime = Runtime::new("/tmp/koharu-runtime", crate::ComputePolicy::CpuOnly).unwrap();
-        let dir = LlamaDistribution::WindowsVulkanX64.install_dir(&runtime);
+        let runtime = Runtime::new("/tmp/koharu-runtime", crate::ComputePolicy::PreferGpu).unwrap();
+        let distribution = LlamaDistribution::WindowsCuda13X64;
+        let dir = distribution.install_dir(&runtime);
         assert!(
             dir.ends_with(
                 std::path::Path::new("llama.cpp")
                     .join(LLAMA_CPP_TAG)
-                    .join("windows-vulkan-x64")
+                    .join("windows-cuda13-x64")
             )
         );
+        assert!(distribution.source_id().ends_with("-extract-2"));
+    }
+
+    #[test]
+    fn required_policy_keeps_llama_package_enabled() {
+        let runtime =
+            Runtime::new("unused", crate::ComputePolicy::CudaRequired).expect("create runtime");
+        assert!(package_enabled(&runtime));
     }
 
     #[test]
@@ -332,15 +240,20 @@ mod tests {
         assert_eq!(paths.len(), runtime.libraries().len());
     }
 
+    #[test]
+    fn llama_runtime_does_not_own_cuda_runtime_or_cublas() {
+        let distribution = LlamaDistribution::WindowsCuda13X64;
+        assert_eq!(distribution.assets().len(), 1);
+        for duplicate in ["cudart64_13.dll", "cublasLt64_13.dll", "cublas64_13.dll"] {
+            assert!(!distribution.libraries().contains(&duplicate));
+        }
+    }
+
     #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
     #[test]
-    fn windows_runtime_prefers_vulkan_when_zluda_is_enabled() {
-        let runtime = Runtime::new("/tmp/koharu-runtime", crate::ComputePolicy::PreferGpu).unwrap();
-        if crate::zluda::package_enabled(&runtime) {
-            assert_eq!(
-                LlamaDistribution::detect(&runtime).unwrap(),
-                LlamaDistribution::WindowsVulkanX64
-            );
-        }
+    fn windows_runtime_rejects_cpu_policy() {
+        let runtime = Runtime::new("/tmp/koharu-runtime", crate::ComputePolicy::CpuOnly).unwrap();
+        let error = LlamaDistribution::detect(&runtime).unwrap_err();
+        assert!(error.to_string().contains("CPU mode is disabled"));
     }
 }

@@ -1,6 +1,6 @@
 mod model;
 
-use std::{collections::BTreeMap, time::Instant};
+use std::{collections::BTreeMap, path::PathBuf, time::Instant};
 
 use anyhow::{Context, Result, bail};
 use candle_core::DType;
@@ -14,8 +14,12 @@ use crate::{Device, device, loading, types::TextRegion};
 use self::model::{RTDetrV2ForObjectDetection, RTDetrV2Outputs};
 
 const HF_REPO: &str = "ogkalu/comic-text-and-bubble-detector";
+const HF_REVISION: &str = "16e8a622f91fabc6b5b65c96d32d1183f8843546";
 const DEFAULT_CONFIDENCE_THRESHOLD: f32 = 0.3;
+pub const DETECTOR_TILE_CONFIDENCE_THRESHOLD: f32 = 0.18;
 const DETECTOR_NAME: &str = "comic-text-bubble-detector";
+pub const DETECTOR_TILE_BATCH_SIZE: usize = 6;
+const TEXT_BUBBLE_MIN_INTERSECTION_OVER_SMALLER: f32 = 0.10;
 
 koharu_runtime::declare_hf_model_package!(
     id: "model:comic-text-bubble-detector:config",
@@ -51,22 +55,51 @@ pub struct ComicTextBubbleDetector {
 
 impl ComicTextBubbleDetector {
     pub async fn load(runtime: &RuntimeManager, cpu: bool) -> Result<Self> {
-        let device = device(cpu)?;
-        let dtype = loading::model_dtype(&device);
         let downloads = runtime.downloads();
-        let config_path = downloads.huggingface_model(HF_REPO, "config.json").await?;
-        let preprocessor_path = downloads
-            .huggingface_model(HF_REPO, "preprocessor_config.json")
-            .await?;
-        let weights_path = downloads
-            .huggingface_model(HF_REPO, "model.safetensors")
-            .await?;
+        let config_url = pinned_hugging_face_url("config.json");
+        let preprocessor_url = pinned_hugging_face_url("preprocessor_config.json");
+        let weights_url = pinned_hugging_face_url("model.safetensors");
+        let (config_path, preprocessor_path, weights_path) = tokio::try_join!(
+            downloads.pinned_url(
+                &config_url,
+                "comic-text-bubble-detector-config-16e8a622.json"
+            ),
+            downloads.pinned_url(
+                &preprocessor_url,
+                "comic-text-bubble-detector-preprocessor-16e8a622.json"
+            ),
+            downloads.pinned_url(
+                &weights_url,
+                "comic-text-bubble-detector-weights-16e8a622.safetensors"
+            ),
+        )?;
+        Self::load_from_paths(config_path, preprocessor_path, weights_path, cpu).await
+    }
+
+    /// Load files supplied by the caller without any repository lookup.
+    ///
+    /// The browser companion uses this entry point after setup byte/hash checks
+    /// and atomic installation, so its production detector never resolves a
+    /// floating Hugging Face branch.
+    pub async fn load_from_paths(
+        config_path: PathBuf,
+        preprocessor_path: PathBuf,
+        weights_path: PathBuf,
+        cpu: bool,
+    ) -> Result<Self> {
+        let device = device(cpu)?;
+        let dtype = if device.is_cuda() {
+            DType::F16
+        } else {
+            loading::model_dtype(&device)
+        };
 
         let config = loading::read_json::<RTDetrV2Config>(&config_path)
             .with_context(|| format!("failed to parse {}", config_path.display()))?;
         config.validate()?;
         let preprocessor = loading::read_json::<RTDetrImageProcessorConfig>(&preprocessor_path)
             .with_context(|| format!("failed to parse {}", preprocessor_path.display()))?;
+        preprocessor.validate()?;
         let model = loading::load_mmaped_safetensors_path_with_dtype(
             &weights_path,
             &device,
@@ -89,6 +122,36 @@ impl ComicTextBubbleDetector {
         self.inference_with_threshold(image, DEFAULT_CONFIDENCE_THRESHOLD)
     }
 
+    /// Runs one true CUDA batch over already-decoded tiles. Callers own tile
+    /// priority and global coordinates, which lets viewport work overtake
+    /// offscreen work between batches without reloading the model.
+    #[instrument(level = "debug", skip_all)]
+    pub fn inference_tiles(&self, tiles: &[DynamicImage]) -> Result<Vec<ComicTextBubbleDetection>> {
+        if tiles.len() > DETECTOR_TILE_BATCH_SIZE {
+            bail!(
+                "detector tile batch is bounded to {DETECTOR_TILE_BATCH_SIZE}, got {}",
+                tiles.len()
+            );
+        }
+        let references = tiles.iter().collect::<Vec<_>>();
+        let batch = self.detect_image_batch(&references, DETECTOR_TILE_CONFIDENCE_THRESHOLD)?;
+        batch
+            .into_iter()
+            .zip(tiles)
+            .map(|(detections, tile)| {
+                let dimensions = tile.dimensions();
+                let detections = filter_and_fix_regions(detections, dimensions);
+                let text_blocks = detections_to_text_blocks(dimensions, &detections);
+                Ok(ComicTextBubbleDetection {
+                    image_width: dimensions.0,
+                    image_height: dimensions.1,
+                    detections,
+                    text_blocks,
+                })
+            })
+            .collect()
+    }
+
     #[instrument(level = "debug", skip_all)]
     pub fn inference_with_threshold(
         &self,
@@ -96,9 +159,19 @@ impl ComicTextBubbleDetector {
         threshold: f32,
     ) -> Result<ComicTextBubbleDetection> {
         let started = Instant::now();
-        let detections = self.slicer.process_slices_for_detection(image, |slice| {
-            self.detect_single_image(slice, threshold)
-        })?;
+        let slices = self.slicer.slices(image);
+        let mut detections = Vec::new();
+        for chunk in slices.chunks(DETECTOR_TILE_BATCH_SIZE) {
+            let images = chunk.iter().map(|slice| &slice.image).collect::<Vec<_>>();
+            let batch = self.detect_image_batch(&images, threshold)?;
+            for (mut slice_detections, slice) in batch.into_iter().zip(chunk) {
+                for detection in &mut slice_detections {
+                    detection.bbox[1] += slice.start_y as f32;
+                    detection.bbox[3] += slice.start_y as f32;
+                }
+                detections.extend(slice_detections);
+            }
+        }
         let detections = merge_slice_regions(
             filter_and_fix_regions(detections, image.dimensions()),
             image.height(),
@@ -123,32 +196,59 @@ impl ComicTextBubbleDetector {
     }
 
     #[instrument(level = "debug", skip_all)]
-    fn detect_single_image(
+    fn detect_image_batch(
         &self,
-        image: &DynamicImage,
+        images: &[&DynamicImage],
         threshold: f32,
-    ) -> Result<Vec<ComicTextBubbleRegion>> {
-        let pixel_values = preprocess_image(image, &self.preprocessor, &self.device, self.dtype)?;
+    ) -> Result<Vec<Vec<ComicTextBubbleRegion>>> {
+        if images.is_empty() {
+            return Ok(Vec::new());
+        }
+        let logical_len = images.len();
+        let mut batched_images = images.to_vec();
+        while batched_images.len() < 4 {
+            batched_images.push(images[images.len() - 1]);
+        }
+        let prepared = batched_images
+            .iter()
+            .map(|image| preprocess_image(image, &self.preprocessor, &self.device, self.dtype))
+            .collect::<Result<Vec<_>>>()?;
+        let tensors = prepared
+            .iter()
+            .map(|prepared| &prepared.tensor)
+            .collect::<Vec<_>>();
+        let target_sizes = prepared
+            .iter()
+            .map(|prepared| prepared.target_size)
+            .collect::<Vec<_>>();
+        let pixel_values = candle_core::Tensor::cat(&tensors, 0)?;
 
-        // Wrap the forward pass and post-processing in a closure so we can capture
-        // any errors without returning from the outer function immediately.
-        let inference_result = (|| -> Result<Vec<ComicTextBubbleRegion>> {
+        let inference_result = (|| -> Result<Vec<Vec<ComicTextBubbleRegion>>> {
             let outputs = self.model.forward(&pixel_values)?;
-            post_process_object_detection(&self.config, &outputs, image.dimensions(), threshold)
+            let mut detections = post_process_object_detection_batch(
+                &self.config,
+                &outputs,
+                &target_sizes,
+                threshold,
+            )?;
+            detections.truncate(logical_len);
+            Ok(detections)
         })();
 
-        // EXPLICIT VRAM CLEANUP
-        // This is now guaranteed to run even if the forward pass fails and returns an Err
         drop(pixel_values);
 
-        // Force the CUDA device to flush its command queue and release memory
-        // back to the OS so Vulkan (llama.cpp) can safely use it.
+        // Keep the model resident, but finish the batch before the priority
+        // worker admits OCR or translation work on the same CUDA device.
         if self.device.is_cuda() {
             let _ = self.device.synchronize();
         }
 
         inference_result
     }
+}
+
+fn pinned_hugging_face_url(filename: &str) -> String {
+    format!("https://huggingface.co/{HF_REPO}/resolve/{HF_REVISION}/{filename}")
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -172,6 +272,10 @@ pub struct ComicTextBubbleRegion {
 impl ComicTextBubbleRegion {
     pub fn is_bubble(&self) -> bool {
         self.label_id == 0
+    }
+
+    pub fn is_dialogue_text(&self) -> bool {
+        self.label_id == 1
     }
 
     pub fn is_text(&self) -> bool {
@@ -363,6 +467,8 @@ impl RTDetrResNetConfig {
 pub(crate) struct RTDetrImageProcessorConfig {
     #[serde(default = "default_true")]
     pub do_resize: bool,
+    #[serde(default)]
+    pub do_pad: bool,
     #[serde(default = "default_true")]
     pub do_rescale: bool,
     #[serde(default)]
@@ -375,6 +481,18 @@ pub(crate) struct RTDetrImageProcessorConfig {
     pub rescale_factor: f32,
     #[serde(default = "default_processor_size")]
     pub size: ProcessorSize,
+}
+
+impl RTDetrImageProcessorConfig {
+    fn validate(&self) -> Result<()> {
+        if self.do_pad {
+            bail!("padded RT-DETR inputs are not supported");
+        }
+        if self.size.height == 0 || self.size.width == 0 {
+            bail!("RT-DETR processor dimensions must be non-zero");
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -390,17 +508,22 @@ fn preprocess_image(
     preprocessor: &RTDetrImageProcessorConfig,
     device: &Device,
     dtype: DType,
-) -> Result<candle_core::Tensor> {
+) -> Result<PreparedDetectorImage> {
     let target_h = preprocessor.size.height;
     let target_w = preprocessor.size.width;
-    let resized = if preprocessor.do_resize {
-        image.resize_exact(target_w as u32, target_h as u32, FilterType::Triangle)
+    let (source_w, source_h) = image.dimensions();
+    preprocessor.validate()?;
+    let rgb = if preprocessor.do_resize {
+        image
+            .resize_exact(target_w as u32, target_h as u32, FilterType::Triangle)
+            .to_rgb8()
     } else {
-        image.clone()
+        image.to_rgb8()
     };
-    let rgb = resized.to_rgb8();
+    let tensor_h = rgb.height() as usize;
+    let tensor_w = rgb.width() as usize;
     let tensor =
-        candle_core::Tensor::from_vec(rgb.into_raw(), (1, target_h, target_w, 3), &Device::Cpu)?
+        candle_core::Tensor::from_vec(rgb.into_raw(), (1, tensor_h, tensor_w, 3), &Device::Cpu)?
             .to_device(device)?
             .permute((0, 3, 1, 2))?
             .to_dtype(dtype)?;
@@ -409,23 +532,41 @@ fn preprocess_image(
     } else {
         tensor
     };
-    if preprocessor.do_normalize {
+    let tensor = if preprocessor.do_normalize {
         let mean = candle_core::Tensor::from_slice(&preprocessor.image_mean, (1, 3, 1, 1), device)?
             .to_dtype(dtype)?;
         let std = candle_core::Tensor::from_slice(&preprocessor.image_std, (1, 3, 1, 1), device)?
             .to_dtype(dtype)?;
-        Ok(tensor.broadcast_sub(&mean)?.broadcast_div(&std)?)
+        tensor.broadcast_sub(&mean)?.broadcast_div(&std)?
     } else {
-        Ok(tensor)
-    }
+        tensor
+    };
+    Ok(PreparedDetectorImage {
+        tensor,
+        target_size: DetectorTargetSize {
+            height: source_h,
+            width: source_w,
+        },
+    })
 }
 
-fn post_process_object_detection(
+struct PreparedDetectorImage {
+    tensor: candle_core::Tensor,
+    target_size: DetectorTargetSize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DetectorTargetSize {
+    height: u32,
+    width: u32,
+}
+
+fn post_process_object_detection_batch(
     config: &RTDetrV2Config,
     outputs: &RTDetrV2Outputs,
-    target_size: (u32, u32),
+    target_sizes: &[DetectorTargetSize],
     threshold: f32,
-) -> Result<Vec<ComicTextBubbleRegion>> {
+) -> Result<Vec<Vec<ComicTextBubbleRegion>>> {
     let logits = outputs
         .logits
         .to_dtype(DType::F32)?
@@ -435,8 +576,11 @@ fn post_process_object_detection(
         .to_dtype(DType::F32)?
         .to_device(&Device::Cpu)?;
     let (batch_size, num_queries, num_classes) = logits.dims3()?;
-    if batch_size != 1 {
-        bail!("only single-image inference is supported, got batch_size={batch_size}");
+    if batch_size != target_sizes.len() {
+        bail!(
+            "model output batch size mismatch: expected {}, got {batch_size}",
+            target_sizes.len()
+        );
     }
     if num_classes != config.num_labels() {
         bail!(
@@ -448,54 +592,66 @@ fn post_process_object_detection(
 
     let logits = logits.flatten_all()?.to_vec1::<f32>()?;
     let pred_boxes = pred_boxes.flatten_all()?.to_vec1::<f32>()?;
-    let mut scored = Vec::with_capacity(num_queries * num_classes);
-    for query_index in 0..num_queries {
-        for class_id in 0..num_classes {
-            let index = query_index * num_classes + class_id;
-            scored.push((sigmoid_scalar(logits[index]), query_index, class_id));
+    let mut batch_detections = Vec::with_capacity(batch_size);
+    for (batch_index, target_size) in target_sizes.iter().copied().enumerate() {
+        let logits_offset = batch_index * num_queries * num_classes;
+        let boxes_offset = batch_index * num_queries * 4;
+        let mut scored = Vec::with_capacity(num_queries * num_classes);
+        for query_index in 0..num_queries {
+            for class_id in 0..num_classes {
+                let index = logits_offset + query_index * num_classes + class_id;
+                scored.push((sigmoid_scalar(logits[index]), query_index, class_id));
+            }
         }
-    }
-    scored.sort_unstable_by(|a, b| b.0.total_cmp(&a.0));
-    scored.truncate(num_queries);
+        scored.sort_unstable_by(|a, b| b.0.total_cmp(&a.0));
+        scored.truncate(num_queries);
 
-    let (image_width, image_height) = target_size;
-    let image_width = image_width as f32;
-    let image_height = image_height as f32;
-    let mut detections = Vec::new();
-    for (score, query_index, class_id) in scored {
-        if score < threshold {
-            continue;
+        let mut detections = Vec::new();
+        for (score, query_index, class_id) in scored {
+            if score < threshold {
+                continue;
+            }
+            let box_offset = boxes_offset + query_index * 4;
+            let bbox = scale_box_to_image(
+                [
+                    pred_boxes[box_offset],
+                    pred_boxes[box_offset + 1],
+                    pred_boxes[box_offset + 2],
+                    pred_boxes[box_offset + 3],
+                ],
+                target_size.width as f32,
+                target_size.height as f32,
+            );
+            detections.push(ComicTextBubbleRegion {
+                label_id: class_id,
+                label: config.label(class_id),
+                score,
+                bbox,
+            });
         }
-        let box_offset = query_index * 4;
-        let bbox = scale_box_to_image(
-            [
-                pred_boxes[box_offset],
-                pred_boxes[box_offset + 1],
-                pred_boxes[box_offset + 2],
-                pred_boxes[box_offset + 3],
-            ],
-            image_width,
-            image_height,
-        );
-        detections.push(ComicTextBubbleRegion {
-            label_id: class_id,
-            label: config.label(class_id),
-            score,
-            bbox,
-        });
+        batch_detections.push(detections);
     }
 
-    Ok(detections)
+    Ok(batch_detections)
 }
 
 fn detections_to_text_blocks(
     image_dimensions: (u32, u32),
     detections: &[ComicTextBubbleRegion],
 ) -> Vec<TextRegion> {
+    let bubbles = detections
+        .iter()
+        .filter(|region| region.is_bubble())
+        .collect::<Vec<_>>();
     let text_boxes = merge_text_regions(
         detections
             .iter()
-            .filter(|region| region.is_text())
+            .filter(|region| {
+                region.is_text()
+                    && bubbles
+                        .iter()
+                        .any(|bubble| text_belongs_to_bubble(region.bbox, bubble.bbox))
+            })
             .cloned()
             .collect::<Vec<_>>(),
     );
@@ -524,6 +680,25 @@ fn detections_to_text_blocks(
         blocks.push(block);
     }
     blocks
+}
+
+fn text_belongs_to_bubble(text: [f32; 4], bubble: [f32; 4]) -> bool {
+    let center_x = (text[0] + text[2]) * 0.5;
+    let center_y = (text[1] + text[3]) * 0.5;
+    if center_x >= bubble[0]
+        && center_x <= bubble[2]
+        && center_y >= bubble[1]
+        && center_y <= bubble[3]
+    {
+        return true;
+    }
+
+    let intersection_width = (text[2].min(bubble[2]) - text[0].max(bubble[0])).max(0.0);
+    let intersection_height = (text[3].min(bubble[3]) - text[1].max(bubble[1])).max(0.0);
+    let smaller_area = box_area(text).min(box_area(bubble));
+    smaller_area > 0.0
+        && intersection_width * intersection_height / smaller_area
+            >= TEXT_BUBBLE_MIN_INTERSECTION_OVER_SMALLER
 }
 
 fn filter_and_fix_regions(
@@ -748,6 +923,12 @@ impl Default for ImageSlicer {
     }
 }
 
+#[derive(Debug)]
+struct ImageSlice {
+    start_y: u32,
+    image: DynamicImage,
+}
+
 impl ImageSlicer {
     fn should_slice(&self, image: &DynamicImage) -> bool {
         let (width, height) = image.dimensions();
@@ -771,21 +952,17 @@ impl ImageSlicer {
         (slice_height, effective_slice_height, num_slices.max(1))
     }
 
-    fn process_slices_for_detection<F>(
-        &self,
-        image: &DynamicImage,
-        detect_fn: F,
-    ) -> Result<Vec<ComicTextBubbleRegion>>
-    where
-        F: Fn(&DynamicImage) -> Result<Vec<ComicTextBubbleRegion>>,
-    {
+    fn slices(&self, image: &DynamicImage) -> Vec<ImageSlice> {
         if !self.should_slice(image) {
-            return detect_fn(image);
+            return vec![ImageSlice {
+                start_y: 0,
+                image: image.clone(),
+            }];
         }
 
         let (slice_height, effective_slice_height, num_slices) = self.calculate_slice_params(image);
         let (width, height) = image.dimensions();
-        let mut detections = Vec::new();
+        let mut slices = Vec::with_capacity(num_slices);
         for slice_number in 0..num_slices {
             let start_y = slice_number as u32 * effective_slice_height;
             let end_y = if slice_number + 1 == num_slices {
@@ -795,14 +972,12 @@ impl ImageSlicer {
             };
             let crop_height = end_y.saturating_sub(start_y).max(1);
             let cropped = image.crop_imm(0, start_y, width, crop_height);
-            let mut slice_detections = detect_fn(&cropped)?;
-            for detection in &mut slice_detections {
-                detection.bbox[1] += start_y as f32;
-                detection.bbox[3] += start_y as f32;
-            }
-            detections.extend(slice_detections);
+            slices.push(ImageSlice {
+                start_y,
+                image: cropped,
+            });
         }
-        Ok(detections)
+        slices
     }
 }
 
@@ -1000,6 +1175,7 @@ const fn default_processor_width() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use image::{Rgb, RgbImage};
 
     #[test]
     fn merge_slice_regions_merges_duplicates_per_label() {
@@ -1025,5 +1201,78 @@ mod tests {
         ];
         let merged = merge_slice_regions(regions, 500);
         assert_eq!(merged.len(), 2);
+    }
+
+    #[test]
+    fn pinned_processor_config_uses_exact_resize_without_padding() {
+        let processor: RTDetrImageProcessorConfig = serde_json::from_str(
+            r#"{
+                "do_normalize": false,
+                "do_pad": false,
+                "do_rescale": true,
+                "do_resize": true,
+                "rescale_factor": 0.00392156862745098,
+                "size": {"height": 640, "width": 640}
+            }"#,
+        )
+        .unwrap();
+
+        assert!(processor.do_resize);
+        assert!(!processor.do_pad);
+        assert_eq!(processor.size.height, 640);
+        assert_eq!(processor.size.width, 640);
+        processor.validate().unwrap();
+    }
+
+    #[test]
+    fn preprocessing_resizes_rectangular_input_directly_without_letterbox_pixels() {
+        let processor = RTDetrImageProcessorConfig {
+            do_resize: true,
+            do_pad: false,
+            do_rescale: false,
+            do_normalize: false,
+            image_mean: default_image_mean(),
+            image_std: default_image_std(),
+            rescale_factor: default_rescale_factor(),
+            size: default_processor_size(),
+        };
+        let image = DynamicImage::ImageRgb8(RgbImage::from_pixel(320, 640, Rgb([10, 20, 30])));
+
+        let prepared = preprocess_image(&image, &processor, &Device::Cpu, DType::F32).unwrap();
+        let values = prepared.tensor.get(0).unwrap().to_vec3::<f32>().unwrap();
+
+        assert_eq!(prepared.tensor.dims4().unwrap(), (1, 3, 640, 640));
+        assert_eq!(
+            prepared.target_size,
+            DetectorTargetSize {
+                height: 640,
+                width: 320,
+            }
+        );
+        assert_eq!(values[0][0][0], 10.0);
+        assert_eq!(values[0][639][639], 10.0);
+    }
+
+    #[test]
+    fn normalized_boxes_scale_directly_to_each_source_target_size() {
+        let normalized = [0.5, 0.5, 0.5, 0.5];
+
+        assert_eq!(
+            scale_box_to_image(normalized, 800.0, 1024.0),
+            [200.0, 256.0, 600.0, 768.0]
+        );
+        assert_eq!(
+            scale_box_to_image(normalized, 300.0, 900.0),
+            [75.0, 225.0, 225.0, 675.0]
+        );
+    }
+
+    #[test]
+    fn text_association_accepts_center_or_meaningful_overlap() {
+        let bubble = [20.0, 20.0, 80.0, 80.0];
+
+        assert!(text_belongs_to_bubble([30.0, 30.0, 50.0, 50.0], bubble));
+        assert!(text_belongs_to_bubble([75.0, 30.0, 95.0, 50.0], bubble));
+        assert!(!text_belongs_to_bubble([81.0, 30.0, 101.0, 50.0], bubble));
     }
 }

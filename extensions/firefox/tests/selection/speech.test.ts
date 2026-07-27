@@ -73,13 +73,24 @@ describe('Mandarin speech', () => {
     expect(chooseMandarinVoice([voices[0]!, voices[1]!, voices[4]!])).toBeUndefined()
   })
 
+  it('recognizes a downloaded Windows natural voice even without a quality suffix', () => {
+    const desktop = voice('Microsoft Huihui Desktop', 'zh-CN', { default: true })
+    const downloadedNatural = voice('Microsoft Yunxi', 'zh-CN')
+
+    expect(chooseMandarinVoice([desktop, downloadedNatural])).toBe(downloadedNatural)
+  })
+
   it('configures clear Mandarin playback and resets after it ends', () => {
     const selectedVoice = voice('Mainland Natural', 'zh-CN')
     const { runtime, utterances } = testRuntime([selectedVoice])
     const speaker = new MandarinSpeaker(runtime)
     const states: string[] = []
+    const selectedVoices: Array<{ name: string; lang: string; localService: boolean }> = []
 
-    speaker.toggle(' 你好！ ', (speaking) => states.push(speaking))
+    speaker.toggle(' 你好！ ', (speaking, selectedVoice) => {
+      states.push(speaking)
+      if (selectedVoice) selectedVoices.push(selectedVoice)
+    })
 
     expect(runtime.speak).toHaveBeenCalledTimes(1)
     expect(utterances[0]).toMatchObject({
@@ -91,6 +102,13 @@ describe('Mandarin speech', () => {
       volume: 1,
     })
     expect(states).toEqual(['speaking'])
+    expect(selectedVoices).toEqual([
+      {
+        name: 'Mainland Natural',
+        lang: 'zh-CN',
+        localService: true,
+      },
+    ])
 
     utterances[0]?.dispatchEvent(new Event('end'))
     expect(states).toEqual(['speaking', 'idle'])

@@ -1,5 +1,13 @@
 export type SpeechState = 'idle' | 'loading' | 'speaking' | 'unavailable' | 'error'
-export type SpeechStateListener = (state: SpeechState) => void
+export type SpeechVoiceMetadata = {
+  name: string
+  lang: string
+  localService: boolean
+}
+export type SpeechStateListener = (
+  state: SpeechState,
+  voice?: SpeechVoiceMetadata,
+) => void
 
 export type SpeechRuntime = {
   getVoices(): SpeechSynthesisVoice[]
@@ -51,6 +59,16 @@ function voiceScore(voice: SpeechSynthesisVoice): number {
   if (!Number.isFinite(score)) return score
 
   const name = `${voice.name} ${voice.voiceURI}`.toLowerCase()
+  // Windows' downloadable natural voices are sometimes exposed by Firefox
+  // without a "Natural" or "Neural" suffix. Prefer their stable voice names
+  // over the older Desktop/SAPI Mandarin voices when both are installed.
+  if (
+    /\b(?:xiaohan|xiaomeng|xiaomo|xiaoqiu|xiaorui|xiaoshuang|xiaoxiao|xiaoxuan|xiaoyan|xiaoyi|xiaoyou|yunfeng|yunhao|yunjian|yunxia|yunxi|yunyang|yunze)\b/u.test(
+      name,
+    )
+  ) {
+    score += 500
+  }
   if (/\b(?:natural|neural)\b/u.test(name)) score += 350
   if (/\bpremium\b/u.test(name)) score += 250
   if (/\benhanced\b/u.test(name)) score += 200
@@ -224,7 +242,11 @@ export class MandarinSpeaker implements TextSpeaker {
     utterance.addEventListener('end', () => finish('idle'), { once: true })
     utterance.addEventListener('error', () => finish('error'), { once: true })
     active.utterance = utterance
-    active.onStateChange('speaking')
+    active.onStateChange('speaking', {
+      name: voice.name,
+      lang: voice.lang,
+      localService: voice.localService,
+    })
     try {
       runtime.speak(utterance)
     } catch {

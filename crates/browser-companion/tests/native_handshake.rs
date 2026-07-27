@@ -9,7 +9,7 @@ use browser_companion::contracts::{NativeReadyResponse, Validate};
 use browser_companion::discovery::{prepare_state_paths, read_daemon_record};
 use browser_companion::launcher::request_session;
 use browser_companion::native_framing::{read_frame, write_frame};
-use browser_companion::{FIREFOX_EXTENSION_ID, NATIVE_HOST_NAME, PROTOCOL_HEADER};
+use browser_companion::{FIREFOX_EXTENSION_ID, NATIVE_HOST_NAME};
 use serde_json::json;
 
 const ORIGIN: &str = "moz-extension://00000000-0000-4000-8000-000000000001";
@@ -39,7 +39,7 @@ fn native_binary_handshake_uses_prestarted_daemon() {
         .arg("--state-dir")
         .arg(directory.path())
         .arg("--idle-milliseconds")
-        .arg("1200")
+        .arg("10000")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -80,7 +80,7 @@ fn native_binary_handshake_uses_prestarted_daemon() {
         &mut framed_request,
         &json!({
             "type": "start-or-discover-daemon",
-            "protocolVersion": 1,
+            "buildFingerprint": "hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-07-26-r2",
             "extensionVersion": "0.1.0",
             "extensionOrigin": ORIGIN
         }),
@@ -111,14 +111,15 @@ fn native_binary_handshake_uses_prestarted_daemon() {
     let ready: NativeReadyResponse = read_frame(&mut cursor).expect("decode native response");
     ready.validate().expect("valid native ready response");
     assert_eq!(ready.port, record.port);
+    assert_eq!(ready.engine_version, env!("CARGO_PKG_VERSION"));
     assert_eq!(cursor.position() as usize, cursor.get_ref().len());
 
     let mut stream = TcpStream::connect(SocketAddrV4::new(Ipv4Addr::LOCALHOST, ready.port))
         .expect("connect with native session");
     write!(
         stream,
-        "GET /browser/v1/health HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nOrigin: {}\r\n{}: 1\r\nAuthorization: Bearer {}\r\nConnection: close\r\n\r\n",
-        ready.port, ORIGIN, PROTOCOL_HEADER, ready.token
+        "GET /health HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nOrigin: {}\r\nAuthorization: Bearer {}\r\nConnection: close\r\n\r\n",
+        ready.port, ORIGIN, ready.token
     )
     .expect("write health request");
     let mut response = String::new();
@@ -126,6 +127,13 @@ fn native_binary_handshake_uses_prestarted_daemon() {
         .read_to_string(&mut response)
         .expect("read health response");
     assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+    assert!(
+        response.contains(&format!(
+            "\"engineVersion\":\"{}\"",
+            env!("CARGO_PKG_VERSION")
+        )),
+        "{response}"
+    );
     assert!(
         response
             .to_ascii_lowercase()

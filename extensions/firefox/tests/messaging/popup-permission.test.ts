@@ -35,7 +35,7 @@ describe('popup permission gesture', () => {
           ok: true,
           value: {
             state: 'ready',
-            selectedPackId: 'standard-v1',
+            modelId: 'qwen3.5-4b',
             message: 'Ready',
           },
         }
@@ -106,10 +106,7 @@ describe('popup permission gesture', () => {
     expect(sendMessage.mock.calls.some(([message]) => message.type === 'popup:start')).toBe(false)
 
     permission.resolve(true)
-    await vi.waitFor(() => expect(order).toEqual([
-      'permission:https://cdn.test/*',
-      'start',
-    ]))
+    await vi.waitFor(() => expect(order).toEqual(['permission:https://cdn.test/*', 'start']))
   })
 
   it('shows one install action when the native companion is missing', async () => {
@@ -158,9 +155,9 @@ describe('popup permission gesture', () => {
     expect(document.querySelector<HTMLButtonElement>('#translate-visible')?.disabled).toBe(true)
     action?.click()
     await vi.waitFor(() =>
-      expect(sendMessage.mock.calls.some(([message]) => message.type === 'setup:open-installer')).toBe(
-        true,
-      ),
+      expect(
+        sendMessage.mock.calls.some(([message]) => message.type === 'setup:open-installer'),
+      ).toBe(true),
     )
   })
 
@@ -181,6 +178,7 @@ describe('popup permission gesture', () => {
           ok: true,
           value: {
             state: 'missing-models',
+            modelId: 'qwen3.5-4b',
             totalBytes: 2048,
             completedBytes: 0,
             requiredDiskBytes: 4096,
@@ -193,7 +191,7 @@ describe('popup permission gesture', () => {
           ok: true,
           value: {
             state: 'downloading',
-            selectedPackId: 'standard-v1',
+            modelId: 'qwen3.5-4b',
             currentFile: 'Qwen.gguf',
             completedBytes: 1024,
             totalBytes: 2048,

@@ -1,10 +1,10 @@
 {
   "type": "ready",
-  "protocolVersion": 1,
-  "engineVersion": "0.1.0",
+  "buildFingerprint": "hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-07-26-r2",
+  "engineVersion": "0.61.2",
   "port": 43127,
   "token": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-  "sessionExpiresAtUnixMs": 1790000000000,
+  "sessionExpiresAtUnixMs": 4102444800000,
   "capabilities": {
     "sourceLanguages": ["en"],
     "targetLanguages": ["zh-CN"],

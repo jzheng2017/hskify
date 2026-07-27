@@ -16,6 +16,7 @@ export type PermissionApi = {
 export type AcquisitionOptions = {
   pageOrigin: string
   limits?: ImageLimits
+  signal?: AbortSignal
 }
 
 export type AcquiredImage = {
@@ -126,6 +127,7 @@ async function fetchWithRedirectChecks(
   permissions: PermissionApi,
   fetcher: typeof fetch,
   credentials: RequestCredentials,
+  signal?: AbortSignal,
 ): Promise<{ response: Response; finalUrl: URL }> {
   let current = initialUrl
   for (let redirects = 0; redirects <= MAX_REDIRECTS; redirects += 1) {
@@ -136,6 +138,7 @@ async function fetchWithRedirectChecks(
       cache: 'no-store',
       redirect: 'manual',
       referrerPolicy: 'no-referrer',
+      ...(signal ? { signal } : {}),
       headers: {
         Accept: 'image/png,image/jpeg,image/webp,image/gif',
       },
@@ -182,6 +185,7 @@ export async function acquireRemoteImage(
     permissions,
     fetcher,
     'omit',
+    options.signal,
   )
   if (fetched.response.status === 401 || fetched.response.status === 403) {
     fetched = await fetchWithRedirectChecks(
@@ -190,6 +194,7 @@ export async function acquireRemoteImage(
       permissions,
       fetcher,
       'include',
+      options.signal,
     )
   }
   if (!fetched.response.ok) {

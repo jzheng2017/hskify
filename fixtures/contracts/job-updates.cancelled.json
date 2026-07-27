@@ -1,0 +1,18 @@
+{
+  "jobId": "fixture-job-cancelled",
+  "nextSequence": 2,
+  "updates": [
+    {
+      "sequence": 1,
+      "type": "progress",
+      "stage": "detecting",
+      "overallProgress": 0.12,
+      "message": "Finding text regions"
+    },
+    {
+      "sequence": 2,
+      "type": "cancelled",
+      "message": "Cancelled"
+    }
+  ]
+}
