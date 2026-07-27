@@ -34,16 +34,17 @@ use uuid::Uuid;
 use crate::contracts::{
     BUILD_FINGERPRINT, BrowserCapabilities, BrowserJobCreated, BrowserJobRequest, BrowserJobStage,
     BrowserSetupState, BrowserSetupStatus, CreateJobRequest, ErrorResponse, HealthResponse,
-    HealthStatus, HskLevel, JobUpdate, JobUpdatesResponse, LookupRequest, NativeReadyResponse,
-    NativeReadyType, NormalizedRect, PatchMimeType, ProgressiveRegion, RegionPatch, Validate,
-    ViewportUpdateRequest,
+    HealthStatus, HskLevel, JobUpdate, JobUpdatesResponse, LookupInteraction, LookupRequest,
+    NativeReadyResponse, NativeReadyType, NormalizedRect, PatchMimeType, ProgressiveRegion,
+    RegionPatch, Validate, ViewportUpdateRequest,
 };
 use crate::crypto::{SECRET_BYTES, decode_secret, generate_secret, secrets_equal, sha256_hex};
 use crate::decoded_cache::DecodedImageCache;
 use crate::fixtures;
 use crate::origin::validate_extension_origin;
 use crate::pipeline_adapter::{
-    CleaningError, CleaningInput, CleaningPipeline, KoharuPipeline, RegionLookupContext,
+    CleaningError, CleaningInput, CleaningPipeline, KoharuPipeline, LookupInput,
+    RegionLookupContext,
 };
 use crate::result_cache::{CachedJob, CachedRegion, ResultCache};
 use crate::setup::{ManagedResourcePaths, ModelSetup};
@@ -2011,7 +2012,7 @@ fn fail_job(state: &BridgeState, record: &JobRecord, sink: &JobUpdateSink, error
     let _ = sink.publish(JobUpdateDraft::Failed {
         code: error.code.to_owned(),
         message: error.message,
-        retryable: false,
+        retryable: true,
     });
     state.touch();
 }
@@ -2147,16 +2148,40 @@ async fn lookup(
     } else {
         None
     };
-    let result = state
-        .pipeline
-        .lookup(request.selected_text, region)
-        .await
-        .map_err(|_| {
-            ApiError::service_unavailable(
-                "LANGUAGE_RESOURCES_NOT_READY",
-                "The local HSK and dictionary resources are unavailable.",
-            )
-        })?;
+    let input = match request.interaction {
+        LookupInteraction::Selection => LookupInput::Selection(
+            request
+                .selected_text
+                .expect("validated selection lookup contains selected text"),
+        ),
+        LookupInteraction::Hover => {
+            let character_offset = request
+                .character_offset
+                .expect("validated hover lookup contains a character offset");
+            let region = region
+                .as_ref()
+                .expect("validated hover request contains a translated region");
+            let character_offset = usize::try_from(character_offset).map_err(|_| {
+                ApiError::bad_request("INVALID_LOOKUP_OFFSET", "The hovered character is invalid.")
+            })?;
+            if character_offset >= region.displayed_chinese.chars().count() {
+                return Err(ApiError::bad_request(
+                    "INVALID_LOOKUP_OFFSET",
+                    "The hovered character is outside the translated region.",
+                ));
+            }
+            LookupInput::Hover {
+                displayed_text: region.displayed_chinese.clone(),
+                character_offset,
+            }
+        }
+    };
+    let result = state.pipeline.lookup(input, region).await.map_err(|_| {
+        ApiError::service_unavailable(
+            "LANGUAGE_RESOURCES_NOT_READY",
+            "The local HSK and dictionary resources are unavailable.",
+        )
+    })?;
     result.validate().map_err(|_| ApiError::internal())?;
     Ok(Json(result))
 }
@@ -2295,7 +2320,7 @@ mod tests {
 
         async fn lookup(
             &self,
-            _selected_text: String,
+            _input: LookupInput,
             _region: Option<RegionLookupContext>,
         ) -> Result<crate::contracts::LookupResult, CleaningError> {
             Err(CleaningError::new("UNUSED", "lookup is not used"))

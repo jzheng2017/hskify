@@ -28,7 +28,7 @@ export type HorizontalPolygonInterval = {
 function charUnits(character: string): number {
   if (/\s/u.test(character)) return 0.3
   if (/[\u3400-\u9fff\uf900-\ufaff]/u.test(character)) return 1
-  if (/[A-Za-z0-9]/u.test(character)) return 0.58
+  if (/[\p{Script=Latin}\p{Number}]/u.test(character)) return 0.58
   return 0.72
 }
 
@@ -39,9 +39,11 @@ export function estimatedLineUnits(text: string): number {
 export function isLegalLineBreak(left: string, right: string): boolean {
   const previous = [...left].at(-1)
   const next = [...right][0]
+  const latinWordCharacter = (character: string | undefined): boolean =>
+    character !== undefined && /[\p{Script=Latin}\p{Number}'’ʼ-]/u.test(character)
   return !(
-    (previous !== undefined && /\s/u.test(previous)) ||
     (next !== undefined && /\s/u.test(next)) ||
+    (latinWordCharacter(previous) && latinWordCharacter(next)) ||
     (previous !== undefined && OPENING_PUNCTUATION.has(previous)) ||
     (next !== undefined && CLOSING_PUNCTUATION.has(next))
   )
@@ -86,21 +88,34 @@ export function nearbyLineCandidates(
   }
   if (suggested.length > 0) add([...suggested])
   add([text])
+  const legalIndices = Array.from(
+    { length: Math.max(0, characters.length - 1) },
+    (_, index) => index + 1,
+  ).filter((index) =>
+    isLegalLineBreak(
+      characters.slice(0, index).join(''),
+      characters.slice(index).join(''),
+    ),
+  )
   for (let lineCount = 2; lineCount <= Math.min(maximumLines, characters.length); lineCount += 1) {
+    if (legalIndices.length < lineCount - 1) continue
     const base = characters.length / lineCount
-    const indices: number[] = []
-    for (let line = 1; line < lineCount; line += 1) {
-      indices.push(Math.round(base * line))
-    }
-    for (let delta = -2; delta <= 2; delta += 1) {
-      add(
-        breakAtIndices(
-          text,
-          indices.map((index, position) =>
-            Math.max(position + 1, Math.min(characters.length - 1, index + delta)),
-          ),
-        ),
-      )
+    const rankedChoices = Array.from({ length: lineCount - 1 }, (_, position) =>
+      [...legalIndices].sort(
+        (left, right) =>
+          Math.abs(left - base * (position + 1)) -
+            Math.abs(right - base * (position + 1)) ||
+          left - right,
+      ),
+    )
+    for (let rank = 0; rank < 5; rank += 1) {
+      const indices = rankedChoices
+        .map((choices) => choices[Math.min(rank, choices.length - 1)])
+        .filter((index): index is number => index !== undefined)
+        .sort((left, right) => left - right)
+      if (new Set(indices).size === lineCount - 1) {
+        add(breakAtIndices(text, indices))
+      }
     }
   }
   return candidates
@@ -244,7 +259,14 @@ function chooseFit(
   const text = region.displayedChinese
   const box = regionBox(region, imageWidth, imageHeight)
   const points = fitPolygonForRegion(region)
-  const candidates = nearbyLineCandidates(text, region.layout.suggestedLines)
+  const allCandidates = nearbyLineCandidates(text, region.layout.suggestedLines)
+  const sourceBandCount = region.style.colorBands?.length ?? 0
+  const bandPreservingCandidates =
+    sourceBandCount > 1
+      ? allCandidates.filter((candidate) => candidate.length === sourceBandCount)
+      : []
+  const candidates =
+    bandPreservingCandidates.length > 0 ? bandPreservingCandidates : allCandidates
   const initial = Math.max(
     ABSOLUTE_MINIMUM_FONT_PX,
     region.layout.fontSizeToImageWidth * imageWidth,

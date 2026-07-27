@@ -51,6 +51,7 @@ function request(): BrowserJobRequest {
       hskLevel: 5,
       readingDirection: 'auto',
       translateSoundEffects: false,
+      nameTranslation: 'keep-original',
     },
   }
 }
@@ -225,7 +226,10 @@ describe('authenticated unversioned companion client', () => {
       })
     })
     expect((await client.getSetupStatus()).state).toBe('ready')
-    expect((await client.lookup({ selectedText: '我' })).selectedText).toBe('我')
+    expect(
+      (await client.lookup({ interaction: 'selection', selectedText: '我' }))
+        .selectedText,
+    ).toBe('我')
     expect([...new Uint8Array(await client.getFont('hmt-sans'))]).toEqual([0, 1, 0, 0])
     expect(requests).toEqual([
       'GET http://127.0.0.1:43127/setup',

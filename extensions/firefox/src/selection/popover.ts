@@ -15,17 +15,106 @@ type SelectionRegion = {
   regionId: string
 }
 
+export type HoverTextHit = {
+  characterOffset: number
+  range: Range
+}
+
+export type HoverHitTester = (
+  element: HTMLElement,
+  clientX: number,
+  clientY: number,
+) => HoverTextHit | null
+
+const HOVER_LOOKUP_DELAY_MS = 120
+const HOVER_DISMISS_DELAY_MS = 140
+
 function nodeElement(node: Node | null): Element | null {
   if (!node) return null
   return node instanceof Element ? node : node.parentElement
 }
 
-export class SelectionController {
+function textNodes(element: HTMLElement): Text[] {
+  const nodes: Text[] = []
+  const documentRef = element.ownerDocument
+  const showText = documentRef.defaultView?.NodeFilter.SHOW_TEXT ?? 4
+  const walker = documentRef.createTreeWalker(element, showText)
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    if (node instanceof Text && node.data.length > 0) nodes.push(node)
+  }
+  return nodes
+}
+
+export function textRange(
+  element: HTMLElement,
+  characterOffset: number,
+  characterLength = 1,
+): Range | null {
+  if (characterOffset < 0 || characterLength < 1) return null
+  const documentRef = element.ownerDocument
+  const range = documentRef.createRange()
+  let globalOffset = 0
+  let start: { node: Text; offset: number } | undefined
+  let end: { node: Text; offset: number } | undefined
+  const targetEnd = characterOffset + characterLength
+
+  for (const node of textNodes(element)) {
+    let localUtf16 = 0
+    for (const character of node.data) {
+      const nextGlobal = globalOffset + 1
+      const nextUtf16 = localUtf16 + character.length
+      if (globalOffset === characterOffset) {
+        start = { node, offset: localUtf16 }
+      }
+      if (nextGlobal === targetEnd) {
+        end = { node, offset: nextUtf16 }
+      }
+      globalOffset = nextGlobal
+      localUtf16 = nextUtf16
+    }
+  }
+  if (!start || !end) return null
+  range.setStart(start.node, start.offset)
+  range.setEnd(end.node, end.offset)
+  return range
+}
+
+export const characterRangeAtPoint: HoverHitTester = (
+  element,
+  clientX,
+  clientY,
+) => {
+  const characterCount = [...(element.textContent ?? '')].length
+  for (let characterOffset = 0; characterOffset < characterCount; characterOffset += 1) {
+    const range = textRange(element, characterOffset)
+    if (!range) continue
+    const rects = [...range.getClientRects()]
+    if (
+      rects.some(
+        (rect) =>
+          clientX >= rect.left - 1 &&
+          clientX <= rect.right + 1 &&
+          clientY >= rect.top - 1 &&
+          clientY <= rect.bottom + 1,
+      )
+    ) {
+      return { characterOffset, range }
+    }
+  }
+  return null
+}
+
+export class ExplanationController {
   private readonly regions = new Map<HTMLElement, SelectionRegion>()
   private requestRevision = 0
   private destroyed = false
   private speechOwner: SpeechStateListener | undefined
   private popoverPointerActive = false
+  private activeInteraction: 'selection' | 'hover' | undefined
+  private activeHoverKey: string | undefined
+  private pendingHoverKey: string | undefined
+  private hoverLookupTimer: ReturnType<typeof setTimeout> | undefined
+  private hoverDismissTimer: ReturnType<typeof setTimeout> | undefined
 
   constructor(
     private readonly root: ShadowRoot,
@@ -33,11 +122,16 @@ export class SelectionController {
     private readonly lookup: LookupCallback,
     private readonly forwardPrimaryClick?: PrimaryClickForwarder,
     private readonly speaker: TextSpeaker = new MandarinSpeaker(),
+    private readonly hitTest: HoverHitTester = characterRangeAtPoint,
   ) {
     root.addEventListener('mouseup', this.onSelectionComplete)
     root.addEventListener('keyup', this.onKeyUp)
     root.addEventListener('copy', this.onCopy)
     root.addEventListener('click', this.onClick, true)
+    root.addEventListener('pointermove', this.onPointerMove)
+    root.addEventListener('pointerout', this.onPointerOut)
+    popover.addEventListener('pointerenter', this.onPopoverPointerEnter)
+    popover.addEventListener('pointerleave', this.onPopoverPointerLeave)
     root.host.ownerDocument.defaultView?.addEventListener('scroll', this.onViewportChange, true)
     root.host.ownerDocument.defaultView?.addEventListener('resize', this.onViewportChange)
     root.host.ownerDocument.addEventListener(
@@ -72,6 +166,10 @@ export class SelectionController {
     this.root.removeEventListener('keyup', this.onKeyUp)
     this.root.removeEventListener('copy', this.onCopy)
     this.root.removeEventListener('click', this.onClick, true)
+    this.root.removeEventListener('pointermove', this.onPointerMove)
+    this.root.removeEventListener('pointerout', this.onPointerOut)
+    this.popover.removeEventListener('pointerenter', this.onPopoverPointerEnter)
+    this.popover.removeEventListener('pointerleave', this.onPopoverPointerLeave)
     this.root.host.ownerDocument.defaultView?.removeEventListener(
       'scroll',
       this.onViewportChange,
@@ -102,11 +200,32 @@ export class SelectionController {
   }
 
   dismiss(): void {
+    this.clearHoverTimers()
     this.requestRevision += 1
     this.popover.hidden = true
     this.popover.replaceChildren()
     if (this.speechOwner) this.speaker.stop(this.speechOwner)
     this.speechOwner = undefined
+    this.activeInteraction = undefined
+    this.activeHoverKey = undefined
+    this.pendingHoverKey = undefined
+  }
+
+  private clearHoverTimers(): void {
+    if (this.hoverLookupTimer !== undefined) clearTimeout(this.hoverLookupTimer)
+    if (this.hoverDismissTimer !== undefined) clearTimeout(this.hoverDismissTimer)
+    this.hoverLookupTimer = undefined
+    this.hoverDismissTimer = undefined
+  }
+
+  private cancelHoverDismiss(): void {
+    if (this.hoverDismissTimer !== undefined) clearTimeout(this.hoverDismissTimer)
+    this.hoverDismissTimer = undefined
+  }
+
+  private scheduleHoverDismiss(): void {
+    this.cancelHoverDismiss()
+    this.hoverDismissTimer = setTimeout(() => this.dismiss(), HOVER_DISMISS_DELAY_MS)
   }
 
   private selectedRegion(): {
@@ -131,6 +250,7 @@ export class SelectionController {
   private readonly onDocumentPointerDown = (event: Event): void => {
     if (event.composedPath().includes(this.popover)) {
       this.popoverPointerActive = true
+      this.cancelHoverDismiss()
       return
     }
     this.popoverPointerActive = false
@@ -151,6 +271,7 @@ export class SelectionController {
     queueMicrotask(() => {
       if (
         this.destroyed ||
+        this.activeInteraction !== 'selection' ||
         this.popoverPointerActive ||
         this.selectionTouches(this.popover)
       ) {
@@ -186,7 +307,9 @@ export class SelectionController {
     ) {
       return
     }
-    queueMicrotask(() => void this.showSelection())
+    queueMicrotask(() => {
+      if (this.selectedRegion()) void this.showSelection()
+    })
   }
 
   private readonly onKeyUp = (event: Event): void => {
@@ -227,6 +350,59 @@ export class SelectionController {
     event.preventDefault()
   }
 
+  private readonly onPopoverPointerEnter = (): void => {
+    this.cancelHoverDismiss()
+  }
+
+  private readonly onPopoverPointerLeave = (): void => {
+    if (this.activeInteraction === 'hover') this.scheduleHoverDismiss()
+  }
+
+  private readonly onPointerOut = (event: Event): void => {
+    if (this.activeInteraction !== 'hover' && !this.pendingHoverKey) return
+    const related = nodeElement(
+      event instanceof MouseEvent && event.relatedTarget instanceof Node
+        ? event.relatedTarget
+        : null,
+    )
+    if (related && (this.popover.contains(related) || [...this.regions.keys()].some(
+      (element) => element.contains(related),
+    ))) {
+      return
+    }
+    this.scheduleHoverDismiss()
+  }
+
+  private readonly onPointerMove = (event: Event): void => {
+    if (!(event instanceof MouseEvent) || this.destroyed) return
+    if ('pointerType' in event && event.pointerType !== 'mouse' && event.pointerType !== 'pen') {
+      return
+    }
+    if (this.selectedRegion()) return
+    const target = nodeElement(event.target instanceof Node ? event.target : null)
+    const region = target
+      ? [...this.regions.values()].find((candidate) =>
+          candidate.element.contains(target),
+        )
+      : undefined
+    if (!region) return
+    this.cancelHoverDismiss()
+    const hit = this.hitTest(region.element, event.clientX, event.clientY)
+    if (!hit) {
+      this.scheduleHoverDismiss()
+      return
+    }
+    const key = `${region.jobId}\0${region.regionId}\0${hit.characterOffset}`
+    if (key === this.activeHoverKey || key === this.pendingHoverKey) return
+    if (this.hoverLookupTimer !== undefined) clearTimeout(this.hoverLookupTimer)
+    this.pendingHoverKey = key
+    this.hoverLookupTimer = setTimeout(() => {
+      this.hoverLookupTimer = undefined
+      if (this.pendingHoverKey !== key || this.destroyed) return
+      void this.showHover(region, hit, key)
+    }, HOVER_LOOKUP_DELAY_MS)
+  }
+
   private async showSelection(): Promise<void> {
     const selected = this.selectedRegion()
     if (!selected || this.destroyed) {
@@ -238,25 +414,75 @@ export class SelectionController {
       this.dismiss()
       return
     }
+    await this.showLookup(
+      selected.region,
+      {
+        interaction: 'selection',
+        selectedText,
+        jobId: selected.region.jobId,
+        regionId: selected.region.regionId,
+      },
+      selectedText,
+      selected.range,
+      'selection',
+    )
+  }
+
+  private async showHover(
+    region: SelectionRegion,
+    hit: HoverTextHit,
+    key: string,
+  ): Promise<void> {
+    this.pendingHoverKey = undefined
+    this.activeHoverKey = key
+    const character = hit.range.cloneContents().textContent ?? ''
+    await this.showLookup(
+      region,
+      {
+        interaction: 'hover',
+        characterOffset: hit.characterOffset,
+        jobId: region.jobId,
+        regionId: region.regionId,
+      },
+      character,
+      hit.range,
+      'hover',
+      hit.characterOffset,
+    )
+  }
+
+  private async showLookup(
+    region: SelectionRegion,
+    request: LookupRequest,
+    displayText: string,
+    range: Range,
+    interaction: 'selection' | 'hover',
+    characterOffset?: number,
+  ): Promise<void> {
     const revision = ++this.requestRevision
+    this.activeInteraction = interaction
     this.speaker.stop()
     this.speechOwner = undefined
     this.popover.hidden = false
     this.popover.replaceChildren()
-    const heading = this.createSpeechHeading(selectedText)
+    const heading = this.createSpeechHeading(displayText)
     const loading = document.createElement('span')
     loading.textContent = 'Looking up…'
     this.popover.append(heading, loading)
-    this.positionPopover(selected.region.element, selected.range)
+    this.positionPopover(region.element, range)
     try {
-      const result = await this.lookup({
-        selectedText,
-        jobId: selected.region.jobId,
-        regionId: selected.region.regionId,
-      })
+      const result = await this.lookup(request)
       if (revision !== this.requestRevision || this.destroyed) return
-      this.renderResult(result, selectedText)
-      this.positionPopover(selected.region.element, selected.range)
+      if (result.tokens.length === 0) {
+        this.dismiss()
+        return
+      }
+      this.renderResult(result, result.selectedText)
+      const resolvedRange =
+        interaction === 'hover' && characterOffset !== undefined
+          ? textRange(region.element, characterOffset, [...result.selectedText].length) ?? range
+          : range
+      this.positionPopover(region.element, resolvedRange)
     } catch {
       if (revision !== this.requestRevision || this.destroyed) return
       const heading = this.popover.querySelector<HTMLElement>('.hmt-lookup-heading')
@@ -265,7 +491,7 @@ export class SelectionController {
       const message = document.createElement('span')
       message.textContent = 'Dictionary lookup unavailable.'
       this.popover.append(message)
-      this.positionPopover(selected.region.element, selected.range)
+      this.positionPopover(region.element, range)
     }
   }
 
@@ -284,7 +510,10 @@ export class SelectionController {
     const edge = 4
     const hostRect = this.root.host.getBoundingClientRect()
     const regionRect = region.getBoundingClientRect()
-    const selectedRect = range.getBoundingClientRect()
+    const selectedRect =
+      typeof range.getBoundingClientRect === 'function'
+        ? range.getBoundingClientRect()
+        : regionRect
     const hasSelectedRect = selectedRect.width > 0 && selectedRect.height > 0
     const obstruction = hasSelectedRect
       ? {
@@ -408,9 +637,8 @@ export class SelectionController {
   }
 
   private renderResult(result: LookupResult, selectedText: string): void {
-    const heading =
-      this.popover.querySelector<HTMLElement>('.hmt-lookup-heading') ??
-      this.createSpeechHeading(selectedText)
+    if (this.speechOwner) this.speaker.stop(this.speechOwner)
+    const heading = this.createSpeechHeading(selectedText)
     this.popover.replaceChildren()
     this.popover.append(heading)
     for (const token of result.tokens) {

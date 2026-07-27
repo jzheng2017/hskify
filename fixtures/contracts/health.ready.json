@@ -1,5 +1,5 @@
 {
-  "buildFingerprint": "hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-07-26-r2",
+  "buildFingerprint": "hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-07-27-r6",
   "engineVersion": "0.61.2",
   "status": "ready",
   "setupState": "ready",
@@ -29,6 +29,22 @@
       "sha256": "037930a861e67870eb345be01b28cc70d7e2b7956528e48ee0ebdb0c093df80d"
     },
     {
+      "id": "lama-manga-inpainter-weights",
+      "repository": "mayocream/lama-manga",
+      "repositoryRevision": "f91c85b26913b3e83f9877867b4c336da3675238",
+      "filename": "lama-manga.safetensors",
+      "bytes": 204332996,
+      "sha256": "a790515e9da839b8d89af7d565ceb110d908b7d6fbdb991f2acb2ec7d9b08bdb"
+    },
+    {
+      "id": "manga-text-segmentation-weights",
+      "repository": "mayocream/manga-text-segmentation-2025",
+      "repositoryRevision": "efd866e3ac6595ea20722f35ae343c403056ba76",
+      "filename": "model.safetensors",
+      "bytes": 216516884,
+      "sha256": "f7e68a0c3e53dda4aba056a2370bcfb99f4dd189e9867d4570bc12578f9c7c4a"
+    },
+    {
       "id": "pp-ocr-v5-english-recognizer-config",
       "repository": "PaddlePaddle/en_PP-OCRv5_mobile_rec_onnx",
       "repositoryRevision": "3fafbc3b5dcf93dd72add9f48368be8a3a2cd33b",
@@ -43,6 +59,22 @@
       "filename": "inference.onnx",
       "bytes": 7848423,
       "sha256": "b5f833dfc5d0eb71da397b4efa06ebeee9b431b690a47d6af40d77d8eabc557f"
+    },
+    {
+      "id": "speech-bubble-segmentation-config",
+      "repository": "mayocream/speech-bubble-segmentation",
+      "repositoryRevision": "387bc1e93f3d24702bc8609798b6a13b37420edc",
+      "filename": "config.json",
+      "bytes": 433,
+      "sha256": "36bb5b9c58a9bfbd9eebcf3569d9019ebb67585d4b572bd3762f7ecc15ebd6b5"
+    },
+    {
+      "id": "speech-bubble-segmentation-weights",
+      "repository": "mayocream/speech-bubble-segmentation",
+      "repositoryRevision": "387bc1e93f3d24702bc8609798b6a13b37420edc",
+      "filename": "model.safetensors",
+      "bytes": 109141868,
+      "sha256": "c881d96771755fa628a94bb5f4b18301a0728ae4ffe8f14b2e9dde55e1b40552"
     },
     {
       "id": "translation-model",

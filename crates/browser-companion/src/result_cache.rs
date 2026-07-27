@@ -23,7 +23,8 @@ pub(crate) const RESULT_CACHE_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const RESULT_CACHE_MAX_ENTRY_BYTES: u64 = 512 * 1024 * 1024;
 const RESULT_CACHE_MAX_DECODED_PATCH_BYTES: u64 = 256 * 1024 * 1024;
 const RESULT_CACHE_SCHEMA: &str = "hskify-progressive-result-2026-07-26-v3";
-const RESULT_CACHE_PIPELINE_REVISION: &str = "direct-browser-pipeline-2026-07-26";
+const RESULT_CACHE_PIPELINE_REVISION: &str =
+    "direct-browser-pipeline-shared-semantic-mask-style-bands-v11-2026-07-27";
 const MODEL_RESOURCE_MANIFEST: &[u8] = include_bytes!("../../../data/model-packs/manifest.v1.json");
 
 #[derive(Debug, Clone)]
@@ -425,6 +426,7 @@ mod tests {
                 writing_mode: WritingMode::HorizontalTb,
                 line_height: 1.1,
                 letter_spacing_em: 0.0,
+                color_bands: Vec::new(),
             },
             layout: BrowserTextLayout {
                 suggested_lines: vec!["\u{4f60}\u{597d}".to_owned()],

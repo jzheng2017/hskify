@@ -221,4 +221,25 @@ describe('visible-first page queue', () => {
     expect(queue.retry(item)).toBe(true)
     await vi.waitFor(() => expect(attempts).toBe(2))
   })
+
+  it('allows a bounded retry to be requested directly from the failure callback', async () => {
+    let attempts = 0
+    const item = { id: 'failed', value: 'value', visible: true, order: 0 }
+    let queue!: VisibleFirstQueue<string>
+    queue = new VisibleFirstQueue<string>(
+      async () => {
+        attempts += 1
+        if (attempts === 1) throw new Error('temporary fixture failure')
+      },
+      {
+        onFailure: (failedItem) => {
+          expect(queue.retry(failedItem)).toBe(true)
+        },
+      },
+    )
+
+    expect(queue.enqueue(item)).toBe(true)
+    await vi.waitFor(() => expect(attempts).toBe(2))
+    expect(queue.size).toBe(0)
+  })
 })

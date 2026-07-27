@@ -51,6 +51,29 @@ const regions = createFixtureRegions({
 if (query.get('vertical') === '1' && regions[0]) {
   regions[0].style.writingMode = 'vertical-rl'
 }
+if (query.get('stress') === '1' && regions[0]) {
+  regions[0].displayedChinese =
+    '帝国发生了一件从来没有发生过的事，Enrique把这件事叫作“四十七号政变”。'
+  regions[0].baseChinese = regions[0].displayedChinese
+  regions[0].layout.suggestedLines = [
+    '帝国发生了一件从来没有发生过的事，',
+    'Enrique把这件事叫作“四十七号政变”。',
+  ]
+  regions[0].layout.fontSizeToImageWidth = 0.075
+  regions[0].layout.safePolygon = [
+    { x: 0.2, y: 0.11 },
+    { x: 0.45, y: 0.11 },
+    { x: 0.49, y: 0.18 },
+    { x: 0.45, y: 0.26 },
+    { x: 0.2, y: 0.26 },
+    { x: 0.17, y: 0.18 },
+  ]
+}
+if (query.get('hover') === '1' && regions[0]) {
+  regions[0].displayedChinese = '\u7814\u7a76\u751f\u79bb\u5f00'
+  regions[0].baseChinese = regions[0].displayedChinese
+  regions[0].layout.suggestedLines = ['\u7814\u7a76\u751f\u79bb\u5f00']
+}
 for (const region of regions) {
   region.patch.rect = { x: 0, y: 0, width: 1, height: 1 }
 }
@@ -69,23 +92,47 @@ try {
     fetchFont: async () => {
       throw new Error('The harness intentionally exercises font fallback.')
     },
-    lookup: async (request) => ({
-      selectedText: request.selectedText,
-      tokens: [
-        {
-          simplified: request.selectedText,
-          pinyin: 'lí kāi',
-          definitions: ['leave', 'depart'],
-          hskLevel: 2,
-          properName: false,
+    lookup: async (request) => {
+      const displayedText =
+        regions.find((region) => region.id === request.regionId)?.displayedChinese ?? ''
+      const suffix =
+        request.interaction === 'hover'
+          ? [...displayedText].slice(request.characterOffset).join('')
+          : ''
+      const selectedText =
+        request.interaction === 'selection'
+          ? request.selectedText
+          : [
+              '\u7814\u7a76\u751f',
+              '\u7814\u7a76',
+              '\u79bb\u5f00',
+              '\u751f',
+              '\u5f00',
+            ].find((word) => suffix.startsWith(word)) ?? [...suffix][0] ?? ''
+      return {
+        selectedText,
+        tokens: selectedText
+          ? [
+              {
+                simplified: selectedText,
+                pinyin:
+                  request.interaction === 'selection' ? 'lí kāi' : 'fixture',
+                definitions:
+                  request.interaction === 'selection'
+                    ? ['leave', 'depart']
+                    : ['fixture dictionary entry'],
+                hskLevel: 2 as const,
+                properName: false,
+              },
+            ]
+          : [],
+        region: {
+          displayedChinese: displayedText,
+          baseChinese: displayedText,
+          sourceEnglish: 'We have to leave now!',
         },
-      ],
-      region: {
-        displayedChinese: '我们现在要走！',
-        baseChinese: '我们得马上离开！',
-        sourceEnglish: 'We have to leave now!',
-      },
-    }),
+      }
+    },
   }).begin(candidate, {
     jobId: 'playwright-fixture',
     sourceWidth: 1200,

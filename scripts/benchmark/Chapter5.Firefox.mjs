@@ -21,7 +21,7 @@ import { isDeepStrictEqual } from 'node:util'
 
 const EXTENSION_ID = 'hsk-manga-translator@local.hskify'
 const EXTENSION_UUID = '7e9a74d0-34ad-4ff7-9c2c-1ea555945100'
-const BUILD_FINGERPRINT = 'hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-07-26-r2'
+const BUILD_FINGERPRINT = 'hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-07-27-r6'
 const SESSION_STORAGE_KEY = 'hmt.nativeSession'
 const ACTIVE_JOB_PREFIX = 'hmt.activeJob.'
 const LONG_IMAGE_MIN_HEIGHT_PX = 10_000

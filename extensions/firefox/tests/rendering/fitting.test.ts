@@ -37,8 +37,18 @@ describe('rectangle and polygon-aware text fitting', () => {
     expect(candidates.flat().some((line) => line.startsWith('，'))).toBe(false)
     const spaced = nearbyLineCandidates('面对那 6 个氏族', [])
     expect(
-      spaced.flat().some((line) => /^\s|\s$/u.test(line)),
+      spaced.flat().some((line) => /^\s/u.test(line)),
     ).toBe(false)
+  })
+
+  it('never breaks a retained Latin name or title inside a word', () => {
+    const text = '帝国称它为 SILVER HARBOR。'
+    const candidates = nearbyLineCandidates(text, [])
+    expect(candidates.length).toBeGreaterThan(1)
+    expect(
+      candidates.flat().some((line) => /(?:CO|ÉT)$|^(?:UP|TAT)/u.test(line)),
+    ).toBe(false)
+    expect(candidates.every((lines) => lines.join('') === text)).toBe(true)
   })
 
   it('computes usable spans for irregular polygons', () => {
@@ -115,6 +125,31 @@ describe('rectangle and polygon-aware text fitting', () => {
     expect(polygon.fontSize).toBeGreaterThanOrEqual(8)
     expect(rectangle.lines.join('')).toBe(region.displayedChinese)
     expect(polygon.lines.join('')).toBe(region.displayedChinese)
+  })
+
+  it('preserves the source color-band count while fitting translated text', () => {
+    const base = fixtureRegion()
+    const region: BrowserRegion = {
+      ...base,
+      displayedChinese: 'æˆ‘ä»¬çŽ°åœ¨å¿…é¡»ç¦»å¼€è¿™é‡Œ',
+      style: {
+        ...base.style,
+        colorBands: [
+          { position: 0.2, foreground: '#111111' },
+          { position: 0.5, foreground: '#b91c1c' },
+          { position: 0.8, foreground: '#111111' },
+        ],
+      },
+      layout: {
+        ...base.layout,
+        suggestedLines: ['æˆ‘ä»¬çŽ°åœ¨', 'å¿…é¡»ç¦»å¼€', 'è¿™é‡Œ'],
+      },
+    }
+
+    const fit = new PolygonTextFitter().fit(region, 600, 900)
+
+    expect(fit.lines).toHaveLength(3)
+    expect(fit.lines.join('')).toBe(region.displayedChinese)
   })
 
   it('keeps font sizing proportional below the old eight-pixel floor', () => {

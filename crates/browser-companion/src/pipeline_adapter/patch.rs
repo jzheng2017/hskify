@@ -1,19 +1,24 @@
+use std::collections::{BTreeMap, VecDeque};
 use std::io::Cursor;
 
 use anyhow::{Context, Result};
-use image::{DynamicImage, GenericImageView, ImageFormat, Rgba, RgbaImage};
+use image::{DynamicImage, GrayImage, ImageFormat, Luma, Rgba, RgbaImage};
+use imageproc::{
+    contours::{BorderType, find_contours},
+    distance_transform::Norm,
+    morphology::erode,
+};
+use koharu_ml::{
+    probability_map::ProbabilityMap, speech_bubble_segmentation::SpeechBubbleSegmentationResult,
+    types::TextRegion,
+};
+
+use crate::contracts::Point;
 
 use super::geometry::{PixelBounds, PixelRect};
-use super::ppocr_v5::PpOcrInkMask;
 
-const COARSE_DIFFUSION_STEPS: usize = 32;
-const REFINEMENT_DIFFUSION_STEPS: usize = 8;
-const LOCAL_TEXT_PADDING_RATIO: f32 = 0.08;
-const MIN_TEXT_PADDING_PIXELS: f32 = 3.0;
-const BUBBLE_CONTOUR_GUARD_PIXELS: f32 = 3.0;
-const INK_DILATION_RATIO: f32 = 0.18;
-const MIN_INK_DILATION_PIXELS: f32 = 8.0;
-const MAX_INK_DILATION_PIXELS: f32 = 32.0;
+const PATCH_EDGE_FEATHER_PIXELS: u32 = 2;
+const MAX_POLYGON_POINTS: usize = 64;
 
 #[derive(Debug)]
 pub(super) struct PatchPng {
@@ -21,551 +26,423 @@ pub(super) struct PatchPng {
     pub bytes: Vec<u8>,
 }
 
-#[derive(Clone, Copy)]
-pub(super) struct PlacedInkMask<'a> {
-    pub(super) mask: &'a PpOcrInkMask,
-    pub(super) crop_bounds: PixelBounds,
-}
-
-pub(super) fn make_cleanup_patch(
-    source: &DynamicImage,
-    text_rect: PixelRect,
-    bubble_rect: PixelRect,
-    inks: &[PlacedInkMask<'_>],
-) -> Result<PatchPng> {
-    let (bounds, patch, _) =
-        make_cleanup_patch_image_with_ink(source, text_rect, bubble_rect, inks);
-    let mut cursor = Cursor::new(Vec::new());
-    DynamicImage::ImageRgba8(patch)
-        .write_to(&mut cursor, ImageFormat::Png)
-        .context("encode transparent cleanup patch")?;
-    Ok(PatchPng {
-        bounds,
-        bytes: cursor.into_inner(),
-    })
-}
-
-#[cfg(test)]
-fn make_cleanup_patch_image(
-    source: &DynamicImage,
-    text_rect: PixelRect,
-    bubble_rect: PixelRect,
-) -> (PixelBounds, RgbaImage, FillStrategy) {
-    make_cleanup_patch_image_with_ink(source, text_rect, bubble_rect, &[])
-}
-
-fn make_cleanup_patch_image_with_ink(
-    source: &DynamicImage,
-    text_rect: PixelRect,
-    bubble_rect: PixelRect,
-    inks: &[PlacedInkMask<'_>],
-) -> (PixelBounds, RgbaImage, FillStrategy) {
-    let (image_width, image_height) = source.dimensions();
-    let local_text_scale = text_rect.width().min(text_rect.height()).max(1.0);
-    let padding = (local_text_scale * LOCAL_TEXT_PADDING_RATIO).max(MIN_TEXT_PADDING_PIXELS);
-    // Recognition masks tend to follow the strongest part of each stroke.
-    // Expand far enough to include outlines, antialiasing, and a second ink
-    // color while still clipping every changed pixel to the accepted region.
-    let dilation = ink_dilation_pixels(text_rect);
-    let sample_margin = padding.clamp(4.0, 18.0);
-    // The accepted layout bounds may include a balloon contour or surrounding
-    // narration background. Keep a small interior guard when there is room,
-    // but never clip the detected text bounds themselves.
-    let guarded_bubble_x0 = (bubble_rect.x0 + BUBBLE_CONTOUR_GUARD_PIXELS).min(text_rect.x0);
-    let guarded_bubble_y0 = (bubble_rect.y0 + BUBBLE_CONTOUR_GUARD_PIXELS).min(text_rect.y0);
-    let guarded_bubble_x1 = (bubble_rect.x1 - BUBBLE_CONTOUR_GUARD_PIXELS).max(text_rect.x1);
-    let guarded_bubble_y1 = (bubble_rect.y1 - BUBBLE_CONTOUR_GUARD_PIXELS).max(text_rect.y1);
-    let fallback_erase_rect = PixelRect {
-        x0: (text_rect.x0 - padding).max(guarded_bubble_x0).max(0.0),
-        y0: (text_rect.y0 - padding).max(guarded_bubble_y0).max(0.0),
-        x1: (text_rect.x1 + padding)
-            .min(guarded_bubble_x1)
-            .min(image_width as f32),
-        y1: (text_rect.y1 + padding)
-            .min(guarded_bubble_y1)
-            .min(image_height as f32),
-    };
-    let ink_rect = inks
-        .iter()
-        .copied()
-        .filter_map(placed_ink_bounds)
-        .reduce(PixelRect::union);
-    let sparse_erase_rect = ink_rect
-        .map(|rect| rect.expand(dilation as f32, image_width, image_height))
-        .and_then(|rect| rect.intersection(bubble_rect))
-        .unwrap_or(fallback_erase_rect);
-    let erase_rect = sparse_erase_rect.union(fallback_erase_rect);
-    let patch_rect = PixelRect {
-        x0: (erase_rect.x0 - sample_margin).max(0.0),
-        y0: (erase_rect.y0 - sample_margin).max(0.0),
-        x1: (erase_rect.x1 + sample_margin).min(image_width as f32),
-        y1: (erase_rect.y1 + sample_margin).min(image_height as f32),
-    };
-    let bounds = patch_rect.pixel_bounds(image_width, image_height);
-    let pixels = source
-        .crop_imm(bounds.x, bounds.y, bounds.width, bounds.height)
-        .to_rgba8();
-    let erase = InnerBounds {
-        x0: (erase_rect.x0 - bounds.x as f32).floor().max(0.0) as u32,
-        y0: (erase_rect.y0 - bounds.y as f32).floor().max(0.0) as u32,
-        x1: (erase_rect.x1 - bounds.x as f32)
+pub(super) fn text_mask_for_regions(
+    probabilities: &ProbabilityMap,
+    bubbles: &GrayImage,
+    regions: &[TextRegion],
+    threshold: f32,
+) -> GrayImage {
+    let mut allowed = GrayImage::new(probabilities.width, probabilities.height);
+    for region in regions {
+        // Detector boxes commonly stop at the last full glyph and can omit
+        // detached punctuation. Give the learned mask one measured glyph of
+        // semantic support, then constrain it to the same segmented balloon.
+        // This raises recall without turning the detector rectangle into an
+        // erase mask or sampling source-image colors.
+        let guard = region
+            .detected_font_size_px
+            .unwrap_or(region.height)
+            .max(1.0);
+        let text_rect = PixelRect {
+            x0: region.x,
+            y0: region.y,
+            x1: region.x + region.width,
+            y1: region.y + region.height,
+        };
+        let bubble_id = dominant_bubble_id(bubbles, text_rect);
+        let x0 = (region.x - guard).floor().max(0.0) as u32;
+        let y0 = (region.y - guard).floor().max(0.0) as u32;
+        let x1 = (region.x + region.width + guard)
             .ceil()
-            .min(bounds.width as f32) as u32,
-        y1: (erase_rect.y1 - bounds.y as f32)
+            .clamp(x0 as f32, probabilities.width as f32) as u32;
+        let y1 = (region.y + region.height + guard)
             .ceil()
-            .min(bounds.height as f32) as u32,
-    };
-    let bubble = InnerBounds {
-        x0: (bubble_rect.x0 - bounds.x as f32).floor().max(0.0) as u32,
-        y0: (bubble_rect.y0 - bounds.y as f32).floor().max(0.0) as u32,
-        x1: (bubble_rect.x1 - bounds.x as f32)
-            .ceil()
-            .min(bounds.width as f32) as u32,
-        y1: (bubble_rect.y1 - bounds.y as f32)
-            .ceil()
-            .min(bounds.height as f32) as u32,
-    };
-    let text = InnerBounds {
-        x0: (text_rect.x0 - bounds.x as f32).floor().max(0.0) as u32,
-        y0: (text_rect.y0 - bounds.y as f32).floor().max(0.0) as u32,
-        x1: (text_rect.x1 - bounds.x as f32)
-            .ceil()
-            .min(bounds.width as f32) as u32,
-        y1: (text_rect.y1 - bounds.y as f32)
-            .ceil()
-            .min(bounds.height as f32) as u32,
-    };
-    let mut mask = placed_ink_erase_mask(
-        pixels.width(),
-        pixels.height(),
-        bounds,
-        bubble,
-        inks,
-        dilation,
-    )
-    .unwrap_or_else(|| {
-        rectangular_erase_mask(pixels.width(), pixels.height(), erase.intersection(bubble))
-    });
-    // PP-OCR ink masks can omit a detached glyph even when recognition reads
-    // it correctly. Guarantee the complete accepted lettering envelope while
-    // retaining dilated ink coverage for outlines beyond that envelope.
-    let text_envelope =
-        rectangular_erase_mask(pixels.width(), pixels.height(), text.intersection(bubble));
-    for (value, guaranteed) in mask.iter_mut().zip(text_envelope) {
-        *value |= guaranteed;
-    }
-    let (fill, strategy) = inpaint_colors(&pixels, &mask);
-    let patch = transparent_patch_from_mask(&mask, &fill, pixels.width(), pixels.height());
-    (bounds, patch, strategy)
-}
-
-pub(super) fn ink_dilation_pixels(text_rect: PixelRect) -> u32 {
-    (text_rect.width().min(text_rect.height()).max(1.0) * INK_DILATION_RATIO)
-        .ceil()
-        .clamp(MIN_INK_DILATION_PIXELS, MAX_INK_DILATION_PIXELS) as u32
-}
-
-fn placed_ink_bounds(placed: PlacedInkMask<'_>) -> Option<PixelRect> {
-    let mask = placed.mask;
-    if mask.width != placed.crop_bounds.width
-        || mask.height != placed.crop_bounds.height
-        || mask.values.len() != (mask.width as usize).saturating_mul(mask.height as usize)
-    {
-        return None;
-    }
-    let mut left = mask.width;
-    let mut top = mask.height;
-    let mut right = 0_u32;
-    let mut bottom = 0_u32;
-    let mut found = false;
-    for y in 0..mask.height {
-        for x in 0..mask.width {
-            if mask.values[index(mask.width, x, y)] {
-                found = true;
-                left = left.min(x);
-                top = top.min(y);
-                right = right.max(x + 1);
-                bottom = bottom.max(y + 1);
+            .clamp(y0 as f32, probabilities.height as f32) as u32;
+        for y in y0..y1 {
+            for x in x0..x1 {
+                if bubble_id.is_none_or(|id| bubbles.get_pixel(x, y).0[0] == id) {
+                    allowed.put_pixel(x, y, Luma([255]));
+                }
             }
         }
     }
-    found.then(|| PixelRect {
-        x0: (placed.crop_bounds.x + left) as f32,
-        y0: (placed.crop_bounds.y + top) as f32,
-        x1: (placed.crop_bounds.x + right) as f32,
-        y1: (placed.crop_bounds.y + bottom) as f32,
+
+    GrayImage::from_fn(probabilities.width, probabilities.height, |x, y| {
+        let index = y as usize * probabilities.width as usize + x as usize;
+        if allowed.get_pixel(x, y).0[0] > 0
+            && probabilities.values.get(index).copied().unwrap_or_default() >= threshold
+        {
+            Luma([255])
+        } else {
+            Luma([0])
+        }
     })
 }
 
-fn placed_ink_erase_mask(
-    width: u32,
-    height: u32,
-    patch_bounds: PixelBounds,
-    bubble: InnerBounds,
-    placed_masks: &[PlacedInkMask<'_>],
-    dilation: u32,
-) -> Option<Vec<bool>> {
-    let mut base = vec![false; (width * height) as usize];
-    let mut found = false;
-    for placed in placed_masks.iter().copied() {
-        if placed_ink_bounds(placed).is_none() {
+pub(super) fn bubble_id_mask(result: &SpeechBubbleSegmentationResult) -> GrayImage {
+    let mut mask = GrayImage::new(result.image_width, result.image_height);
+    let mut regions = result.regions.iter().collect::<Vec<_>>();
+    regions.sort_by_key(|region| std::cmp::Reverse(region.area));
+    for (index, region) in regions.into_iter().take(255).enumerate() {
+        if region.mask.is_empty() {
             continue;
         }
-        for crop_y in 0..placed.mask.height {
-            for crop_x in 0..placed.mask.width {
-                if !placed.mask.values[index(placed.mask.width, crop_x, crop_y)] {
-                    continue;
-                }
-                let global_x = placed.crop_bounds.x + crop_x;
-                let global_y = placed.crop_bounds.y + crop_y;
-                let Some(local_x) = global_x.checked_sub(patch_bounds.x) else {
-                    continue;
-                };
-                let Some(local_y) = global_y.checked_sub(patch_bounds.y) else {
-                    continue;
-                };
-                if local_x < width && local_y < height {
-                    found = true;
-                    base[index(width, local_x, local_y)] = true;
+        let id = (index + 1) as u8;
+        let source_width = region.mask.width as usize;
+        let max_x = region
+            .mask
+            .width
+            .min(result.image_width.saturating_sub(region.mask.x));
+        let max_y = region
+            .mask
+            .height
+            .min(result.image_height.saturating_sub(region.mask.y));
+        for local_y in 0..max_y {
+            let source_row = local_y as usize * source_width;
+            for local_x in 0..max_x {
+                if region.mask.pixels[source_row + local_x as usize] > 0 {
+                    mask.put_pixel(region.mask.x + local_x, region.mask.y + local_y, Luma([id]));
                 }
             }
-        }
-    }
-    if !found {
-        return None;
-    }
-    let mut dilated = dilate_mask_square(&base, width, height, dilation);
-    for y in 0..height {
-        for x in 0..width {
-            if x < bubble.x0 || x >= bubble.x1 || y < bubble.y0 || y >= bubble.y1 {
-                dilated[index(width, x, y)] = false;
-            }
-        }
-    }
-    dilated.iter().any(|value| *value).then_some(dilated)
-}
-
-fn dilate_mask_square(mask: &[bool], width: u32, height: u32, radius: u32) -> Vec<bool> {
-    if radius == 0 {
-        return mask.to_vec();
-    }
-    let mut horizontal = vec![false; mask.len()];
-    for y in 0..height {
-        let mut prefix = vec![0_u32; width as usize + 1];
-        for x in 0..width {
-            prefix[x as usize + 1] = prefix[x as usize] + u32::from(mask[index(width, x, y)]);
-        }
-        for x in 0..width {
-            let left = x.saturating_sub(radius) as usize;
-            let right = x.saturating_add(radius).saturating_add(1).min(width) as usize;
-            horizontal[index(width, x, y)] = prefix[right] > prefix[left];
-        }
-    }
-    let mut output = vec![false; mask.len()];
-    for x in 0..width {
-        let mut prefix = vec![0_u32; height as usize + 1];
-        for y in 0..height {
-            prefix[y as usize + 1] = prefix[y as usize] + u32::from(horizontal[index(width, x, y)]);
-        }
-        for y in 0..height {
-            let top = y.saturating_sub(radius) as usize;
-            let bottom = y.saturating_add(radius).saturating_add(1).min(height) as usize;
-            output[index(width, x, y)] = prefix[bottom] > prefix[top];
-        }
-    }
-    output
-}
-
-#[derive(Clone, Copy)]
-struct InnerBounds {
-    x0: u32,
-    y0: u32,
-    x1: u32,
-    y1: u32,
-}
-
-impl InnerBounds {
-    fn intersection(self, other: Self) -> Self {
-        let x0 = self.x0.max(other.x0);
-        let y0 = self.y0.max(other.y0);
-        let x1 = self.x1.min(other.x1).max(x0);
-        let y1 = self.y1.min(other.y1).max(y0);
-        Self { x0, y0, x1, y1 }
-    }
-}
-
-fn rectangular_erase_mask(width: u32, height: u32, erase: InnerBounds) -> Vec<bool> {
-    let mut mask = vec![false; (width * height) as usize];
-    for y in erase.y0.min(height)..erase.y1.min(height) {
-        for x in erase.x0.min(width)..erase.x1.min(width) {
-            mask[index(width, x, y)] = true;
         }
     }
     mask
 }
 
-fn border_colors(pixels: &RgbaImage) -> Vec<[u8; 3]> {
-    let width = pixels.width();
-    let height = pixels.height();
-    let border = 2_u32.min(width).min(height);
-    let mut colors = Vec::new();
-    for y in 0..height {
-        for x in 0..width {
-            if (x < border || y < border || x + border >= width || y + border >= height)
-                && pixels.get_pixel(x, y)[3] != 0
-            {
-                let pixel = pixels.get_pixel(x, y);
-                colors.push([pixel[0], pixel[1], pixel[2]]);
+pub(super) fn merge_binary_mask(
+    destination: &mut GrayImage,
+    source: &GrayImage,
+    offset_x: u32,
+    offset_y: u32,
+) {
+    let copy_width = source
+        .width()
+        .min(destination.width().saturating_sub(offset_x));
+    let copy_height = source
+        .height()
+        .min(destination.height().saturating_sub(offset_y));
+    for y in 0..copy_height {
+        for x in 0..copy_width {
+            if source.get_pixel(x, y).0[0] > 0 {
+                destination.put_pixel(offset_x + x, offset_y + y, Luma([255]));
             }
         }
     }
-    if colors.is_empty() {
-        colors.push([255, 255, 255]);
-    }
-    colors
 }
 
-fn median_rgb(colors: &[[u8; 3]]) -> [u8; 3] {
-    let mut channels = [Vec::new(), Vec::new(), Vec::new()];
-    for color in colors {
-        for channel in 0..3 {
-            channels[channel].push(color[channel]);
+pub(super) fn merge_probability_map(
+    destination: &mut ProbabilityMap,
+    source: &ProbabilityMap,
+    offset_x: u32,
+    offset_y: u32,
+) {
+    let copy_width = source.width.min(destination.width.saturating_sub(offset_x));
+    let copy_height = source
+        .height
+        .min(destination.height.saturating_sub(offset_y));
+    for y in 0..copy_height {
+        for x in 0..copy_width {
+            let source_index = y as usize * source.width as usize + x as usize;
+            let destination_index =
+                (offset_y + y) as usize * destination.width as usize + (offset_x + x) as usize;
+            if let (Some(source_value), Some(destination_value)) = (
+                source.values.get(source_index),
+                destination.values.get_mut(destination_index),
+            ) {
+                *destination_value = destination_value.max(*source_value);
+            }
         }
     }
-    for values in &mut channels {
-        values.sort_unstable();
-    }
-    [
-        channels[0][channels[0].len() / 2],
-        channels[1][channels[1].len() / 2],
-        channels[2][channels[2].len() / 2],
-    ]
 }
 
-fn color_variation(colors: &[[u8; 3]], center: [u8; 3]) -> f32 {
-    colors
-        .iter()
-        .map(|color| color_distance(*color, center))
-        .sum::<f32>()
-        / colors.len().max(1) as f32
-}
-
-fn color_distance(left: [u8; 3], right: [u8; 3]) -> f32 {
-    let red = left[0] as f32 - right[0] as f32;
-    let green = left[1] as f32 - right[1] as f32;
-    let blue = left[2] as f32 - right[2] as f32;
-    (red * red + green * green + blue * blue).sqrt()
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum FillStrategy {
-    Flat,
-    MultiscaleDiffusion,
-}
-
-fn inpaint_colors(pixels: &RgbaImage, mask: &[bool]) -> (Vec<[u8; 3]>, FillStrategy) {
-    let width = pixels.width();
-    let height = pixels.height();
-    let mut boundary = Vec::<[u8; 3]>::new();
+pub(super) fn crop_probability_map(source: &ProbabilityMap, bounds: PixelBounds) -> ProbabilityMap {
+    let width = bounds.width.min(source.width.saturating_sub(bounds.x));
+    let height = bounds.height.min(source.height.saturating_sub(bounds.y));
+    let mut crop = ProbabilityMap::zeros(width, height);
     for y in 0..height {
-        for x in 0..width {
-            if mask[index(width, x, y)] {
+        let source_start = (bounds.y + y) as usize * source.width as usize + bounds.x as usize;
+        let source_end = source_start + width as usize;
+        let destination_start = y as usize * width as usize;
+        let destination_end = destination_start + width as usize;
+        if let (Some(source_row), Some(destination_row)) = (
+            source.values.get(source_start..source_end),
+            crop.values.get_mut(destination_start..destination_end),
+        ) {
+            destination_row.copy_from_slice(source_row);
+        }
+    }
+    crop
+}
+
+pub(super) fn label_bubble_components(binary: &GrayImage) -> GrayImage {
+    let (width, height) = binary.dimensions();
+    let mut labels = GrayImage::new(width, height);
+    let mut next_id = 1_u8;
+    for seed_y in 0..height {
+        for seed_x in 0..width {
+            if binary.get_pixel(seed_x, seed_y).0[0] == 0
+                || labels.get_pixel(seed_x, seed_y).0[0] != 0
+            {
                 continue;
             }
-            if cardinal_neighbors(x, y, width, height)
-                .any(|(next_x, next_y)| mask[index(width, next_x, next_y)])
-            {
-                let pixel = pixels.get_pixel(x, y);
-                boundary.push([pixel[0], pixel[1], pixel[2]]);
-            }
-        }
-    }
-    if boundary.is_empty() {
-        boundary = border_colors(pixels);
-    }
-    let flat_fill = median_rgb(&boundary);
-    let variation = color_variation(&boundary, flat_fill);
-    if variation <= 15.0 {
-        return (vec![flat_fill; mask.len()], FillStrategy::Flat);
-    }
-
-    (
-        multiscale_diffusion(pixels, mask, flat_fill),
-        FillStrategy::MultiscaleDiffusion,
-    )
-}
-
-#[derive(Clone)]
-struct DiffusionLevel {
-    width: u32,
-    height: u32,
-    colors: Vec<[f32; 3]>,
-    fixed: Vec<bool>,
-}
-
-fn multiscale_diffusion(pixels: &RgbaImage, mask: &[bool], fallback: [u8; 3]) -> Vec<[u8; 3]> {
-    let mut levels = vec![DiffusionLevel {
-        width: pixels.width(),
-        height: pixels.height(),
-        colors: pixels
-            .pixels()
-            .map(|pixel| [pixel[0] as f32, pixel[1] as f32, pixel[2] as f32])
-            .collect(),
-        fixed: mask.iter().map(|masked| !masked).collect(),
-    }];
-    while {
-        let last = levels.last().expect("diffusion pyramid is non-empty");
-        last.width > 8 || last.height > 8
-    } {
-        let coarse = downsample_level(levels.last().expect("diffusion pyramid is non-empty"));
-        if coarse.width == levels.last().unwrap().width
-            && coarse.height == levels.last().unwrap().height
-        {
-            break;
-        }
-        levels.push(coarse);
-    }
-
-    let fallback = [fallback[0] as f32, fallback[1] as f32, fallback[2] as f32];
-    {
-        let coarsest = levels.last_mut().expect("diffusion pyramid is non-empty");
-        for (position, fixed) in coarsest.fixed.iter().enumerate() {
-            if !fixed {
-                coarsest.colors[position] = fallback;
-            }
-        }
-        relax_level(coarsest, COARSE_DIFFUSION_STEPS);
-    }
-
-    for level_index in (0..levels.len().saturating_sub(1)).rev() {
-        let coarse = levels[level_index + 1].clone();
-        let fine = &mut levels[level_index];
-        for y in 0..fine.height {
-            for x in 0..fine.width {
-                let position = index(fine.width, x, y);
-                if !fine.fixed[position] {
-                    fine.colors[position] = coarse.colors[index(coarse.width, x / 2, y / 2)];
-                }
-            }
-        }
-        relax_level(fine, REFINEMENT_DIFFUSION_STEPS);
-    }
-
-    levels
-        .remove(0)
-        .colors
-        .into_iter()
-        .map(|color| {
-            [
-                color[0].round().clamp(0.0, 255.0) as u8,
-                color[1].round().clamp(0.0, 255.0) as u8,
-                color[2].round().clamp(0.0, 255.0) as u8,
-            ]
-        })
-        .collect()
-}
-
-fn downsample_level(fine: &DiffusionLevel) -> DiffusionLevel {
-    let width = fine.width.div_ceil(2);
-    let height = fine.height.div_ceil(2);
-    let mut colors = vec![[0.0; 3]; (width * height) as usize];
-    let mut fixed = vec![false; colors.len()];
-    for coarse_y in 0..height {
-        for coarse_x in 0..width {
-            let mut known_sum = [0.0_f32; 3];
-            let mut known_count = 0_u32;
-            for fine_y in (coarse_y * 2)..(coarse_y * 2 + 2).min(fine.height) {
-                for fine_x in (coarse_x * 2)..(coarse_x * 2 + 2).min(fine.width) {
-                    let fine_position = index(fine.width, fine_x, fine_y);
-                    if fine.fixed[fine_position] {
-                        for channel in 0..3 {
-                            known_sum[channel] += fine.colors[fine_position][channel];
+            let id = next_id;
+            next_id = next_id.saturating_add(1).max(1);
+            let mut queue = VecDeque::from([(seed_x, seed_y)]);
+            labels.put_pixel(seed_x, seed_y, Luma([id]));
+            while let Some((x, y)) = queue.pop_front() {
+                for dy in -1_i32..=1 {
+                    for dx in -1_i32..=1 {
+                        if dx == 0 && dy == 0 {
+                            continue;
                         }
-                        known_count += 1;
-                    }
-                }
-            }
-            let coarse_position = index(width, coarse_x, coarse_y);
-            if known_count > 0 {
-                fixed[coarse_position] = true;
-                for channel in 0..3 {
-                    colors[coarse_position][channel] = known_sum[channel] / known_count as f32;
-                }
-            }
-        }
-    }
-    DiffusionLevel {
-        width,
-        height,
-        colors,
-        fixed,
-    }
-}
-
-fn relax_level(level: &mut DiffusionLevel, iterations: usize) {
-    for _ in 0..iterations {
-        let mut next = level.colors.clone();
-        for y in 0..level.height {
-            for x in 0..level.width {
-                let position = index(level.width, x, y);
-                if level.fixed[position] {
-                    continue;
-                }
-                let mut sum = [0.0_f32; 3];
-                let mut count = 0.0_f32;
-                for (next_x, next_y) in cardinal_neighbors(x, y, level.width, level.height) {
-                    let color = level.colors[index(level.width, next_x, next_y)];
-                    for channel in 0..3 {
-                        sum[channel] += color[channel];
-                    }
-                    count += 1.0;
-                }
-                if count > 0.0 {
-                    for channel in 0..3 {
-                        next[position][channel] = sum[channel] / count;
+                        let nx = x as i32 + dx;
+                        let ny = y as i32 + dy;
+                        if nx < 0 || ny < 0 || nx >= width as i32 || ny >= height as i32 {
+                            continue;
+                        }
+                        let nx = nx as u32;
+                        let ny = ny as u32;
+                        if binary.get_pixel(nx, ny).0[0] > 0 && labels.get_pixel(nx, ny).0[0] == 0 {
+                            labels.put_pixel(nx, ny, Luma([id]));
+                            queue.push_back((nx, ny));
+                        }
                     }
                 }
             }
         }
-        level.colors = next;
     }
+    labels
 }
 
-fn cardinal_neighbors(x: u32, y: u32, width: u32, height: u32) -> impl Iterator<Item = (u32, u32)> {
-    [
-        x.checked_sub(1).map(|next_x| (next_x, y)),
-        (x + 1 < width).then_some((x + 1, y)),
-        y.checked_sub(1).map(|next_y| (x, next_y)),
-        (y + 1 < height).then_some((x, y + 1)),
-    ]
-    .into_iter()
-    .flatten()
+pub(super) fn make_inpainted_patch(
+    inpainted: &DynamicImage,
+    erase_mask: &GrayImage,
+    support: PixelRect,
+) -> Result<Option<PatchPng>> {
+    let Some(bounds) = active_bounds(erase_mask, support) else {
+        return Ok(None);
+    };
+    let image = inpainted.to_rgba8();
+    let mut patch = RgbaImage::new(bounds.width, bounds.height);
+    let alpha = feathered_alpha(erase_mask);
+    for local_y in 0..bounds.height {
+        for local_x in 0..bounds.width {
+            let x = bounds.x + local_x;
+            let y = bounds.y + local_y;
+            let opacity = alpha.get_pixel(x, y).0[0];
+            if opacity == 0 {
+                continue;
+            }
+            let pixel = image.get_pixel(x, y);
+            patch.put_pixel(
+                local_x,
+                local_y,
+                Rgba([pixel.0[0], pixel.0[1], pixel.0[2], opacity]),
+            );
+        }
+    }
+    let mut cursor = Cursor::new(Vec::new());
+    DynamicImage::ImageRgba8(patch)
+        .write_to(&mut cursor, ImageFormat::Png)
+        .context("encode model-inpainted cleanup patch")?;
+    Ok(Some(PatchPng {
+        bounds,
+        bytes: cursor.into_inner(),
+    }))
 }
 
-fn transparent_patch_from_mask(
-    mask: &[bool],
-    fill: &[[u8; 3]],
-    width: u32,
-    height: u32,
-) -> RgbaImage {
-    let mut output = RgbaImage::new(width, height);
-    for y in 0..height {
-        for x in 0..width {
-            let position = index(width, x, y);
-            if mask[position] {
-                output.put_pixel(
-                    x,
-                    y,
-                    Rgba([fill[position][0], fill[position][1], fill[position][2], 255]),
-                );
+pub(super) fn region_polygons(
+    bubbles: &GrayImage,
+    text_rect: PixelRect,
+    fallback_bubble_rect: PixelRect,
+    measured_font_height: f32,
+) -> (Vec<Point>, Vec<Point>) {
+    let bubble_id = dominant_bubble_id(bubbles, text_rect)
+        .or_else(|| dominant_bubble_id(bubbles, fallback_bubble_rect));
+    let Some(bubble_id) = bubble_id else {
+        let fallback = fallback_bubble_rect.polygon(bubbles.width(), bubbles.height());
+        return (
+            fallback.clone(),
+            text_rect.polygon(bubbles.width(), bubbles.height()),
+        );
+    };
+    let support = fallback_bubble_rect
+        .union(text_rect)
+        .expand(
+            measured_font_height.max(1.0),
+            bubbles.width(),
+            bubbles.height(),
+        )
+        .pixel_bounds(bubbles.width(), bubbles.height());
+    let binary = GrayImage::from_fn(support.width, support.height, |x, y| {
+        if bubbles.get_pixel(support.x + x, support.y + y).0[0] == bubble_id {
+            Luma([255])
+        } else {
+            Luma([0])
+        }
+    });
+    let local_text = PixelRect {
+        x0: text_rect.x0 - support.x as f32,
+        y0: text_rect.y0 - support.y as f32,
+        x1: text_rect.x1 - support.x as f32,
+        y1: text_rect.y1 - support.y as f32,
+    };
+    let bubble_polygon = contour_polygon(
+        &binary,
+        local_text,
+        support.x,
+        support.y,
+        bubbles.width(),
+        bubbles.height(),
+    )
+    .unwrap_or_else(|| fallback_bubble_rect.polygon(bubbles.width(), bubbles.height()));
+
+    // Clearance follows the measured source glyph height. This preserves a
+    // comparable amount of breathing room for small and large balloons
+    // without assuming a fixed percentage of the detector box.
+    let clearance = (measured_font_height * 0.45).round().clamp(1.0, 255.0) as u8;
+    let safe_mask = erode(&binary, Norm::LInf, clearance);
+    let safe_polygon = contour_polygon(
+        &safe_mask,
+        local_text,
+        support.x,
+        support.y,
+        bubbles.width(),
+        bubbles.height(),
+    )
+    .filter(|polygon| !polygon.is_empty())
+    .unwrap_or_else(|| text_rect.polygon(bubbles.width(), bubbles.height()));
+    (bubble_polygon, safe_polygon)
+}
+
+pub(super) fn bubble_id_for_rect(mask: &GrayImage, rect: PixelRect) -> Option<u8> {
+    dominant_bubble_id(mask, rect)
+}
+
+fn dominant_bubble_id(mask: &GrayImage, rect: PixelRect) -> Option<u8> {
+    let bounds = rect.pixel_bounds(mask.width(), mask.height());
+    let mut counts = BTreeMap::<u8, usize>::new();
+    for y in bounds.y..bounds.y.saturating_add(bounds.height) {
+        for x in bounds.x..bounds.x.saturating_add(bounds.width) {
+            let id = mask.get_pixel(x, y).0[0];
+            if id > 0 {
+                *counts.entry(id).or_default() += 1;
             }
         }
     }
-    output
+    counts
+        .into_iter()
+        .max_by_key(|(id, count)| (*count, std::cmp::Reverse(*id)))
+        .map(|(id, _)| id)
 }
 
-fn index(width: u32, x: u32, y: u32) -> usize {
-    (y * width + x) as usize
+fn contour_polygon(
+    mask: &GrayImage,
+    text_rect: PixelRect,
+    offset_x: u32,
+    offset_y: u32,
+    image_width: u32,
+    image_height: u32,
+) -> Option<Vec<Point>> {
+    let center = text_rect.center();
+    let contours = find_contours::<i32>(mask);
+    let contour = contours
+        .into_iter()
+        .filter(|contour| contour.border_type == BorderType::Outer && contour.points.len() >= 3)
+        .filter_map(|contour| {
+            let bounds = contour.points.iter().fold(
+                (i32::MAX, i32::MAX, i32::MIN, i32::MIN),
+                |(x0, y0, x1, y1), point| {
+                    (
+                        x0.min(point.x),
+                        y0.min(point.y),
+                        x1.max(point.x),
+                        y1.max(point.y),
+                    )
+                },
+            );
+            let contains_center = center.0 >= bounds.0 as f32
+                && center.0 <= bounds.2 as f32
+                && center.1 >= bounds.1 as f32
+                && center.1 <= bounds.3 as f32;
+            let area = i64::from(bounds.2 - bounds.0) * i64::from(bounds.3 - bounds.1);
+            contains_center.then_some((area, contour.points))
+        })
+        .max_by_key(|(area, _)| *area)?
+        .1;
+
+    let stride = contour.len().div_ceil(MAX_POLYGON_POINTS).max(1);
+    let width = image_width.max(1) as f32;
+    let height = image_height.max(1) as f32;
+    let points = contour
+        .into_iter()
+        .step_by(stride)
+        .map(|point| Point {
+            x: ((offset_x as f32 + point.x as f32) / width).clamp(0.0, 1.0),
+            y: ((offset_y as f32 + point.y as f32) / height).clamp(0.0, 1.0),
+        })
+        .collect::<Vec<_>>();
+    (points.len() >= 3).then_some(points)
+}
+
+fn active_bounds(mask: &GrayImage, support: PixelRect) -> Option<PixelBounds> {
+    let support = support.pixel_bounds(mask.width(), mask.height());
+    let mut x0 = mask.width();
+    let mut y0 = mask.height();
+    let mut x1 = 0;
+    let mut y1 = 0;
+    for y in support.y..support.y.saturating_add(support.height) {
+        for x in support.x..support.x.saturating_add(support.width) {
+            if mask.get_pixel(x, y).0[0] == 0 {
+                continue;
+            }
+            x0 = x0.min(x);
+            y0 = y0.min(y);
+            x1 = x1.max(x + 1);
+            y1 = y1.max(y + 1);
+        }
+    }
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+    let padding = PATCH_EDGE_FEATHER_PIXELS + 1;
+    x0 = x0.saturating_sub(padding);
+    y0 = y0.saturating_sub(padding);
+    x1 = x1.saturating_add(padding).min(mask.width());
+    y1 = y1.saturating_add(padding).min(mask.height());
+    Some(PixelBounds {
+        x: x0,
+        y: y0,
+        width: x1 - x0,
+        height: y1 - y0,
+    })
+}
+
+fn feathered_alpha(mask: &GrayImage) -> GrayImage {
+    let (width, height) = mask.dimensions();
+    GrayImage::from_fn(width, height, |x, y| {
+        if mask.get_pixel(x, y).0[0] == 0 {
+            return Luma([0]);
+        }
+        let mut nearest_edge = PATCH_EDGE_FEATHER_PIXELS + 1;
+        for dy in -(PATCH_EDGE_FEATHER_PIXELS as i32)..=PATCH_EDGE_FEATHER_PIXELS as i32 {
+            for dx in -(PATCH_EDGE_FEATHER_PIXELS as i32)..=PATCH_EDGE_FEATHER_PIXELS as i32 {
+                let nx = x as i32 + dx;
+                let ny = y as i32 + dy;
+                if nx < 0
+                    || ny < 0
+                    || nx >= width as i32
+                    || ny >= height as i32
+                    || mask.get_pixel(nx as u32, ny as u32).0[0] == 0
+                {
+                    nearest_edge = nearest_edge.min(dx.unsigned_abs().max(dy.unsigned_abs()));
+                }
+            }
+        }
+        let alpha = ((nearest_edge.min(PATCH_EDGE_FEATHER_PIXELS + 1) * 255)
+            / (PATCH_EDGE_FEATHER_PIXELS + 1)) as u8;
+        Luma([alpha])
+    })
 }
 
 #[cfg(test)]
@@ -573,201 +450,72 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cleanup_patch_alpha_is_bounded_exactly_by_the_mask() {
-        let mask = vec![false, true, false, true, true, false];
-        let fill = vec![[240, 241, 242]; mask.len()];
-        let patch = transparent_patch_from_mask(&mask, &fill, 3, 2);
-        for (position, pixel) in patch.pixels().enumerate() {
-            assert_eq!(pixel[3], if mask[position] { 255 } else { 0 });
-        }
-    }
-
-    #[test]
-    fn ocr_ink_mask_dilation_also_guarantees_the_full_text_envelope() {
-        let source =
-            DynamicImage::ImageRgba8(RgbaImage::from_pixel(40, 30, Rgba([250, 250, 250, 255])));
-        let text = PixelRect::new(10.0, 10.0, 30.0, 20.0).unwrap();
-        let bubble = PixelRect::new(5.0, 5.0, 35.0, 25.0).unwrap();
-        let mut values = vec![false; 24 * 14];
-        values[index(24, 10, 6)] = true;
-        let ink = PpOcrInkMask {
-            width: 24,
-            height: 14,
-            values,
+    fn learned_mask_uses_measured_punctuation_support_inside_the_same_bubble() {
+        let probabilities = ProbabilityMap {
+            width: 12,
+            height: 8,
+            values: vec![1.0; 96],
         };
-        let placed = PlacedInkMask {
-            mask: &ink,
-            crop_bounds: PixelBounds {
-                x: 8,
-                y: 8,
-                width: 24,
-                height: 14,
-            },
-        };
-
-        let (bounds, patch, _) =
-            make_cleanup_patch_image_with_ink(&source, text, bubble, &[placed]);
-        let center_x = 18 - bounds.x;
-        let center_y = 14 - bounds.y;
-        assert_eq!(patch.get_pixel(center_x, center_y)[3], 255);
-        for global_y in 10..20 {
-            for global_x in 10..30 {
-                assert_eq!(
-                    patch.get_pixel(global_x - bounds.x, global_y - bounds.y)[3],
-                    255
-                );
-            }
-        }
-        assert_eq!(patch.get_pixel(0, 0)[3], 0);
-    }
-
-    #[test]
-    fn accepted_region_padding_uses_the_same_bounded_radius_as_ink_dilation() {
-        let small = PixelRect::new(1.0, 1.0, 6.0, 6.0).unwrap();
-        let large = PixelRect::new(1.0, 1.0, 501.0, 501.0).unwrap();
-
-        assert_eq!(ink_dilation_pixels(small), 8);
-        assert_eq!(ink_dilation_pixels(large), 32);
-    }
-
-    #[test]
-    fn full_erase_mask_never_crosses_the_confirmed_bubble_interior() {
-        let erase = InnerBounds {
-            x0: 1,
-            y0: 1,
-            x1: 6,
-            y1: 6,
-        };
-        let bubble = InnerBounds {
-            x0: 2,
-            y0: 2,
-            x1: 5,
-            y1: 5,
-        };
-        let mask = rectangular_erase_mask(7, 7, erase.intersection(bubble));
-
-        for y in 0..7 {
-            for x in 0..7 {
-                assert_eq!(
-                    mask[index(7, x, y)],
-                    x >= bubble.x0 && x < bubble.x1 && y >= bubble.y0 && y < bubble.y1
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn multiscale_diffusion_fills_every_masked_pixel_without_touching_source_pixels() {
-        let mut pixels = RgbaImage::new(17, 17);
-        for y in 0..17 {
-            for x in 0..17 {
-                pixels.put_pixel(x, y, Rgba([x as u8 * 8, y as u8 * 8, 64, 255]));
-            }
-        }
-        let erase = InnerBounds {
-            x0: 3,
-            y0: 3,
-            x1: 14,
-            y1: 14,
-        };
-        let mask = rectangular_erase_mask(17, 17, erase);
-        let fill = multiscale_diffusion(&pixels, &mask, [64, 64, 64]);
-
-        for y in 0..17 {
-            for x in 0..17 {
-                let position = index(17, x, y);
-                if !mask[position] {
-                    let original = pixels.get_pixel(x, y);
-                    assert_eq!(fill[position], [original[0], original[1], original[2]]);
-                }
-            }
-        }
-        assert!(fill[index(17, 8, 8)][0] > 0);
-        assert!(fill[index(17, 8, 8)][1] > 0);
-    }
-
-    #[test]
-    fn flat_bubble_uses_the_constant_local_fill_path() {
-        let pixels = RgbaImage::from_pixel(21, 17, Rgba([242, 243, 244, 255]));
-        let mask = rectangular_erase_mask(
-            21,
-            17,
-            InnerBounds {
-                x0: 4,
-                y0: 3,
-                x1: 17,
-                y1: 14,
-            },
+        let bubbles = GrayImage::from_fn(12, 8, |x, _| if x < 8 { Luma([1]) } else { Luma([2]) });
+        let mask = text_mask_for_regions(
+            &probabilities,
+            &bubbles,
+            &[TextRegion {
+                x: 3.0,
+                y: 3.0,
+                width: 3.0,
+                height: 2.0,
+                detected_font_size_px: Some(2.0),
+                ..TextRegion::default()
+            }],
+            0.1,
         );
-        let (fill, strategy) = inpaint_colors(&pixels, &mask);
-
-        assert_eq!(strategy, FillStrategy::Flat);
-        assert!(fill.iter().all(|color| *color == [242, 243, 244]));
+        assert_eq!(mask.get_pixel(0, 3).0[0], 0);
+        assert_eq!(mask.get_pixel(1, 3).0[0], 255);
+        assert_eq!(mask.get_pixel(7, 4).0[0], 255);
+        assert_eq!(mask.get_pixel(8, 4).0[0], 0);
     }
 
     #[test]
-    fn gradient_bubble_uses_nonuniform_multiscale_diffusion() {
-        let mut pixels = RgbaImage::new(41, 25);
-        for y in 0..pixels.height() {
-            for x in 0..pixels.width() {
-                pixels.put_pixel(
-                    x,
-                    y,
-                    Rgba([(40 + x * 4) as u8, (80 + y * 3) as u8, 160, 255]),
-                );
+    fn overlapping_tile_masks_are_stitched_and_relabelled_by_real_continuity() {
+        let mut union = GrayImage::new(12, 8);
+        let left = GrayImage::from_fn(8, 8, |x, y| {
+            if x >= 5 && (2..6).contains(&y) {
+                Luma([1])
+            } else {
+                Luma([0])
+            }
+        });
+        let right = GrayImage::from_fn(8, 8, |x, y| {
+            if x < 3 && (2..6).contains(&y) {
+                Luma([7])
+            } else {
+                Luma([0])
+            }
+        });
+        merge_binary_mask(&mut union, &left, 0, 0);
+        merge_binary_mask(&mut union, &right, 5, 0);
+        let labels = label_bubble_components(&union);
+        assert_eq!(labels.get_pixel(5, 3).0[0], labels.get_pixel(7, 3).0[0]);
+        assert_ne!(labels.get_pixel(5, 3).0[0], 0);
+    }
+
+    #[test]
+    fn inpainted_patch_alpha_follows_the_semantic_mask() {
+        let image =
+            DynamicImage::ImageRgba8(RgbaImage::from_pixel(12, 12, Rgba([90, 100, 110, 255])));
+        let mut mask = GrayImage::new(12, 12);
+        for y in 4..8 {
+            for x in 4..8 {
+                mask.put_pixel(x, y, Luma([255]));
             }
         }
-        let mask = rectangular_erase_mask(
-            pixels.width(),
-            pixels.height(),
-            InnerBounds {
-                x0: 7,
-                y0: 5,
-                x1: 34,
-                y1: 20,
-            },
-        );
-        let (fill, strategy) = inpaint_colors(&pixels, &mask);
-
-        assert_eq!(strategy, FillStrategy::MultiscaleDiffusion);
-        assert!(fill[index(pixels.width(), 10, 12)][0] < fill[index(pixels.width(), 30, 12)][0]);
-        assert!(fill[index(pixels.width(), 20, 7)][1] < fill[index(pixels.width(), 20, 17)][1]);
-    }
-
-    #[test]
-    fn tight_border_patch_stays_clipped_and_transparent() {
-        let source =
-            DynamicImage::ImageRgba8(RgbaImage::from_pixel(24, 20, Rgba([250, 250, 250, 255])));
-        let text = PixelRect::new(0.0, 1.0, 7.0, 7.0).unwrap();
-        let bubble = PixelRect::new(0.0, 0.0, 11.0, 10.0).unwrap();
-        let patch = make_cleanup_patch(&source, text, bubble, &[]).unwrap();
-
-        assert_eq!(patch.bounds.x, 0);
-        assert_eq!(&patch.bytes[..8], b"\x89PNG\r\n\x1a\n");
-        let decoded = image::load_from_memory_with_format(&patch.bytes, ImageFormat::Png)
-            .unwrap()
-            .to_rgba8();
-        assert!(decoded.pixels().any(|pixel| pixel[3] == 0));
-        assert!(decoded.pixels().any(|pixel| pixel[3] == 255));
-    }
-
-    #[test]
-    fn vertical_padding_preserves_the_confirmed_bubble_contour_guard() {
-        let source =
-            DynamicImage::ImageRgba8(RgbaImage::from_pixel(100, 80, Rgba([250, 250, 250, 255])));
-        let text = PixelRect::new(30.0, 14.0, 70.0, 39.0).unwrap();
-        let bubble = PixelRect::new(20.0, 10.0, 80.0, 60.0).unwrap();
-        let (bounds, patch, _) = make_cleanup_patch_image(&source, text, bubble);
-        let mut first_opaque_y = u32::MAX;
-
-        for y in 0..patch.height() {
-            for x in 0..patch.width() {
-                if patch.get_pixel(x, y)[3] != 0 {
-                    first_opaque_y = first_opaque_y.min(bounds.y + y);
-                }
-            }
-        }
-
-        assert_eq!(first_opaque_y, 13);
+        let patch =
+            make_inpainted_patch(&image, &mask, PixelRect::new(0.0, 0.0, 12.0, 12.0).unwrap())
+                .unwrap()
+                .unwrap();
+        let decoded = image::load_from_memory(&patch.bytes).unwrap().to_rgba8();
+        assert_eq!(decoded.get_pixel(0, 0).0[3], 0);
+        assert!(decoded.pixels().any(|pixel| pixel.0[3] > 0));
     }
 }

@@ -34,19 +34,6 @@ header > span:last-child {
   gap: 2px;
 }
 
-.mark {
-  align-items: center;
-  background: linear-gradient(135deg, #2563eb, #7c3aed);
-  border-radius: 10px;
-  color: #fff;
-  display: flex;
-  font-size: 20px;
-  font-weight: 800;
-  height: 38px;
-  justify-content: center;
-  width: 38px;
-}
-
 strong {
   font-size: 14px;
 }

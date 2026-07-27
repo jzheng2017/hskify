@@ -544,6 +544,33 @@ impl HskControl {
         }
     }
 
+    /// Resolves exactly one dictionary expression beginning at a hovered
+    /// Unicode-scalar offset. Longest-match is intentionally anchored at the
+    /// hovered character: hovering the first character of a compound returns
+    /// the compound, while hovering a later component starts a fresh lookup
+    /// from that component.
+    pub fn lookup_at_with_region_context(
+        &self,
+        displayed_text: &str,
+        character_offset: usize,
+        proper_names: &[ProperName],
+        region: Option<LookupRegionContext>,
+    ) -> Option<LookupResult> {
+        let characters = displayed_text.chars().collect::<Vec<_>>();
+        let first = *characters.get(character_offset)?;
+        let first_text = first.to_string();
+        if is_ignorable_token(&first_text) {
+            return None;
+        }
+
+        let suffix = characters[character_offset..].iter().collect::<String>();
+        let mut result = self.lookup_with_region_context(&suffix, proper_names, region);
+        let token = result.tokens.into_iter().next()?;
+        result.selected_text.clone_from(&token.simplified);
+        result.tokens = vec![token];
+        Some(result)
+    }
+
     fn lookup_token(&self, word: &str, proper_name: bool) -> LookupToken {
         let (mut pinyin, mut definitions) = self.dictionary.merged_fields(word);
         if let Some(entry) = self.hsk.entry(word) {

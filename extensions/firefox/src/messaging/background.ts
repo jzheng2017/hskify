@@ -48,7 +48,13 @@ import {
   type RecoveryCandidate,
   type SubmittedJob,
 } from './messages'
-import { loadHskLevel, saveHskLevel } from './settings'
+import {
+  loadHskLevel,
+  loadNameTranslation,
+  saveHskLevel,
+  saveNameTranslation,
+  type NameTranslation,
+} from './settings'
 
 type Sender = browser.runtime.MessageSender
 
@@ -267,15 +273,17 @@ export class BackgroundRouter {
   private async startContent(
     scope: 'visible' | 'all',
     hskLevel: 1 | 2 | 3 | 4 | 5 | 6,
+    nameTranslation: NameTranslation,
   ): Promise<PageState> {
     const tabId = await this.activeTab()
-    await saveHskLevel(hskLevel)
+    await Promise.all([saveHskLevel(hskLevel), saveNameTranslation(nameTranslation)])
     await this.ensureContent(tabId)
     return parsePageState(
       await browser.tabs.sendMessage(tabId, {
         type: 'content:start',
         scope,
         hskLevel,
+        nameTranslation,
       }),
     )
   }
@@ -303,9 +311,12 @@ export class BackgroundRouter {
 
   private async popupState(): Promise<PopupState> {
     const tabId = await this.activeTab()
-    const level = await loadHskLevel()
+    const [level, nameTranslation] = await Promise.all([
+      loadHskLevel(),
+      loadNameTranslation(),
+    ])
     const content = await this.contentState(tabId)
-    if (content) return { ...content, hskLevel: level }
+    if (content) return { ...content, hskLevel: level, nameTranslation }
     const active = await this.jobs.forTab(tabId)
     return {
       state: active.length > 0 ? 'running' : 'idle',
@@ -313,6 +324,7 @@ export class BackgroundRouter {
       total: active.length,
       message: active.length > 0 ? 'Translation continues in this tab.' : 'Ready',
       hskLevel: level,
+      nameTranslation,
     }
   }
 
@@ -322,10 +334,6 @@ export class BackgroundRouter {
 
   private startSetup(): Promise<BrowserSetupStatus> {
     return this.companion.startModelSetup()
-  }
-
-  private async openInstaller(): Promise<void> {
-    await browser.tabs.create({ url: browser.runtime.getURL('/setup.html') })
   }
 
   private async acquire(
@@ -452,6 +460,7 @@ export class BackgroundRouter {
         hskLevel: message.hskLevel,
         readingDirection: 'auto',
         translateSoundEffects: false,
+        nameTranslation: message.nameTranslation,
       },
       ...(message.precedingContext?.length
         ? { precedingContext: message.precedingContext.slice(-6) }
@@ -830,7 +839,11 @@ export class BackgroundRouter {
       case 'popup:prepare':
         return this.prepareContent()
       case 'popup:start':
-        return this.startContent(message.scope, message.hskLevel)
+        return this.startContent(
+          message.scope,
+          message.hskLevel,
+          message.nameTranslation,
+        )
       case 'popup:cancel':
         return this.cancelTab(await this.activeTab())
       case 'popup:state':
@@ -839,8 +852,6 @@ export class BackgroundRouter {
         return this.setupStatus()
       case 'setup:start':
         return this.startSetup()
-      case 'setup:open-installer':
-        return this.openInstaller()
       case 'image:prefetch':
         return this.prefetch(message, sender)
       case 'image:prefetch-cancel':
@@ -888,7 +899,6 @@ const BACKGROUND_MESSAGE_TYPES = new Set([
   'popup:state',
   'setup:status',
   'setup:start',
-  'setup:open-installer',
   'image:prefetch',
   'image:prefetch-cancel',
   'job:submit',

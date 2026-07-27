@@ -7,7 +7,7 @@ use thiserror::Error;
 ///
 /// This is deliberately not a negotiable protocol version. A mismatched build
 /// must restart the native/daemon pair that shipped with the extension.
-pub const BUILD_FINGERPRINT: &str = "hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-07-26-r2";
+pub const BUILD_FINGERPRINT: &str = "hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-07-27-r6";
 pub const HSK_STANDARD: &str = "2.0";
 pub const SOURCE_LANGUAGE: &str = "en";
 pub const TARGET_LANGUAGE: &str = "zh-CN";
@@ -606,6 +606,7 @@ pub struct BrowserJobSettings {
     pub hsk_level: HskLevel,
     pub reading_direction: ReadingDirection,
     pub translate_sound_effects: bool,
+    pub name_translation: NameTranslation,
 }
 
 impl Validate for BrowserJobSettings {
@@ -646,6 +647,13 @@ pub enum ReadingDirection {
     Rtl,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum NameTranslation {
+    KeepOriginal,
+    Chinese,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DialogueContext {
@@ -676,6 +684,36 @@ impl Point {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BrowserTextColorBand {
+    pub position: f32,
+    pub foreground: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outline_color: Option<String>,
+}
+
+impl BrowserTextColorBand {
+    fn validate_at(&self, path: &str) -> Result<(), ContractError> {
+        require_unit(&format!("{path}.position"), self.position)?;
+        if !is_css_color(&self.foreground) {
+            return Err(ContractError::at(
+                format!("{path}.foreground"),
+                "must be a hexadecimal CSS color",
+            ));
+        }
+        if let Some(value) = &self.outline_color
+            && !is_css_color(value)
+        {
+            return Err(ContractError::at(
+                format!("{path}.outlineColor"),
+                "must be a hexadecimal CSS color",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct BrowserTextStyle {
     pub font_id: String,
     pub category: FontCategory,
@@ -693,6 +731,8 @@ pub struct BrowserTextStyle {
     pub writing_mode: WritingMode,
     pub line_height: f32,
     pub letter_spacing_em: f32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub color_bands: Vec<BrowserTextColorBand>,
 }
 
 impl BrowserTextStyle {
@@ -752,6 +792,17 @@ impl BrowserTextStyle {
                 format!("{path}.lineHeight"),
                 "must be positive",
             ));
+        }
+        let mut previous_position = None;
+        for (index, band) in self.color_bands.iter().enumerate() {
+            band.validate_at(&format!("{path}.colorBands[{index}]"))?;
+            if previous_position.is_some_and(|previous| band.position <= previous) {
+                return Err(ContractError::at(
+                    format!("{path}.colorBands[{index}].position"),
+                    "must be strictly greater than the preceding color band",
+                ));
+            }
+            previous_position = Some(band.position);
         }
         Ok(())
     }
@@ -1186,10 +1237,21 @@ pub enum BrowserSetupState {
     Failed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LookupInteraction {
+    Selection,
+    Hover,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LookupRequest {
-    pub selected_text: String,
+    pub interaction: LookupInteraction,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub character_offset: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub job_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1198,17 +1260,50 @@ pub struct LookupRequest {
 
 impl Validate for LookupRequest {
     fn validate(&self) -> Result<(), ContractError> {
-        require_nonempty("selectedText", &self.selected_text)?;
-        if self.selected_text.chars().count() > 256 {
-            return Err(ContractError::at(
-                "selectedText",
-                "must contain at most 256 characters",
-            ));
+        match self.interaction {
+            LookupInteraction::Selection => {
+                let selected_text = self.selected_text.as_deref().ok_or_else(|| {
+                    ContractError::at("selectedText", "selection lookup requires selected text")
+                })?;
+                if self.character_offset.is_some() {
+                    return Err(ContractError::at(
+                        "characterOffset",
+                        "selection lookup cannot contain a character offset",
+                    ));
+                }
+                require_nonempty("selectedText", selected_text)?;
+                if selected_text.chars().count() > 256 {
+                    return Err(ContractError::at(
+                        "selectedText",
+                        "must contain at most 256 characters",
+                    ));
+                }
+            }
+            LookupInteraction::Hover => {
+                if self.selected_text.is_some() {
+                    return Err(ContractError::at(
+                        "selectedText",
+                        "hover lookup cannot contain selected text",
+                    ));
+                }
+                if self.character_offset.is_none() {
+                    return Err(ContractError::at(
+                        "characterOffset",
+                        "hover lookup requires a character offset",
+                    ));
+                }
+            }
         }
         if self.job_id.is_some() != self.region_id.is_some() {
             return Err(ContractError::at(
                 "regionId",
                 "jobId and regionId must be present together",
+            ));
+        }
+        if self.interaction == LookupInteraction::Hover && self.job_id.is_none() {
+            return Err(ContractError::at(
+                "jobId",
+                "hover lookup requires a translated job and region",
             ));
         }
         Ok(())
@@ -1305,6 +1400,71 @@ mod tests {
         assert!(is_css_color("#112233"));
         assert!(is_css_color("#11223344"));
         assert!(!is_css_color("red"));
+    }
+
+    #[test]
+    fn text_color_bands_are_validated_as_an_ordered_source_structure() {
+        let valid = BrowserTextStyle {
+            font_id: "hmt-sans".to_owned(),
+            category: FontCategory::Sans,
+            foreground: "#000".to_owned(),
+            weight: 600,
+            italic_degrees: 0.0,
+            outline_color: None,
+            outline_width_ratio: 0.0,
+            shadow_color: None,
+            shadow_x_ratio: 0.0,
+            shadow_y_ratio: 0.0,
+            alignment: TextAlignment::Center,
+            writing_mode: WritingMode::HorizontalTb,
+            line_height: 1.1,
+            letter_spacing_em: 0.0,
+            color_bands: vec![
+                BrowserTextColorBand {
+                    position: 0.25,
+                    foreground: "#111".to_owned(),
+                    outline_color: None,
+                },
+                BrowserTextColorBand {
+                    position: 0.75,
+                    foreground: "#2580df".to_owned(),
+                    outline_color: Some("#fff".to_owned()),
+                },
+            ],
+        };
+        assert!(valid.validate_at("style").is_ok());
+
+        let mut unordered = valid;
+        unordered.color_bands.reverse();
+        assert!(unordered.validate_at("style").is_err());
+    }
+
+    #[test]
+    fn lookup_contract_distinguishes_selection_from_position_anchored_hover() {
+        let hover: LookupRequest = serde_json::from_value(serde_json::json!({
+            "interaction": "hover",
+            "characterOffset": 2,
+            "jobId": "job-1",
+            "regionId": "region-1"
+        }))
+        .unwrap();
+        hover.validate().unwrap();
+        assert_eq!(hover.interaction, LookupInteraction::Hover);
+        assert_eq!(hover.character_offset, Some(2));
+
+        let selection: LookupRequest = serde_json::from_value(serde_json::json!({
+            "interaction": "selection",
+            "selectedText": "研究生"
+        }))
+        .unwrap();
+        selection.validate().unwrap();
+
+        let hover_without_region: LookupRequest = serde_json::from_value(serde_json::json!({
+            "interaction": "hover",
+            "characterOffset": 0
+        }))
+        .unwrap();
+        assert!(hover_without_region.validate().is_err());
     }
 
     #[test]

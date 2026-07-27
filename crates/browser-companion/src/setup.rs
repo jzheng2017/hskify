@@ -43,6 +43,10 @@ pub(crate) const OCR_MODEL_ID: &str = "pp-ocr-v5-english-recognizer-model";
 pub(crate) const DETECTOR_CONFIG_ID: &str = "comic-text-bubble-detector-config";
 pub(crate) const DETECTOR_PREPROCESSOR_ID: &str = "comic-text-bubble-detector-preprocessor-config";
 pub(crate) const DETECTOR_WEIGHTS_ID: &str = "comic-text-bubble-detector-weights";
+pub(crate) const INPAINTER_WEIGHTS_ID: &str = "lama-manga-inpainter-weights";
+pub(crate) const TEXT_SEGMENTER_WEIGHTS_ID: &str = "manga-text-segmentation-weights";
+pub(crate) const BUBBLE_SEGMENTER_CONFIG_ID: &str = "speech-bubble-segmentation-config";
+pub(crate) const BUBBLE_SEGMENTER_WEIGHTS_ID: &str = "speech-bubble-segmentation-weights";
 
 #[derive(Debug, Clone)]
 pub(crate) struct ManagedResourcePaths {
@@ -179,8 +183,12 @@ fn model_resources() -> Result<ModelResources> {
         DETECTOR_CONFIG_ID,
         DETECTOR_PREPROCESSOR_ID,
         DETECTOR_WEIGHTS_ID,
+        INPAINTER_WEIGHTS_ID,
+        TEXT_SEGMENTER_WEIGHTS_ID,
         OCR_CONFIG_ID,
         OCR_MODEL_ID,
+        BUBBLE_SEGMENTER_CONFIG_ID,
+        BUBBLE_SEGMENTER_WEIGHTS_ID,
         TRANSLATION_MODEL_ID,
     ];
     if identities.len() != required_ids.len()
@@ -189,7 +197,7 @@ fn model_resources() -> Result<ModelResources> {
             .map(|identity| identity.id.as_str())
             .ne(required_ids)
     {
-        bail!("embedded model manifest must contain exactly the six required resource identities");
+        bail!("embedded model manifest must contain exactly the required resource identities");
     }
 
     for resource in &manifest.resource_identities {
@@ -870,8 +878,12 @@ mod tests {
                 DETECTOR_CONFIG_ID,
                 DETECTOR_PREPROCESSOR_ID,
                 DETECTOR_WEIGHTS_ID,
+                INPAINTER_WEIGHTS_ID,
+                TEXT_SEGMENTER_WEIGHTS_ID,
                 OCR_CONFIG_ID,
                 OCR_MODEL_ID,
+                BUBBLE_SEGMENTER_CONFIG_ID,
+                BUBBLE_SEGMENTER_WEIGHTS_ID,
                 TRANSLATION_MODEL_ID,
             ]
         );

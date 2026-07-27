@@ -6,7 +6,8 @@
 
 use std::fmt::Write as _;
 
-pub const DIRECT_HSK_PROMPT_REVISION: &str = "direct-hsk-en-zh-generic-v19-2026-07-27";
+pub const DIRECT_HSK_PROMPT_REVISION: &str =
+    "direct-hsk-en-zh-semantic-disposition-inline-names-v29-2026-07-27";
 
 /// Canonical protocol description whose SHA-256 is
 /// [`DIRECT_HSK_PROMPT_HASH`].
@@ -15,10 +16,10 @@ pub const DIRECT_HSK_PROMPT_REVISION: &str = "direct-hsk-en-zh-generic-v19-2026-
 /// the digest so a prompt-semantic change cannot silently reuse cache entries
 /// or benchmark evidence.
 pub const DIRECT_HSK_PROMPT_FINGERPRINT_MATERIAL: &str = "\
-    direct-hsk-en-zh-generic-v19-2026-07-27
-primary-system=translate each of exactly {count} numbered OCR sources independently; every source was already accepted as story text by the semantic vision gate, so never classify or skip a line; only supplied preceding translations are reference; translate only meaning explicitly present in that line; preserve sentence and styled-emphasis fragments as fragments; never complete a fragment from another numbered source; response starts 1+tab; exactly {count} non-empty ordered lines 1..{count}; position+one-tab+Chinese; prefer concise natural HSK2.0 level {level}, but accurate natural Chinese wins if simplification changes meaning; preserve every clause/detail, speaker/addressee/participant roles, agency, attachment, causality, modality/certainty/condition, quantities/comparisons, negation, question intent, tone/humour, context-resolved ambiguity, unresolved ambiguity, relationships, pronoun referents, self-corrections in order, and numeric values; follow optional line-local approved-glossary notes only for matching position; no headings/labels/English/explanation/markdown/json/IDs
+    direct-hsk-en-zh-semantic-disposition-inline-names-v29-2026-07-27
+primary-system=classify and translate each of exactly {count} numbered OCR sources independently; output [NON-STORY] only when the complete source is unrelated page furniture such as a publisher/site credit, watermark, advertisement, or navigation label; never exclude dialogue, narration, thoughts, captions, signs, letters, titles within the story, names, roles, sentence fragments, or stylized emphasis; only supplied preceding translations are reference; translate only meaning explicitly present in that line; preserve sentence and styled-emphasis fragments as fragments; never complete a fragment from another numbered source; response starts 1+tab; exactly {count} non-empty ordered lines 1..{count}; position+one-tab+Chinese-or-[NON-STORY]; actively rewrite vocabulary, grammar, clause structure, and idioms for HSK2.0 level {level} according to a level-specific style rule, while preserving meaning; at levels 1-2 use basic everyday words, short subject-verb-object clauses, explicit referents, and avoid idioms, literary/formal wording, nominalization, nested clauses, and avoidable passive/把/被 constructions; at levels 3-4 allow common compound sentences and familiar connectors but replace advanced idioms, formal synonyms, and dense embedding; at levels 5-6 allow natural advanced grammar and precise vocabulary; preserve every clause/detail, speaker/addressee/participant roles, agency, attachment, causality, modality/certainty/condition, quantities/comparisons, negation, question intent, tone/humour, context-resolved ambiguity, unresolved ambiguity, relationships, pronoun referents, self-corrections in order, and numeric values; name handling is part of this same contextual translation decision: in keep-original mode preserve only semantic proper names that identify a particular entity, wrap every retained name as ⟦exact boundary-aligned source spelling⟧, and translate all unmarked English including descriptions and roles; in Chinese-name mode use approved/established/phonetic Chinese forms without dictionary-meaning translation; follow optional line-local approved-glossary notes only for matching position; no headings/labels/explanation/markdown/json/IDs
 primary-user=optional readable preceding-translations heading and dash source=>Chinese reference lines; optional line-specific-note heading with one-based position-tagged notes generated solely from application-supplied approved glossary entries whose exact ASCII English forms occur on that source line, selecting longest nonoverlapping matches; blank separators; English-lines heading; one-based position+tab+untouched-English
-repair-system=one accurate natural HSK2.0 level {level} Chinese line; prefer requested vocabulary unless simplification changes meaning; fix all problems; preserve every clause/detail, roles, agency, causality, modality, quantities/comparisons, negation, question intent, tone/humour, ambiguity, self-corrections, approved-substituted-Chinese-glossary-forms, and numeric values; no position/label/tab/English/explanation/markdown/json/ID
+repair-system=one accurate natural HSK2.0 level {level} Chinese line; actively apply the same level-specific vocabulary, grammar, clause-structure, and idiom rule as primary generation; fix all problems; apply the same contextual proper-name decision and exact-source inline name markup in keep-original mode, or Chinese name forms without dictionary-meaning translation in Chinese-name mode; preserve every clause/detail, roles, agency, causality, modality, quantities/comparisons, negation, question intent, tone/humour, ambiguity, self-corrections, approved-substituted-glossary-forms, and numeric values; no position/label/tab/explanation/markdown/json/ID
 repair-user=Source/Rejected/Problems/Answer readable fields; matching approved Chinese glossary forms substituted directly in Source
 decoding=greedy-unpenalized
 batch=3..6-production-max6
@@ -28,17 +29,23 @@ repair=at-most-one-per-rejected-bubble-no-context-no-primary-retry";
 // Filled from the exact UTF-8 bytes of
 // DIRECT_HSK_PROMPT_FINGERPRINT_MATERIAL.
 pub const DIRECT_HSK_PROMPT_HASH: &str =
-    "sha256:385818e986f0bb21cc78d477a6e76d5c25685de6ea1c9ed2deb53a1988986fc3";
+    "sha256:55190968a85b2619aca2d48087d9a52e22c48a881aee959aa69cbe25904dc558";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DirectHskNameStyle {
+    KeepOriginal,
+    Chinese,
+}
 
 /// Shared identity of numbered-line parsing and deterministic preservation
 /// validation used by production and release evidence.
 pub const DIRECT_HSK_VALIDATOR_FINGERPRINT_MATERIAL: &str = "numbered-tab-or-space-parser|\
 fullwidth-ascii|strict-primary-ascii-repair-trigger|source-guided-final-numeric-value-validation-v3-\
     ignore-letter-adjacent-ocr-digits-v1|deterministic-question-punctuation-v1|\
-all-skip-markers-rejected-v1|names|question-fragment-aware-v2|\
+    semantic-non-story-disposition-v1|inline-exact-source-name-markup-v1|unmarked-latin-rejected-v1|names|question-fragment-aware-v2|\
 excessive-han-expansion-v1";
 pub const DIRECT_HSK_VALIDATOR_HASH: &str =
-    "sha256:f8a05b19ee350f8942fbccf58e129a5eec60091e521523d144ca9fabc4ef79ef";
+    "sha256:1c23256323cef94f965c4d1c093392a3515f61249eba5d79cd73aa6689a4a1b1";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DirectHskContext<'a> {
@@ -54,26 +61,81 @@ pub struct DirectHskName<'a> {
 
 #[must_use]
 pub fn primary_system_prompt(level: u8, count: usize) -> String {
+    primary_system_prompt_with_name_style(level, count, DirectHskNameStyle::Chinese)
+}
+
+#[must_use]
+pub fn primary_system_prompt_with_name_style(
+    level: u8,
+    count: usize,
+    name_style: DirectHskNameStyle,
+) -> String {
+    let level_style = level_style_instruction(level);
+    let name_instruction = match name_style {
+        DirectHskNameStyle::KeepOriginal => {
+            "As part of translating the complete sentence, decide from meaning and context which \
+            source spans are proper names: lexicalized identifiers for particular people, places, \
+            organizations, named events, or unique entities. A capitalized description, relationship, \
+            occupation, rank, title, species, ordinary noun phrase, or clause is not a proper name and \
+            must be translated. Keep each proper name exactly as written in the English source and wrap \
+            it as `⟦exact source spelling⟧`. The text inside each marker pair must be one exact, \
+            boundary-aligned source span. Do not put markers around translated text. Translate every \
+            English word outside those marked names."
+        }
+        DirectHskNameStyle::Chinese => {
+            "Treat person, place, organization, and other proper names as names: never translate \
+            their dictionary meaning. Use an approved glossary form when supplied; otherwise use an \
+            established Chinese name only when certain, or a phonetic Chinese transliteration, and \
+            keep it consistent with preceding context."
+        }
+    };
     format!(
-        "Translate each of the {count} numbered OCR source lines independently into concise, \
-natural Simplified Chinese for a reader targeting cumulative HSK 2.0 level {level}. Every source \
-was already accepted as story text by the semantic vision gate, so never classify or skip a line. \
+        "Classify and translate each of the {count} numbered OCR source lines independently. \
+For a complete source that is unrelated page furniture—a publisher or site credit, watermark, \
+advertisement, or navigation label—output exactly `[NON-STORY]`. Never use `[NON-STORY]` for \
+dialogue, narration, thoughts, captions, signs, letters, titles within the story, proper names, \
+roles, sentence fragments, or stylized emphasis. Translate every story source into concise, \
+natural Simplified Chinese for a reader targeting cumulative HSK 2.0 level {level}. \
 Use only supplied preceding translations as reference; do not use another numbered source to \
 change a line's meaning. Translate only meaning explicitly present in that numbered line. If it is a \
 sentence fragment or styled emphasis fragment, keep it as a fragment and never complete it from \
-another numbered source. Prefer vocabulary at or below the requested level and short grammar, but \
-prioritize accurate, natural Chinese whenever simplification would omit or alter meaning. \
+        another numbered source. Actively rewrite vocabulary, grammar, clause structure, and idioms to \
+        suit the requested level—not vocabulary alone. {level_style} Prefer the simplest natural wording \
+        that preserves the complete meaning; do not keep advanced grammar merely because its vocabulary \
+        passes the HSK list. \
 Preserve complete meaning: every clause and detail; speaker, addressee, and participant roles; \
 who acts on whom and whether agency is intentional or accidental; attachment, cause and result; \
 modality, certainty, and conditions; quantities and comparisons; negation; question intent; tone \
 and humour; relationships and pronoun referents; ambiguity as resolved by preceding context, or \
 the ambiguity itself when unresolved; and self-corrections in their original order. Preserve \
-numeric values. If line-specific approved-glossary notes appear, follow only notes carrying that \
+        numeric values. {name_instruction} If line-specific approved-glossary notes appear, follow only notes carrying that \
 line's position; never apply a note to another line or output the notes. Your response must start \
 with `1\t` and contain exactly {count} non-empty lines numbered 1 through {count} in order. On \
-every line, write the position, one tab character, and only its Simplified Chinese translation. \
-Do not write headings, labels, English, explanations, Markdown, JSON, or application IDs."
+        every line, write the position, one tab, and only its Simplified Chinese translation plus \
+        the required temporary name markers when keep-original mode is active, or the exact \
+        `[NON-STORY]` disposition. \
+Do not write headings, labels, explanations, Markdown, JSON, or application IDs."
     )
+}
+
+fn level_style_instruction(level: u8) -> &'static str {
+    match level {
+        1 | 2 => {
+            "Use basic everyday words and short, direct subject-verb-object clauses. Make referents \
+            explicit when natural. Prefer two simple clauses over one nested clause. Avoid idioms, \
+            literary or formal wording, nominalization, dense modifiers, and avoidable 把/被 or passive \
+            constructions."
+        }
+        3 | 4 => {
+            "Use common conversational words and familiar connectors. Moderate compound sentences are \
+            fine, but replace advanced idioms, formal synonyms, nominalization, and deeply nested clauses \
+            with clearer everyday phrasing."
+        }
+        _ => {
+            "Natural advanced grammar and precise vocabulary are allowed, while concise everyday wording \
+            is still preferred when equally accurate."
+        }
+    }
 }
 
 #[must_use]
@@ -117,8 +179,7 @@ fn line_specific_notes(source: &str, names: &[DirectHskName<'_>]) -> Vec<String>
         .into_iter()
         .map(|name| {
             format!(
-                "approved glossary \"{}\" => \"{}\" (use this Chinese form for the exact English \
-form)",
+                "approved glossary \"{}\" => \"{}\" (use this exact form)",
                 compact(name.source_english),
                 compact(name.chinese)
             )
@@ -170,15 +231,35 @@ fn line_specific_names<'a>(source: &str, names: &[DirectHskName<'a>]) -> Vec<Dir
 
 #[must_use]
 pub fn repair_system_prompt(level: u8) -> String {
+    repair_system_prompt_with_name_style(level, DirectHskNameStyle::Chinese)
+}
+
+#[must_use]
+pub fn repair_system_prompt_with_name_style(level: u8, name_style: DirectHskNameStyle) -> String {
+    let level_style = level_style_instruction(level);
+    let name_instruction = match name_style {
+        DirectHskNameStyle::KeepOriginal => {
+            "Decide proper names from the complete source meaning, not capitalization. A proper name \
+            is a lexicalized identifier for a particular entity; descriptions, relationships, \
+            occupations, ranks, titles, species, noun phrases, and clauses must be translated. Keep \
+            each proper name exactly as written in the source and wrap it as `⟦exact source \
+            spelling⟧`. Each marked value must be one exact, boundary-aligned source span. Translate \
+            every English word outside marked names."
+        }
+        DirectHskNameStyle::Chinese => {
+            "Never translate proper names by dictionary meaning; use approved or established forms \
+            and otherwise a phonetic Chinese transliteration."
+        }
+    };
     format!(
         "Repair this one English-to-Simplified-Chinese translation for a reader targeting \
-cumulative HSK 2.0 level {level}. Fix every listed problem. Prefer concise, natural phrasing and \
-vocabulary at or below that level, but prioritize accurate, natural Chinese whenever \
-simplification would omit or alter meaning. Preserve every clause and detail, participant roles, \
+        cumulative HSK 2.0 level {level}. Fix every listed problem. Actively rewrite vocabulary, grammar, \
+        clause structure, and idioms for the requested level—not vocabulary alone. {level_style} Preserve \
+        every clause and detail, participant roles, \
 agency, cause and result, modality, quantities and comparisons, negation, question intent, tone \
-and humour, ambiguity, pronoun referents, self-corrections, approved Chinese glossary forms \
-already present in the source, and numeric values. Return exactly one non-empty line containing \
-only the corrected Simplified Chinese: no position, label, tab, English, explanation, Markdown, \
+        and humour, ambiguity, pronoun referents, self-corrections, approved glossary forms \
+        already present in the source, and numeric values. Return exactly one non-empty line containing \
+only the corrected translation. {name_instruction} Write no position, label, tab, explanation, Markdown, \
 JSON, or application ID."
     )
 }
@@ -294,17 +375,18 @@ mod tests {
         assert!(system.contains("start with `1\t`"));
         assert!(system.contains("exactly 2 non-empty lines"));
         assert!(system.contains("numbered 1 through 2 in order"));
-        assert!(system.contains("already accepted as story text"));
-        assert!(system.contains("never classify or skip a line"));
-        assert!(!system.contains("[SKIP]"));
+        assert!(system.contains("Classify and translate"));
+        assert!(system.contains("publisher or site credit"));
+        assert!(system.contains("[NON-STORY]"));
+        assert!(system.contains("Never use `[NON-STORY]` for"));
         assert_eq!(
             user,
             "Previous translations (reference only; do not output):\n\
 - Earlier English => 之前的中文\n\
 \n\
 Line-specific translation notes (reference only; do not output):\n\
-- 1: approved glossary \"Captain Rowan Finch\" => \"罗文·芬奇队长\" (use this Chinese form for the exact English form)\n\
-- 2: approved glossary \"Rowan Finch\" => \"罗文·芬奇\" (use this Chinese form for the exact English form)\n\
+- 1: approved glossary \"Captain Rowan Finch\" => \"罗文·芬奇队长\" (use this exact form)\n\
+- 2: approved glossary \"Rowan Finch\" => \"罗文·芬奇\" (use this exact form)\n\
 \n\
 English lines:\n\
 1\tCaptain Rowan Finch is here.\n\
@@ -318,12 +400,27 @@ English lines:\n\
         assert!(system.contains("only supplied preceding translations as reference"));
         assert!(system.contains("keep it as a fragment"));
         assert!(system.contains("never complete it from another numbered source"));
-        assert!(system.contains("prioritize accurate, natural Chinese"));
+        assert!(system.contains("simplest natural wording"));
         assert!(system.contains("speaker, addressee, and participant roles"));
         assert!(system.contains("agency is intentional or accidental"));
         assert!(system.contains("quantities and comparisons"));
         assert!(system.contains("tone and humour"));
         assert!(system.contains("self-corrections in their original order"));
+        assert!(system.contains("never translate their dictionary meaning"));
+    }
+
+    #[test]
+    fn low_and_high_hsk_levels_receive_materially_different_style_rules() {
+        let low = primary_system_prompt(2, 1);
+        let high = primary_system_prompt(5, 1);
+        let low_repair = repair_system_prompt(2);
+
+        assert!(low.contains("short, direct subject-verb-object clauses"));
+        assert!(low.contains("Prefer two simple clauses over one nested clause"));
+        assert!(low.contains("Avoid idioms"));
+        assert!(low_repair.contains("short, direct subject-verb-object clauses"));
+        assert!(high.contains("Natural advanced grammar and precise vocabulary are allowed"));
+        assert!(!high.contains("Prefer two simple clauses over one nested clause"));
     }
 
     #[test]
@@ -362,7 +459,7 @@ English lines:\n\
         let prompt = primary_user_prompt(&[], &names, &sources);
 
         assert!(prompt.contains(
-            "- 1: approved glossary \"River Stone\" => \"河石\" (use this Chinese form for the exact English form); approved glossary \"River\" => \"河\" (use this Chinese form for the exact English form)"
+            "- 1: approved glossary \"River Stone\" => \"河石\" (use this exact form); approved glossary \"River\" => \"河\" (use this exact form)"
         ));
         assert!(!prompt.contains("\"Never Present\""));
         assert!(!prompt.contains("- 2:"));
@@ -375,10 +472,27 @@ English lines:\n\
         assert!(system.contains("Preserve complete meaning"));
         assert!(system.contains("ambiguity itself when unresolved"));
         assert!(material.contains("application-supplied approved glossary entries"));
-        assert!(material.contains("every source was already accepted as story text"));
-        assert!(!material.contains("[SKIP]"));
+        assert!(material.contains("publisher/site credit"));
+        assert!(material.contains("[NON-STORY]"));
         assert!(!system.contains("chapter"));
         assert!(!material.contains("chapter"));
+    }
+
+    #[test]
+    fn name_style_explicitly_switches_between_original_and_chinese_forms() {
+        let original =
+            primary_system_prompt_with_name_style(3, 1, DirectHskNameStyle::KeepOriginal);
+        let chinese = primary_system_prompt_with_name_style(3, 1, DirectHskNameStyle::Chinese);
+        let original_repair =
+            repair_system_prompt_with_name_style(3, DirectHskNameStyle::KeepOriginal);
+
+        assert!(original.contains("exactly as written in the English source"));
+        assert!(original.contains("⟦exact source spelling⟧"));
+        assert!(original.contains("Translate every English word outside"));
+        assert!(original_repair.contains("Decide proper names from the complete source meaning"));
+        assert!(original_repair.contains("boundary-aligned source span"));
+        assert!(chinese.contains("phonetic Chinese transliteration"));
+        assert!(!chinese.contains("including its original Latin spelling"));
     }
 
     #[test]

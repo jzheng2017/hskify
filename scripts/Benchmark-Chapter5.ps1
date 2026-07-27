@@ -826,12 +826,16 @@ function Test-Prerequisites {
             'comic-text-bubble-detector-config',
             'comic-text-bubble-detector-preprocessor-config',
             'comic-text-bubble-detector-weights',
+            'lama-manga-inpainter-weights',
+            'manga-text-segmentation-weights',
             'pp-ocr-v5-english-recognizer-config',
             'pp-ocr-v5-english-recognizer-model',
+            'speech-bubble-segmentation-config',
+            'speech-bubble-segmentation-weights',
             'translation-model'
         )
         if ($manifestResourceIdentities.Count -ne $requiredIdentityIds.Count) {
-            $failures.Add('Pinned model manifest must contain exactly six resource identities')
+            $failures.Add('Pinned model manifest must contain exactly the required resource identities')
         }
         else {
             $identityIds = [System.Collections.Generic.HashSet[string]]::new(

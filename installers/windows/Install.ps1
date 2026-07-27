@@ -56,7 +56,8 @@ function Write-ModelReadinessMarker {
         [Parameter(Mandatory = $true)]
         [string] $Root,
         [Parameter(Mandatory = $true)]
-        [object] $Bundle
+        [object] $Bundle,
+        [string] $InstallationRoot = $Root
     )
 
     $modelManifestPath = Join-Path $Root 'resources\model-packs\manifest.v1.json'
@@ -76,10 +77,10 @@ function Write-ModelReadinessMarker {
     $installations = @(
         foreach ($identity in @($modelManifest.resourceIdentities)) {
             $path = if ([string] $identity.id -ceq 'translation-model') {
-                Join-Path $Root 'resources\models\Qwen3.5-4B-Q4_K_M.gguf'
+                Join-Path $InstallationRoot 'resources\models\Qwen3.5-4B-Q4_K_M.gguf'
             }
             else {
-                Join-Path $Root "resources\models\resident\$($identity.id)\$($identity.filename)"
+                Join-Path $InstallationRoot "resources\models\resident\$($identity.id)\$($identity.filename)"
             }
             [ordered]@{
                 id = [string] $identity.id
@@ -99,6 +100,29 @@ function Write-ModelReadinessMarker {
         ($marker | ConvertTo-Json -Depth 8 -Compress),
         [Text.UTF8Encoding]::new($false)
     )
+}
+
+function Stop-InstalledHskifyProcesses {
+    param([Parameter(Mandatory = $true)][string] $InstalledAppRoot)
+
+    $companionRoot = [IO.Path]::GetFullPath(
+        (Join-Path $InstalledAppRoot 'companion')
+    ).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+    foreach ($name in @('hsk-manga-native-host', 'hsk-manga-browser-daemon')) {
+        foreach ($process in @(Get-Process -Name $name -ErrorAction SilentlyContinue)) {
+            $path = try { $process.Path } catch { $null }
+            if (
+                -not [string]::IsNullOrWhiteSpace($path) -and
+                [IO.Path]::GetFullPath($path).StartsWith(
+                    $companionRoot,
+                    [StringComparison]::OrdinalIgnoreCase
+                )
+            ) {
+                Stop-Process -Id $process.Id -Force -ErrorAction Stop
+                $process.WaitForExit(5000)
+            }
+        }
+    }
 }
 
 $resolvedBundleRoot = (Resolve-Path -LiteralPath $BundleRoot).Path
@@ -136,23 +160,17 @@ if ($resolvedProductRoot -eq $driveRoot) {
     throw "refusing to install into a drive root: $resolvedProductRoot"
 }
 $appRoot = Join-Path $resolvedProductRoot 'app'
-$resourceRoot = Join-Path $resolvedProductRoot 'resources'
-$stateRoot = Join-Path $resolvedProductRoot 'browser-companion'
-if (
-    (Test-Path -LiteralPath $appRoot) -or
-    (Test-Path -LiteralPath $resourceRoot) -or
-    (Test-Path -LiteralPath $stateRoot)
-) {
-    throw "an installation already exists under $resolvedProductRoot; run Uninstall.ps1 first"
-}
+$updateId = [Guid]::NewGuid().ToString('N')
+$stagingRoot = Join-Path $resolvedProductRoot ".update-$updateId"
+$backupRoot = Join-Path $resolvedProductRoot ".previous-$updateId"
+$stagedAppRoot = Join-Path $stagingRoot 'app'
+$stagedResourceRoot = Join-Path $stagingRoot 'resources'
+$activatedNames = [Collections.Generic.List[string]]::new()
+$backedUpNames = [Collections.Generic.List[string]]::new()
+$registryExistedBefore = Test-Path -LiteralPath $RegistryPath
 
-$createdApp = $false
-$createdResources = $false
-$createdState = $false
-$registered = $false
 try {
-    [IO.Directory]::CreateDirectory($appRoot) | Out-Null
-    $createdApp = $true
+    [IO.Directory]::CreateDirectory($stagedAppRoot) | Out-Null
     foreach ($name in @(
         'companion',
         'extension',
@@ -163,55 +181,80 @@ try {
         'README.md',
         'bundle-manifest.json'
     )) {
-        Copy-Item -LiteralPath (Join-Path $resolvedBundleRoot $name) -Destination $appRoot -Recurse -Force
+        Copy-Item -LiteralPath (Join-Path $resolvedBundleRoot $name) -Destination $stagedAppRoot -Recurse -Force
     }
 
-    Copy-DirectoryContents -Source (Join-Path $resolvedBundleRoot 'resources') -Destination $resourceRoot
-    $createdResources = $true
+    Copy-DirectoryContents -Source (Join-Path $resolvedBundleRoot 'resources') -Destination $stagedResourceRoot
 
     foreach ($entry in @($bundleManifest.files)) {
         $relativePath = [string] $entry.path
         if ($relativePath.StartsWith('resources\', [StringComparison]::OrdinalIgnoreCase)) {
-            $installedPath = Join-Path $resolvedProductRoot $relativePath
+            $installedPath = Join-Path $stagingRoot $relativePath
         }
         else {
-            $installedPath = Join-Path $appRoot $relativePath
+            $installedPath = Join-Path $stagedAppRoot $relativePath
         }
         if (-not (Test-Path -LiteralPath $installedPath -PathType Leaf)) {
-            throw "installed file is missing after copy: $relativePath"
+            throw "staged file is missing after copy: $relativePath"
         }
         $actual = Get-Sha256 -Path $installedPath
         $expected = ([string] $entry.sha256).ToLowerInvariant()
         if ($actual -ne $expected) {
-            throw "installed file SHA-256 mismatch for $relativePath"
+            throw "staged file SHA-256 mismatch for $relativePath"
         }
     }
 
-    Write-ModelReadinessMarker -Root $resolvedProductRoot -Bundle $bundleManifest
-    $createdState = $true
+    Write-ModelReadinessMarker `
+        -Root $stagingRoot `
+        -Bundle $bundleManifest `
+        -InstallationRoot $resolvedProductRoot
+
+    Stop-InstalledHskifyProcesses -InstalledAppRoot $appRoot
+    [IO.Directory]::CreateDirectory($backupRoot) | Out-Null
+    foreach ($name in @('app', 'resources', 'browser-companion')) {
+        $installedPath = Join-Path $resolvedProductRoot $name
+        if (Test-Path -LiteralPath $installedPath) {
+            Move-Item -LiteralPath $installedPath -Destination (Join-Path $backupRoot $name)
+            $backedUpNames.Add($name)
+        }
+    }
+    foreach ($name in @('app', 'resources', 'browser-companion')) {
+        Move-Item -LiteralPath (Join-Path $stagingRoot $name) -Destination (Join-Path $resolvedProductRoot $name)
+        $activatedNames.Add($name)
+    }
 
     $registerScript = Join-Path $appRoot 'native-host-registration\Register-NativeHost.ps1'
     $nativeHostPath = Join-Path $appRoot 'companion\hsk-manga-native-host.exe'
     & $registerScript -NativeHostPath $nativeHostPath -RegistryPath $RegistryPath | Out-Null
-    $registered = $true
+
+    Remove-Item -LiteralPath $backupRoot -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $stagingRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
 catch {
-    if ($registered) {
-        $unregisterScript = Join-Path $appRoot 'native-host-registration\Unregister-NativeHost.ps1'
-        & $unregisterScript -RegistryPath $RegistryPath
+    foreach ($name in @($activatedNames)) {
+        $activatedPath = Join-Path $resolvedProductRoot $name
+        if (Test-Path -LiteralPath $activatedPath) {
+            Remove-Item -LiteralPath $activatedPath -Recurse -Force
+        }
     }
-    if ($createdApp -and (Test-Path -LiteralPath $appRoot)) {
-        Remove-Item -LiteralPath $appRoot -Recurse -Force
+    foreach ($name in @($backedUpNames)) {
+        $backupPath = Join-Path $backupRoot $name
+        if (Test-Path -LiteralPath $backupPath) {
+            Move-Item -LiteralPath $backupPath -Destination (Join-Path $resolvedProductRoot $name)
+        }
     }
-    if ($createdResources -and (Test-Path -LiteralPath $resourceRoot)) {
-        Remove-Item -LiteralPath $resourceRoot -Recurse -Force
+    if (-not $registryExistedBefore -and (Test-Path -LiteralPath $RegistryPath)) {
+        Remove-Item -LiteralPath $RegistryPath -Recurse -Force
     }
-    if ($createdState -and (Test-Path -LiteralPath $stateRoot)) {
-        Remove-Item -LiteralPath $stateRoot -Recurse -Force
+    if (Test-Path -LiteralPath $backupRoot) {
+        Remove-Item -LiteralPath $backupRoot -Recurse -Force
+    }
+    if (Test-Path -LiteralPath $stagingRoot) {
+        Remove-Item -LiteralPath $stagingRoot -Recurse -Force
     }
     throw
 }
 
-Write-Output "Installed Hskify under $resolvedProductRoot"
+Write-Output "Hskify is up to date under $resolvedProductRoot"
 Write-Output "Firefox extension package: $(Join-Path $appRoot 'extension\hskify-firefox.zip')"
 Write-Output "Uninstall command: powershell -ExecutionPolicy Bypass -File `"$(Join-Path $appRoot 'Uninstall.ps1')`""

@@ -30,7 +30,8 @@ are broader.
 - Direct English-to-HSK Chinese primary generation, with at most one targeted
   invalid-item repair batch.
 - Story inclusion is deterministic before the translation-only LLM; the LLM
-  cannot classify or skip accepted text.
+  returns either translated story text or the typed non-story disposition for
+  unrelated page furniture.
 - Viewport priority controls processing and publication only. Stable
   `readingOrder` remains document order followed by within-image reading order.
 - No browser projects, history, page-level pipeline markers, or level-change

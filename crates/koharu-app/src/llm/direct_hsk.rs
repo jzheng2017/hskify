@@ -10,8 +10,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Result, bail};
 use koharu_llm::direct_hsk_protocol::{
-    DirectHskContext, DirectHskName, context_budget_text, primary_system_prompt,
-    primary_user_prompt, repair_system_prompt as shared_repair_system_prompt, repair_user_prompt,
+    DirectHskContext, DirectHskName, DirectHskNameStyle, context_budget_text,
+    primary_system_prompt_with_name_style, primary_user_prompt,
+    repair_system_prompt_with_name_style, repair_user_prompt,
 };
 use koharu_llm::{GenerateOptions, Language, ModelId};
 use serde::{Deserialize, Serialize};
@@ -51,18 +52,37 @@ pub const fn direct_hsk_validator_hash() -> &'static str {
 
 const MIN_OUTPUT_TOKENS: usize = 24;
 const MAX_OUTPUT_TOKENS: usize = 256;
-const OUTPUT_TOKENS_PER_UTTERANCE: usize = 4;
-const INVALID_SKIP_MARKER: &str = "[SKIP]";
+const OUTPUT_TOKENS_PER_UTTERANCE: usize = 8;
+const NON_STORY_MARKER: &str = "[NON-STORY]";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct HskTranslationBatchRequest {
     pub requested_level: u8,
+    #[serde(default)]
+    pub name_handling: HskNameHandling,
     pub utterances: Vec<HskSourceUtterance>,
     #[serde(default)]
     pub preceding_utterances: Vec<HskPrecedingUtterance>,
     #[serde(default)]
     pub protected_names: Vec<HskProtectedName>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum HskNameHandling {
+    KeepOriginal,
+    #[default]
+    Chinese,
+}
+
+impl From<HskNameHandling> for DirectHskNameStyle {
+    fn from(value: HskNameHandling) -> Self {
+        match value {
+            HskNameHandling::KeepOriginal => Self::KeepOriginal,
+            HskNameHandling::Chinese => Self::Chinese,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -106,20 +126,40 @@ pub struct HskTranslationBatchResult {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct HskTranslationOutcome {
     pub id: String,
+    #[serde(default)]
+    pub disposition: HskTranslationDisposition,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub declared_names: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub issues: Vec<HskTranslationIssue>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum HskTranslationDisposition {
+    #[default]
+    Translate,
+    ExcludeNonStory,
 }
 
 impl HskTranslationOutcome {
     #[must_use]
     pub fn is_valid(&self) -> bool {
-        self.issues.is_empty()
+        self.disposition == HskTranslationDisposition::Translate
+            && self.issues.is_empty()
             && self
                 .text
                 .as_deref()
                 .is_some_and(|text| !text.trim().is_empty())
+    }
+
+    #[must_use]
+    pub fn is_non_story(&self) -> bool {
+        self.disposition == HskTranslationDisposition::ExcludeNonStory
+            && self.issues.is_empty()
+            && self.text.is_none()
     }
 
     #[must_use]
@@ -152,7 +192,8 @@ pub enum HskTranslationIssue {
         source_words: usize,
         chinese_characters: usize,
     },
-    UnsupportedExclusion,
+    InvalidNameMarkup,
+    UnmarkedLatinText,
 }
 
 impl HskTranslationIssue {
@@ -179,8 +220,12 @@ impl HskTranslationIssue {
                 "translate only this source fragment; {source_words} English words expanded to \
 {chinese_characters} Chinese characters"
             ),
-            Self::UnsupportedExclusion => {
-                "translate this story text; its OCR does not support exclusion".to_owned()
+            Self::InvalidNameMarkup => {
+                "wrap each retained proper name once as `⟦exact source spelling⟧`".to_owned()
+            }
+            Self::UnmarkedLatinText => {
+                "translate ordinary English; retain only proper names wrapped as `⟦name⟧`"
+                    .to_owned()
             }
         }
     }
@@ -193,6 +238,8 @@ impl HskTranslationIssue {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct HskTranslationRepairRequest {
     pub requested_level: u8,
+    #[serde(default)]
+    pub name_handling: HskNameHandling,
     pub utterance: HskRepairUtterance,
     #[serde(default)]
     pub preceding_utterances: Vec<HskPrecedingUtterance>,
@@ -219,6 +266,7 @@ trait Generator {
         system_prompt: &str,
         user_prompt: &str,
         options: &GenerateOptions,
+        target_language: Language,
         cancel: &AtomicBool,
         on_piece: &mut dyn FnMut(&str) -> Result<()>,
     ) -> Result<String>;
@@ -316,6 +364,7 @@ impl Generator for Model {
         system_prompt: &str,
         user_prompt: &str,
         options: &GenerateOptions,
+        target_language: Language,
         cancel: &AtomicBool,
         on_piece: &mut dyn FnMut(&str) -> Result<()>,
     ) -> Result<String> {
@@ -342,7 +391,7 @@ impl Generator for Model {
         llm.generate_constrained_streaming(
             user_prompt,
             options,
-            Language::ChineseSimplified,
+            target_language,
             system_prompt,
             cancel,
             on_piece,
@@ -412,9 +461,12 @@ where
             std::mem::swap(&mut tail, &mut pending_line);
             let completed = tail.strip_suffix('\n').unwrap_or(&tail);
             let completed = completed.strip_suffix('\r').unwrap_or(completed);
-            if let Some(outcome) =
-                parse_streamed_line(completed, &expected, &bounded_request.protected_names)
-                && streamed_ids.insert(outcome.id.clone())
+            if let Some(outcome) = parse_streamed_line(
+                completed,
+                &expected,
+                &bounded_request.protected_names,
+                bounded_request.name_handling,
+            ) && streamed_ids.insert(outcome.id.clone())
             {
                 on_item(&outcome)?;
             }
@@ -426,16 +478,23 @@ where
             &translation_system_prompt(
                 bounded_request.requested_level,
                 bounded_request.utterances.len(),
+                bounded_request.name_handling,
             ),
             &prompt,
             &options,
+            Language::ChineseSimplified,
             cancel,
             &mut publish_piece,
         )
         .await?;
     check_cancelled(cancel)?;
 
-    let result = parse_numbered_output(&raw, &expected, &bounded_request.protected_names);
+    let result = parse_numbered_output_with_name_handling(
+        &raw,
+        &expected,
+        &bounded_request.protected_names,
+        bounded_request.name_handling,
+    );
     for outcome in &result.items {
         if streamed_ids.insert(outcome.id.clone()) {
             on_item(outcome)?;
@@ -465,22 +524,27 @@ where
     ));
     let raw = generator
         .generate_streaming(
-            &repair_system_prompt(bounded_request.requested_level),
+            &repair_system_prompt(
+                bounded_request.requested_level,
+                bounded_request.name_handling,
+            ),
             &prompt,
             &options,
+            Language::ChineseSimplified,
             cancel,
             &mut |_| Ok(()),
         )
         .await?;
     check_cancelled(cancel)?;
 
-    Ok(parse_repair_output(
+    Ok(parse_repair_output_with_name_handling(
         &raw,
         &ExpectedUtterance {
             id: &bounded_request.utterance.id,
             source_english: &bounded_request.utterance.source_english,
         },
         &bounded_request.protected_names,
+        bounded_request.name_handling,
     ))
 }
 
@@ -515,12 +579,12 @@ fn render_context_for_budget(context: &[HskPrecedingUtterance]) -> String {
     context_budget_text(&context)
 }
 
-fn translation_system_prompt(level: u8, count: usize) -> String {
-    primary_system_prompt(level, count)
+fn translation_system_prompt(level: u8, count: usize, name_handling: HskNameHandling) -> String {
+    primary_system_prompt_with_name_style(level, count, name_handling.into())
 }
 
-fn repair_system_prompt(level: u8) -> String {
-    shared_repair_system_prompt(level)
+fn repair_system_prompt(level: u8, name_handling: HskNameHandling) -> String {
+    repair_system_prompt_with_name_style(level, name_handling.into())
 }
 
 fn build_translation_prompt(request: &HskTranslationBatchRequest) -> String {
@@ -701,14 +765,30 @@ struct ExpectedUtterance<'a> {
 }
 
 enum ParsedLine {
-    Candidate(String),
+    Candidate { text: String },
+    ExcludeNonStory,
     Malformed,
 }
 
+#[cfg(test)]
 fn parse_numbered_output(
     output: &str,
     expected: &[ExpectedUtterance<'_>],
     protected_names: &[HskProtectedName],
+) -> HskTranslationBatchResult {
+    parse_numbered_output_with_name_handling(
+        output,
+        expected,
+        protected_names,
+        HskNameHandling::Chinese,
+    )
+}
+
+fn parse_numbered_output_with_name_handling(
+    output: &str,
+    expected: &[ExpectedUtterance<'_>],
+    protected_names: &[HskProtectedName],
+    name_handling: HskNameHandling,
 ) -> HskTranslationBatchResult {
     let mut slots = (0..expected.len())
         .map(|_| Vec::<ParsedLine>::new())
@@ -729,7 +809,9 @@ fn parse_numbered_output(
     let items = expected
         .iter()
         .zip(slots)
-        .map(|(expected, lines)| outcome_from_lines(expected, lines, protected_names))
+        .map(|(expected, lines)| {
+            outcome_from_lines(expected, lines, protected_names, name_handling)
+        })
         .collect();
     HskTranslationBatchResult { items }
 }
@@ -738,6 +820,7 @@ fn parse_streamed_line(
     line: &str,
     expected: &[ExpectedUtterance<'_>],
     protected_names: &[HskProtectedName],
+    name_handling: HskNameHandling,
 ) -> Option<HskTranslationOutcome> {
     let (position, parsed) = parse_output_line(line, expected.len())?;
     if is_source_echo(&parsed, expected[position - 1].source_english) {
@@ -747,49 +830,93 @@ fn parse_streamed_line(
         &expected[position - 1],
         vec![parsed],
         protected_names,
+        name_handling,
     ))
 }
 
-fn parse_repair_output(
+fn parse_repair_output_with_name_handling(
     output: &str,
     expected: &ExpectedUtterance<'_>,
     protected_names: &[HskProtectedName],
+    name_handling: HskNameHandling,
 ) -> HskTranslationOutcome {
     let mut lines = output
         .split('\n')
         .map(|line| line.strip_suffix('\r').unwrap_or(line))
         .filter(|line| !line.trim().is_empty());
     let Some(line) = lines.next() else {
-        return outcome_from_lines(expected, Vec::new(), protected_names);
+        return outcome_from_lines(expected, Vec::new(), protected_names, name_handling);
     };
     if lines.next().is_some() || line.contains('\t') {
-        return outcome_from_lines(expected, vec![ParsedLine::Malformed], protected_names);
+        return outcome_from_lines(
+            expected,
+            vec![ParsedLine::Malformed],
+            protected_names,
+            name_handling,
+        );
     }
     if compact_field(line) == compact_field(expected.source_english) {
         return HskTranslationOutcome {
             id: expected.id.to_owned(),
+            disposition: HskTranslationDisposition::Translate,
             text: None,
+            declared_names: Vec::new(),
             issues: vec![HskTranslationIssue::SourceEcho],
         };
     }
-    if line.trim().eq_ignore_ascii_case(INVALID_SKIP_MARKER) {
-        return outcome_from_lines(expected, vec![ParsedLine::Malformed], protected_names);
+    if line.trim().eq_ignore_ascii_case(NON_STORY_MARKER) {
+        return outcome_from_lines(
+            expected,
+            vec![ParsedLine::Malformed],
+            protected_names,
+            name_handling,
+        );
     }
     let mut outcome = outcome_from_lines(
         expected,
-        vec![ParsedLine::Candidate(line.to_owned())],
+        vec![ParsedLine::Candidate {
+            text: line.to_owned(),
+        }],
         protected_names,
+        name_handling,
     );
     if let Some(text) = outcome.text.as_deref() {
+        let markup_issues = outcome
+            .issues
+            .iter()
+            .filter(|issue| {
+                matches!(
+                    issue,
+                    HskTranslationIssue::InvalidNameMarkup | HskTranslationIssue::UnmarkedLatinText
+                )
+            })
+            .cloned()
+            .collect::<Vec<_>>();
         outcome.issues = preservation_issues(expected.source_english, text, protected_names, true);
+        outcome.issues.extend(markup_issues);
     }
     outcome
+}
+
+#[cfg(test)]
+fn parse_repair_output(
+    output: &str,
+    expected: &ExpectedUtterance<'_>,
+    protected_names: &[HskProtectedName],
+) -> HskTranslationOutcome {
+    parse_repair_output_with_name_handling(
+        output,
+        expected,
+        protected_names,
+        HskNameHandling::Chinese,
+    )
 }
 
 fn is_source_echo(line: &ParsedLine, source_english: &str) -> bool {
     matches!(
         line,
-        ParsedLine::Candidate(text) if compact_field(text) == compact_field(source_english)
+        ParsedLine::Candidate { text, .. }
+            if compact_field(text) == compact_field(source_english)
     )
 }
 
@@ -797,55 +924,76 @@ fn outcome_from_lines(
     expected: &ExpectedUtterance<'_>,
     mut lines: Vec<ParsedLine>,
     protected_names: &[HskProtectedName],
+    name_handling: HskNameHandling,
 ) -> HskTranslationOutcome {
     if lines.is_empty() {
         return HskTranslationOutcome {
             id: expected.id.to_owned(),
+            disposition: HskTranslationDisposition::Translate,
             text: None,
+            declared_names: Vec::new(),
             issues: vec![HskTranslationIssue::MissingLine],
         };
     }
     if lines.len() > 1 {
         let text = lines.drain(..).find_map(|line| match line {
-            ParsedLine::Candidate(text) if !text.trim().is_empty() => Some(text),
-            ParsedLine::Candidate(_) | ParsedLine::Malformed => None,
+            ParsedLine::Candidate { text, .. } if !text.trim().is_empty() => Some(text),
+            ParsedLine::Candidate { .. } | ParsedLine::ExcludeNonStory | ParsedLine::Malformed => {
+                None
+            }
         });
         return HskTranslationOutcome {
             id: expected.id.to_owned(),
+            disposition: HskTranslationDisposition::Translate,
             text,
+            declared_names: Vec::new(),
             issues: vec![HskTranslationIssue::DuplicateLine],
         };
     }
 
-    let ParsedLine::Candidate(mut text) = lines.pop().expect("slot is non-empty") else {
-        return HskTranslationOutcome {
-            id: expected.id.to_owned(),
-            text: None,
-            issues: vec![HskTranslationIssue::MalformedLine],
-        };
+    let mut text = match lines.pop().expect("slot is non-empty") {
+        ParsedLine::Candidate { text } => text,
+        ParsedLine::ExcludeNonStory => {
+            return HskTranslationOutcome {
+                id: expected.id.to_owned(),
+                disposition: HskTranslationDisposition::ExcludeNonStory,
+                text: None,
+                declared_names: Vec::new(),
+                issues: Vec::new(),
+            };
+        }
+        ParsedLine::Malformed => {
+            return HskTranslationOutcome {
+                id: expected.id.to_owned(),
+                disposition: HskTranslationDisposition::Translate,
+                text: None,
+                declared_names: Vec::new(),
+                issues: vec![HskTranslationIssue::MalformedLine],
+            };
+        }
     };
     text = text.trim().to_owned();
     if text.is_empty() {
         return HskTranslationOutcome {
             id: expected.id.to_owned(),
+            disposition: HskTranslationDisposition::Translate,
             text: None,
+            declared_names: Vec::new(),
             issues: vec![HskTranslationIssue::EmptyTranslation],
         };
     }
-    if text.eq_ignore_ascii_case(INVALID_SKIP_MARKER) {
-        return HskTranslationOutcome {
-            id: expected.id.to_owned(),
-            text: None,
-            issues: vec![HskTranslationIssue::UnsupportedExclusion],
-        };
-    }
 
+    let (mut text, declared_names, mut markup_issues) =
+        validate_and_strip_name_markup(expected.source_english, &text, name_handling);
     normalize_full_width_digits(&mut text);
     normalize_question_punctuation(expected.source_english, &mut text);
-    let issues = preservation_issues(expected.source_english, &text, protected_names, false);
+    let mut issues = preservation_issues(expected.source_english, &text, protected_names, false);
+    issues.append(&mut markup_issues);
     HskTranslationOutcome {
         id: expected.id.to_owned(),
+        disposition: HskTranslationDisposition::Translate,
         text: Some(text),
+        declared_names,
         issues,
     }
 }
@@ -883,7 +1031,95 @@ fn parse_output_line(line: &str, expected_count: usize) -> Option<(usize, Parsed
     if text.contains('\t') {
         return Some((position, ParsedLine::Malformed));
     }
-    Some((position, ParsedLine::Candidate(text.to_owned())))
+    if text.trim().eq_ignore_ascii_case(NON_STORY_MARKER) {
+        return Some((position, ParsedLine::ExcludeNonStory));
+    }
+    Some((
+        position,
+        ParsedLine::Candidate {
+            text: text.to_owned(),
+        },
+    ))
+}
+
+fn validate_and_strip_name_markup(
+    source_english: &str,
+    translation: &str,
+    name_handling: HskNameHandling,
+) -> (String, Vec<String>, Vec<HskTranslationIssue>) {
+    const OPEN: char = '⟦';
+    const CLOSE: char = '⟧';
+
+    let mut output = String::with_capacity(translation.len());
+    let mut current_name = None::<String>;
+    let mut names = Vec::<String>::new();
+    let mut invalid_markup = name_handling == HskNameHandling::Chinese
+        && translation
+            .chars()
+            .any(|character| matches!(character, OPEN | CLOSE));
+    let mut unmarked_latin = false;
+
+    for character in translation.chars() {
+        match character {
+            OPEN => {
+                if current_name.is_some() {
+                    invalid_markup = true;
+                } else {
+                    current_name = Some(String::new());
+                }
+            }
+            CLOSE => {
+                let Some(name) = current_name.take() else {
+                    invalid_markup = true;
+                    continue;
+                };
+                if name_handling != HskNameHandling::KeepOriginal
+                    || name.is_empty()
+                    || !source_contains_exact_span(source_english, &name)
+                {
+                    invalid_markup = true;
+                } else if !names.contains(&name) {
+                    names.push(name.clone());
+                }
+                output.push_str(&name);
+            }
+            _ => {
+                if let Some(name) = current_name.as_mut() {
+                    name.push(character);
+                } else {
+                    unmarked_latin |= character.is_ascii_alphabetic();
+                    output.push(character);
+                }
+            }
+        }
+    }
+    if let Some(name) = current_name {
+        invalid_markup = true;
+        output.push_str(&name);
+    }
+
+    let mut issues = Vec::new();
+    if invalid_markup {
+        issues.push(HskTranslationIssue::InvalidNameMarkup);
+    }
+    if name_handling == HskNameHandling::KeepOriginal && unmarked_latin {
+        issues.push(HskTranslationIssue::UnmarkedLatinText);
+    }
+    if name_handling == HskNameHandling::Chinese {
+        names.clear();
+    }
+    (output, names, issues)
+}
+
+fn source_contains_exact_span(source: &str, name: &str) -> bool {
+    source.match_indices(name).any(|(start, matched)| {
+        let end = start + matched.len();
+        let starts_at_boundary =
+            start == 0 || !source.as_bytes()[start - 1].is_ascii_alphanumeric();
+        let ends_at_boundary =
+            end == source.len() || !source.as_bytes()[end].is_ascii_alphanumeric();
+        starts_at_boundary && ends_at_boundary
+    })
 }
 
 fn preservation_issues(
@@ -1170,6 +1406,7 @@ mod tests {
         system_prompts: Mutex<Vec<String>>,
         user_prompts: Mutex<Vec<String>>,
         options: Mutex<Vec<GenerateOptions>>,
+        target_languages: Mutex<Vec<Language>>,
         calls: AtomicUsize,
     }
 
@@ -1180,6 +1417,7 @@ mod tests {
                 system_prompts: Mutex::new(Vec::new()),
                 user_prompts: Mutex::new(Vec::new()),
                 options: Mutex::new(Vec::new()),
+                target_languages: Mutex::new(Vec::new()),
                 calls: AtomicUsize::new(0),
             }
         }
@@ -1195,6 +1433,7 @@ mod tests {
             system_prompt: &str,
             user_prompt: &str,
             options: &GenerateOptions,
+            target_language: Language,
             _cancel: &AtomicBool,
             on_piece: &mut dyn FnMut(&str) -> Result<()>,
         ) -> Result<String> {
@@ -1208,6 +1447,7 @@ mod tests {
                 .unwrap()
                 .push(user_prompt.to_owned());
             self.options.lock().unwrap().push(options.clone());
+            self.target_languages.lock().unwrap().push(target_language);
             let output = self
                 .outputs
                 .lock()
@@ -1221,6 +1461,78 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn keep_original_names_are_decided_inside_the_single_translation_call() -> Result<()> {
+        let generator = FakeGenerator::new(["1\t我昨天见到了⟦Tarin Voss⟧。"]);
+        let input = HskTranslationBatchRequest {
+            requested_level: 3,
+            name_handling: HskNameHandling::KeepOriginal,
+            utterances: vec![source("dialogue", "I saw Tarin Voss yesterday.")],
+            preceding_utterances: Vec::new(),
+            protected_names: Vec::new(),
+        };
+
+        let result = translate_with(&generator, &input, &AtomicBool::new(false)).await?;
+
+        assert!(result.items[0].is_valid());
+        assert_eq!(
+            result.items[0].text.as_deref(),
+            Some("我昨天见到了Tarin Voss。")
+        );
+        assert_eq!(result.items[0].declared_names, ["Tarin Voss"]);
+        assert_eq!(generator.calls.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            *generator.target_languages.lock().unwrap(),
+            [Language::ChineseSimplified]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ordinary_descriptions_need_no_code_vocabulary_to_translate() -> Result<()> {
+        let generator = FakeGenerator::new(["1\t那位年长的管理员来了。"]);
+        let input = HskTranslationBatchRequest {
+            requested_level: 3,
+            name_handling: HskNameHandling::KeepOriginal,
+            utterances: vec![source("dialogue", "THE SENIOR ADMINISTRATOR ARRIVED.")],
+            preceding_utterances: Vec::new(),
+            protected_names: Vec::new(),
+        };
+
+        let result = translate_with(&generator, &input, &AtomicBool::new(false)).await?;
+
+        assert!(result.items[0].is_valid());
+        assert!(result.items[0].declared_names.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn name_markup_is_mechanical_exact_and_never_semantic_code() {
+        let source = "Tarin Voss met the senior administrator.";
+        let (text, names, issues) = validate_and_strip_name_markup(
+            source,
+            "⟦Tarin Voss⟧见到了高级管理员。",
+            HskNameHandling::KeepOriginal,
+        );
+        assert_eq!(text, "Tarin Voss见到了高级管理员。");
+        assert_eq!(names, ["Tarin Voss"]);
+        assert!(issues.is_empty());
+
+        let (_, _, altered) = validate_and_strip_name_markup(
+            source,
+            "我见到了⟦TARIN VOSS⟧。",
+            HskNameHandling::KeepOriginal,
+        );
+        assert_eq!(altered, [HskTranslationIssue::InvalidNameMarkup]);
+
+        let (_, _, unmarked) = validate_and_strip_name_markup(
+            source,
+            "Tarin Voss见到了高级管理员。",
+            HskNameHandling::KeepOriginal,
+        );
+        assert_eq!(unmarked, [HskTranslationIssue::UnmarkedLatinText]);
+    }
+
     fn source(id: &str, source_english: &str) -> HskSourceUtterance {
         HskSourceUtterance {
             id: id.to_owned(),
@@ -1232,6 +1544,7 @@ mod tests {
     fn request() -> HskTranslationBatchRequest {
         HskTranslationBatchRequest {
             requested_level: 2,
+            name_handling: HskNameHandling::Chinese,
             utterances: vec![
                 source("private-bubble-a", "Alice does not have 2 tickets."),
                 source("private-bubble-b", "Are you ready?"),
@@ -1290,9 +1603,9 @@ mod tests {
         assert!(prompt.contains("- english-context-2 => chinese-context-2"));
         assert!(!prompt.contains("1\tenglish-context-2"));
         assert!(!prompt.contains("N\tAlice\t"));
-        assert!(prompt.contains(
-            "- 1: approved glossary \"Alice\" => \"爱丽丝\" (use this Chinese form for the exact English form)"
-        ));
+        assert!(
+            prompt.contains("- 1: approved glossary \"Alice\" => \"爱丽丝\" (use this exact form)")
+        );
         assert!(prompt.contains("1\tAlice does not have 2 tickets."));
         assert!(!prompt.contains("INPUT\t"));
         assert!(!prompt.contains("\tD\t"));
@@ -1416,7 +1729,7 @@ mod tests {
     }
 
     #[test]
-    fn parser_rejects_reserved_skip_marker() {
+    fn parser_returns_explicit_non_story_disposition_without_translation() {
         let input = request();
         let expected = input
             .utterances
@@ -1427,15 +1740,12 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let result = parse_numbered_output(
-            "1\t[SKIP]\n2\t你准备好了吗？\n3\t我们走吧！",
+            "1\t[NON-STORY]\n2\t你准备好了吗？\n3\t我们走吧！",
             &expected,
             &input.protected_names,
         );
 
-        assert_eq!(
-            result.items[0].issues,
-            vec![HskTranslationIssue::UnsupportedExclusion]
-        );
+        assert!(result.items[0].is_non_story());
         assert!(!result.items[0].is_valid());
         assert!(
             result.items[1..]
@@ -1445,35 +1755,12 @@ mod tests {
     }
 
     #[test]
-    fn parser_rejects_skip_for_every_preaccepted_story_source() {
-        let expected = [
-            ExpectedUtterance {
-                id: "release-note",
-                source_english: "for the fstest eleases",
-            },
-            ExpectedUtterance {
-                id: "fragmented-ocr",
-                source_english: "H FIV OOCALM",
-            },
-            ExpectedUtterance {
-                id: "real-story",
-                source_english: "I found your identit4, location, and personal details.",
-            },
-        ];
-        let result = parse_numbered_output("1\t[SKIP]\n2\t[skip]\n3\t[SKIP]", &expected, &[]);
-
-        assert!(result.items.iter().all(|item| {
-            item.issues == vec![HskTranslationIssue::UnsupportedExclusion] && !item.is_valid()
-        }));
-    }
-
-    #[test]
-    fn repair_parser_rejects_reserved_skip_marker() {
+    fn repair_parser_rejects_non_story_disposition() {
         let expected = ExpectedUtterance {
             id: "story-region",
             source_english: "A real story line.",
         };
-        let outcome = parse_repair_output(INVALID_SKIP_MARKER, &expected, &[]);
+        let outcome = parse_repair_output(NON_STORY_MARKER, &expected, &[]);
 
         assert_eq!(outcome.issues, vec![HskTranslationIssue::MalformedLine]);
     }
@@ -1505,6 +1792,7 @@ mod tests {
 
         let repair = HskTranslationRepairRequest {
             requested_level: input.requested_level,
+            name_handling: input.name_handling,
             utterance: HskRepairUtterance {
                 id: input.utterances[0].id.clone(),
                 kind: input.utterances[0].kind,
@@ -1751,7 +2039,7 @@ mod tests {
         assert!(output_token_budget(["A short sentence."].into_iter(), 1) < 512);
         assert_eq!(
             output_token_budget(["x".repeat(242).as_str()].into_iter(), 6),
-            153
+            177
         );
         let long = "x".repeat(10_000);
         assert_eq!(
@@ -1761,14 +2049,26 @@ mod tests {
     }
 
     #[test]
+    fn name_handling_changes_primary_and_repair_instructions() {
+        let original = translation_system_prompt(3, 1, HskNameHandling::KeepOriginal);
+        let chinese = translation_system_prompt(3, 1, HskNameHandling::Chinese);
+        let repair = repair_system_prompt(3, HskNameHandling::KeepOriginal);
+
+        assert!(original.contains("exactly as written in the English source"));
+        assert!(repair.contains("Decide proper names from the complete source meaning"));
+        assert!(repair.contains("⟦exact source spelling⟧"));
+        assert!(chinese.contains("phonetic Chinese transliteration"));
+    }
+
+    #[test]
     fn cache_metadata_helpers_are_stable_and_layered() {
         assert_eq!(
             direct_hsk_prompt_hash(),
-            "sha256:385818e986f0bb21cc78d477a6e76d5c25685de6ea1c9ed2deb53a1988986fc3"
+            "sha256:55190968a85b2619aca2d48087d9a52e22c48a881aee959aa69cbe25904dc558"
         );
         assert_eq!(
             direct_hsk_validator_hash(),
-            "sha256:f8a05b19ee350f8942fbccf58e129a5eec60091e521523d144ca9fabc4ef79ef"
+            "sha256:1c23256323cef94f965c4d1c093392a3515f61249eba5d79cd73aa6689a4a1b1"
         );
         assert_eq!(HSK_TRANSLATION_MODEL, ModelId::Qwen3_5_4b);
         assert_eq!(
@@ -1819,6 +2119,7 @@ mod tests {
 
         let repair = HskTranslationRepairRequest {
             requested_level: 2,
+            name_handling: HskNameHandling::Chinese,
             utterance: HskRepairUtterance {
                 id: "id".to_owned(),
                 kind: HskUtteranceKind::Dialogue,

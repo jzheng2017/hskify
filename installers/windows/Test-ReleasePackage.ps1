@@ -8,7 +8,7 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-$buildScript = Join-Path $PSScriptRoot 'Build-DeveloperPackage.ps1'
+$buildScript = Join-Path $PSScriptRoot 'Build-ReleasePackage.ps1'
 $repositoryRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 . (Join-Path $repositoryRoot 'scripts\PerformanceBuildAttestation.ps1')
 if ([string]::IsNullOrWhiteSpace($HskArtifactPath)) {
@@ -233,7 +233,7 @@ try {
             -SansFontPath $sansFontPath `
             -SerifFontPath $serifFontPath `
             -ModelManifestPath $modelManifestPath
-        throw 'the developer package accepted explicitly supplied binaries without an attestation'
+        throw 'the release package accepted explicitly supplied binaries without an attestation'
     }
     catch {
         if ($_.Exception.Message -notlike '*BuildAttestationPath is required*') {
@@ -271,7 +271,7 @@ try {
                 -SansFontPath $sansFontPath `
                 -SerifFontPath $serifFontPath `
                 -ModelManifestPath $modelManifestPath
-            throw "the developer package accepted the invalid $Name attestation claim"
+            throw "the release package accepted the invalid $Name attestation claim"
         }
         catch {
             if ($_.Exception.Message -notlike "*$ExpectedMessage*") {
@@ -319,7 +319,7 @@ try {
             -SansFontPath $sansFontPath `
             -SerifFontPath $serifFontPath `
             -ModelManifestPath $modelManifestPath
-        throw 'the developer package accepted a binary that did not match the attestation'
+        throw 'the release package accepted a binary that did not match the attestation'
     }
     catch {
         if ($_.Exception.Message -notlike '*binary identity mismatch*') {
@@ -345,7 +345,7 @@ try {
             -SansFontPath $sansFontPath `
             -SerifFontPath $serifFontPath `
             -ModelManifestPath $modelManifestPath
-        throw 'the developer package accepted a model with the wrong SHA-256'
+        throw 'the release package accepted a model with the wrong SHA-256'
     }
     catch {
         if ($_.Exception.Message -notlike '*model SHA-256 mismatch*') {
@@ -374,7 +374,7 @@ try {
             -SerifFontPath $serifFontPath `
             -ModelManifestPath $modelManifestPath `
             -Force
-        throw 'the developer package replaced a populated unmarked directory'
+        throw 'the release package replaced a populated unmarked directory'
     }
     catch {
         if ($_.Exception.Message -notlike '*without a valid prior HSK bundle marker*') {
@@ -524,8 +524,8 @@ try {
     Assert-True `
         -Condition (
             $readinessMarker.buildFingerprint -eq $script:HskifyPerformanceBuildFingerprint -and
-            @($readinessMarker.resourceIdentities).Count -eq 6 -and
-            @($readinessMarker.installations).Count -eq 6
+            @($readinessMarker.resourceIdentities).Count -eq 10 -and
+            @($readinessMarker.installations).Count -eq 10
         ) `
         -Message 'installer wrote an invalid model-readiness marker'
 
@@ -539,6 +539,32 @@ try {
     Assert-True `
         -Condition (@($nativeManifest.allowed_extensions).Count -eq 1 -and $nativeManifest.allowed_extensions[0] -eq 'hsk-manga-translator@local.hskify') `
         -Message 'native manifest allows the wrong Firefox extension'
+
+    $obsoleteAppFile = Join-Path $productRoot 'app\obsolete-from-previous-build'
+    $obsoleteResourceFile = Join-Path $productRoot 'resources\obsolete-from-previous-build'
+    [IO.File]::WriteAllText($obsoleteAppFile, 'obsolete')
+    [IO.File]::WriteAllText($obsoleteResourceFile, 'obsolete')
+    & powershell `
+        -NoProfile `
+        -ExecutionPolicy Bypass `
+        -File (Join-Path $bundleRoot 'Install.ps1') `
+        -ProductRoot $productRoot `
+        -RegistryPath $testRegistryPath | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "documented update command failed with exit code $LASTEXITCODE"
+    }
+    Assert-True `
+        -Condition (-not (Test-Path -LiteralPath $obsoleteAppFile)) `
+        -Message 'update retained an obsolete app file'
+    Assert-True `
+        -Condition (-not (Test-Path -LiteralPath $obsoleteResourceFile)) `
+        -Message 'update retained an obsolete resource file'
+    Assert-True `
+        -Condition (@(Get-ChildItem -LiteralPath $productRoot -Force | Where-Object Name -Like '.previous-*').Count -eq 0) `
+        -Message 'update retained a previous-build directory'
+    Assert-True `
+        -Condition (@(Get-ChildItem -LiteralPath $productRoot -Force | Where-Object Name -Like '.update-*').Count -eq 0) `
+        -Message 'update retained a staging directory'
 
     $stateCache = Join-Path $productRoot 'browser-companion\browser-cache'
     [IO.Directory]::CreateDirectory($stateCache) | Out-Null
@@ -557,7 +583,7 @@ try {
     Assert-True -Condition (-not (Test-Path -LiteralPath $nativeManifestPath)) -Message 'uninstall left the native-host manifest'
     Assert-True -Condition (-not (Test-Path -LiteralPath $productRoot)) -Message 'uninstall left product files or cache'
 
-    Write-Output 'Windows developer package checks passed'
+    Write-Output 'Windows release package checks passed'
 }
 finally {
     if (Test-Path -LiteralPath $testRegistryPath) {

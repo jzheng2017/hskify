@@ -13,6 +13,9 @@ use ort::session::{
 };
 use ort::value::{Tensor, TensorRef};
 
+use koharu_ml::manga_text_segmentation_2025::DEFAULT_TEXT_MASK_THRESHOLD;
+use koharu_ml::probability_map::ProbabilityMap;
+
 pub(super) const MAX_LINE_BATCH_SIZE: usize = 8;
 
 const MODEL_HEIGHT: usize = 48;
@@ -30,18 +33,19 @@ const OUTPUT_CACHE_MAX_BYTES: usize = 32 * 1024 * 1024;
 pub(super) struct PpOcrPrediction {
     pub(super) text: String,
     pub(super) confidence: f32,
-    /// Foreground pixels belonging to recognized text lines in crop coordinates.
-    pub(super) ink_mask: Option<PpOcrInkMask>,
     pub(super) text_color: [u8; 3],
     pub(super) stroke_color: [u8; 3],
     pub(super) has_stroke_color: bool,
+    pub(super) appearance_bands: Vec<PpOcrAppearanceBand>,
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct PpOcrInkMask {
-    pub(super) width: u32,
-    pub(super) height: u32,
-    pub(super) values: Vec<bool>,
+pub(super) struct PpOcrAppearanceBand {
+    pub(super) top_ratio: f32,
+    pub(super) bottom_ratio: f32,
+    pub(super) text_color: [u8; 3],
+    pub(super) stroke_color: [u8; 3],
+    pub(super) has_stroke_color: bool,
 }
 
 pub(super) struct EnglishPpOcrV5 {
@@ -117,6 +121,7 @@ struct DecodeResult {
 struct LineSample {
     region_index: usize,
     image: DynamicImage,
+    bounds: CropBounds,
 }
 
 impl EnglishPpOcrV5 {
@@ -170,6 +175,7 @@ impl EnglishPpOcrV5 {
     pub(super) fn recognize_regions(
         &mut self,
         block_crops: &[DynamicImage],
+        text_probabilities: &[ProbabilityMap],
     ) -> Result<Vec<PpOcrPrediction>> {
         if block_crops.is_empty() {
             return Ok(Vec::new());
@@ -180,13 +186,15 @@ impl EnglishPpOcrV5 {
                 block_crops.len()
             );
         }
+        if text_probabilities.len() != block_crops.len() {
+            bail!("PP-OCRv5 requires one learned text mask per region crop");
+        }
 
         let mut lines = Vec::new();
-        let mut colors = Vec::with_capacity(block_crops.len());
-        let mut ink_masks = Vec::with_capacity(block_crops.len());
-        for (region_index, crop) in block_crops.iter().enumerate() {
-            colors.push(inferred_text_color(crop));
-            let (region_lines, ink_mask) = segment_text_line_bounds(crop);
+        for (region_index, (crop, probabilities)) in
+            block_crops.iter().zip(text_probabilities).enumerate()
+        {
+            let region_lines = segment_text_line_bounds(crop, probabilities);
             for bounds in region_lines {
                 lines.push(LineSample {
                     region_index,
@@ -196,45 +204,76 @@ impl EnglishPpOcrV5 {
                         bounds.right - bounds.left,
                         bounds.bottom - bounds.top,
                     ),
+                    bounds,
                 });
             }
-            ink_masks.push(ink_mask);
         }
 
         let mut grouped = (0..block_crops.len())
-            .map(|_| Vec::<DecodeResult>::new())
+            .map(|_| Vec::<(DecodeResult, CropBounds)>::new())
             .collect::<Vec<_>>();
         for line_batch in lines.chunks(MAX_LINE_BATCH_SIZE) {
             let decoded = self.run_line_batch(line_batch)?;
             for (line, prediction) in line_batch.iter().zip(decoded) {
-                grouped[line.region_index].push(prediction);
+                grouped[line.region_index].push((prediction, line.bounds));
             }
         }
 
         Ok(grouped
             .into_iter()
-            .zip(colors.into_iter().zip(ink_masks))
-            .map(|(predictions, (text_color, ink_mask))| {
+            .zip(block_crops.iter().zip(text_probabilities))
+            .map(|(predictions, (crop, probabilities))| {
                 let confidence = if predictions.is_empty() {
                     0.0
                 } else {
                     predictions
                         .iter()
-                        .map(|prediction| prediction.confidence)
+                        .map(|(prediction, _)| prediction.confidence)
                         .sum::<f32>()
                         / predictions.len() as f32
                 };
+                let appearance_bands = predictions
+                    .iter()
+                    .map(|(_, bounds)| {
+                        let (text_color, stroke_color) =
+                            inferred_text_appearance_within(crop, probabilities, *bounds);
+                        PpOcrAppearanceBand {
+                            top_ratio: bounds.top as f32 / crop.height().max(1) as f32,
+                            bottom_ratio: bounds.bottom as f32 / crop.height().max(1) as f32,
+                            text_color,
+                            stroke_color: stroke_color.unwrap_or([255, 255, 255]),
+                            has_stroke_color: stroke_color.is_some(),
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let primary_appearance = predictions
+                    .iter()
+                    .enumerate()
+                    .max_by_key(|(_, (prediction, _))| prediction.text.chars().count())
+                    .and_then(|(index, _)| appearance_bands.get(index))
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        let (text_color, stroke_color) =
+                            inferred_text_appearance(crop, probabilities);
+                        PpOcrAppearanceBand {
+                            top_ratio: 0.0,
+                            bottom_ratio: 1.0,
+                            text_color,
+                            stroke_color: stroke_color.unwrap_or([255, 255, 255]),
+                            has_stroke_color: stroke_color.is_some(),
+                        }
+                    });
                 PpOcrPrediction {
                     text: predictions
                         .iter()
-                        .map(|prediction| prediction.text.as_str())
+                        .map(|(prediction, _)| prediction.text.as_str())
                         .collect::<Vec<_>>()
                         .join(" "),
                     confidence,
-                    ink_mask,
-                    text_color,
-                    stroke_color: [255, 255, 255],
-                    has_stroke_color: false,
+                    text_color: primary_appearance.text_color,
+                    stroke_color: primary_appearance.stroke_color,
+                    has_stroke_color: primary_appearance.has_stroke_color,
+                    appearance_bands,
                 }
             })
             .collect())
@@ -566,17 +605,20 @@ struct ComponentGroup {
     last_core_center: f64,
 }
 
-fn segment_text_line_bounds(block_crop: &DynamicImage) -> (Vec<CropBounds>, Option<PpOcrInkMask>) {
+fn segment_text_line_bounds(
+    block_crop: &DynamicImage,
+    probabilities: &ProbabilityMap,
+) -> Vec<CropBounds> {
     let rgb = block_crop.to_rgb8();
     let width = rgb.width() as usize;
     let height = rgb.height() as usize;
     if width <= 1 || height <= 1 {
-        return (vec![full_bounds(&rgb)], None);
+        return vec![full_bounds(&rgb)];
     }
-    let mask = foreground_mask(&rgb);
+    let mask = foreground_mask(probabilities);
     let (components, groups) = component_line_groups(&mask);
     if groups.is_empty() {
-        return (vec![full_bounds(&rgb)], None);
+        return vec![full_bounds(&rgb)];
     }
 
     let pad_y = 2_usize.max((height as f64 * 0.018).round_ties_even() as usize);
@@ -650,31 +692,9 @@ fn segment_text_line_bounds(block_crop: &DynamicImage) -> (Vec<CropBounds>, Opti
         }
     }
     if bounds.is_empty() {
-        (vec![full_bounds(&rgb)], None)
+        vec![full_bounds(&rgb)]
     } else {
-        let values = (0..height)
-            .flat_map(|y| {
-                let bounds = &bounds;
-                let mask = &mask;
-                (0..width).map(move |x| {
-                    mask.get(x, y)
-                        && bounds.iter().any(|line| {
-                            x >= line.left as usize
-                                && x < line.right as usize
-                                && y >= line.top as usize
-                                && y < line.bottom as usize
-                        })
-                })
-            })
-            .collect();
-        (
-            bounds,
-            Some(PpOcrInkMask {
-                width: width as u32,
-                height: height as u32,
-                values,
-            }),
-        )
+        bounds
     }
 }
 
@@ -687,104 +707,16 @@ fn full_bounds(image: &RgbImage) -> CropBounds {
     }
 }
 
-fn foreground_mask(image: &RgbImage) -> ForegroundMask {
-    let width = image.width() as usize;
-    let height = image.height() as usize;
-    let grayscale = image
-        .pixels()
-        .map(|pixel| {
-            let [red, green, blue] = pixel.0;
-            ((19_595_u32 * red as u32
-                + 38_470_u32 * green as u32
-                + 7_471_u32 * blue as u32
-                + 32_768)
-                >> 16) as u8
-        })
-        .collect::<Vec<_>>();
-    let threshold = otsu_threshold(&grayscale);
-    let mut border = Vec::with_capacity(width * 2 + height * 2);
-    border.extend_from_slice(&grayscale[..width]);
-    border.extend_from_slice(&grayscale[(height - 1) * width..height * width]);
-    border.extend((0..height).map(|y| grayscale[y * width]));
-    border.extend((0..height).map(|y| grayscale[y * width + width - 1]));
-    border.sort_unstable();
-    let background = if border.len() % 2 == 0 {
-        (border[border.len() / 2 - 1] as f64 + border[border.len() / 2] as f64) / 2.0
-    } else {
-        border[border.len() / 2] as f64
-    };
-    let background_integer = background as i16;
-    let threshold_integer = threshold as i16;
-    let mut values = grayscale
-        .iter()
-        .map(|value| {
-            let value = *value as i16;
-            if background >= threshold as f64 {
-                value <= threshold_integer.min(background_integer - 6)
-            } else {
-                value >= threshold_integer.max(background_integer + 6)
-            }
-        })
-        .collect::<Vec<_>>();
-    let foreground_count = values.iter().filter(|value| **value).count() as u64;
-    let total = values.len() as u64;
-    if foreground_count * 100 > total * 45 {
-        let dark_count = grayscale
-            .iter()
-            .filter(|value| **value <= threshold)
-            .count();
-        let light_count = grayscale.len() - dark_count;
-        let dark = dark_count <= light_count;
-        for (mask_value, grayscale_value) in values.iter_mut().zip(&grayscale) {
-            *mask_value = if dark {
-                *grayscale_value <= threshold
-            } else {
-                *grayscale_value > threshold
-            };
-        }
-    }
+fn foreground_mask(probabilities: &ProbabilityMap) -> ForegroundMask {
     ForegroundMask {
-        width,
-        height,
-        values,
+        width: probabilities.width as usize,
+        height: probabilities.height as usize,
+        values: probabilities
+            .values
+            .iter()
+            .map(|value| *value >= DEFAULT_TEXT_MASK_THRESHOLD)
+            .collect(),
     }
-}
-
-fn otsu_threshold(grayscale: &[u8]) -> u8 {
-    let mut histogram = [0_u64; 256];
-    for value in grayscale {
-        histogram[*value as usize] += 1;
-    }
-    let total = grayscale.len() as f64;
-    let weighted_sum = histogram
-        .iter()
-        .enumerate()
-        .map(|(value, count)| value as f64 * *count as f64)
-        .sum::<f64>();
-    let mut background_weight = 0.0_f64;
-    let mut background_sum = 0.0_f64;
-    let mut best_variance = -1.0_f64;
-    let mut best_threshold = 127_u8;
-    for (threshold, count) in histogram.iter().copied().enumerate() {
-        background_weight += count as f64;
-        if background_weight <= 0.0 {
-            continue;
-        }
-        let foreground_weight = total - background_weight;
-        if foreground_weight <= 0.0 {
-            break;
-        }
-        background_sum += threshold as f64 * count as f64;
-        let background_mean = background_sum / background_weight;
-        let foreground_mean = (weighted_sum - background_sum) / foreground_weight;
-        let variance =
-            background_weight * foreground_weight * (background_mean - foreground_mean).powi(2);
-        if variance > best_variance {
-            best_variance = variance;
-            best_threshold = threshold as u8;
-        }
-    }
-    best_threshold
 }
 
 fn connected_ink_components(mask: &ForegroundMask) -> Vec<InkComponent> {
@@ -1096,33 +1028,138 @@ impl UnionFind {
     }
 }
 
-fn inferred_text_color(image: &DynamicImage) -> [u8; 3] {
+fn inferred_text_appearance(
+    image: &DynamicImage,
+    probabilities: &ProbabilityMap,
+) -> ([u8; 3], Option<[u8; 3]>) {
+    let bounds = CropBounds {
+        left: 0,
+        top: 0,
+        right: image.width(),
+        bottom: image.height(),
+    };
+    inferred_text_appearance_within(image, probabilities, bounds)
+}
+
+fn inferred_text_appearance_within(
+    image: &DynamicImage,
+    probabilities: &ProbabilityMap,
+    bounds: CropBounds,
+) -> ([u8; 3], Option<[u8; 3]>) {
     let rgb = image.to_rgb8();
-    if rgb.width() == 0 || rgb.height() == 0 {
-        return [0, 0, 0];
+    if rgb.width() == 0
+        || rgb.height() == 0
+        || rgb.width() != probabilities.width
+        || rgb.height() != probabilities.height
+    {
+        return ([0, 0, 0], None);
     }
-    let mask = foreground_mask(&rgb);
-    let mut channels = [Vec::new(), Vec::new(), Vec::new()];
-    for (index, pixel) in rgb.pixels().enumerate() {
-        if mask.values[index] {
-            for channel in 0..3 {
-                channels[channel].push(pixel.0[channel]);
-            }
+    let bounds = CropBounds {
+        left: bounds.left.min(rgb.width()),
+        top: bounds.top.min(rgb.height()),
+        right: bounds.right.min(rgb.width()),
+        bottom: bounds.bottom.min(rgb.height()),
+    };
+    let maximum = probability_maximum_within(probabilities, bounds);
+    let core_threshold = (maximum * 0.65).max(DEFAULT_TEXT_MASK_THRESHOLD);
+    let foreground =
+        dominant_masked_color(&rgb, probabilities, bounds, |value| value >= core_threshold)
+            .or_else(|| {
+                dominant_masked_color(&rgb, probabilities, bounds, |value| {
+                    value >= DEFAULT_TEXT_MASK_THRESHOLD
+                })
+            })
+            .unwrap_or([0, 0, 0]);
+    let stroke = dominant_masked_color(&rgb, probabilities, bounds, |value| {
+        value >= DEFAULT_TEXT_MASK_THRESHOLD && value < core_threshold
+    });
+    (foreground, stroke)
+}
+
+fn probability_maximum_within(probabilities: &ProbabilityMap, bounds: CropBounds) -> f32 {
+    (bounds.top..bounds.bottom)
+        .flat_map(|y| {
+            (bounds.left..bounds.right).filter_map(move |x| {
+                probabilities
+                    .values
+                    .get(y as usize * probabilities.width as usize + x as usize)
+                    .copied()
+            })
+        })
+        .fold(0.0, f32::max)
+}
+
+#[derive(Clone, Default)]
+struct ColorBucket {
+    count: usize,
+    sums: [u64; 3],
+}
+
+impl ColorBucket {
+    fn add(&mut self, color: [u8; 3]) {
+        self.count += 1;
+        for (sum, channel) in self.sums.iter_mut().zip(color) {
+            *sum += u64::from(channel);
         }
     }
-    if channels[0].is_empty() {
-        return [0, 0, 0];
+
+    fn mean(&self) -> [u8; 3] {
+        self.sums
+            .map(|sum| (sum / self.count.max(1) as u64).min(255) as u8)
     }
-    channels.map(|mut values| {
-        values.sort_unstable();
-        values[values.len() / 2]
-    })
+}
+
+fn dominant_masked_color(
+    image: &RgbImage,
+    probabilities: &ProbabilityMap,
+    bounds: CropBounds,
+    include: impl Fn(f32) -> bool,
+) -> Option<[u8; 3]> {
+    let mut buckets = vec![ColorBucket::default(); 512];
+    for y in bounds.top..bounds.bottom {
+        for x in bounds.left..bounds.right {
+            let index = y as usize * probabilities.width as usize + x as usize;
+            let Some(probability) = probabilities.values.get(index) else {
+                continue;
+            };
+            if !include(*probability) {
+                continue;
+            }
+            let color = image.get_pixel(x, y).0;
+            let bucket = ((usize::from(color[0]) >> 5) << 6)
+                | ((usize::from(color[1]) >> 5) << 3)
+                | (usize::from(color[2]) >> 5);
+            buckets[bucket].add(color);
+        }
+    }
+    buckets
+        .into_iter()
+        .max_by_key(|bucket| bucket.count)
+        .filter(|bucket| bucket.count > 0)
+        .map(|bucket| bucket.mean())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use image::{ImageBuffer, Rgb};
+
+    fn text_probabilities_for(image: &RgbImage, text_probability: f32) -> ProbabilityMap {
+        ProbabilityMap {
+            width: image.width(),
+            height: image.height(),
+            values: image
+                .pixels()
+                .map(|pixel| {
+                    if pixel.0 == [255, 255, 255] {
+                        0.0
+                    } else {
+                        text_probability
+                    }
+                })
+                .collect(),
+        }
+    }
 
     #[test]
     fn splitter_finds_two_lines_without_annotation_or_expected_count() {
@@ -1141,14 +1178,87 @@ mod tests {
                 }
             }
         }
-        let (bounds, ink_mask) = segment_text_line_bounds(&DynamicImage::ImageRgb8(image));
-        let ink_mask = ink_mask.expect("synthetic text has foreground");
+        let probabilities = text_probabilities_for(&image, 0.95);
+        let bounds = segment_text_line_bounds(&DynamicImage::ImageRgb8(image), &probabilities);
         assert_eq!(bounds.len(), 2);
         assert!(bounds[0].bottom <= bounds[1].top);
-        assert_eq!(ink_mask.width, 120);
-        assert_eq!(ink_mask.height, 60);
-        assert!(ink_mask.values[10 * 120 + 18]);
-        assert!(ink_mask.values[46 * 120 + 103]);
+        assert!(bounds.iter().all(|line| line.right > line.left));
+    }
+
+    #[test]
+    fn appearance_keeps_white_text_and_its_dark_outline_on_a_colored_bubble() {
+        let mut image = ImageBuffer::from_pixel(80, 40, Rgb([130, 25, 30]));
+        for y in 8..32 {
+            for x in 15..65 {
+                image.put_pixel(x, y, Rgb([8, 8, 10]));
+            }
+        }
+        for y in 12..28 {
+            for x in 20..60 {
+                image.put_pixel(x, y, Rgb([248, 248, 245]));
+            }
+        }
+
+        let mut probabilities = ProbabilityMap::zeros(image.width(), image.height());
+        for y in 8..32 {
+            for x in 15..65 {
+                probabilities.values[y as usize * image.width() as usize + x as usize] = 0.55;
+            }
+        }
+        for y in 12..28 {
+            for x in 20..60 {
+                probabilities.values[y as usize * image.width() as usize + x as usize] = 0.98;
+            }
+        }
+        let (text, stroke) =
+            inferred_text_appearance(&DynamicImage::ImageRgb8(image), &probabilities);
+
+        assert!(text[0] > 230 && text[1] > 230 && text[2] > 230);
+        let stroke = stroke.expect("contrasting adjacent outline should be retained");
+        assert!(stroke[0] < 30 && stroke[1] < 30 && stroke[2] < 30);
+    }
+
+    #[test]
+    fn appearance_is_sampled_per_learned_text_line_instead_of_per_block() {
+        let mut image = ImageBuffer::from_pixel(80, 48, Rgb([255, 255, 255]));
+        let mut probabilities = ProbabilityMap::zeros(80, 48);
+        for y in 4..18 {
+            for x in 12..68 {
+                image.put_pixel(x, y, Rgb([8, 8, 10]));
+                probabilities.values[y as usize * 80 + x as usize] = 0.98;
+            }
+        }
+        for y in 30..44 {
+            for x in 12..68 {
+                image.put_pixel(x, y, Rgb([25, 110, 220]));
+                probabilities.values[y as usize * 80 + x as usize] = 0.98;
+            }
+        }
+        let image = DynamicImage::ImageRgb8(image);
+
+        let (top, _) = inferred_text_appearance_within(
+            &image,
+            &probabilities,
+            CropBounds {
+                left: 0,
+                top: 0,
+                right: 80,
+                bottom: 24,
+            },
+        );
+        let (bottom, _) = inferred_text_appearance_within(
+            &image,
+            &probabilities,
+            CropBounds {
+                left: 0,
+                top: 24,
+                right: 80,
+                bottom: 48,
+            },
+        );
+
+        assert!(top[0] < 20 && top[1] < 20 && top[2] < 20);
+        assert!(bottom[2] > 200 && bottom[1] > 90);
     }
 
     #[test]
@@ -1169,12 +1279,13 @@ mod tests {
             }
         }
 
-        let (_, ink_mask) = segment_text_line_bounds(&DynamicImage::ImageRgb8(image));
-        let ink_mask = ink_mask.expect("synthetic line has foreground");
-        assert!(ink_mask.values[25 * 120 + 19]);
-        assert!(ink_mask.values[25 * 120 + 30]);
-        assert!(ink_mask.values[25 * 120 + 41]);
-        assert!(ink_mask.values[20 * 120 + 60]);
+        let probabilities = text_probabilities_for(&image, 0.95);
+        let bounds = segment_text_line_bounds(&DynamicImage::ImageRgb8(image), &probabilities);
+        assert_eq!(bounds.len(), 1);
+        assert!(bounds[0].left <= 18);
+        assert!(bounds[0].right >= 104);
+        assert!(bounds[0].top <= 10);
+        assert!(bounds[0].bottom >= 28);
     }
 
     #[test]
@@ -1200,11 +1311,10 @@ mod tests {
             }
         }
 
-        let (bounds, ink_mask) = segment_text_line_bounds(&DynamicImage::ImageRgb8(image));
-        let ink_mask = ink_mask.expect("synthetic lines have foreground");
+        let probabilities = text_probabilities_for(&image, 0.95);
+        let bounds = segment_text_line_bounds(&DynamicImage::ImageRgb8(image), &probabilities);
         assert_eq!(bounds.len(), 2);
         assert!(bounds[0].bottom >= 26);
-        assert!(ink_mask.values[24 * 120 + 60]);
     }
 
     #[test]

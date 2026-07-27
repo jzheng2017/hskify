@@ -193,6 +193,30 @@ fn dictionary_lookup_uses_longest_match_pinyin_gloss_and_hsk_overlay() {
 }
 
 #[test]
+fn hover_lookup_is_longest_match_anchored_at_the_hovered_character() {
+    let control = seed();
+    let whole = control
+        .lookup_at_with_region_context("研究生", 0, &[], None)
+        .expect("the first character starts a dictionary expression");
+    let later = control
+        .lookup_at_with_region_context("研究生", 2, &[], None)
+        .expect("a later component starts its own anchored lookup");
+
+    assert_eq!(whole.tokens.len(), 1);
+    assert_eq!(whole.selected_text, "研究生");
+    assert_eq!(whole.tokens[0].simplified, "研究生");
+    assert_eq!(later.tokens.len(), 1);
+    assert_eq!(later.selected_text, "生");
+    assert_eq!(later.tokens[0].simplified, "生");
+    assert!(
+        control
+            .lookup_at_with_region_context("研究生。", 3, &[], None)
+            .is_none(),
+        "punctuation must not jump forward to an unrelated word"
+    );
+}
+
+#[test]
 fn lookup_marks_only_explicit_proper_names() {
     let names = [ProperName {
         text: "小明".into(),

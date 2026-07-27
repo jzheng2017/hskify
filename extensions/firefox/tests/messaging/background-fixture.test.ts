@@ -28,6 +28,7 @@ function submitMessage(pageSessionId = 'fixture-page-session') {
     naturalWidth: 1200,
     naturalHeight: 1800,
     hskLevel: 5 as const,
+    nameTranslation: 'keep-original' as const,
     visibleRects,
   }
 }
@@ -154,6 +155,7 @@ describe('progressive background fixture adapter', () => {
       {
         type: 'dictionary:lookup',
         request: {
+          interaction: 'selection',
           selectedText: '离开',
           jobId: submitted.jobId,
           regionId: `${submitted.sourceSha256.slice(0, 8)}-region-0001`,

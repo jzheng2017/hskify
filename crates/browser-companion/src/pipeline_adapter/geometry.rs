@@ -81,7 +81,7 @@ impl PixelRect {
         }
     }
 
-    fn iou(self, other: Self) -> f32 {
+    pub(super) fn iou(self, other: Self) -> f32 {
         let intersection = self.intersection(other).map(Self::area).unwrap_or_default();
         let union = self.area() + other.area() - intersection;
         if union <= 0.0 {
@@ -333,36 +333,49 @@ pub(super) fn candidates_for_tile(
         .filter_map(|detection| {
             let rect = PixelRect::from_local_bounds(detection.bbox, tile)?;
             let (center_x, center_y) = rect.center();
-            let kind = if detection.label_id == 1
-                || bubbles.iter().any(|bubble| {
+            let containing_bubble = bubbles
+                .iter()
+                .copied()
+                .filter(|bubble| {
                     (center_x >= bubble.x0
                         && center_x <= bubble.x1
                         && center_y >= bubble.y0
                         && center_y <= bubble.y1)
                         || rect.overlap_over_smaller(*bubble) >= 0.10
-                }) {
+                })
+                .min_by(|left, right| {
+                    (left.width() * left.height()).total_cmp(&(right.width() * right.height()))
+                });
+            let kind = if detection.label_id == 1 || containing_bubble.is_some() {
                 CandidateKind::StoryText
             } else {
                 CandidateKind::FreeText
             };
-            tile.owns(center_x, center_y)
-                .then_some((rect, detection.score, kind))
+            tile.owns(center_x, center_y).then_some((
+                rect,
+                detection.score,
+                kind,
+                containing_bubble,
+            ))
         })
         .collect::<Vec<_>>();
     lines
         .into_iter()
-        .map(|(text_rect, detector_confidence, kind)| {
-            let layout_padding =
-                (text_rect.height().min(text_rect.width()) * 0.22).clamp(6.0, 28.0);
-            let layout_rect = text_rect.expand(layout_padding, image_width, image_height);
-            Candidate {
-                kind,
-                text_rect,
-                bubble_rect: layout_rect,
-                confirmed_bubble_rect: layout_rect,
-                detector_confidence,
-            }
-        })
+        .map(
+            |(text_rect, detector_confidence, kind, containing_bubble)| {
+                let layout_padding =
+                    (text_rect.height().min(text_rect.width()) * 0.22).clamp(6.0, 28.0);
+                let layout_rect = text_rect.expand(layout_padding, image_width, image_height);
+                let confirmed_bubble_rect = containing_bubble.unwrap_or(layout_rect);
+                Candidate {
+                    kind,
+                    text_rect,
+                    bubble_rect: confirmed_bubble_rect.union(layout_rect),
+                    confirmed_bubble_rect,
+                    detector_confidence,
+                }
+            },
+        )
         .collect()
 }
 
@@ -523,14 +536,21 @@ mod tests {
     }
 
     #[test]
-    fn detector_lines_remain_independent_candidates() {
+    fn detector_lines_keep_their_shared_confirmed_bubble() {
         let tile = overlapping_tiles(900, 1_024)[0];
+        let bubble = PixelRect::new(50.0, 50.0, 350.0, 220.0).unwrap();
         let detection = comic_detection(vec![
             comic_region(1, [100.0, 100.0, 300.0, 130.0], 0.9),
             comic_region(2, [120.0, 140.0, 280.0, 170.0], 0.8),
             comic_region(0, [50.0, 50.0, 350.0, 220.0], 0.99),
         ]);
-        assert_eq!(candidates_for_tile(&detection, &tile, 900, 1_024).len(), 2);
+        let candidates = candidates_for_tile(&detection, &tile, 900, 1_024);
+        assert_eq!(candidates.len(), 2);
+        assert!(
+            candidates
+                .iter()
+                .all(|candidate| candidate.confirmed_bubble_rect == bubble)
+        );
     }
 
     #[test]

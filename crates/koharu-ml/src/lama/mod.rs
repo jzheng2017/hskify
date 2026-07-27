@@ -1,6 +1,8 @@
 mod fft;
 mod model;
 
+use std::path::Path;
+
 use anyhow::{Result, bail};
 use candle_core::{DType, Device, Tensor};
 use image::{DynamicImage, GenericImageView, GrayImage, RgbImage};
@@ -38,12 +40,16 @@ pub struct Lama {
 
 impl Lama {
     pub async fn load(runtime: &RuntimeManager, cpu: bool) -> Result<Self> {
-        let device = device(cpu)?;
         let weights_path = runtime
             .downloads()
             .huggingface_model(HF_REPO, "lama-manga.safetensors")
             .await?;
-        let model = loading::load_buffered_safetensors_path(&weights_path, &device, |vb| {
+        Self::load_from_path(weights_path, cpu)
+    }
+
+    pub fn load_from_path(path: impl AsRef<Path>, cpu: bool) -> Result<Self> {
+        let device = device(cpu)?;
+        let model = loading::load_buffered_safetensors_path(path.as_ref(), &device, |vb| {
             model::Lama::load(&vb)
         })?;
 

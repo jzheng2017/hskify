@@ -38,7 +38,7 @@ markers.
 Rust and TypeScript compile the same fingerprint:
 
 ```text
-hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-07-26-r2
+hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-07-27-r6
 ```
 
 The native handshake request/response, health response, job metadata, and job
@@ -136,7 +136,8 @@ components, and sets `CUDA_COMPUTE_CAP=89`.
 The adapter lazily initializes two `OnceCell` values:
 
 - the pinned CUDA RT-DETR-v2 comic text detector, batched English PP-OCRv5
-  recognizer, resident `RuntimeManager`, and local Qwen3.5 4B application state;
+  recognizer, learned text and bubble segmenters, manga LaMa inpainter,
+  resident `RuntimeManager`, and local Qwen3.5 4B application state;
   and
 - complete `hsk-control` data.
 
@@ -160,8 +161,12 @@ Default resource discovery is:
   models\resident\comic-text-bubble-detector-config\config.json
   models\resident\comic-text-bubble-detector-preprocessor-config\preprocessor_config.json
   models\resident\comic-text-bubble-detector-weights\model.safetensors
+  models\resident\lama-manga-inpainter-weights\lama-manga.safetensors
+  models\resident\manga-text-segmentation-weights\model.safetensors
   models\resident\pp-ocr-v5-english-recognizer-config\inference.yml
   models\resident\pp-ocr-v5-english-recognizer-model\inference.onnx
+  models\resident\speech-bubble-segmentation-config\config.json
+  models\resident\speech-bubble-segmentation-weights\model.safetensors
   fonts\NotoSansSC-VF.ttf
   fonts\NotoSerifSC-VF.ttf
 ```
@@ -190,40 +195,45 @@ The explicit overrides are `HSK_MANGA_RESOURCES_DIR`,
 5. Run PP-OCRv5 English line recognition in batches of at most eight, and yield
    after each candidate chunk so newly visible translation work can overtake
    off-screen OCR.
-6. Accept OCR at confidence 0.45 or higher and keep each RT-DETR text proposal
-   as one semantic region candidate. Then apply the Latin-English, story-text,
-   SFX, credit, branding, metadata, and ambiguity gates. This keeps differently
-   colored emphasis and separated balloons independent. When a tile has
-   explicit credit/release context, reject its isolated uppercase credit-name
-   labels without applying that rule to normal story tiles.
-7. Construct one region-local cleanup patch from the proposal mask and compute deterministic
-   reading order plus visibility.
+6. Accept mechanically valid Latin OCR at confidence 0.45 or higher. Segment
+   real bubble contours and group every accepted line by bubble identity, so a
+   complete balloon is translated atomically even when detector boxes differ.
+7. Segment source glyph pixels with the learned manga text model, constrain the
+   mask to accepted text regions, expand it by measured source geometry, and
+   restore the masked artwork with the manga-trained LaMa model.
 8. Queue accepted regions for translation and reprioritize visible work at
    every OCR or detector boundary. Ready batches begin at three pending
    regions, contain at most six, and an undersized tail becomes eligible when
    its hard 75 ms batching deadline expires (or at the final forced drain).
    Boundary checks never sleep, and no page-wide translation call exists.
 
-Sound effects, punctuation-only OCR, non-Latin text, credits, branding,
-promotion, metadata, and low-confidence OCR are excluded before translation
-and patch publication. Eligible narration and other story text outside a
-balloon remain in scope.
+Low-confidence, undecodable, and non-Latin OCR are excluded before translation.
+Content is not rejected by hard-coded story, credit, role, or sound-effect word
+lists. Eligible narration and other story text outside a balloon remain in
+scope.
 
-## Region-local cleanup
+## Model-backed cleanup
 
-Cleanup does not reconstruct or encode the source page. For one accepted story
-region, the adapter:
+Cleanup does not paint inferred background colors. For each source image, the
+adapter:
 
-- expands a small bounded patch rectangle;
-- combines the recognizer's polarity-independent line masks, attaches
-  punctuation and antialiased edges, and dilates the ink by a bounded 8-32
-  pixels (18% of the local crop scale);
-- unions that sparse mask with the complete accepted text envelope so detached
-  glyph components cannot survive, then clips every alpha pixel to the
-  confirmed bubble or accepted free-story-text geometry;
-- propagates surrounding known colors into masked pixels, with a median-color
-  fast path for flat regions and local multiscale diffusion for gradients; and
-- encodes a PNG whose alpha is 255 only at masked pixels and 0 elsewhere.
+- predicts source-text pixels with the pinned manga text segmenter;
+- predicts real speech-bubble contours and assigns lines by contour identity;
+- constrains the semantic text mask to accepted OCR geometry and expands glyphs
+  with the shared model pipeline's measured text-region rules;
+- runs the manga-trained LaMa inpainter over the union mask; and
+- emits transparent per-region PNGs whose alpha follows only the expanded
+  semantic mask.
+
+The stitched learned text-probability field is produced once per detector tile
+and reused by OCR line discovery, per-line palette extraction, punctuation
+support, cleanup masking, and inpainting. Bubble grouping keeps those ordered
+appearance bands instead of replacing a mixed-color bubble with the style of
+its longest line.
+
+An empty semantic mask fails the image and enters the extension's bounded
+automatic retry state machine. It never silently leaves half a balloon
+translated and never substitutes a painted text-sized rectangle.
 
 The server validates the PNG and its normalized rectangle, enforces a 16 MiB
 per-patch limit and 256 MiB total retained source/patch budget, stores it under
@@ -241,12 +251,26 @@ directly to Qwen3.5 4B with the requested cumulative HSK 2.0 level and at most
 six preceding dialogue utterances. It does not generate a page-wide faithful
 translation and then rewrite it.
 
-The semantic vision/OCR gate excludes credits, branding, release or scanner
-notes, SFX, non-English OCR, and ambiguous regions before translation. Every
-region passed to Qwen is therefore already accepted story text; the language
-model only translates it and cannot classify or skip it. Any `[SKIP]` output
-is rejected and the item is repaired. Standalone numbers remain
-exact-preservation requirements; digits embedded in Latin OCR tokens do not.
+The requested level controls syntax as well as vocabulary. Levels 1-2 prefer
+short direct clauses, explicit referents, everyday wording, and no avoidable
+idioms, formal nominalization, nested clauses, or passive constructions.
+Levels 3-4 permit familiar compound sentences while simplifying dense
+embedding and formal synonyms; levels 5-6 permit natural advanced grammar.
+The job's name preference is part of generation, validation, and both cache
+keys. `keep-original` preserves the source's exact Latin name spelling and
+permits those matched source names as HSK exceptions. `chinese` uses approved
+glossary forms first, then established Chinese names when certain and
+otherwise consistent phonetic transliteration. Neither mode translates a
+name by its dictionary meaning.
+
+The same contextual Qwen decision that translates a region may return the
+typed `[NON-STORY]` disposition for an entire publisher/site credit, watermark,
+advertisement, or navigation label. The protocol explicitly forbids that
+disposition for dialogue, narration, thoughts, captions, in-story signs or
+letters, titles, names, roles, fragments, and stylized emphasis. Excluded
+regions publish neither cleanup pixels nor replacement text, so the source
+image remains untouched. Standalone numbers remain exact-preservation
+requirements; digits embedded in Latin OCR tokens do not.
 
 `hsk-control` validates each returned story item. Items that already pass are
 accepted. Rejected items alone may be sent once to the targeted repair call
@@ -304,7 +328,11 @@ patch intermediate is persisted.
 
 `POST /lookup` uses the same local `hsk-control` instance for longest-match
 tokens, pinyin, definitions, HSK level overlay, proper-name state, and optional
-region context. The extension owns the original/Chinese comparison control.
+region context. Selection lookup tokenizes the selected text. Hover lookup
+accepts only an owning region and Unicode character offset, then longest-matches
+from that exact position in the daemon's canonical displayed Chinese. It
+returns one expression and never advances across punctuation. The extension
+owns the original/Chinese comparison control.
 Mandarin speech is also extension-only and uses an eligible local Web Speech
 voice; neither comparison nor speech adds a daemon result endpoint.
 

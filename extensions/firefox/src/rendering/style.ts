@@ -74,3 +74,27 @@ export function applyRegionStyle(
   }px ${Math.max(0, fontSize * 0.025)}px ${style.shadowColor}`
   element.style.transform = `skewX(${style.italicDegrees}deg)`
 }
+
+export function applyRegionColorBands(
+  element: HTMLElement,
+  region: BrowserRegion,
+  fontSize: number,
+): void {
+  const bands = region.style.colorBands ?? []
+  const lines = [...element.querySelectorAll<HTMLElement>('.hmt-region-line')]
+  if (bands.length <= 1 || lines.length === 0) return
+  for (const [index, line] of lines.entries()) {
+    const position = (index + 0.5) / lines.length
+    const band = bands.reduce((closest, candidate) =>
+      Math.abs(candidate.position - position) < Math.abs(closest.position - position)
+        ? candidate
+        : closest,
+    )
+    line.style.color = safeHexColor(band.foreground, '#111111')
+    const outline = safeHexColor(band.outlineColor, 'transparent')
+    line.style.setProperty(
+      '-webkit-text-stroke',
+      `${fontSize * validateRegionStyle(region).strokeWidthRatio}px ${outline}`,
+    )
+  }
+}

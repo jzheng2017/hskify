@@ -1,5 +1,5 @@
 export const BUILD_FINGERPRINT =
-  'hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-07-26-r2' as const
+  'hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-07-27-r6' as const
 export const HSK_STANDARD = '2.0' as const
 export const SOURCE_LANGUAGE = 'en' as const
 export const TARGET_LANGUAGE = 'zh-CN' as const
@@ -7,6 +7,7 @@ export const MAX_PRECEDING_CONTEXT = 6
 export const MAX_PROPER_NAME_GLOSSARY = 64
 
 export type HskLevel = 1 | 2 | 3 | 4 | 5 | 6
+export type NameTranslation = 'keep-original' | 'chinese'
 export type Point = { x: number; y: number }
 
 export type NormalizedRect = {
@@ -72,6 +73,7 @@ export type BrowserJobRequest = {
     hskLevel: HskLevel
     readingDirection: 'auto' | 'ltr' | 'rtl'
     translateSoundEffects: false
+    nameTranslation: NameTranslation
   }
   precedingContext?: Array<{
     sourceEnglish: string
@@ -115,6 +117,11 @@ export type RegionStyle = {
   writingMode: 'horizontal-tb' | 'vertical-rl'
   lineHeight: number
   letterSpacingEm: number
+  colorBands?: Array<{
+    position: number
+    foreground: string
+    outlineColor?: string
+  }>
 }
 
 export type RegionLayout = {
@@ -225,11 +232,19 @@ export type BrowserSetupStatus = {
   errorCode?: string
 }
 
-export type LookupRequest = {
-  selectedText: string
-  jobId?: string
-  regionId?: string
-}
+export type LookupRequest =
+  | {
+      interaction: 'selection'
+      selectedText: string
+      jobId?: string
+      regionId?: string
+    }
+  | {
+      interaction: 'hover'
+      characterOffset: number
+      jobId: string
+      regionId: string
+    }
 
 export type LookupResult = {
   selectedText: string
@@ -526,6 +541,7 @@ function parseStyle(value: unknown, path: string): RegionStyle {
       'writingMode',
       'lineHeight',
       'letterSpacingEm',
+      'colorBands',
     ],
     path,
   )
@@ -537,6 +553,35 @@ function parseStyle(value: unknown, path: string): RegionStyle {
   if (lineHeight <= 0) fail(`${path}.lineHeight`, 'must be positive')
   const outlineColor = optional(item.outlineColor, `${path}.outlineColor`, cssColor)
   const shadowColor = optional(item.shadowColor, `${path}.shadowColor`, cssColor)
+  const colorBands =
+    item.colorBands === undefined
+      ? []
+      : array(item.colorBands, `${path}.colorBands`, 512).map((value, index) => {
+          const bandPath = `${path}.colorBands[${index}]`
+          const band = record(value, bandPath)
+          exact(band, ['position', 'foreground', 'outlineColor'], bandPath)
+          const position = finite(band.position, `${bandPath}.position`)
+          if (position < 0 || position > 1) {
+            fail(`${bandPath}.position`, 'must be from 0 through 1')
+          }
+          const outlineColor = optional(
+            band.outlineColor,
+            `${bandPath}.outlineColor`,
+            cssColor,
+          )
+          return {
+            position,
+            foreground: cssColor(band.foreground, `${bandPath}.foreground`),
+            ...(outlineColor === undefined ? {} : { outlineColor }),
+          }
+        })
+  if (
+    colorBands.some(
+      (band, index) => index > 0 && band.position <= (colorBands[index - 1]?.position ?? 1),
+    )
+  ) {
+    fail(`${path}.colorBands`, 'positions must be strictly increasing')
+  }
   return {
     fontId: string(item.fontId, `${path}.fontId`, false, 512),
     category: oneOf(item.category, `${path}.category`, [
@@ -561,6 +606,7 @@ function parseStyle(value: unknown, path: string): RegionStyle {
     ] as const),
     lineHeight,
     letterSpacingEm: finite(item.letterSpacingEm, `${path}.letterSpacingEm`),
+    ...(colorBands.length === 0 ? {} : { colorBands }),
   }
 }
 
@@ -746,6 +792,7 @@ export function parseBrowserJobRequest(value: unknown): BrowserJobRequest {
       'hskLevel',
       'readingDirection',
       'translateSoundEffects',
+      'nameTranslation',
     ],
     'settings',
   )
@@ -825,6 +872,10 @@ export function parseBrowserJobRequest(value: unknown): BrowserJobRequest {
         'settings.translateSoundEffects',
         [false] as const,
       ),
+      nameTranslation: oneOf(settings.nameTranslation, 'settings.nameTranslation', [
+        'keep-original',
+        'chinese',
+      ] as const),
     },
     ...(precedingContext === undefined ? {} : { precedingContext }),
     ...(properNameGlossary === undefined ? {} : { properNameGlossary }),
@@ -1030,18 +1081,38 @@ export function parseBrowserSetupStatus(value: unknown): BrowserSetupStatus {
 
 export function parseLookupRequest(value: unknown): LookupRequest {
   const item = record(value, '$')
-  exact(item, ['selectedText', 'jobId', 'regionId'], '$')
-  const selectedText = string(item.selectedText, 'selectedText', false, 256)
-  if ([...selectedText].length > 256) fail('selectedText', 'must contain at most 256 characters')
+  const interaction = oneOf(
+    item.interaction,
+    'interaction',
+    ['selection', 'hover'] as const,
+  )
   const jobId = optional(item.jobId, 'jobId', string)
   const regionId = optional(item.regionId, 'regionId', string)
   if ((jobId === undefined) !== (regionId === undefined)) {
     fail('regionId', 'jobId and regionId must be present together')
   }
+  if (interaction === 'selection') {
+    exact(item, ['interaction', 'selectedText', 'jobId', 'regionId'], '$')
+    const selectedText = string(item.selectedText, 'selectedText', false, 256)
+    if ([...selectedText].length > 256) {
+      fail('selectedText', 'must contain at most 256 characters')
+    }
+    return {
+      interaction,
+      selectedText,
+      ...(jobId === undefined ? {} : { jobId }),
+      ...(regionId === undefined ? {} : { regionId }),
+    }
+  }
+  exact(item, ['interaction', 'characterOffset', 'jobId', 'regionId'], '$')
+  if (jobId === undefined || regionId === undefined) {
+    fail('jobId', 'hover lookup requires a translated job and region')
+  }
   return {
-    selectedText,
-    ...(jobId === undefined ? {} : { jobId }),
-    ...(regionId === undefined ? {} : { regionId }),
+    interaction,
+    characterOffset: integer(item.characterOffset, 'characterOffset', 0),
+    jobId,
+    regionId,
   }
 }
 

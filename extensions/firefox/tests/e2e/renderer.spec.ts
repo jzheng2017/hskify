@@ -6,6 +6,54 @@ async function waitForHarness(page: Page): Promise<void> {
     .toBe(true)
 }
 
+async function hoverCharacter(
+  page: Page,
+  regionIndex: number,
+  characterOffset: number,
+): Promise<void> {
+  const point = await page.locator('.hmt-region').nth(regionIndex).evaluate(
+    (region, offset) => {
+      const walker = document.createTreeWalker(region, NodeFilter.SHOW_TEXT)
+      let remaining = offset
+      for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+        if (!(node instanceof Text)) continue
+        const characters = [...node.data]
+        if (remaining >= characters.length) {
+          remaining -= characters.length
+          continue
+        }
+        const start = characters.slice(0, remaining).join('').length
+        const end = start + characters[remaining]!.length
+        const range = document.createRange()
+        range.setStart(node, start)
+        range.setEnd(node, end)
+        const rect = range.getBoundingClientRect()
+        return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }
+      }
+      throw new Error('Character offset is outside the translated region.')
+    },
+    characterOffset,
+  )
+  await page.mouse.move(point.x, point.y)
+}
+
+test('explains the longest expression beginning at the hovered character', async ({
+  page,
+}) => {
+  await page.goto('/?hover=1')
+  await waitForHarness(page)
+  const heading = page.locator('.hmt-lookup-heading strong')
+
+  await hoverCharacter(page, 0, 0)
+  await expect(heading).toHaveText('\u7814\u7a76\u751f')
+  expect(await page.evaluate(() => window.getSelection()?.isCollapsed ?? true)).toBe(
+    true,
+  )
+
+  await hoverCharacter(page, 0, 2)
+  await expect(heading).toHaveText('\u751f')
+})
+
 test('renders exact selectable Chinese and dictionary context', async ({ page }) => {
   await page.goto('/')
   await waitForHarness(page)
@@ -43,7 +91,7 @@ test('renders exact selectable Chinese and dictionary context', async ({ page })
   await original.focus()
   await page.keyboard.press('Enter')
   await expect(page.locator('.hmt-lookup')).toBeHidden()
-  await expect(speak).toHaveAttribute('aria-pressed', 'false')
+  await expect(speak).toHaveCount(0)
 })
 
 test('keeps reader navigation for clicks and suppresses only selection clicks', async ({
@@ -86,6 +134,69 @@ test('refits normalized geometry within two CSS pixels after resize', async ({ p
     return Math.abs(regionRect.left - expectedLeft)
   })
   expect(delta).toBeLessThanOrEqual(2)
+})
+
+test('keeps translated regions aligned in the same frame as document scrolling', async ({
+  page,
+}) => {
+  await page.goto('/')
+  await waitForHarness(page)
+  const drift = await page.evaluate(() => {
+    const image = document.querySelector<HTMLImageElement>('#source')
+    const region = document
+      .querySelector<HTMLElement>('[aria-label="HSK manga translation controls"]')
+      ?.shadowRoot?.querySelector<HTMLElement>('.hmt-region')
+    if (!image || !region) return Number.POSITIVE_INFINITY
+    const beforeImage = image.getBoundingClientRect()
+    const beforeRegion = region.getBoundingClientRect()
+    const beforeOffset = beforeRegion.top - beforeImage.top
+    window.scrollTo(0, 300)
+    const afterImage = image.getBoundingClientRect()
+    const afterRegion = region.getBoundingClientRect()
+    return Math.abs(afterRegion.top - afterImage.top - beforeOffset)
+  })
+
+  expect(drift).toBeLessThanOrEqual(1)
+})
+
+test('measures mixed-script chapter text into an irregular bubble without clipping', async ({
+  page,
+}) => {
+  await page.goto('/?stress=1')
+  await waitForHarness(page)
+
+  const measure = async () =>
+    page.locator('.hmt-region').first().evaluate((region) => {
+      const content = region.querySelector<HTMLElement>('.hmt-region-text')
+      if (!(region instanceof HTMLElement) || !content) {
+        return { fits: false, fontSize: 0, text: '' }
+      }
+      const outer = region.getBoundingClientRect()
+      const inner = content.getBoundingClientRect()
+      return {
+        fits:
+          region.scrollWidth <= region.clientWidth + 1 &&
+          region.scrollHeight <= region.clientHeight + 1 &&
+          inner.left >= outer.left - 1 &&
+          inner.right <= outer.right + 1 &&
+          inner.top >= outer.top - 1 &&
+          inner.bottom <= outer.bottom + 1,
+        fontSize: Number.parseFloat(getComputedStyle(region).fontSize),
+        text: content.textContent ?? '',
+      }
+    })
+
+  let metrics = await measure()
+  expect(metrics.fits).toBe(true)
+  expect(metrics.fontSize).toBeGreaterThan(0)
+  expect(metrics.text).toContain('Enrique')
+  expect(metrics.text).toContain('四十七号政变')
+
+  await page.evaluate(() => window.hmtHarness.setWidth(420))
+  await page.waitForTimeout(50)
+  metrics = await measure()
+  expect(metrics.fits).toBe(true)
+  expect(metrics.fontSize).toBeGreaterThan(0)
 })
 
 test('maps contain and cover object-fit content boxes', async ({ page }) => {

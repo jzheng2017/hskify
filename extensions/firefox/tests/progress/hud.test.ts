@@ -22,12 +22,14 @@ describe('page and image progress UI', () => {
         overallProgress: 0.3,
         current: 2,
         total: 7,
-        message: 'Reading text',
+        message: 'Running OCR batch 2 of 7',
       },
     })
     const shadow = hud.host.shadowRoot
     expect(shadow?.textContent).toContain('Image 2 of 4')
-    expect(shadow?.textContent).toContain('Reading text · 2 of 7')
+    expect(shadow?.textContent).toContain('Translating this chapter')
+    expect(shadow?.textContent).not.toContain('OCR')
+    expect(shadow?.textContent).not.toContain('2 of 7')
     expect(shadow?.querySelector('progress')?.getAttribute('value')).toBe('0.3')
     shadow?.querySelector('button')?.dispatchEvent(new Event('click'))
     expect(cancel).toHaveBeenCalled()
@@ -49,10 +51,13 @@ describe('page and image progress UI', () => {
     const hud = new PageHud(() => undefined)
     hud.complete(3, 3)
     expect(hud.snapshot()).toMatchObject({ state: 'complete', current: 3, total: 3 })
-    hud.fail('OCR failed', 1, 3)
-    expect(hud.snapshot()).toMatchObject({ state: 'failed', message: 'OCR failed' })
+    hud.fail('This image couldn’t be translated. Try again.', 1, 3)
+    expect(hud.snapshot()).toMatchObject({
+      state: 'failed',
+      message: 'This image couldn’t be translated. Try again.',
+    })
     hud.cancelled(1, 3)
-    expect(hud.snapshot().message).toContain('incomplete images kept original')
+    expect(hud.snapshot().message).toContain('unfinished was left unchanged')
   })
 
   it('keeps retry as the one clear image-level failure action', () => {

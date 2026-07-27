@@ -36,6 +36,7 @@ function record(overrides: Partial<ActiveJobRecord> = {}): ActiveJobRecord {
         hskLevel: 5,
         readingDirection: 'auto',
         translateSoundEffects: false,
+        nameTranslation: 'keep-original',
       },
     },
     uploadedImageBytes: 123_456,

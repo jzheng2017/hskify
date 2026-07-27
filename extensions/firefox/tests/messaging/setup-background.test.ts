@@ -14,7 +14,7 @@ describe('first-run background routing', () => {
     vi.unstubAllGlobals()
   })
 
-  it('proxies setup status/start and opens only the bundled install guide', async () => {
+  it('proxies setup status and model preparation without opening tabs', async () => {
     const companion = {
       getSetupStatus: vi.fn(async () => ({
         state: 'missing-models' as const,
@@ -29,14 +29,7 @@ describe('first-run background routing', () => {
         message: 'Downloading.',
       })),
     } as unknown as CompanionClient
-    const create = vi.spyOn(fakeBrowser.tabs, 'create').mockResolvedValue({
-      id: 3,
-      index: 0,
-      highlighted: true,
-      active: true,
-      pinned: false,
-      incognito: false,
-    })
+    const create = vi.spyOn(fakeBrowser.tabs, 'create')
     const router = new BackgroundRouter({ companion })
     const sender = { id: fakeBrowser.runtime.id } as browser.runtime.MessageSender
 
@@ -46,11 +39,8 @@ describe('first-run background routing', () => {
     await expect(router.route({ type: 'setup:start' }, sender)).resolves.toMatchObject({
       state: 'downloading',
     })
-    await expect(router.route({ type: 'setup:open-installer' }, sender)).resolves.toBeUndefined()
     expect(companion.getSetupStatus).toHaveBeenCalledTimes(1)
     expect(companion.startModelSetup).toHaveBeenCalledTimes(1)
-    expect(create).toHaveBeenCalledWith({
-      url: expect.stringMatching(/\/setup\.html$/),
-    })
+    expect(create).not.toHaveBeenCalled()
   })
 })

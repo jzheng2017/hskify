@@ -1,0 +1,2 @@
+allowBuilds:
+  '@openapitools/openapi-generator-cli': set this to true or false

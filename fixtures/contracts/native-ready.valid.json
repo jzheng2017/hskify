@@ -1,6 +1,6 @@
 {
   "type": "ready",
-  "buildFingerprint": "hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-07-26-r2",
+  "buildFingerprint": "hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-07-27-r6",
   "engineVersion": "0.61.2",
   "port": 43127,
   "token": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",

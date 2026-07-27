@@ -5,7 +5,7 @@ import type {
   RegionRefinedJobUpdate,
 } from '../contracts/browser'
 import type { DiscoveredImage } from '../discovery/images'
-import { SelectionController } from '../selection/popover'
+import { ExplanationController } from '../selection/popover'
 import { MandarinSpeaker, type TextSpeaker } from '../selection/speech'
 import { FontLoader, type FontFetcher } from './font-loader'
 import {
@@ -17,7 +17,7 @@ import {
   fitPolygonForRegion,
   PolygonTextFitter,
 } from './fitting'
-import { applyRegionStyle } from './style'
+import { applyRegionColorBands, applyRegionStyle } from './style'
 
 const MEASUREMENT_SEARCH_STEPS = 16
 const FIT_SAFETY_RATIO = 0.98
@@ -460,10 +460,21 @@ function regionElement(region: BrowserRegion): {
   return { element, textElement }
 }
 
-function actualOverflow(element: HTMLElement): boolean {
-  return (
+function actualOverflow(element: HTMLElement, content?: HTMLElement): boolean {
+  const scrollOverflow =
     element.scrollWidth > element.clientWidth + 0.5 ||
     element.scrollHeight > element.clientHeight + 0.5
+  if (scrollOverflow || !content) return scrollOverflow
+  const outer = element.getBoundingClientRect()
+  const inner = content.getBoundingClientRect()
+  if (outer.width <= 0 || outer.height <= 0 || inner.width <= 0 || inner.height <= 0) {
+    return false
+  }
+  return (
+    inner.left < outer.left + 0.5 ||
+    inner.right > outer.right - 0.5 ||
+    inner.top < outer.top + 0.5 ||
+    inner.bottom > outer.bottom - 0.5
   )
 }
 
@@ -471,7 +482,7 @@ export class RenderedImage {
   private mode: TranslationMode = 'chinese'
   private readonly regions = new Map<string, RegionView>()
   private readonly fitter = new PolygonTextFitter()
-  private readonly selection: SelectionController
+  private readonly explanation: ExplanationController
   private destroyed = false
   private geometry?: ImageGeometry
 
@@ -492,7 +503,7 @@ export class RenderedImage {
     private readonly resizeObserver?: ResizeObserver,
     private readonly onDestroy?: (rendered: RenderedImage) => void,
   ) {
-    this.selection = new SelectionController(
+    this.explanation = new ExplanationController(
       shadowRoot,
       popover,
       callbacks.lookup,
@@ -500,7 +511,7 @@ export class RenderedImage {
       speaker,
     )
     this.resizeObserver?.observe(candidate.element)
-    candidate.element.ownerDocument.addEventListener('scroll', this.scheduleRefit, true)
+    candidate.element.ownerDocument.addEventListener('scroll', this.schedulePosition, true)
     candidate.element.ownerDocument.defaultView?.addEventListener('resize', this.scheduleRefit)
     this.refit()
   }
@@ -544,7 +555,7 @@ export class RenderedImage {
   setMode(mode: TranslationMode): void {
     if (this.destroyed) return
     this.mode = mode
-    if (mode === 'original') this.selection.dismiss()
+    if (mode === 'original') this.explanation.dismiss()
     this.applyVisualMode(mode)
   }
 
@@ -649,13 +660,13 @@ export class RenderedImage {
     if (previous) {
       previous.patch.replaceWith(patch)
       previous.element.replaceWith(created.element)
-      this.selection.unregister(previous.element)
+      this.explanation.unregister(previous.element)
     } else {
       this.patchLayer.append(patch)
       this.textLayer.append(created.element)
     }
     this.regions.set(region.id, next)
-    this.selection.register(created.element, this.job.jobId, region.id)
+    this.explanation.register(created.element, this.job.jobId, region.id)
     this.updateRegionMetadata(next)
     this.refitView(next)
     if (previous) URL.revokeObjectURL(previous.patchUrl)
@@ -689,32 +700,36 @@ export class RenderedImage {
       this.geometry.image.height,
     )
     applyChosenLines(view.textElement, fit.lines, view.region.displayedChinese)
-    applyRegionStyle(view.element, view.region, fit.fontSize, view.fontFamily)
+    const applyStyle = (fontSize: number): void => {
+      applyRegionStyle(view.element, view.region, fontSize, view.fontFamily)
+      applyRegionColorBands(view.textElement, view.region, fontSize)
+    }
+    applyStyle(fit.fontSize)
     view.element.style.alignItems =
       view.region.style.writingMode === 'vertical-rl' ? 'flex-start' : 'center'
 
     // Keep a small measured-layout margin so fractional CSS zoom and device
     // pixel rounding cannot turn an exact fit into a clipped final glyph.
     let measuredSize = fit.fontSize * FIT_SAFETY_RATIO
-    applyRegionStyle(view.element, view.region, measuredSize, view.fontFamily)
-    if (actualOverflow(view.element)) {
+    applyStyle(measuredSize)
+    if (actualOverflow(view.element, view.textElement)) {
       let low = 0
       let high = measuredSize
       for (let iteration = 0; iteration < MEASUREMENT_SEARCH_STEPS; iteration += 1) {
         const midpoint = (low + high) / 2
-        applyRegionStyle(view.element, view.region, midpoint, view.fontFamily)
-        if (actualOverflow(view.element)) high = midpoint
+        applyStyle(midpoint)
+        if (actualOverflow(view.element, view.textElement)) high = midpoint
         else low = midpoint
       }
       measuredSize = low * 0.995
-      applyRegionStyle(view.element, view.region, measuredSize, view.fontFamily)
+      applyStyle(measuredSize)
     }
     // A zero-size final fallback is only reachable for degenerate page
     // geometry. It preserves selectable text while strictly preventing
     // overflow; normal regions remain above zero through the binary search.
-    if (actualOverflow(view.element)) {
+    if (actualOverflow(view.element, view.textElement)) {
       measuredSize = 0
-      applyRegionStyle(view.element, view.region, measuredSize, view.fontFamily)
+      applyStyle(measuredSize)
     }
     if (fit.degraded || measuredSize === 0) {
       view.element.dataset.fit = 'degraded'
@@ -724,7 +739,26 @@ export class RenderedImage {
     }
   }
 
+  private positionFrame: number | null = null
   private refitFrame: number | null = null
+  private readonly schedulePosition = (event: Event): void => {
+    if (this.destroyed || this.positionFrame !== null) return
+    const documentRef = this.candidate.element.ownerDocument
+    // A document-anchored overlay moves with normal page scrolling in the
+    // compositor. Only nested scrolling containers require a coordinate
+    // refresh.
+    if (event.target === documentRef || event.target === documentRef.defaultView) return
+    const view = documentRef.defaultView
+    if (!view) {
+      this.positionWrapper()
+      return
+    }
+    this.positionFrame = view.requestAnimationFrame(() => {
+      this.positionFrame = null
+      this.positionWrapper()
+    })
+  }
+
   private readonly scheduleRefit = (): void => {
     if (this.destroyed || this.refitFrame !== null) return
     const view = this.candidate.element.ownerDocument.defaultView
@@ -738,13 +772,30 @@ export class RenderedImage {
     })
   }
 
-  refit(): void {
+  private positionWrapper(): void {
     if (this.destroyed || !this.candidate.element.isConnected) return
     const imageRect = this.candidate.element.getBoundingClientRect()
-    this.wrapper.style.left = px(imageRect.left)
-    this.wrapper.style.top = px(imageRect.top)
+    const offsetParent = this.wrapper.offsetParent
+    if (offsetParent instanceof HTMLElement) {
+      const parentRect = offsetParent.getBoundingClientRect()
+      this.wrapper.style.left = px(
+        imageRect.left - parentRect.left + offsetParent.scrollLeft - offsetParent.clientLeft,
+      )
+      this.wrapper.style.top = px(
+        imageRect.top - parentRect.top + offsetParent.scrollTop - offsetParent.clientTop,
+      )
+    } else {
+      const view = this.candidate.element.ownerDocument.defaultView
+      this.wrapper.style.left = px(imageRect.left + (view?.scrollX ?? 0))
+      this.wrapper.style.top = px(imageRect.top + (view?.scrollY ?? 0))
+    }
     this.wrapper.style.width = px(imageRect.width)
     this.wrapper.style.height = px(imageRect.height)
+  }
+
+  refit(): void {
+    if (this.destroyed || !this.candidate.element.isConnected) return
+    this.positionWrapper()
     this.geometry = calculateImageGeometry(
       this.candidate.element,
       this.wrapper,
@@ -761,13 +812,17 @@ export class RenderedImage {
     this.destroyed = true
     this.resizeObserver?.disconnect()
     const documentRef = this.candidate.element.ownerDocument
-    documentRef.removeEventListener('scroll', this.scheduleRefit, true)
+    documentRef.removeEventListener('scroll', this.schedulePosition, true)
     documentRef.defaultView?.removeEventListener('resize', this.scheduleRefit)
+    if (this.positionFrame !== null) {
+      documentRef.defaultView?.cancelAnimationFrame(this.positionFrame)
+      this.positionFrame = null
+    }
     if (this.refitFrame !== null) {
       documentRef.defaultView?.cancelAnimationFrame(this.refitFrame)
       this.refitFrame = null
     }
-    this.selection.destroy()
+    this.explanation.destroy()
     this.candidate.element.removeAttribute('data-hmt-original')
     this.wrapper.remove()
     for (const view of this.regions.values()) URL.revokeObjectURL(view.patchUrl)
@@ -860,7 +915,10 @@ export class SelectableRenderer {
     wrapper.style.contain = 'layout style'
     wrapper.style.display = 'block'
     wrapper.style.pointerEvents = 'none'
-    wrapper.style.position = 'fixed'
+    // Document anchoring lets the browser compositor move the overlay with
+    // the image during normal scrolling. Fixed positioning would require a
+    // main-thread layout read and coordinate rewrite on every scroll frame.
+    wrapper.style.position = 'absolute'
     wrapper.style.zIndex = '2147483000'
     guard.validate()
     candidate.element.ownerDocument.body.append(wrapper)

@@ -64,7 +64,11 @@ async function decodeFixturePatch(image: HTMLImageElement): Promise<void> {
 function renderer(
   lookup: ConstructorParameters<typeof SelectableRenderer>[0]['lookup'] = async (
     request,
-  ) => ({ selectedText: request.selectedText, tokens: [] }),
+  ) => ({
+    selectedText:
+      request.interaction === 'selection' ? request.selectedText : '离开',
+    tokens: [],
+  }),
   decoder = decodeFixturePatch,
   speaker?: TextSpeaker,
 ): SelectableRenderer {
@@ -161,10 +165,47 @@ describe('progressive selectable image renderer', () => {
     expect(shadow.querySelector('.hmt-region')).toBeNull()
     releaseDecode()
     await installing
+    expect(rendered.wrapper.style.position).toBe('absolute')
     expect(shadow.querySelector('.hmt-patch')).not.toBeNull()
     expect(shadow.querySelector('.hmt-region')?.textContent).toBe('我们现在要走！')
     image.dispatchEvent(new Event('custom-live-listener'))
     expect(liveListener).toHaveBeenCalledTimes(1)
+  })
+
+  it('renders retained Latin names at the measured text size without changing selectable text', async () => {
+    const image = loadedImage()
+    document.body.append(image)
+    const rendered = renderer().begin(candidate(image), {
+      jobId: 'fixture-job',
+      sourceWidth: 1200,
+      sourceHeight: 1800,
+    })
+    const region = {
+      ...fixtureRegions()[0]!,
+      displayedChinese: '帝国称它为 SILVER HARBOR。',
+      layout: {
+        ...fixtureRegions()[0]!.layout,
+        suggestedLines: [],
+      },
+    }
+
+    await rendered.installRegion(region, pngHeader())
+
+    const translated = shadowOf(rendered).querySelector<HTMLElement>('.hmt-region')
+    expect(translated?.textContent).toBe(region.displayedChinese)
+    expect(translated?.querySelector('.hmt-latin-run')).toBeNull()
+  })
+
+  it('lets document scrolling stay compositor-only without scheduling a refit', async () => {
+    const image = loadedImage()
+    document.body.append(image)
+    const rendered = await renderAll(image)
+    const animationFrame = vi.spyOn(window, 'requestAnimationFrame')
+
+    document.dispatchEvent(new Event('scroll'))
+
+    expect(animationFrame).not.toHaveBeenCalled()
+    expect(rendered.wrapper.style.position).toBe('absolute')
   })
 
   it('shares one fixed, synchronized mode control across a long multi-image reader', async () => {
@@ -247,7 +288,8 @@ describe('progressive selectable image renderer', () => {
     const image = loadedImage()
     document.body.append(image)
     const lookup = vi.fn(async (request) => ({
-      selectedText: request.selectedText,
+      selectedText:
+        request.interaction === 'selection' ? request.selectedText : '离开',
       tokens: [
         {
           simplified: '离开',

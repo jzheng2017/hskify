@@ -18,6 +18,7 @@ describe('strict extension runtime messages', () => {
       sourceMimeType: 'image/webp',
       sourceBytes: Uint8Array.of(1, 2, 3).buffer,
       hskLevel: 4,
+      nameTranslation: 'keep-original',
       visibleRects: [{ x: 0, y: 0.25, width: 1, height: 0.5 }],
       properNameGlossary: [{ sourceEnglish: 'Cheon Yeo Woon', chinese: '天汝云' }],
     }
@@ -37,7 +38,10 @@ describe('strict extension runtime messages', () => {
     expect(() =>
       parseBackgroundRequest({
         type: 'dictionary:lookup',
-        request: { selectedText: '我' },
+        request: {
+          interaction: 'selection',
+          selectedText: '我',
+        },
       }),
     ).toThrow(/identify the translated job and region/i)
     expect(() =>
@@ -112,6 +116,7 @@ describe('strict extension runtime messages', () => {
         type: 'content:start',
         scope: 'all',
         hskLevel: 5,
+        nameTranslation: 'keep-original',
         properNameGlossary: [
           { sourceEnglish: 'Cheon Yeo Woon', chinese: '天汝云' },
         ],
@@ -124,8 +129,17 @@ describe('strict extension runtime messages', () => {
         type: 'content:start',
         scope: 'everything',
         hskLevel: 9,
+        nameTranslation: 'literal',
       }),
     ).toThrow(/scope/i)
+    expect(() =>
+      parseContentRequest({
+        type: 'content:start',
+        scope: 'all',
+        hskLevel: 3,
+        nameTranslation: 'literal',
+      }),
+    ).toThrow(/nameTranslation/i)
     expect(() =>
       parseContentRequest({
         type: 'content:cancel',
@@ -140,9 +154,6 @@ describe('strict extension runtime messages', () => {
     })
     expect(parseBackgroundRequest({ type: 'setup:start' })).toEqual({
       type: 'setup:start',
-    })
-    expect(parseBackgroundRequest({ type: 'setup:open-installer' })).toEqual({
-      type: 'setup:open-installer',
     })
     expect(() =>
       parseBackgroundRequest({ type: 'setup:start', model: 'untrusted-model' }),

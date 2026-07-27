@@ -12,6 +12,7 @@ import {
   type JobUpdateBatch,
   type LookupRequest,
   type LookupResult,
+  type NameTranslation,
   type NormalizedRect,
 } from '../contracts/browser'
 
@@ -31,18 +32,19 @@ export type PopupStartMessage = {
   type: 'popup:start'
   scope: TranslationScope
   hskLevel: HskLevel
+  nameTranslation: NameTranslation
 }
 export type PopupCancelMessage = { type: 'popup:cancel' }
 export type PopupStateMessage = { type: 'popup:state' }
 export type SetupStatusMessage = { type: 'setup:status' }
 export type SetupStartMessage = { type: 'setup:start' }
-export type SetupOpenInstallerMessage = { type: 'setup:open-installer' }
 
 export type ContentPrepareMessage = { type: 'content:prepare' }
 export type ContentStartMessage = {
   type: 'content:start'
   scope: TranslationScope
   hskLevel: HskLevel
+  nameTranslation: NameTranslation
   properNameGlossary?: BrowserJobRequest['properNameGlossary']
 }
 export type ContentCancelMessage = { type: 'content:cancel' }
@@ -59,6 +61,7 @@ export type SubmitImageMessage = {
   sourceMimeType?: string
   sourceBytes?: ArrayBuffer
   hskLevel: HskLevel
+  nameTranslation: NameTranslation
   visibleRects: NormalizedRect[]
   precedingContext?: BrowserJobRequest['precedingContext']
   properNameGlossary?: BrowserJobRequest['properNameGlossary']
@@ -146,7 +149,6 @@ export type BackgroundRequest =
   | PopupStateMessage
   | SetupStatusMessage
   | SetupStartMessage
-  | SetupOpenInstallerMessage
   | PrefetchImageMessage
   | CancelImagePrefetchMessage
   | SubmitImageMessage
@@ -207,7 +209,10 @@ export type RecoveredJob = {
   terminalType?: 'complete' | 'failed' | 'cancelled'
 }
 
-export type PopupState = PageState & { hskLevel: HskLevel }
+export type PopupState = PageState & {
+  hskLevel: HskLevel
+  nameTranslation: NameTranslation
+}
 
 export type MessageError = {
   code: string
@@ -226,7 +231,6 @@ export type MessageResultMap = {
   'popup:state': PopupState
   'setup:status': BrowserSetupStatus
   'setup:start': BrowserSetupStatus
-  'setup:open-installer': undefined
   'image:prefetch': undefined
   'image:prefetch-cancel': undefined
   'job:submit': SubmittedJob
@@ -332,6 +336,15 @@ function translationScope(value: unknown, path: string): TranslationScope {
   return value
 }
 
+function nameTranslation(value: unknown, path: string): NameTranslation {
+  if (value !== 'keep-original' && value !== 'chinese') {
+    throw new RuntimeMessageValidationError(
+      `${path} must be "keep-original" or "chinese".`,
+    )
+  }
+  return value
+}
+
 function terminalType(
   value: unknown,
   path: string,
@@ -392,7 +405,7 @@ function pageState(value: unknown, includeHsk = false): PopupState | PageState {
   exact(
     item,
     includeHsk
-      ? ['state', 'current', 'total', 'stage', 'message', 'hskLevel']
+      ? ['state', 'current', 'total', 'stage', 'message', 'hskLevel', 'nameTranslation']
       : ['state', 'current', 'total', 'stage', 'message'],
   )
   if (
@@ -412,7 +425,11 @@ function pageState(value: unknown, includeHsk = false): PopupState | PageState {
     message: string(item.message, '$.message', 2_048),
   } satisfies PageState
   return includeHsk
-    ? { ...parsed, hskLevel: hskLevel(item.hskLevel, '$.hskLevel') }
+    ? {
+        ...parsed,
+        hskLevel: hskLevel(item.hskLevel, '$.hskLevel'),
+        nameTranslation: nameTranslation(item.nameTranslation, '$.nameTranslation'),
+      }
     : parsed
 }
 
@@ -490,15 +507,15 @@ export function parseBackgroundRequest(value: unknown): BackgroundRequest {
     case 'popup:state':
     case 'setup:status':
     case 'setup:start':
-    case 'setup:open-installer':
       exact(item, ['type'])
       return { type }
     case 'popup:start':
-      exact(item, ['type', 'scope', 'hskLevel'])
+      exact(item, ['type', 'scope', 'hskLevel', 'nameTranslation'])
       return {
         type,
         scope: translationScope(item.scope, '$.scope'),
         hskLevel: hskLevel(item.hskLevel, '$.hskLevel'),
+        nameTranslation: nameTranslation(item.nameTranslation, '$.nameTranslation'),
       }
     case 'image:prefetch':
       exact(item, [
@@ -538,6 +555,7 @@ export function parseBackgroundRequest(value: unknown): BackgroundRequest {
         'sourceMimeType',
         'sourceBytes',
         'hskLevel',
+        'nameTranslation',
         'visibleRects',
         'precedingContext',
         'properNameGlossary',
@@ -569,6 +587,7 @@ export function parseBackgroundRequest(value: unknown): BackgroundRequest {
         ...(sourceMimeType === undefined ? {} : { sourceMimeType }),
         ...(sourceBytes === undefined ? {} : { sourceBytes }),
         hskLevel: hskLevel(item.hskLevel, '$.hskLevel'),
+        nameTranslation: nameTranslation(item.nameTranslation, '$.nameTranslation'),
         visibleRects: normalizedRects(item.visibleRects, '$.visibleRects'),
         ...(precedingContext === undefined ? {} : { precedingContext }),
         ...(properNameGlossary === undefined ? {} : { properNameGlossary }),
@@ -666,7 +685,13 @@ export function parseContentRequest(value: unknown): ContentRequest {
       exact(item, ['type'])
       return { type }
     case 'content:start':
-      exact(item, ['type', 'scope', 'hskLevel', 'properNameGlossary'])
+      exact(item, [
+        'type',
+        'scope',
+        'hskLevel',
+        'nameTranslation',
+        'properNameGlossary',
+      ])
       const properNameGlossary =
         item.properNameGlossary === undefined
           ? undefined
@@ -675,6 +700,7 @@ export function parseContentRequest(value: unknown): ContentRequest {
         type,
         scope: translationScope(item.scope, '$.scope'),
         hskLevel: hskLevel(item.hskLevel, '$.hskLevel'),
+        nameTranslation: nameTranslation(item.nameTranslation, '$.nameTranslation'),
         ...(properNameGlossary === undefined ? {} : { properNameGlossary }),
       }
     default:
@@ -812,7 +838,6 @@ function parseResult<T extends BackgroundRequest['type']>(
     case 'jobs:cancel-page':
     case 'image:prefetch':
     case 'image:prefetch-cancel':
-    case 'setup:open-installer':
       if (value !== undefined) {
         throw new RuntimeMessageValidationError('$ must be undefined.')
       }

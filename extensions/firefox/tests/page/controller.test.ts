@@ -2,7 +2,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { DiscoveredImage, DiscoveryEvent } from '../../src/discovery/images'
 import type { VisibleFirstQueue } from '../../src/discovery/queue'
-import { PageTranslationController } from '../../src/page/controller'
+import {
+  AUTOMATIC_IMAGE_RETRY_LIMIT,
+  PageTranslationController,
+  shouldAutomaticallyRetryImage,
+} from '../../src/page/controller'
+import { RuntimeMessageError } from '../../src/messaging/messages'
 import {
   SelectableRenderer,
   type RenderedImage,
@@ -176,6 +181,32 @@ afterEach(() => {
 })
 
 describe('page controller terminal restoration', () => {
+  it('automatically retries only retryable image failures within the limit', () => {
+    const retryable = new RuntimeMessageError(
+      'PIPELINE_FAILED',
+      'Temporary local failure',
+      true,
+    )
+    const permanent = new RuntimeMessageError(
+      'UNSUPPORTED_IMAGE',
+      'Unsupported image',
+      false,
+    )
+
+    expect(shouldAutomaticallyRetryImage(retryable, 0)).toBe(true)
+    expect(
+      shouldAutomaticallyRetryImage(
+        retryable,
+        AUTOMATIC_IMAGE_RETRY_LIMIT - 1,
+      ),
+    ).toBe(true)
+    expect(
+      shouldAutomaticallyRetryImage(retryable, AUTOMATIC_IMAGE_RETRY_LIMIT),
+    ).toBe(false)
+    expect(shouldAutomaticallyRetryImage(permanent, 0)).toBe(false)
+    expect(shouldAutomaticallyRetryImage(new Error('unknown'), 0)).toBe(false)
+  })
+
   it('cancellation restores completed and partial overlays to an exact DOM snapshot', () => {
     const page = fixture()
     const expectedHtml = page.chapter.innerHTML

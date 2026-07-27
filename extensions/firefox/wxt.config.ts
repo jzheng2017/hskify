@@ -4,8 +4,8 @@ export default defineConfig({
   srcDir: '.',
   outDir: '.output',
   manifestVersion: 3,
-  manifest: {
-    name: 'Hskify',
+  manifest: ({ mode }) => ({
+    name: mode === 'development' ? 'Hskify Dev' : 'Hskify',
     description: 'Translate English manga lettering into selectable, HSK-controlled Chinese.',
     version: '0.1.0',
     permissions: ['activeTab', 'scripting', 'storage', 'nativeMessaging'],
@@ -20,5 +20,5 @@ export default defineConfig({
         },
       },
     },
-  },
+  }),
 })

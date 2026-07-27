@@ -4,6 +4,7 @@ import type { BrowserRegion } from '../../src/contracts/browser'
 import { createFixtureRegions } from '../../src/messaging/fixture-service'
 import { FontLoader } from '../../src/rendering/font-loader'
 import {
+  applyRegionColorBands,
   applyRegionStyle,
   safeHexColor,
   validateRegionStyle,
@@ -48,6 +49,35 @@ describe('validated browser typography', () => {
     expect(element.style.color).toBe('#151515')
     expect(element.style.fontSize).toBe('24px')
     expect(element.style.getPropertyValue('-webkit-text-stroke')).toContain('#ffffff')
+  })
+
+  it('applies the ordered source palette to translated lines', () => {
+    const base = fixtureRegion()
+    const region: BrowserRegion = {
+      ...base,
+      style: {
+        ...base.style,
+        outlineWidthRatio: 0.04,
+        colorBands: [
+          { position: 0.25, foreground: '#111111', outlineColor: '#ffffff' },
+          { position: 0.75, foreground: '#2580df', outlineColor: '#000000' },
+        ],
+      },
+    }
+    const content = document.createElement('span')
+    for (const text of ['ä¸Š', 'ä¸‹']) {
+      const line = document.createElement('span')
+      line.className = 'hmt-region-line'
+      line.textContent = text
+      content.append(line)
+    }
+
+    applyRegionColorBands(content, region, 20)
+
+    const lines = content.querySelectorAll<HTMLElement>('.hmt-region-line')
+    expect(lines[0]?.style.color).toBe('#111111')
+    expect(lines[1]?.style.color).toBe('#2580df')
+    expect(lines[1]?.style.getPropertyValue('-webkit-text-stroke')).toContain('#000000')
   })
 
   it('caches a successfully loaded local font', async () => {

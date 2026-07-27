@@ -32,12 +32,12 @@ flowchart LR
     Control --> Daemon
     Daemon -->|"flat sequenced updates"| Extension
     Extension --> Overlay --> Reader
-    Extension -->|"selected Chinese"| Speech
+    Extension -->|"resolved Chinese"| Speech
 ```
 
 ## Build affinity and trust boundary
 
-`hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-07-26-r2` is compiled into the TypeScript and Rust
+`hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-07-27-r6` is compiled into the TypeScript and Rust
 contracts. Native handshake requests and responses, health responses, and job
 creation metadata must carry that exact value. A different value is rejected.
 There is no protocol-version header, range negotiation, compatibility shim, or
@@ -77,28 +77,28 @@ credential, or remote translation path is mounted.
    prerequisite. This covers dialogue, thoughts, captions, and unballooned
    story text while leaving the final semantic decision to OCR. Text proposals
    are spatially deduplicated at tile overlaps.
-4. PP-OCRv5 English recognition runs in batches of eight. Each RT-DETR text
-   proposal remains one semantic story-region candidate; this avoids merging
-   neighboring balloons or differently colored emphasis. A region is accepted
-   only when it meets the 0.45 confidence and English/story-text gates. On a
-   tile with explicit credit/release context, isolated uppercase name labels
-   are excluded; the same form on a normal story tile remains eligible.
-   Sound effects, credits, scanlation promotion, branding, non-English text,
-   and ambiguous OCR do not enter translation or cleanup.
-5. A small transparent PNG is constructed for the accepted text geometry.
-   Foreground and background colors are inferred from local pixels rather than
-   a fixed palette. Only the erase/glyph mask has alpha; pixels outside it
-   remain transparent, and cleanup preserves local color, gradients, texture,
-   contours, and styling instead of whitening the region.
+4. PP-OCRv5 English recognition runs in batches of eight. Mechanically valid
+   Latin OCR at confidence 0.45 or higher remains eligible; hard-coded content
+   word lists do not decide whether a line is story text.
+5. Learned bubble segmentation assigns lines to real bubble identities so an
+   entire balloon is processed atomically. Learned manga-text segmentation
+   produces one stitched probability field that also drives OCR line discovery
+   and per-line appearance sampling. Shared geometry expansion grows its mask
+   around the detected glyphs, and manga LaMa restores the source artwork.
+   Transparent region patches take alpha only from that semantic mask. Layout uses the
+   measured, eroded bubble contour rather than a fixed detector-box inset.
 6. Visible accepted regions jump ahead of off-screen work at every batch
    boundary. Translation batches contain up to six regions and normally flush
    once three are pending; an undersized visible tail waits no longer than
    75 ms so visibility changes do not create one-item GPU calls.
-7. Qwen3.5 4B translates English directly to HSK 2.0-targeted Simplified
-   Chinese in one primary generation. Deterministic vision, OCR, language, and
-   story-role gates decide inclusion before translation; Qwen cannot classify
-   or skip an accepted item. A returned `[SKIP]` marker is invalid and may enter
-   the single targeted repair. `hsk-control` validates vocabulary; the direct
+7. Qwen3.5 4B makes one contextual semantic decision per accepted OCR region:
+   translate it directly to HSK 2.0-targeted Simplified Chinese, or return the
+   typed `[NON-STORY]` disposition for unrelated page furniture such as a
+   publisher/site credit, watermark, advertisement, or navigation label.
+   Excluded regions retain their original pixels and never enter repair. The
+   protocol forbids exclusion for story dialogue, narration, thoughts,
+   captions, in-story text, names, roles, fragments, and emphasis.
+   `hsk-control` validates vocabulary; the direct
    protocol validator checks protected names, standalone numbers, question
    intent, and output structure. Digits embedded in Latin OCR tokens such as
    `IDENTIT4` are not treated as semantic numbers. Only rejected items may
@@ -107,7 +107,8 @@ credential, or remote translation path is mounted.
 8. For each completed region, the daemon stores the patch blob first and then
    appends `regionReady`, which carries the patch descriptor, geometry, source
    text, base/direct Chinese, displayed Chinese, pinyin, style, layout, and HSK
-   status.
+   status. Ordered color bands preserve real foreground/outline changes between
+   source lines, and Firefox keeps that band count while fitting the translation.
 9. Firefox fetches and validates the PNG, decodes it, inserts it in the patch
    layer, and only then inserts the selectable text. Later updates continue
    independently.
@@ -118,17 +119,20 @@ result representation.
 ## Live-page rendering
 
 The renderer never reparents, replaces, hides, or rewrites the reader's source
-`img`. One fixed-position shadow-DOM portal follows the image's viewport
-geometry and contains only transparent patch and selectable-text layers.
-Scroll, resize, responsive layout, and source replacement trigger a refit.
-Cancellation or navigation removes the portal and leaves the untouched source
-DOM in place.
+`img`. One document-anchored shadow-DOM portal shares the image's scroll
+coordinate space and contains only transparent patch and selectable-text
+layers. Normal document scrolling therefore stays compositor-only. Nested
+scrollers trigger a position-only update, while resize and responsive layout
+changes trigger a complete geometry/text refit. Cancellation or navigation
+removes the portal and leaves the untouched source DOM in place.
 
 The original/Chinese/hold-to-compare controls live in a separate fixed
 shadow-DOM host at the viewport edge, so they remain reachable while reading a
-long chapter. Dictionary lookup is anchored outside the selected glyphs when
-space permits, clamped to the viewport, repositioned on scroll/resize, and
-dismissed when the selection collapses or leaves a translated region.
+long chapter. Pointer hit-testing maps a hovered rendered glyph to a Unicode
+character offset. The daemon then performs a dictionary longest-match anchored
+at that exact offset; selection remains an explicit fallback. The explanation
+is placed outside the resolved glyph range when space permits, clamped to the
+viewport, and dismissed on scroll, resize, or pointer departure.
 
 ## Scheduling and cache identity
 
@@ -212,7 +216,8 @@ different model revision are not evidence for this build.
 The progressive architecture preserves:
 
 - selectable Chinese with displayed pinyin;
-- local longest-match dictionary definitions and HSK overlay;
+- position-anchored hover explanations with local longest-match dictionary
+  definitions and HSK overlay;
 - region context showing direct/displayed Chinese and source English;
 - original/Chinese/hold-to-compare controls; and
 - local-only Mandarin pronunciation using an eligible Firefox/OS voice.

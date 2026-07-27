@@ -4,10 +4,15 @@ The Firefox MV3 extension is a direct client of the local, unversioned
 progressive companion API. There is no legacy result download or full cleaned
 image path.
 
+Development runs through `pnpm dev:firefox`: WXT hot-reloads browser code while
+the repository-level watcher rebuilds and re-registers native binaries after
+native source changes. Production ZIPs are created only by the isolated release
+packager and are updated through the normal Firefox release channel.
+
 ## Companion contract
 
 Every native and HTTP handshake is pinned to the build fingerprint
-`hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-07-26-r2`. A different fingerprint is a hard failure,
+`hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-07-27-r6`. A different fingerprint is a hard failure,
 not a negotiated compatibility mode.
 
 The background worker uses these loopback routes:
@@ -54,7 +59,7 @@ The renderer keeps the exact original `<img>` node connected and visible. A
 layout-preserving wrapper adds a Shadow DOM containing:
 
 - a transparent patch layer;
-- selectable Chinese text;
+- hover-explainable and selectable Chinese text;
 - Original, Chinese, and hold-to-compare controls; and
 - the dictionary/pinyin/Mandarin-speech popover.
 
@@ -73,11 +78,16 @@ exact parent and sibling position.
 
 Image geometry accounts for borders, padding, `object-fit`, and
 `object-position`. Visible source rectangles also account for cover cropping
-and browser viewport intersection. Scroll, resize, visibility, and image-size
-changes are coalesced into viewport updates at roughly 100 ms.
+and browser viewport intersection. The overlay is document-anchored, so normal
+page scrolling moves it with the image in the compositor without a layout read
+or text refit. Nested scrollers receive a position-only update; resize and
+image-size changes trigger the more expensive geometry and text refit.
+Viewport-priority reports remain coalesced at roughly 100 ms.
 
 Text fitting tests nearby legal Chinese line breaks against the safe polygon.
 Model fitting and final DOM measurement both use bounded binary searches.
+When a source region contains distinct learned color bands, fitting preserves
+that line-style count and applies each foreground/outline band in source order.
 The final measurement pass checks scroll dimensions, stays inside the
 subpixel boundary, and has a zero-size fallback only for degenerate geometry,
 so selectable text never overflows its region.
@@ -95,7 +105,19 @@ npm run build
 
 The Vitest suite covers strict progressive contracts, exact root endpoints,
 update acknowledgement/recovery, patch ownership, atomic patch installation,
-refinement, viewport messages, measured fitting, selection, dictionary
+refinement, viewport messages, measured fitting, hover hit-testing, selection, dictionary
 pinyin, and Mandarin speech. The Playwright Firefox harness covers real image
 decode, normalized geometry, object-fit mapping, compare modes, navigation,
-selection, vertical text, and long WebP dimensions.
+position-anchored expression lookup, selection, vertical text, and long WebP
+dimensions.
+
+## Reader-facing controls
+
+The popup describes difficulty, scope, setup, and progress in reader language.
+Raw pipeline stages and daemon messages never appear in the popup, page HUD,
+or image badge. Internal stages map to short phrases such as “Reading the
+page,” “Writing the Chinese text,” and “Fitting the text.”
+
+The persisted Names setting defaults to `keep-original`; readers may switch to
+`chinese`. The selected value travels through the strict popup/content/job
+contracts and is included in the companion request.

@@ -13,7 +13,8 @@
     "hskStandard": "2.0",
     "hskLevel": 2,
     "readingDirection": "auto",
-    "translateSoundEffects": false
+    "translateSoundEffects": false,
+    "nameTranslation": "keep-original"
   },
   "visibleRects": []
 }

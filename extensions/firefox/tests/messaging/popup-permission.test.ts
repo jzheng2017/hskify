@@ -16,10 +16,97 @@ afterEach(() => {
 })
 
 describe('popup permission gesture', () => {
+  it('does not replace the page status with setup-ready text while polling', async () => {
+    document.body.innerHTML = `
+      <select id="hsk-level"><option value="5" selected>5</option></select>
+      <select id="name-translation"><option value="keep-original" selected>Keep</option></select>
+      <button id="translate-all">All</button>
+      <button id="cancel">Cancel</button>
+      <span id="status-title"></span>
+      <span id="status-detail"></span>
+      <progress id="status-progress"></progress>
+      <button id="setup-primary" hidden></button>
+    `
+    const blockedState = deferred<{
+      ok: true
+      value: {
+        state: 'complete'
+        current: number
+        total: number
+        message: string
+        hskLevel: 5
+        nameTranslation: 'keep-original'
+      }
+    }>()
+    let stateCalls = 0
+    const sendMessage = vi.fn(async (message: { type: string }) => {
+      if (message.type === 'setup:status') {
+        return {
+          ok: true,
+          value: { state: 'ready', modelId: 'qwen3.5-4b', message: 'Ready' },
+        }
+      }
+      if (message.type === 'popup:prepare') {
+        return { ok: true, value: { visibleOrigins: [], allOrigins: [] } }
+      }
+      if (message.type === 'popup:state') {
+        stateCalls += 1
+        if (stateCalls > 1) return blockedState.promise
+        return {
+          ok: true,
+          value: {
+            state: 'complete',
+            current: 1,
+            total: 1,
+            message: 'Done',
+            hskLevel: 5,
+            nameTranslation: 'keep-original',
+          },
+        }
+      }
+      throw new Error(`Unexpected message ${message.type}`)
+    })
+    vi.stubGlobal('browser', {
+      runtime: { sendMessage },
+      permissions: { request: vi.fn() },
+      storage: {
+        local: {
+          async get() {
+            return {}
+          },
+          async set() {},
+        },
+      },
+    })
+
+    await import('../../entrypoints/popup/main')
+    await vi.waitFor(() =>
+      expect(document.querySelector('#status-title')?.textContent).toBe('Translation complete'),
+    )
+    await new Promise((resolve) => window.setTimeout(resolve, 1_050))
+
+    expect(stateCalls).toBeGreaterThan(1)
+    expect(document.querySelector('#status-title')?.textContent).toBe('Translation complete')
+    expect(document.querySelector('#status-detail')?.textContent).toBe(
+      'The translated text is ready.',
+    )
+    blockedState.resolve({
+      ok: true,
+      value: {
+        state: 'complete',
+        current: 1,
+        total: 1,
+        message: 'Done',
+        hskLevel: 5,
+        nameTranslation: 'keep-original',
+      },
+    })
+  })
+
   it('requests exact origins directly on click before starting async content work', async () => {
     document.body.innerHTML = `
       <select id="hsk-level"><option value="5" selected>5</option></select>
-      <button id="translate-visible">Visible</button>
+      <select id="name-translation"><option value="keep-original" selected>Keep</option></select>
       <button id="translate-all">All</button>
       <button id="cancel">Cancel</button>
       <span id="status-title"></span>
@@ -58,6 +145,7 @@ describe('popup permission gesture', () => {
             total: 0,
             message: 'Ready',
             hskLevel: 5,
+            nameTranslation: 'keep-original',
           },
         }
       }
@@ -97,22 +185,30 @@ describe('popup permission gesture', () => {
     })
 
     await import('../../entrypoints/popup/main')
-    const visible = document.querySelector<HTMLButtonElement>('#translate-visible')
-    await vi.waitFor(() => expect(visible?.disabled).toBe(false))
-    visible?.click()
-    visible?.click()
+    const chapter = document.querySelector<HTMLButtonElement>('#translate-all')
+    await vi.waitFor(() => expect(chapter?.disabled).toBe(false))
+    expect(document.querySelector('#status-title')?.textContent).toBe('Ready')
+    chapter?.click()
+    chapter?.click()
     expect(order).toEqual(['permission:https://cdn.test/*'])
     expect(browser.permissions.request).toHaveBeenCalledTimes(1)
     expect(sendMessage.mock.calls.some(([message]) => message.type === 'popup:start')).toBe(false)
 
     permission.resolve(true)
     await vi.waitFor(() => expect(order).toEqual(['permission:https://cdn.test/*', 'start']))
+    expect(sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'popup:start',
+        scope: 'all',
+        nameTranslation: 'keep-original',
+      }),
+    )
   })
 
-  it('shows one install action when the native companion is missing', async () => {
+  it('keeps a failed start inside the popup without opening a setup tab', async () => {
     document.body.innerHTML = `
       <select id="hsk-level"><option value="5" selected>5</option></select>
-      <button id="translate-visible">Visible</button>
+      <select id="name-translation"><option value="keep-original" selected>Keep</option></select>
       <button id="translate-all">All</button>
       <button id="cancel">Cancel</button>
       <span id="status-title"></span>
@@ -131,9 +227,6 @@ describe('popup permission gesture', () => {
           },
         }
       }
-      if (message.type === 'setup:open-installer') {
-        return { ok: true, value: undefined }
-      }
       throw new Error(`Unexpected message ${message.type}`)
     })
     vi.stubGlobal('browser', {
@@ -151,20 +244,20 @@ describe('popup permission gesture', () => {
 
     await import('../../entrypoints/popup/main')
     const action = document.querySelector<HTMLButtonElement>('#setup-primary')
-    await vi.waitFor(() => expect(action?.textContent).toBe('Install local engine'))
-    expect(document.querySelector<HTMLButtonElement>('#translate-visible')?.disabled).toBe(true)
+    await vi.waitFor(() => expect(action?.textContent).toBe('Try again'))
+    expect(document.querySelector<HTMLButtonElement>('#translate-all')?.disabled).toBe(true)
     action?.click()
     await vi.waitFor(() =>
       expect(
-        sendMessage.mock.calls.some(([message]) => message.type === 'setup:open-installer'),
-      ).toBe(true),
+        sendMessage.mock.calls.filter(([message]) => message.type === 'setup:status'),
+      ).toHaveLength(2),
     )
   })
 
   it('starts model setup and renders measured byte progress', async () => {
     document.body.innerHTML = `
       <select id="hsk-level"><option value="5" selected>5</option></select>
-      <button id="translate-visible">Visible</button>
+      <select id="name-translation"><option value="keep-original" selected>Keep</option></select>
       <button id="translate-all">All</button>
       <button id="cancel">Cancel</button>
       <span id="status-title"></span>
@@ -217,10 +310,10 @@ describe('popup permission gesture', () => {
 
     await import('../../entrypoints/popup/main')
     const action = document.querySelector<HTMLButtonElement>('#setup-primary')
-    await vi.waitFor(() => expect(action?.textContent).toBe('Download local models'))
+    await vi.waitFor(() => expect(action?.textContent).toBe('Set up translation'))
     action?.click()
     await vi.waitFor(() =>
-      expect(document.querySelector('#status-detail')?.textContent).toContain('1.0 KiB of 2.0 KiB'),
+      expect(document.querySelector('#status-detail')?.textContent).toContain('50%'),
     )
     expect(document.querySelector<HTMLProgressElement>('#status-progress')?.value).toBe(0.5)
   })

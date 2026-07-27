@@ -3,6 +3,7 @@ import type {
   JobUpdateBatch,
   JobUpdate,
   LookupRequest,
+  NameTranslation,
 } from '../contracts/browser'
 import { sha256Hex } from '../acquisition/hash'
 import { requiredCrossOriginPatterns } from '../acquisition/origin-permissions'
@@ -34,6 +35,7 @@ const PAGE_SESSION_KEY = 'hmt.pageSessionId'
 const CONTENT_BYTE_LIMIT = 25 * 1024 * 1024
 const NAVIGATION_CHECK_INTERVAL_MS = 250
 const VIEWPORT_THROTTLE_MS = 100
+export const AUTOMATIC_IMAGE_RETRY_LIMIT = 2
 
 type TranslationCandidate = {
   candidate: DiscoveredImage
@@ -247,8 +249,24 @@ class ViewportReporter {
 }
 
 function errorMessage(error: unknown): string {
-  if (error instanceof RuntimeMessageError || error instanceof Error) return error.message
-  return 'This image could not be translated.'
+  if (
+    error instanceof RuntimeMessageError &&
+    error.code === 'IMAGE_PERMISSION_DENIED'
+  ) {
+    return 'Allow image access, then try again.'
+  }
+  return 'This image couldn’t be translated. Try again.'
+}
+
+export function shouldAutomaticallyRetryImage(
+  error: unknown,
+  attempts: number,
+): boolean {
+  return (
+    error instanceof RuntimeMessageError &&
+    error.retryable &&
+    attempts < AUTOMATIC_IMAGE_RETRY_LIMIT
+  )
 }
 
 export class PageTranslationController {
@@ -263,6 +281,7 @@ export class PageTranslationController {
   private readonly queueIds = new Map<HTMLImageElement, string>()
   private readonly processed = new Set<HTMLImageElement>()
   private readonly failedImages = new Set<HTMLImageElement>()
+  private readonly retryAttempts = new Map<HTMLImageElement, number>()
   private readonly context: NonNullable<BrowserJobRequest['precedingContext']> = []
   private properNameGlossary: NonNullable<
     BrowserJobRequest['properNameGlossary']
@@ -271,6 +290,7 @@ export class PageTranslationController {
   private hud: PageHud | undefined
   private scope: TranslationScope | undefined
   private hskLevel: 1 | 2 | 3 | 4 | 5 | 6 = 5
+  private nameTranslation: NameTranslation = 'keep-original'
   private activeJobId: string | undefined
   private prefetchTargetId: string | undefined
   private prefetchEnabled = false
@@ -310,11 +330,23 @@ export class PageTranslationController {
         onSuccess: (item) => {
           const image = item.value.candidate.element
           this.queueIds.delete(image)
+          this.retryAttempts.delete(image)
           this.completed += 1
           this.finishIfIdleSoon()
         },
         onFailure: (item, error) => {
           const image = item.value.candidate.element
+          const attempts = this.retryAttempts.get(image) ?? 0
+          if (
+            shouldAutomaticallyRetryImage(error, attempts) &&
+            this.requeueFailedImage(
+              image,
+              `Trying again automatically (${attempts + 1}/${AUTOMATIC_IMAGE_RETRY_LIMIT})`,
+            )
+          ) {
+            this.retryAttempts.set(image, attempts + 1)
+            return
+          }
           this.failedImages.add(image)
           this.failed += 1
           this.badge(image).failure(errorMessage(error))
@@ -348,6 +380,7 @@ export class PageTranslationController {
   async start(
     scope: TranslationScope,
     hskLevel: 1 | 2 | 3 | 4 | 5 | 6,
+    nameTranslation: NameTranslation,
     properNameGlossary: BrowserJobRequest['properNameGlossary'] = [],
   ): Promise<PageState> {
     const replacingRun = this.scope !== undefined
@@ -355,6 +388,7 @@ export class PageTranslationController {
     if (replacingRun) this.restoreAll()
     this.scope = scope
     this.hskLevel = hskLevel
+    this.nameTranslation = nameTranslation
     this.properNameGlossary = properNameGlossary.slice()
     this.cancelledState = false
     this.completed = 0
@@ -380,7 +414,7 @@ export class PageTranslationController {
       (candidate) => scope === 'all' || candidate.visible,
     )
     if (candidates.length === 0) {
-      this.hud.fail('No supported manga images are visible on this page.', 0, 0)
+      this.hud.fail('No manga images were found on this page.', 0, 0)
       return this.snapshot()
     }
 
@@ -421,7 +455,7 @@ export class PageTranslationController {
     this.hud.update({
       current: 0,
       total: this.total,
-      message: 'Queued',
+      message: 'Waiting to start',
     })
     return this.snapshot()
   }
@@ -505,6 +539,7 @@ export class PageTranslationController {
     this.queueIds.clear()
     this.processed.clear()
     this.failedImages.clear()
+    this.retryAttempts.clear()
     this.context.splice(0)
   }
 
@@ -573,7 +608,9 @@ export class PageTranslationController {
     const id = candidateKey(candidate)
     this.queueIds.set(candidate.element, id)
     this.total += 1
-    this.badge(candidate.element).update(recovered ? 'Resuming' : 'Queued')
+    this.badge(candidate.element).update(
+      recovered ? 'Picking up where you left off' : 'Waiting to start',
+    )
     const accepted = this.queue.enqueue({
       id,
       value: {
@@ -601,32 +638,30 @@ export class PageTranslationController {
 
   private retry(image: HTMLImageElement): void {
     if (!this.failedImages.delete(image)) return
+    this.failed = Math.max(0, this.failed - 1)
+    this.retryAttempts.delete(image)
+    if (!this.requeueFailedImage(image, 'Trying again')) {
+      this.failedImages.add(image)
+      this.failed += 1
+      this.badge(image).failure('This image couldn’t be translated. Try again.')
+    }
+  }
+
+  private requeueFailedImage(image: HTMLImageElement, status: string): boolean {
     const candidate = this.discovery.current().find((item) => item.element === image)
     const failedId = this.queueIds.get(image)
-    this.badges.get(image)?.destroy()
-    this.badges.delete(image)
-    this.failed = Math.max(0, this.failed - 1)
-    this.total = Math.max(0, this.total - 1)
     this.processed.delete(image)
-    if (!candidate || !failedId) {
-      if (failedId) this.queue.remove(failedId)
-      this.queueIds.delete(image)
-      return
-    }
-    this.total += 1
-    this.badge(image).update('Queued')
+    if (!candidate || !failedId) return false
     const queued = this.queue.retry({
       id: failedId,
       value: { candidate },
       visible: candidate.visible,
       order: candidate.domIndex,
     })
-    if (!queued) {
-      this.queueIds.delete(image)
-      this.total = Math.max(0, this.total - 1)
-      return
-    }
+    if (!queued) return false
+    this.badge(image).update(status)
     this.refreshPrefetch()
+    return true
   }
 
   private sourceSnapshot(candidate: DiscoveredImage): SourceSnapshot {
@@ -695,7 +730,7 @@ export class PageTranslationController {
     try {
       this.assertCurrent(candidate, snapshot, signal)
       if (!jobId) {
-        badge.update('Reading image bytes')
+        badge.update('Opening the image')
         const inline = consumesPrefetch ? undefined : await tryContentBytes(candidate)
         this.assertCurrent(candidate, snapshot, signal)
         const submitted = await sendBackgroundMessage({
@@ -709,6 +744,7 @@ export class PageTranslationController {
           ...(inline?.mimeType ? { sourceMimeType: inline.mimeType } : {}),
           ...(inline ? { sourceBytes: inline.bytes } : {}),
           hskLevel: this.hskLevel,
+          nameTranslation: this.nameTranslation,
           visibleRects: visibleImageRects(
             candidate.element,
             snapshot.naturalWidth,
@@ -813,7 +849,7 @@ export class PageTranslationController {
               })
               break
             case 'regionReady': {
-              badge.update('Installing translated region')
+              badge.update('Adding translated text')
               const patch = await sendBackgroundMessage({
                 type: 'job:patch',
                 jobId,
@@ -916,6 +952,7 @@ export class PageTranslationController {
       this.failed = Math.max(0, this.failed - 1)
       tracked = true
     }
+    this.retryAttempts.delete(image)
     this.badges.get(image)?.destroy()
     this.badges.delete(image)
     if (tracked) this.total = Math.max(0, this.total - 1)
@@ -1024,7 +1061,7 @@ export class PageTranslationController {
     if (!this.scope || this.cancelledState) return
     if (this.failed > 0) {
       this.hud?.fail(
-        `${this.failed} image${this.failed === 1 ? '' : 's'} failed. Use Retry on the image.`,
+        `${this.failed} image${this.failed === 1 ? '' : 's'} still needs attention.`,
         this.completed,
         this.total,
       )
@@ -1073,6 +1110,7 @@ export function bootContentRuntime(): void {
         return controller.start(
           message.scope,
           message.hskLevel,
+          message.nameTranslation,
           message.properNameGlossary,
         )
       case 'content:cancel':

@@ -134,14 +134,18 @@ export class VisibleFirstQueue<T> {
     this.callbacks.onStart?.(item)
     try {
       await this.processor(item, controller.signal)
-      if (!controller.signal.aborted) this.callbacks.onSuccess?.(item)
+      if (!controller.signal.aborted) {
+        if (this.active?.controller === controller) this.active = undefined
+        this.callbacks.onSuccess?.(item)
+      }
     } catch (error) {
       if (!controller.signal.aborted) {
         this.failedIds.add(item.id)
+        if (this.active?.controller === controller) this.active = undefined
         this.callbacks.onFailure?.(item, error)
       }
     } finally {
-      this.active = undefined
+      if (this.active?.controller === controller) this.active = undefined
       if (!this.stopped) void this.drain()
     }
   }

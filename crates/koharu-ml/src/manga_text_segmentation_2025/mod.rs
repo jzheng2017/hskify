@@ -19,6 +19,7 @@ const IMAGENET_MEAN: [f32; 3] = [0.485, 0.456, 0.406];
 const IMAGENET_STD: [f32; 3] = [0.229, 0.224, 0.225];
 const GPU_MAX_PIXELS: u64 = 1_536 * 1_536;
 const CPU_MAX_PIXELS: u64 = 1_280 * 1_280;
+pub const DEFAULT_TEXT_MASK_THRESHOLD: f32 = 0.1;
 
 #[derive(Debug)]
 pub struct MangaTextSegmentation {

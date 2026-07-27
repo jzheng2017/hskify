@@ -1,3 +1,5 @@
+# Builds one immutable, exact-version release bundle. Development hot reload
+# uses scripts/Start-FirefoxDevelopment.ps1 and never invokes this packager.
 [CmdletBinding()]
 param(
     [string] $OutputDirectory,
@@ -23,6 +25,22 @@ $ErrorActionPreference = 'Stop'
 
 $repositoryRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 . (Join-Path $repositoryRoot 'scripts\PerformanceBuildAttestation.ps1')
+
+foreach ($contractPath in @(
+    (Join-Path $repositoryRoot 'crates\browser-companion\src\contracts.rs'),
+    (Join-Path $repositoryRoot 'extensions\firefox\src\contracts\browser.ts')
+)) {
+    $contractSource = Get-Content -LiteralPath $contractPath -Raw
+    if (
+        $contractSource.IndexOf(
+            $script:HskifyPerformanceBuildFingerprint,
+            [StringComparison]::Ordinal
+        ) -lt 0
+    ) {
+        throw "release build fingerprint is not synchronized in $contractPath"
+    }
+}
+
 if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
     $OutputDirectory = Join-Path $repositoryRoot 'dist\hskify-windows'
 }
@@ -215,13 +233,17 @@ $requiredResourceIds = @(
     'comic-text-bubble-detector-config',
     'comic-text-bubble-detector-preprocessor-config',
     'comic-text-bubble-detector-weights',
+    'lama-manga-inpainter-weights',
+    'manga-text-segmentation-weights',
     'pp-ocr-v5-english-recognizer-config',
     'pp-ocr-v5-english-recognizer-model',
+    'speech-bubble-segmentation-config',
+    'speech-bubble-segmentation-weights',
     'translation-model'
 )
 $resourceIdentities = @($modelManifest.resourceIdentities)
 if ($resourceIdentities.Count -ne $requiredResourceIds.Count) {
-    throw 'the model manifest must contain exactly six resident resource identities'
+    throw 'the model manifest must contain exactly the required resident resource identities'
 }
 $expectedIdentityFields = @('bytes', 'filename', 'id', 'repository', 'repositoryRevision', 'sha256', 'url')
 for ($index = 0; $index -lt $resourceIdentities.Count; $index++) {
@@ -255,7 +277,7 @@ if ($expectedModelSha256 -notmatch '^[0-9a-f]{64}$') {
 }
 
 if (-not (Test-Path -LiteralPath $ResidentModelsDirectory -PathType Container)) {
-    throw "ResidentModelsDirectory must contain the five pinned detector/OCR resources: $ResidentModelsDirectory"
+    throw "ResidentModelsDirectory must contain the pinned browser pipeline resources: $ResidentModelsDirectory"
 }
 $resolvedResidentModelsDirectory = (Resolve-Path -LiteralPath $ResidentModelsDirectory).Path
 $resolvedResidentResources = @(

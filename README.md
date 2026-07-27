@@ -21,15 +21,14 @@ and selectable Chinese text for each accepted region.
    discovers the loopback daemon, and returns a short-lived authenticated
    session.
 3. The daemon decodes the source once, schedules overlapping detector tiles
-   with visible tiles first, recognizes English story text, groups related
-   lines without merging differently colored emphasis, and constructs a
-   region-local cleanup patch.
-4. Qwen3.5 4B semantically excludes non-story OCR and translates small
-   story-region batches directly to the requested HSK level. A deterministic
-   gate accepts exclusion only when the OCR itself supports a credit,
-   release-note, SFX, or gibberish decision. Vocabulary and meaning validation
-   accepts the translation or sends only the rejected item through one
-   targeted repair.
+   with visible tiles first, groups lines by learned balloon identity, builds
+   a learned text mask, and restores the original artwork with manga LaMa.
+   Cleanup patches are transparent outside that semantic mask.
+4. Qwen3.5 4B makes one contextual decision for each OCR region: translate
+   story text directly to the requested HSK level, or return the typed
+   non-story disposition for unrelated page furniture. Excluded regions keep
+   their original pixels. Vocabulary and meaning validation accepts each
+   translation or sends only the rejected item through one targeted repair.
 5. The browser fetches and decodes each PNG patch, installs it before the
    corresponding selectable text, and can continue rendering while later
    regions are still running.
@@ -37,7 +36,7 @@ and selectable Chinese text for each accepted region.
 There is no versioned browser API, job-result endpoint, full cleaned-page
 payload, project/history store, page-wide translation pass, or retranslation
 route. The extension, native host, daemon, and contract fixtures instead share
-the exact build fingerprint `hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-07-26-r2`; a mismatch is a
+the exact build fingerprint `hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-07-27-r6`; a mismatch is a
 hard failure, not a negotiation opportunity.
 
 Pinyin, longest-match local dictionary lookup, original/Chinese comparison,

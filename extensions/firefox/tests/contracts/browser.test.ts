@@ -11,6 +11,7 @@ import {
   parseErrorResponse,
   parseHealthResponse,
   parseJobUpdateBatch,
+  parseLookupRequest,
   parseLookupResult,
   parseNativeHandshakeRequest,
   parseNativeReadyResponse,
@@ -47,6 +48,7 @@ function jobRequest() {
       hskLevel: 5,
       readingDirection: 'auto',
       translateSoundEffects: false,
+      nameTranslation: 'keep-original',
     },
   } as const
 }
@@ -93,7 +95,7 @@ describe('unversioned progressive browser contract', () => {
     )
     expect(parseNativeReadyResponse(sharedFixture('native-ready.valid.json')).type).toBe('ready')
     expect(parseHealthResponse(sharedFixture('health.ready.json')).resourceIdentities).toHaveLength(
-      6,
+      10,
     )
     expect(parseBrowserSetupStatus(sharedFixture('setup.ready.json'))).toMatchObject({
       state: 'ready',
@@ -115,6 +117,12 @@ describe('unversioned progressive browser contract', () => {
         jobId: 'fixture-job',
       }),
     ).toEqual({ buildFingerprint: BUILD_FINGERPRINT, jobId: 'fixture-job' })
+    expect(() =>
+      parseBrowserJobRequest({
+        ...jobRequest(),
+        settings: { ...jobRequest().settings, nameTranslation: 'literal' },
+      }),
+    ).toThrow(/nameTranslation/i)
   })
 
   it('parses monotonic progressive region, refinement, and terminal updates', () => {
@@ -124,6 +132,12 @@ describe('unversioned progressive browser contract', () => {
       sourceWidth: 1200,
       sourceHeight: 1800,
     })[0]
+    if (region) {
+      region.style.colorBands = [
+        { position: 0.25, foreground: '#111111' },
+        { position: 0.75, foreground: '#2580df', outlineColor: '#ffffff' },
+      ]
+    }
     const batch = parseJobUpdateBatch({
       jobId: 'fixture-job',
       nextSequence: 4,
@@ -159,6 +173,10 @@ describe('unversioned progressive browser contract', () => {
       'complete',
     ])
     expect(batch.nextSequence).toBe(4)
+    const readyRegion = batch.updates.find((update) => update.type === 'regionReady')
+    expect(readyRegion?.type === 'regionReady' && readyRegion.region.style.colorBands).toHaveLength(
+      2,
+    )
   })
 
   it('accepts build-matched native health, setup, lookup, and errors', () => {
@@ -187,6 +205,20 @@ describe('unversioned progressive browser contract', () => {
         message: 'Ready',
       }).state,
     ).toBe('ready')
+    expect(
+      parseLookupRequest({
+        interaction: 'hover',
+        characterOffset: 2,
+        jobId: 'job-1',
+        regionId: 'region-1',
+      }).interaction,
+    ).toBe('hover')
+    expect(
+      parseLookupRequest({
+        interaction: 'selection',
+        selectedText: '研究生',
+      }).interaction,
+    ).toBe('selection')
     expect(
       parseLookupResult({
         selectedText: '离开',
@@ -219,6 +251,12 @@ describe('unversioned progressive browser contract', () => {
       /buildFingerprint/,
     )
     expect(() =>
+      parseLookupRequest({
+        interaction: 'hover',
+        characterOffset: 0,
+      }),
+    ).toThrow(/jobId/)
+    expect(() =>
       parseBrowserJobRequest({
         ...jobRequest(),
         visibleRects: [{ x: 0.8, y: 0, width: 0.3, height: 1 }],
@@ -248,8 +286,12 @@ describe('unversioned progressive browser contract', () => {
       'comic-text-bubble-detector-config',
       'comic-text-bubble-detector-preprocessor-config',
       'comic-text-bubble-detector-weights',
+      'lama-manga-inpainter-weights',
+      'manga-text-segmentation-weights',
       'pp-ocr-v5-english-recognizer-config',
       'pp-ocr-v5-english-recognizer-model',
+      'speech-bubble-segmentation-config',
+      'speech-bubble-segmentation-weights',
       'translation-model',
     ])
     expect(() =>

@@ -34,7 +34,7 @@ Every browser route requires:
   standard `Origin` header.
 
 There is deliberately no protocol header. The exact fingerprint
-`hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-07-26-r2` is validated in the native handshake and job
+`hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-07-27-r6` is validated in the native handshake and job
 request and echoed by native readiness, health, and job creation. Unknown JSON
 fields are rejected by the contracts.
 
@@ -46,8 +46,9 @@ fields are rejected by the contracts.
   sniffed type, SHA-256, and decoded dimensions agree;
 - `request`: `application/json` metadata containing the exact build
   fingerprint, source identity, dimensions, page identity, HSK 2.0 level 1–6,
-reading direction, visible rectangles, up to six preceding utterances, and an
-optional bounded proper-name glossary.
+  name preference (`keep-original` or `chinese`), reading direction, visible
+  rectangles, up to six preceding utterances, and an optional bounded
+  proper-name glossary.
 
 The only supported language pair is English to Simplified Chinese. Sound-effect
 translation must be false. A successful request returns HTTP 202 with only the
@@ -104,7 +105,9 @@ never restarts page-wide generation.
 A `regionReady` contains normalized text and optional bubble polygons, a
 normalized PNG patch rectangle and blob ID, source English, direct/base and
 displayed Chinese, pinyin, OCR confidence, reading order, validated style and
-layout, and HSK status. The status carries requested level, strict validity,
+layout, and HSK status. Style can include ordered `colorBands` sampled from
+learned source-text lines, so an atomic region can preserve multiple foreground
+and outline colors. The status carries requested level, strict validity,
 above-level tokens, and one of `not-needed`, `pending`, `accepted`, or
 `rejected`.
 
@@ -122,11 +125,15 @@ layer.
 
 ## Lookup, comparison, and speech
 
-`POST /lookup` accepts up to 256 selected characters. Job and region IDs must
-be supplied together when region context is requested. Results contain
-longest-match tokens with Simplified spelling, pinyin, definitions, optional
-HSK level, and explicit proper-name state.
+`POST /lookup` has two explicit interactions. A selection lookup accepts up to
+256 selected characters. A hover lookup accepts a Unicode-scalar offset and
+requires the owning job and region; the daemon resolves against its canonical
+displayed Chinese rather than trusting a browser-supplied substring. Hover
+resolution returns exactly the longest dictionary expression beginning at the
+hovered character, so a later component starts a fresh lookup. Punctuation
+does not jump forward. Results contain Simplified spelling, pinyin,
+definitions, optional HSK level, and explicit proper-name state.
 
 Original/Chinese comparison is entirely in the extension's layered renderer.
-Mandarin playback sends no daemon request: Firefox speaks selected Chinese
+Mandarin playback sends no daemon request: Firefox speaks the resolved Chinese
 through the best eligible local Simplified-Chinese voice.

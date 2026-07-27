@@ -2,9 +2,13 @@ import { describe, expect, it } from 'vitest'
 
 import {
   DEFAULT_HSK_LEVEL,
+  DEFAULT_NAME_TRANSLATION,
   HSK_LEVEL_KEY,
+  NAME_TRANSLATION_KEY,
   loadHskLevel,
+  loadNameTranslation,
   saveHskLevel,
+  saveNameTranslation,
 } from '../../src/messaging/settings'
 import { MemoryStorage } from '../helpers/storage'
 
@@ -23,5 +27,15 @@ describe('popup HSK persistence', () => {
     const storage = new MemoryStorage()
     storage.values[HSK_LEVEL_KEY] = 7
     expect(await loadHskLevel(storage)).toBe(5)
+  })
+
+  it('keeps original names by default and remembers the name preference', async () => {
+    const storage = new MemoryStorage()
+    expect(await loadNameTranslation(storage)).toBe(DEFAULT_NAME_TRANSLATION)
+    await saveNameTranslation('chinese', storage)
+    expect(await loadNameTranslation(storage)).toBe('chinese')
+    expect(storage.values[NAME_TRANSLATION_KEY]).toBe('chinese')
+    storage.values[NAME_TRANSLATION_KEY] = 'literal-translation'
+    expect(await loadNameTranslation(storage)).toBe('keep-original')
   })
 })

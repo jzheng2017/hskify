@@ -81,6 +81,29 @@ export type HudProgress = {
   message?: string
 }
 
+export function friendlyProgressMessage(
+  status: Pick<ProgressJobUpdate, 'stage'>,
+): string {
+  switch (status.stage) {
+    case 'queued':
+      return 'Waiting to start'
+    case 'decoding':
+    case 'detecting':
+    case 'ocr':
+      return 'Reading the page'
+    case 'inpainting':
+      return 'Preparing the artwork'
+    case 'translating':
+      return 'Writing the Chinese text'
+    case 'hsk-validating':
+      return 'Matching your difficulty level'
+    case 'styling':
+      return 'Fitting the text'
+    case 'packaging':
+      return 'Finishing this image'
+  }
+}
+
 export class PageHud {
   readonly host: HTMLElement
   private readonly title: HTMLElement
@@ -127,7 +150,11 @@ export class PageHud {
   update(input: HudProgress): void {
     const status = input.status
     const state = 'running'
-    const message = input.message ?? status?.message ?? 'Preparing image'
+    // The HUD represents one chapter-wide operation. Individual images can be
+    // in different pipeline stages concurrently, so exposing whichever image
+    // reported last makes the chapter status oscillate. Keep the chapter
+    // message stable; per-image badges still show local progress and retries.
+    const message = input.message ?? 'Translating this chapter'
     this.state = {
       state,
       current: input.current,
@@ -139,11 +166,7 @@ export class PageHud {
     const measurable = status?.overallProgress
     if (measurable === undefined) this.progress.removeAttribute('value')
     else this.progress.value = measurable
-    const count =
-      status?.current !== undefined && status.total !== undefined
-        ? ` · ${status.current} of ${status.total}`
-        : ''
-    this.detail.textContent = `${message}${count}`
+    this.detail.textContent = message
     this.cancelButton.hidden = state !== 'running'
   }
 
@@ -152,7 +175,7 @@ export class PageHud {
       state: 'complete',
       current: completed,
       total,
-      message: `${completed} of ${total} images translated`,
+      message: `${completed} of ${total} images ready`,
     }
     this.title.textContent = 'Translation complete'
     this.detail.textContent = this.state.message
@@ -173,7 +196,7 @@ export class PageHud {
       state: 'cancelled',
       current,
       total,
-      message: 'Cancelled · incomplete images kept original',
+      message: 'Anything unfinished was left unchanged',
     }
     this.title.textContent = 'Translation cancelled'
     this.detail.textContent = this.state.message
@@ -223,7 +246,8 @@ export class ImageStatusBadge {
   }
 
   update(status: ProgressJobUpdate | string): void {
-    this.message.textContent = typeof status === 'string' ? status : status.message
+    this.message.textContent =
+      typeof status === 'string' ? status : friendlyProgressMessage(status)
     this.retryButton.hidden = true
     this.position()
   }

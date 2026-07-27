@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from 'vitest'
 
-import { SelectionController } from '../../src/selection/popover'
+import {
+  ExplanationController,
+  type HoverHitTester,
+} from '../../src/selection/popover'
 
 function rect(
   left: number,
@@ -21,12 +24,12 @@ function rect(
   }
 }
 
-function fixture() {
+function fixture(hitTest?: HoverHitTester) {
   const host = document.createElement('span')
   document.body.append(host)
   const root = host.attachShadow({ mode: 'open' })
   const region = document.createElement('span')
-  region.textContent = '恩里克，谢尔盖耶维奇，英雄党前小偷。'
+  region.textContent = '研究生离开。'
   const outside = document.createElement('span')
   outside.textContent = 'Untranslated page text'
   const popover = document.createElement('span')
@@ -37,11 +40,33 @@ function fixture() {
   vi.spyOn(popover, 'getBoundingClientRect').mockReturnValue(
     rect(0, 0, 320, 220),
   )
-  const lookup = vi.fn().mockResolvedValue({
-    selectedText: '恩里克',
-    tokens: [],
+  const lookup = vi.fn(async (request) => {
+    const selectedText =
+      request.interaction === 'hover'
+        ? request.characterOffset === 0
+          ? '研究生'
+          : '生'
+        : request.selectedText
+    return {
+    selectedText,
+    tokens: [
+      {
+        simplified: selectedText,
+        pinyin: 'fixture',
+        definitions: ['fixture definition'],
+        properName: false,
+      },
+    ],
+  }
   })
-  const controller = new SelectionController(root, popover, lookup)
+  const controller = new ExplanationController(
+    root,
+    popover,
+    lookup,
+    undefined,
+    undefined,
+    hitTest,
+  )
   controller.register(region, 'job-1', 'region-1')
   const range = document.createRange()
   range.setStart(region.firstChild!, 0)
@@ -57,6 +82,61 @@ function fixture() {
 }
 
 describe('selection popover', () => {
+  it('resolves hover explanations from the exact character position', async () => {
+    let offset = 0
+    const hoverRange = document.createRange()
+    Object.defineProperty(hoverRange, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => rect(240, 150, 24, 24),
+    })
+    const item = fixture((_element, _clientX, _clientY) => ({
+      characterOffset: offset,
+      range: hoverRange,
+    }))
+    item.selection.removeAllRanges()
+
+    item.region.dispatchEvent(
+      new MouseEvent('pointermove', {
+        bubbles: true,
+        composed: true,
+        clientX: 250,
+        clientY: 160,
+      }),
+    )
+    await vi.waitFor(() => expect(item.lookup).toHaveBeenCalledTimes(1))
+    expect(item.lookup).toHaveBeenLastCalledWith({
+      interaction: 'hover',
+      characterOffset: 0,
+      jobId: 'job-1',
+      regionId: 'region-1',
+    })
+    await vi.waitFor(() => expect(item.popover.textContent).toContain('研究生'))
+
+    offset = 2
+    item.region.dispatchEvent(
+      new MouseEvent('pointermove', {
+        bubbles: true,
+        composed: true,
+        clientX: 300,
+        clientY: 160,
+      }),
+    )
+    await vi.waitFor(() => expect(item.lookup).toHaveBeenCalledTimes(2))
+    expect(item.lookup).toHaveBeenLastCalledWith({
+      interaction: 'hover',
+      characterOffset: 2,
+      jobId: 'job-1',
+      regionId: 'region-1',
+    })
+    await vi.waitFor(() =>
+      expect(
+        item.popover.querySelector('.hmt-lookup-heading strong')?.textContent,
+      ).toBe('生'),
+    )
+    item.controller.destroy()
+    item.host.remove()
+  })
+
   it('positions the explanation after the whole translated region', async () => {
     const item = fixture()
     item.region.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, composed: true }))

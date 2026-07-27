@@ -256,7 +256,8 @@ export class FixtureService {
   }
 
   lookup(request: LookupRequest): LookupResult {
-    const selectedText = request.selectedText
+    const selectedText =
+      request.interaction === 'selection' ? request.selectedText : '离开'
     const isLeave = selectedText.includes('离开')
     return parseLookupResult({
       selectedText,

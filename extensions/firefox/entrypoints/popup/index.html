@@ -9,37 +9,38 @@
   <body>
     <main>
       <header>
-        <span class="mark" aria-hidden="true">译</span>
         <span>
-          <strong>Hskify</strong>
-          <small>Local · selectable Chinese</small>
+          <strong id="product-name">Hskify</strong>
+          <small>Private · runs on your computer</small>
         </span>
       </header>
 
-      <label for="hsk-level">Cumulative vocabulary level</label>
+      <label for="hsk-level">Chinese difficulty</label>
       <select id="hsk-level" aria-describedby="hsk-help">
-        <option value="1">HSK 1</option>
-        <option value="2">HSK 2 · levels 1–2</option>
-        <option value="3">HSK 3 · levels 1–3</option>
-        <option value="4">HSK 4 · levels 1–4</option>
-        <option value="5">HSK 5 · levels 1–5</option>
-        <option value="6">HSK 6 · levels 1–6</option>
+        <option value="1">HSK 1 · easiest</option>
+        <option value="2">HSK 2 · very easy</option>
+        <option value="3">HSK 3 · everyday Chinese</option>
+        <option value="4">HSK 4 · intermediate</option>
+        <option value="5">HSK 5 · advanced</option>
+        <option value="6">HSK 6 · most natural</option>
       </select>
-      <small id="hsk-help">Grammar is targeted to this level; vocabulary is cumulative.</small>
+      <small id="hsk-help">Lower levels use simpler words and shorter sentences.</small>
+
+      <label for="name-translation">Names</label>
+      <select id="name-translation" aria-describedby="name-help">
+        <option value="keep-original">Keep original names</option>
+        <option value="chinese">Use Chinese name forms</option>
+      </select>
+      <small id="name-help">Applies to character, place, and organization names.</small>
 
       <section class="actions" aria-label="Translation actions">
-        <button id="translate-all" type="button">
-          Translate chapter · viewport first
-        </button>
-        <button id="translate-visible" type="button" class="secondary">
-          Translate only visible manga
-        </button>
-        <small>Start reading as bubbles appear; the rest continues in the background.</small>
+        <button id="translate-all" type="button">Translate chapter</button>
+        <small>You can start reading while the rest of the chapter finishes.</small>
       </section>
 
       <section class="status" aria-live="polite">
         <span id="status-title">Ready</span>
-        <span id="status-detail">Choose one translation action.</span>
+        <span id="status-detail">Open a chapter when you’re ready.</span>
         <progress id="status-progress" max="1" hidden></progress>
         <button id="setup-primary" type="button" hidden></button>
         <button id="cancel" type="button" class="cancel" hidden>Cancel</button>
