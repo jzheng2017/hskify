@@ -14,14 +14,15 @@
 mod direct_hsk;
 
 pub use direct_hsk::{
-    DirectHskTranslator, HSK_TRANSLATION_MODEL, HSK_TRANSLATION_MODEL_REVISION,
-    HSK_TRANSLATION_PROMPT_HASH, HSK_TRANSLATION_PROMPT_REVISION, HSK_TRANSLATION_VALIDATOR_HASH,
-    HskLearningMode, HskNameHandling, HskPrecedingUtterance, HskProtectedName, HskRepairUtterance,
+    DirectHskTranslator, HSK_SEMANTIC_ANALYSIS_REVISION, HSK_TRANSLATION_MODEL,
+    HSK_TRANSLATION_MODEL_REVISION, HSK_TRANSLATION_PROMPT_HASH, HSK_TRANSLATION_PROMPT_REVISION,
+    HSK_TRANSLATION_VALIDATOR_HASH, HskLearningMode, HskNameHandling, HskPrecedingUtterance,
+    HskProtectedName, HskRepairUtterance, HskSemanticClassification, HskSemanticLayout,
     HskSourceUtterance, HskTranslationBatchRequest, HskTranslationBatchResult,
     HskTranslationDisposition, HskTranslationIssue, HskTranslationOutcome,
-    HskTranslationRepairRequest, HskUtteranceKind, MAX_HSK_CONTEXT_TOKENS,
-    MAX_HSK_PRECEDING_UTTERANCES, MAX_HSK_TRANSLATION_BATCH, direct_hsk_prompt_hash,
-    direct_hsk_validator_hash,
+    HskTranslationRepairBatchRequest, HskTranslationRepairRequest, HskUtteranceKind,
+    MAX_HSK_CONTEXT_TOKENS, MAX_HSK_PRECEDING_UTTERANCES, MAX_HSK_TRANSLATION_BATCH,
+    direct_hsk_prompt_hash, direct_hsk_validator_hash,
 };
 
 use std::path::PathBuf;

@@ -41,8 +41,8 @@ test('tracked manifest is deterministic, offline-only, and structurally complete
   const manifest = JSON.parse(readFileSync(DEFAULT_MANIFEST_PATH, 'utf8'))
   const failures = validateManifest(manifest).filter((item) => !item.passed)
   assert.deepEqual(failures, [])
-  assert.equal(manifest.cases.length, 20)
-  assert.equal(new Set(manifest.cases.map((item) => item.chapterId)).size, 7)
+  assert.equal(manifest.cases.length, 22)
+  assert.equal(new Set(manifest.cases.map((item) => item.chapterId)).size, 8)
   assert.equal(manifest.execution.networkPolicy, 'forbidden')
 })
 
@@ -51,9 +51,9 @@ test('missing local copyrighted objects are explicit machine-readable failures',
   try {
     const result = auditCorpus({ corpusRoot: emptyCorpus, selection: 'smoke' })
     assert.equal(result.status, 'failed')
-    assert.equal(result.caseCount, 8)
-    assert.equal(result.missingCount, 8)
-    assert.equal(result.remediation.requiredPaths.length, 8)
+    assert.equal(result.caseCount, 10)
+    assert.equal(result.missingCount, 10)
+    assert.equal(result.remediation.requiredPaths.length, 10)
     assert.match(result.remediation.message, /will not download/u)
   } finally {
     rmSync(emptyCorpus, { recursive: true, force: true })

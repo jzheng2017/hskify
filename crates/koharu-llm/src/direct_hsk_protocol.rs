@@ -6,7 +6,8 @@
 
 use std::fmt::Write as _;
 
-pub const DIRECT_HSK_PROMPT_REVISION: &str = "direct-hsk-en-zh-natural-learning-v49-2026-07-28";
+pub const DIRECT_HSK_PROMPT_REVISION: &str =
+    "direct-hsk-en-zh-authoritative-semantic-prepass-v55-2026-07-28";
 
 /// Canonical protocol description whose SHA-256 is
 /// [`DIRECT_HSK_PROMPT_HASH`].
@@ -15,23 +16,23 @@ pub const DIRECT_HSK_PROMPT_REVISION: &str = "direct-hsk-en-zh-natural-learning-
 /// the digest so a prompt-semantic change cannot silently reuse cache entries
 /// or benchmark evidence.
 pub const DIRECT_HSK_PROMPT_FINGERPRINT_MATERIAL: &str = "\
-    direct-hsk-en-zh-natural-learning-v49-2026-07-28
-semantic-ner=dedicated same-model pass over numbered source lines; return exact boundary-aligned proper-name spans or none; classify semantic lexicalized identifiers generically; common relational terms, roles, occupations, ranks, titles, species, ordinary noun phrases, capitalization, and emphasis are not names unless the complete span is an attested unique entity
-semantic-region=first dedicated same-model pass over numbered source lines; classify STORY, pure standalone SFX, or unrelated FURNITURE by semantic function; malformed or missing decisions fail soft to STORY; SFX follows user policy; model-classified unattached free-text FURNITURE is excluded immediately; FURNITURE that conflicts with detector bubble topology receives page-context semantic adjudication and only confirmed furniture is excluded; verifier error or uncertainty fails safe to STORY; proper-name analysis and translation run only for remaining STORY regions
-furniture-verifier=adjudicate one disputed target with detector enclosure and page-edge position as fallible layout evidence plus up to five nearby OCR sources from the same page section as semantic context; first decide whether the target itself is a complete in-story utterance, narration, caption, sign, letter, character title, role, or world content and return STORY when it is; otherwise decide whether it is a title-like or branding noun phrase identifying the work, series, chapter, publisher, site, scan staff, advertisement, or navigation and return FURNITURE; do not require a known work or brand and tolerate merged words, misspellings, duplicated title words, or possessive title phrases from OCR; classify the target's own semantic function and never inherit nearby lines' category; dialogue peers support STORY only when the target continues that dialogue or narration; an unrelated work/series title or logo remains FURNITURE when story dialogue appears elsewhere on the page; clusters of credits, watermarks, logos, or OCR-corrupted staff labels support FURNITURE; decorative contours and title-like wording do not convert page furniture into story; remaining uncertainty fails safe to STORY
-primary-system=classify and translate each of exactly {count} numbered OCR sources independently; output [NON-STORY] only when the complete source is unrelated page furniture such as a publisher/site credit, watermark, advertisement, or navigation label; when sound-effect translation is disabled output [SFX] only for a semantically pure sound effect or onomatopoeia, never based on shortness, styling, capitalization, or bubble position; never exclude dialogue, narration, thoughts, captions, signs, letters, titles within the story, names, roles, sentence fragments, or stylized emphasis; only supplied preceding translations are reference; translate only meaning explicitly present in that line; preserve sentence and styled-emphasis fragments as fragments; never complete a fragment from another numbered source; response starts 1+tab; exactly {count} non-empty ordered lines 1..{count}; position+one-tab+Chinese-or-policy-disposition; actively rewrite vocabulary, grammar, clause structure, and idioms for HSK2.0 level {level} according to a level-specific style rule, while preserving meaning; natural-learning mode simplifies first and enforces a numeric level-appropriate lexical-coverage target plus a numeric per-line exception ceiling, retaining only indispensable story terms when paraphrase would become awkward, childish, repetitive, or imprecise, and leaves teaching metadata to the application; strict mode rewrites every avoidable advanced term and grammar pattern except protected names and required glossary forms; at levels 1-2 use basic everyday words, short subject-verb-object clauses, explicit referents, and avoid idioms, literary/formal wording, nominalization, nested clauses, and avoidable passive/把/被 constructions; at levels 3-4 allow common compound sentences and familiar connectors but replace advanced idioms, formal synonyms, and dense embedding; at levels 5-6 allow natural advanced grammar and precise vocabulary; preserve every clause/detail, speaker/addressee/participant roles, agency, attachment, causality, modality/certainty/condition, quantities/comparisons, negation, question intent, tone/humour, context-resolved ambiguity, unresolved ambiguity, relationships, pronoun referents, self-corrections in order, and numeric values; in keep-original mode dedicated semantic NER supplies the complete approved name set as opaque ordered placeholders, every placeholder is copied exactly once, no additional name is invented, and every other Latin word including relationships, honorifics, roles, ranks, titles, and uncertain OCR tokens is translated; in Chinese-name mode use approved/established/phonetic Chinese forms without dictionary-meaning translation; follow optional line-local approved-glossary notes only for matching position; no headings/labels/explanation/markdown/json/IDs
-primary-user=optional readable preceding-translations heading and dash source=>Chinese reference lines; optional line-specific-note heading with one-based position-tagged notes generated solely from application-supplied approved glossary entries whose exact ASCII English forms occur on that source line, selecting longest nonoverlapping boundary-aligned matches; blank separators; English-lines heading; one-based position+tab+English with only model-NER-approved keep-original spans replaced by opaque per-line ordered markers such as ⟦N1⟧
-repair-system=one accurate natural HSK2.0 level {level} Chinese line or [SFX] only when sound-effect translation is disabled and semantic classification confirms a pure sound effect; actively apply the same level-specific vocabulary, grammar, clause-structure, and idiom rule as primary generation; fix all problems; natural-learning mode simplifies every listed term that has a natural level-safe expression and must meet the same numeric coverage target and per-line exception ceiling as primary generation; strict mode treats the deterministic validator avoid-list as exact forbidden Chinese substrings and emits none of them except protected names and required glossary forms; in keep-original mode copy only the complete NER-approved opaque placeholder set and translate every other Latin word, or use Chinese name forms without dictionary-meaning translation in Chinese-name mode; preserve every clause/detail, roles, agency, causality, modality, quantities/comparisons, negation, question intent, tone/humour, ambiguity, self-corrections, approved-substituted-glossary-forms, and numeric values; no position/label/tab/explanation/markdown/json/ID
-repair-user=Source/Rejected/Validator-avoid-list/Problems/Answer readable fields; the typed validator avoid-list is refreshed from each rejected candidate; Chinese-name mode substitutes matching approved Chinese glossary forms; keep-original mode replaces only model-NER-approved exact boundary-aligned source spans with opaque per-line ordered markers; parser restores markers to exact OCR spelling before deterministic validation
+    direct-hsk-en-zh-authoritative-semantic-prepass-v55-2026-07-28
+semantic-ner=dedicated pretranslation same-model discovery plus candidate-verification is the sole authority for keep-original names; only exact boundary-aligned opaque lexical identifiers approved by the stricter second pass, remembered chapter entities, or the configured glossary become opaque placeholders and protected names; the verifier sees all batch occurrences and explicitly separates KEEP from TRANSLATE; transparent descriptive epithets and codenames built from ordinary adjectives, colors, species, relationships, occupations, ranks, or titles remain translatable even when uniquely recurring; translation and repair cannot create additional names or preserve unsupplied Latin text; common relational terms, roles, occupations, ranks, titles, species, interface or game categories, ordinary noun phrases, work or chapter titles, publisher or site furniture, capitalization, and emphasis are not names
+semantic-region=dedicated pretranslation same-model page-function classification first emits an explicit all-furniture-page-section decision and then decides story, pure standalone SFX, or unrelated furniture per region; it consumes the complete available page section and fallible layout evidence; unattached free-text furniture with topology support is excluded immediately; any semantic exclusion that conflicts with detector-backed story topology receives independent disputed-region verification; malformed or uncertain decisions fail safe to story; SFX follows user policy; retained story is authoritative and the translation model cannot later discard it
+disputed-region-verifier=adjudicate one disputed target with its normalized bounding box, detector enclosure, full page dimensions, and up to five peer regions carrying the same fallible layout evidence and semantic context; return STORY for coherent or reasonably recoverable in-story dialogue, narration, captions, signs, letters, character titles, roles, and world content; under the current user policy return EXCLUDE for a pure standalone SFX when SFX translation is disabled and STORY when it is enabled; return EXCLUDE for irrecoverable OCR letter soup or fragmented symbols without enough coherent language to translate, but never reject short interjections, names, stylized fragments, ordinary OCR misspellings, or sound effects merely for being short or unusual; also return EXCLUDE for title-like or branding phrases identifying the work, series, chapter, publisher, site, scan staff, advertisements, or navigation; do not require a known work or brand and tolerate merged words, misspellings, duplicated title words, and possessive title phrases; classify the target's own semantic function and OCR recoverability and never inherit nearby lines' category; dialogue peers support STORY only when the target itself continues that dialogue or narration; unrelated logos, credits, watermarks, and corrupted staff labels remain EXCLUDE when story dialogue appears elsewhere; remaining uncertain but linguistically interpretable cases fail safe to STORY
+primary-system=translate each of exactly {count} preclassified story OCR sources independently; never output a semantic exclusion marker because page function was already decided; only supplied preceding translations are reference; translate only meaning explicitly present in that line; preserve sentence and styled-emphasis fragments as fragments; never complete a fragment from another numbered source; response starts 1+tab; exactly {count} non-empty ordered lines 1..{count}; position+one-tab+Chinese; actively rewrite vocabulary, grammar, clause structure, and idioms for HSK2.0 level {level} according to a level-specific style rule, while preserving meaning; natural-learning mode simplifies first and enforces a numeric level-appropriate lexical-coverage target plus a numeric per-line exception ceiling, retaining only indispensable story terms when paraphrase would become awkward, childish, repetitive, or imprecise, and leaves teaching metadata to the application; strict mode rewrites every avoidable advanced term and grammar pattern except protected names and required glossary forms; at levels 1-2 use basic everyday words, short subject-verb-object clauses, explicit referents, and avoid idioms, literary/formal wording, nominalization, nested clauses, and avoidable passive/把/被 constructions; at levels 3-4 allow common compound sentences and familiar connectors but replace advanced idioms, formal synonyms, and dense embedding; at levels 5-6 allow natural advanced grammar and precise vocabulary; preserve every clause/detail, speaker/addressee/participant roles, agency, attachment, causality, modality/certainty/condition, quantities/comparisons, negation, question intent, tone/humour, context-resolved ambiguity, unresolved ambiguity, relationships, pronoun referents, self-corrections in order, and numeric values; in keep-original mode copy only supplied opaque approved-name placeholders exactly and translate every other Latin word including relationships, honorifics, roles, ranks, titles, work or chapter titles, furniture that survived classification, and uncertain OCR tokens; never invent a name, marker, or unsupplied Latin span because dedicated NER already supplied the complete approved name set; in Chinese-name mode use approved/established/phonetic Chinese forms without dictionary-meaning translation; follow optional line-local approved-glossary notes only for matching position; no headings/labels/explanation/markdown/json/IDs
+primary-user=optional readable preceding-translations heading and dash source=>Chinese reference lines; optional line-specific-note heading with one-based position-tagged notes generated solely from application-supplied approved glossary entries whose exact ASCII English forms occur on that source line, selecting longest nonoverlapping boundary-aligned matches; blank separators; English-lines heading; one-based position+tab+English with only already-approved remembered or glossary keep-original spans replaced by opaque per-line ordered markers such as ⟦N1⟧
+repair-system=one or up to six independently numbered accurate natural HSK2.0 level {level} Chinese repairs, or [SFX] only when sound-effect translation is disabled and semantic classification confirms a pure sound effect; actively apply the same level-specific vocabulary, grammar, clause-structure, and idiom rule as primary generation; fix all item-local problems; natural-learning mode simplifies every listed term that has a natural level-safe expression and must meet the same numeric coverage target and per-line exception ceiling as primary generation; strict mode treats each deterministic validator avoid-list as exact forbidden Chinese substrings and emits none of them except protected names and required glossary forms; in keep-original mode copy only verified opaque placeholders and translate every other Latin word, or use Chinese name forms without dictionary-meaning translation in Chinese-name mode; preserve every clause/detail, roles, agency, causality, modality, quantities/comparisons, negation, question intent, tone/humour, ambiguity, self-corrections, approved-substituted-glossary-forms, and numeric values; singular output has no position or tab while batch output uses exact ordered position+tab lines
+repair-user=each item has Source/Rejected/Validator-avoid-list/Problems readable fields; singular adds Answer while batch adds one Corrected-numbered-lines response boundary; the typed validator avoid-list is refreshed from each rejected candidate; Chinese-name mode substitutes matching approved Chinese glossary forms; keep-original mode replaces only independently verified exact boundary-aligned source spans with opaque per-line ordered markers; parser restores markers to exact OCR spelling before deterministic item-local validation
 decoding=greedy-unpenalized
 batch=production-max6-with-exact-chat-template-token-capacity-planning; choose-largest-fitting-ordered-prefix-before-generation; never retry-a-known-oversized-prompt; preserve-streaming-and-application-id-order-across-subbatches
 context=max6-preceding-utterances-and-max256-context-tokens; remove-oldest-context-first-when-needed-for-the-current-batch; when-context-removal-is-insufficient-split-the-ordered-batch; one-utterance-output-budget-may-use-exact-remaining-capacity-but-never-less-than-24-tokens
-repair=bounded-progress-convergence-with-at-most-four-prompt-changing-targeted-attempts-per-rejected-bubble-no-context-no-primary-retry; each attempt receives deterministic validator violations, an exact typed avoid-list, plus level-safe candidate words when available; candidates are semantic options rather than forced substitutions; a rejected attempt becomes the next attempt's rejected text and refreshes its avoid-list and problem set; natural-learning remains natural on every repair and uses its numeric exception policy so an indispensable story concept is not discarded merely to achieve strict validity; strict mode stops on strict validity; natural-learning mode stops when deterministic occurrence coverage and level-specific absolute exception budget are satisfied; every distinct bounded strategy runs unless an earlier attempt succeeds";
+repair=bounded-progress-convergence-with-at-most-four-prompt-changing-numbered-microbatch-attempts-no-context-no-primary-retry; up to six rejected bubbles share each generation while parsing validation feedback and convergence state remain isolated by application ID; each attempt receives deterministic validator violations, an exact typed avoid-list, plus level-safe candidate words when available; candidates are semantic options rather than forced substitutions; a rejected attempt becomes the next attempt's rejected text and refreshes its avoid-list and problem set; natural-learning remains natural on every repair and uses its numeric exception policy so an indispensable story concept is not discarded merely to achieve strict validity; strict mode stops on strict validity; natural-learning mode stops when deterministic occurrence coverage and level-specific absolute exception budget are satisfied; every distinct bounded strategy runs unless an earlier attempt succeeds";
 
 // Filled from the exact UTF-8 bytes of
 // DIRECT_HSK_PROMPT_FINGERPRINT_MATERIAL.
 pub const DIRECT_HSK_PROMPT_HASH: &str =
-    "sha256:7d3609beaea03d4962ba81529213ed296b99fe6e840dad3551f287020ea01d5b";
+    "sha256:bb67dbf844ff60d92cc770610935002c7fc047d49ead533e4f25de107e110b66";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DirectHskNameStyle {
@@ -50,10 +51,10 @@ pub enum DirectHskLearningMode {
 pub const DIRECT_HSK_VALIDATOR_FINGERPRINT_MATERIAL: &str = "numbered-tab-or-space-parser|\
 fullwidth-ascii|strict-primary-ascii-repair-trigger|source-guided-final-numeric-value-validation-v3-\
     ignore-letter-adjacent-ocr-digits-with-boundary-multiplier-notation-v2|deterministic-question-punctuation-v1|\
-    semantic-non-story-disposition-v1|semantic-sfx-policy-disposition-v1|semantic-ner-exact-source-spans-v1|opaque-approved-name-placeholder-restoration-v1|inline-exact-source-name-markup-v1|known-protected-unmarked-latin-accepted-v2|other-unmarked-latin-rejected-v1|names|question-fragment-aware-v2|\
+    semantic-non-story-disposition-v1|semantic-sfx-policy-disposition-v1|semantic-ner-exact-source-spans-v2-authoritative|opaque-approved-name-placeholder-restoration-v1|unapproved-name-markup-rejected-v2|known-protected-unmarked-latin-source-line-scoped-v3|all-other-latin-rejected-in-every-name-mode-v3|names|question-fragment-aware-v2|\
 excessive-han-expansion-v1";
 pub const DIRECT_HSK_VALIDATOR_HASH: &str =
-    "sha256:08ebd3ba89c060310f15c2d02d5398010e42737bb2a6242c7a181c39c73c0a80";
+    "sha256:e54ab012c0ff53ae5895c427fbf366261c4215699770cf955163fae763774cee";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DirectHskContext<'a> {
@@ -116,15 +117,13 @@ pub fn primary_system_prompt_with_learning_policy(
     };
     let name_instruction = match name_style {
         DirectHskNameStyle::KeepOriginal => {
-            "As part of translating the complete sentence, decide from meaning and context which \
-            source spans are proper names: lexicalized identifiers for particular people, places, \
-            organizations, named events, or unique entities. A capitalized description, relationship, \
-            occupation, rank, title, species, ordinary noun phrase, or clause is not a proper name and \
-            must be translated. Dedicated semantic NER has already replaced the complete approved \
-            name set with opaque placeholders such as `⟦N1⟧`. Copy every placeholder exactly once and \
-            unchanged in its grammatical position; the application restores its exact source spelling. \
-            Do not invent additional names or markers. Translate every other Latin word, including \
-            relationships, honorifics, roles, ranks, titles, and uncertain OCR tokens."
+            "Dedicated semantic NER has already supplied the complete approved proper-name set. Copy \
+            every supplied opaque approved-name placeholder such as `⟦N1⟧` exactly once and unchanged \
+            in its grammatical position; the application restores its exact source spelling. Never \
+            invent another name, name marker, or unsupplied Latin span. Translate every other Latin \
+            word, including capitalized descriptions, relationships, honorifics, occupations, roles, \
+            ranks, titles, species, work or chapter titles, interface or game categories, ordinary noun \
+            phrases, and uncertain OCR tokens."
         }
         DirectHskNameStyle::Chinese => {
             "Treat person, place, organization, and other proper names as names: never translate \
@@ -345,6 +344,34 @@ pub fn repair_system_prompt_with_learning_policy(
     translate_sound_effects: bool,
     learning_mode: DirectHskLearningMode,
 ) -> String {
+    repair_system_prompt_for_count(level, 1, name_style, translate_sound_effects, learning_mode)
+}
+
+#[must_use]
+pub fn repair_batch_system_prompt_with_learning_policy(
+    level: u8,
+    count: usize,
+    name_style: DirectHskNameStyle,
+    translate_sound_effects: bool,
+    learning_mode: DirectHskLearningMode,
+) -> String {
+    assert!(count > 0, "repair batch must not be empty");
+    repair_system_prompt_for_count(
+        level,
+        count,
+        name_style,
+        translate_sound_effects,
+        learning_mode,
+    )
+}
+
+fn repair_system_prompt_for_count(
+    level: u8,
+    count: usize,
+    name_style: DirectHskNameStyle,
+    translate_sound_effects: bool,
+    learning_mode: DirectHskLearningMode,
+) -> String {
     let level_style = level_style_instruction(level);
     let sound_effect_instruction = if translate_sound_effects {
         "Translate a pure sound effect naturally."
@@ -354,14 +381,13 @@ pub fn repair_system_prompt_with_learning_policy(
     };
     let name_instruction = match name_style {
         DirectHskNameStyle::KeepOriginal => {
-            "Decide proper names from the complete source meaning, not capitalization. A proper name \
-            is a lexicalized identifier for a particular entity; descriptions, relationships, \
-            occupations, ranks, titles, species, noun phrases, and clauses must be translated. Keep \
-            every opaque approved-name placeholder such as `⟦N1⟧` exactly once and unchanged in its \
-            grammatical position; the application restores the exact source spelling. Dedicated \
-            semantic NER already supplied the complete approved name set. Do not invent additional \
-            names or markers. Translate every other Latin word, including relationships, honorifics, \
-            roles, ranks, titles, and uncertain OCR tokens."
+            "Dedicated semantic NER already supplied the complete approved proper-name set. Keep every \
+            opaque approved-name placeholder such as `⟦N1⟧` exactly once and unchanged in its \
+            grammatical position; the application restores the exact source spelling. Do not invent \
+            additional names, markers, or unsupplied Latin spans. Translate every other Latin word, \
+            including descriptions, relationships, honorifics, occupations, roles, ranks, titles, \
+            species, work or chapter titles, interface or game categories, noun phrases, clauses, and \
+            uncertain OCR tokens."
         }
         DirectHskNameStyle::Chinese => {
             "Never translate proper names by dictionary meaning; use approved or established forms \
@@ -378,16 +404,31 @@ pub fn repair_system_prompt_with_learning_policy(
                 .to_owned()
         }
     };
+    let scope_instruction = if count == 1 {
+        "Repair this one English-to-Simplified-Chinese translation".to_owned()
+    } else {
+        format!(
+            "Repair each of the {count} numbered English-to-Simplified-Chinese translations independently"
+        )
+    };
+    let output_instruction = if count == 1 {
+        "Return exactly one non-empty line containing only the corrected translation; write no position or tab."
+            .to_owned()
+    } else {
+        format!(
+            "Return exactly {count} non-empty lines numbered 1 through {count} in order. On every line write the position, one tab, and only that corrected translation."
+        )
+    };
     format!(
-        "Repair this one English-to-Simplified-Chinese translation for a reader targeting \
+        "{scope_instruction} for a reader targeting \
         cumulative HSK 2.0 level {level}. Fix every listed problem. Actively rewrite vocabulary, grammar, \
         clause structure, and idioms for the requested level—not vocabulary alone. {level_style} {learning_instruction} Preserve \
         every clause and detail, participant roles, \
 agency, cause and result, modality, quantities and comparisons, negation, question intent, tone \
         and humour, ambiguity, pronoun referents, self-corrections, approved glossary forms \
-        already present in the source, and numeric values. Return exactly one non-empty line containing \
-only the corrected translation. {sound_effect_instruction} {name_instruction} Write no position, label, tab, explanation, Markdown, \
-JSON, or application ID."
+        already present in the source, and numeric values. {output_instruction} \
+{sound_effect_instruction} {name_instruction} Write no headings, labels, explanations, Markdown, \
+JSON, or application IDs."
     )
 }
 
@@ -434,6 +475,28 @@ pub fn repair_user_prompt_with_constraints(
     name_style: DirectHskNameStyle,
     avoid_chinese: &[String],
 ) -> String {
+    format!(
+        "{}\nAnswer:",
+        repair_item_constraints(
+            source_english,
+            rejected_chinese,
+            problems,
+            names,
+            name_style,
+            avoid_chinese,
+        )
+    )
+}
+
+#[must_use]
+pub fn repair_item_constraints(
+    source_english: &str,
+    rejected_chinese: Option<&str>,
+    problems: &[&str],
+    names: &[DirectHskName<'_>],
+    name_style: DirectHskNameStyle,
+    avoid_chinese: &[String],
+) -> String {
     let rejected = rejected_chinese
         .map(compact)
         .unwrap_or_else(|| "<missing>".to_owned());
@@ -456,7 +519,7 @@ pub fn repair_user_prompt_with_constraints(
             .join(", ")
     };
     format!(
-        "Source: {}\nRejected: {rejected}\nValidator avoid-list: {avoid}\nProblems: {problems}\nAnswer:",
+        "Source: {}\nRejected: {rejected}\nValidator avoid-list: {avoid}\nProblems: {problems}",
         source,
     )
 }
@@ -694,8 +757,8 @@ English lines:\n\
         assert!(system.contains("Preserve complete meaning"));
         assert!(system.contains("ambiguity itself when unresolved"));
         assert!(material.contains("application-supplied approved glossary entries"));
-        assert!(material.contains("publisher/site credit"));
-        assert!(material.contains("[NON-STORY]"));
+        assert!(material.contains("publisher or site"));
+        assert!(material.contains("semantic exclusion marker"));
         assert!(!system.contains("chapter"));
         assert!(!material.to_ascii_lowercase().contains("asura"));
         assert!(!material.to_ascii_lowercase().contains("webtoon"));
@@ -744,13 +807,14 @@ English lines:\n\
         let original_repair =
             repair_system_prompt_with_name_style(3, DirectHskNameStyle::KeepOriginal);
 
-        assert!(original.contains("complete approved name set"));
-        assert!(original.contains("complete approved name set"));
+        assert!(original.contains("complete approved proper-name set"));
+        assert!(original.contains("Never invent another name"));
+        assert!(original.contains("Translate every other Latin word"));
         assert!(original.contains("⟦N1⟧"));
         assert!(original.contains("Translate every other Latin word"));
-        assert!(original_repair.contains("Decide proper names from the complete source meaning"));
+        assert!(original_repair.contains("complete approved proper-name set"));
         assert!(original_repair.contains("opaque approved-name placeholder"));
-        assert!(original_repair.contains("complete approved name set"));
+        assert!(original_repair.contains("complete approved proper-name set"));
         assert!(chinese.contains("phonetic Chinese transliteration"));
         assert!(!chinese.contains("including its original Latin spelling"));
     }

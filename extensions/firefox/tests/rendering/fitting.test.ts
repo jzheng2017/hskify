@@ -10,6 +10,7 @@ import {
   isLegalLineBreak,
   minimumFontSizeForImage,
   nearbyLineCandidates,
+  sourceDensityScale,
 } from '../../src/rendering/fitting'
 
 function fixtureRegion(): BrowserRegion {
@@ -112,7 +113,7 @@ describe('rectangle and polygon-aware text fitting', () => {
       }
 
       expect(horizontalPolygonSpan(polygon, 0.5)).toBeGreaterThan(0)
-      expect(new RectangleTextFitter().fit(region, 100, 100).fontSize).toBe(20)
+      expect(new RectangleTextFitter().fit(region, 100, 100).fontSize).toBeGreaterThan(36)
       expect(new PolygonTextFitter().fit(region, 100, 100).fontSize).toBe(0)
     }
   })
@@ -127,10 +128,17 @@ describe('rectangle and polygon-aware text fitting', () => {
     expect(polygon.lines.join('')).toBe(region.displayedChinese)
   })
 
-  it('preserves the source color-band count while fitting translated text', () => {
+  it('scales concise Chinese by source-to-translation glyph density', () => {
+    expect(sourceDensityScale('The tower administrator arrived', '管理员来了')).toBeGreaterThan(1)
+    expect(sourceDensityScale('Wait', '请等一下')).toBe(1)
+    expect(sourceDensityScale('A'.repeat(100), '中')).toBeGreaterThan(5)
+  })
+
+  it('does not force translated line count to equal the source color sample count', () => {
     const base = fixtureRegion()
     const region: BrowserRegion = {
       ...base,
+      sourceEnglish: 'A'.repeat(100),
       displayedChinese: 'æˆ‘ä»¬çŽ°åœ¨å¿…é¡»ç¦»å¼€è¿™é‡Œ',
       style: {
         ...base.style,
@@ -146,9 +154,17 @@ describe('rectangle and polygon-aware text fitting', () => {
       },
     }
 
-    const fit = new PolygonTextFitter().fit(region, 600, 900)
+    region.textPolygon = [
+      { x: 0, y: 0 },
+      { x: 1, y: 0 },
+      { x: 1, y: 1 },
+      { x: 0, y: 1 },
+    ]
+    region.bubblePolygon = region.textPolygon
+    region.layout.safePolygon = region.textPolygon
+    const fit = new PolygonTextFitter().fit(region, 600, 120)
 
-    expect(fit.lines).toHaveLength(3)
+    expect(fit.lines.length).toBeLessThan(3)
     expect(fit.lines.join('')).toBe(region.displayedChinese)
   })
 
@@ -161,6 +177,7 @@ describe('rectangle and polygon-aware text fitting', () => {
     ]
     const region: BrowserRegion = {
       ...fixtureRegion(),
+      sourceEnglish: '中',
       displayedChinese: '中',
       textPolygon: polygon,
       bubblePolygon: polygon,

@@ -11,6 +11,36 @@ function deferred() {
 }
 
 describe('visible-first page queue', () => {
+  it('pipelines visible images within both concurrency and source-pixel budgets', async () => {
+    const gates = new Map([
+      ['small', deferred()],
+      ['story', deferred()],
+      ['next', deferred()],
+    ])
+    const order: string[] = []
+    const queue = new VisibleFirstQueue<string>(
+      async (item) => {
+        order.push(item.id)
+        await gates.get(item.id)?.promise
+      },
+      {},
+      { maximumConcurrent: 2, maximumActiveCost: 80 },
+    )
+
+    queue.enqueue({ id: 'small', value: 'small', visible: true, order: 0, cost: 5 })
+    queue.enqueue({ id: 'story', value: 'story', visible: true, order: 1, cost: 70 })
+    queue.enqueue({ id: 'next', value: 'next', visible: true, order: 2, cost: 70 })
+
+    await vi.waitFor(() => expect(order).toEqual(['small', 'story']))
+    gates.get('small')?.resolve()
+    await Promise.resolve()
+    expect(order).toEqual(['small', 'story'])
+    gates.get('story')?.resolve()
+    await vi.waitFor(() => expect(order).toEqual(['small', 'story', 'next']))
+    gates.get('next')?.resolve()
+    await vi.waitFor(() => expect(queue.size).toBe(0))
+  })
+
   it('runs one item at a time and prioritizes visible pending items', async () => {
     const gate = deferred()
     const order: string[] = []

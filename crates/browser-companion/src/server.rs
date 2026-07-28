@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
@@ -766,6 +766,7 @@ pub struct BridgeState {
     lifecycle: Mutex<Lifecycle>,
     request_capacity: Arc<Semaphore>,
     active_jobs: AtomicUsize,
+    warmup_state: AtomicU8,
 }
 
 impl BridgeState {
@@ -827,6 +828,7 @@ impl BridgeState {
             }),
             request_capacity,
             active_jobs: AtomicUsize::new(0),
+            warmup_state: AtomicU8::new(0),
         })
     }
 
@@ -835,6 +837,30 @@ impl BridgeState {
             || self.pipeline.resources_ready(),
             |setup| setup.resources_ready(),
         )
+    }
+
+    pub(crate) fn start_pipeline_warmup(self: &Arc<Self>) -> bool {
+        if !self.resources_ready() {
+            return false;
+        }
+        if self
+            .warmup_state
+            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return false;
+        }
+        let state = Arc::clone(self);
+        let pipeline = Arc::clone(&self.pipeline);
+        tokio::spawn(async move {
+            let next = if pipeline.warm_up().await.is_ok() {
+                2
+            } else {
+                0
+            };
+            state.warmup_state.store(next, Ordering::Release);
+        });
+        true
     }
 
     pub fn port(&self) -> u16 {
@@ -1483,6 +1509,7 @@ async fn issue_internal_session(
 }
 
 async fn health(State(state): State<Arc<BridgeState>>) -> Json<HealthResponse> {
+    state.start_pipeline_warmup();
     Json(HealthResponse {
         build_fingerprint: BUILD_FINGERPRINT.to_owned(),
         engine_version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -1500,6 +1527,7 @@ async fn health(State(state): State<Arc<BridgeState>>) -> Json<HealthResponse> {
 }
 
 async fn setup(State(state): State<Arc<BridgeState>>) -> Json<BrowserSetupStatus> {
+    state.start_pipeline_warmup();
     Json(
         state
             .setup
@@ -2298,12 +2326,18 @@ mod tests {
 
     struct CountingPipeline {
         runs: AtomicUsize,
+        warmups: AtomicUsize,
         ready: bool,
         sabotage_cache_root: Option<PathBuf>,
     }
 
     #[async_trait::async_trait]
     impl CleaningPipeline for CountingPipeline {
+        async fn warm_up(&self) -> Result<(), CleaningError> {
+            self.warmups.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+
         async fn run(
             &self,
             _input: CleaningInput,
@@ -2348,10 +2382,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ready_pipeline_warms_once_in_background() {
+        let temp = tempfile::tempdir().unwrap();
+        let pipeline = Arc::new(CountingPipeline {
+            runs: AtomicUsize::new(0),
+            warmups: AtomicUsize::new(0),
+            ready: true,
+            sabotage_cache_root: None,
+        });
+        let state = BridgeState::with_pipeline_and_setup(
+            BridgeConfig::for_port(1234),
+            [7; SECRET_BYTES],
+            pipeline.clone(),
+            None,
+            temp.path().to_path_buf(),
+        );
+
+        assert!(state.start_pipeline_warmup());
+        assert!(!state.start_pipeline_warmup());
+        while pipeline.warmups.load(Ordering::Acquire) == 0 {
+            tokio::task::yield_now().await;
+        }
+        while state.warmup_state.load(Ordering::Acquire) != 2 {
+            tokio::task::yield_now().await;
+        }
+
+        assert_eq!(pipeline.warmups.load(Ordering::Acquire), 1);
+        assert!(!state.start_pipeline_warmup());
+    }
+
+    #[tokio::test]
     async fn exact_cache_replay_never_invokes_the_inference_pipeline() {
         let temp = tempfile::tempdir().unwrap();
         let pipeline = Arc::new(CountingPipeline {
             runs: AtomicUsize::new(0),
+            warmups: AtomicUsize::new(0),
             ready: false,
             sabotage_cache_root: None,
         });
@@ -2429,6 +2494,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let pipeline = Arc::new(CountingPipeline {
             runs: AtomicUsize::new(0),
+            warmups: AtomicUsize::new(0),
             ready: false,
             sabotage_cache_root: None,
         });
@@ -2462,6 +2528,7 @@ mod tests {
         let cache_root = temp.path().join("results");
         let pipeline = Arc::new(CountingPipeline {
             runs: AtomicUsize::new(0),
+            warmups: AtomicUsize::new(0),
             ready: true,
             sabotage_cache_root: Some(cache_root),
         });

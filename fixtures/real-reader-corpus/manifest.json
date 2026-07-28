@@ -9,8 +9,8 @@
   },
   "coverageRequirements": {
     "minimumProviders": 2,
-    "minimumChapters": 7,
-    "minimumCases": 20,
+    "minimumChapters": 8,
+    "minimumCases": 22,
     "requiredQualityFocus": [
       "dense-dialogue",
       "fixed-height-reader-slice",
@@ -21,12 +21,18 @@
     ]
   },
   "selections": {
+    "chapter130": [
+      "asura-exclusive-tower-130-page-1",
+      "asura-exclusive-tower-130-page-2"
+    ],
     "smoke": [
       "asura-shepherd-28-page-18",
       "asura-status-window-31-page-14",
       "asura-mercenary-98-page-6",
       "asura-sword-hound-171-page-1",
       "asura-sword-hound-171-page-2",
+      "asura-exclusive-tower-130-page-1",
+      "asura-exclusive-tower-130-page-2",
       "webtoon-vigilante-1-page-20",
       "webtoon-thirty-minutes-1-page-50",
       "webtoon-rooftops-1-page-20"
@@ -37,6 +43,8 @@
       "asura-mercenary-98-page-6",
       "asura-sword-hound-171-page-1",
       "asura-sword-hound-171-page-2",
+      "asura-exclusive-tower-130-page-1",
+      "asura-exclusive-tower-130-page-2",
       "webtoon-vigilante-1-page-20",
       "webtoon-thirty-minutes-1-page-50",
       "webtoon-rooftops-1-page-20"
@@ -179,6 +187,77 @@
       "expectations": {
         "minimumRegionCount": 10,
         "requiredSourceFragments": ["THIRTY OF THEM", "X3"]
+      }
+    },
+    {
+      "id": "asura-exclusive-tower-130-page-1",
+      "chapterId": "asura-exclusive-tower-130",
+      "object": {
+        "path": "objects/75a72a63685800aecac7b8a7fdf1b6d1e5717eb6e1be935607f63dca99cbcb42.webp",
+        "sha256": "75a72a63685800aecac7b8a7fdf1b6d1e5717eb6e1be935607f63dca99cbcb42",
+        "bytes": 193622,
+        "mimeType": "image/webp",
+        "width": 1200,
+        "height": 800
+      },
+      "provenance": {
+        "provider": "asura",
+        "chapterUrl": "https://asurascans.com/comics/my-exclusive-tower-guide-059befe1/chapter/130",
+        "pageIndex": 1,
+        "capturedAtUtc": "2026-07-28T12:34:30Z",
+        "captureNote": "Local cover-page regression captured from the packaged Firefox end-to-end audit."
+      },
+      "qualityFocus": [
+        "page-furniture",
+        "series-title",
+        "untranslated-latin"
+      ],
+      "expectations": {
+        "exactRegionCount": 0,
+        "excludedSourceTexts": [
+          "MY EXCLUSIVE TOWER GUIDE"
+        ]
+      }
+    },
+    {
+      "id": "asura-exclusive-tower-130-page-2",
+      "chapterId": "asura-exclusive-tower-130",
+      "object": {
+        "path": "objects/77e93b3040d8a8a159d74f88d659f530a553f795af317d1d147be035890fa272.webp",
+        "sha256": "77e93b3040d8a8a159d74f88d659f530a553f795af317d1d147be035890fa272",
+        "bytes": 1284324,
+        "mimeType": "image/webp",
+        "width": 900,
+        "height": 16000
+      },
+      "provenance": {
+        "provider": "asura",
+        "chapterUrl": "https://asurascans.com/comics/my-exclusive-tower-guide-059befe1/chapter/130",
+        "pageIndex": 2,
+        "capturedAtUtc": "2026-07-28T07:21:39Z",
+        "captureNote": "Local regression object for faint stylized text inside a detector-confirmed speech bubble."
+      },
+      "qualityFocus": [
+        "dense-dialogue",
+        "faint-lettering",
+        "irregular-bubbles",
+        "missed-text-recovery",
+        "ultra-tall-strip"
+      ],
+      "expectations": {
+        "minimumRegionCount": 11,
+        "initialVisibleRects": [
+          {
+            "x": 0,
+            "y": 0.15,
+            "width": 1,
+            "height": 0.05
+          }
+        ],
+        "maximumFirstRegionReadyMs": 45000,
+        "requiredSourceFragments": ["CHEERS", "JAMEL", "THE PORTAL'S OPENED"],
+        "preserveNamesWhenDetected": ["JAMEL", "JOHAN"],
+        "excludedSourceTexts": ["ASURASCANS.COM"]
       }
     },
     {

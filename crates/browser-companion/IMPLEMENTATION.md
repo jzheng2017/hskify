@@ -207,6 +207,15 @@ and the recognizer to
 setup verifies their exact byte counts and SHA-256 identities before the
 resident session is created.
 
+When the daemon sees that the managed resources are ready, it starts one
+background warm-up task for the resident detector, OCR, segmenters, inpainter,
+HSK data, and translation model. The same `OnceCell` initialization futures are
+shared with incoming jobs, so a quick user action safely joins the in-flight
+load while the normal case uses the otherwise idle time before the Translate
+click. Failed warm-up is retryable, and resource paths are rediscovered after a
+first-time model installation instead of being frozen as missing for the
+daemon's lifetime.
+
 The explicit overrides are `HSK_MANGA_RESOURCES_DIR`,
 `HSK_MANGA_HSK_PATH`, `HSK_MANGA_DICTIONARY_PATH`, and
 `HSK_MANGA_QWEN_MODEL_PATH`.
@@ -216,7 +225,9 @@ The explicit overrides are `HSK_MANGA_RESOURCES_DIR`,
 1. Split the decoded page into 2,048-pixel tiles with 410-pixel overlap and
    resize detector input to the model's trained 640-pixel dimensions.
 2. Before each detector batch, reprioritize remaining tiles against the current
-   `visibleRects` and active state.
+   `visibleRects` and active state. When the visible frontier is smaller than
+   six tiles, submit only that frontier first instead of filling the batch with
+   off-screen tiles.
 3. Run RT-DETR-v2 in true CUDA batches of at most six tiles and retain its
    `text_bubble` and `text_free` classes. Do not require a detected balloon.
 4. Convert tile-local text geometry to source coordinates, enforce tile
@@ -224,17 +235,32 @@ The explicit overrides are `HSK_MANGA_RESOURCES_DIR`,
 5. Run PP-OCRv5 English line recognition in batches of at most eight, and yield
    after each candidate chunk so newly visible translation work can overtake
    off-screen OCR.
-6. Accept mechanically valid Latin OCR at confidence 0.45 or higher. Segment
-   real bubble contours and group every accepted line by bubble identity, so a
-   complete balloon is translated atomically even when detector boxes differ.
-7. Segment source glyph pixels with the learned manga text model, constrain the
+6. Accept mechanically valid Latin OCR at confidence 0.45 or higher. A
+   detector-backed bubble becomes finalizable only after every unprocessed
+   tile-ownership cell that could contain another line in that bubble is gone.
+   Segment its local contour, group every accepted line by bubble identity,
+   inpaint, translate, and publish it immediately while the remaining page
+   tiles continue. This removes the whole-image publication barrier without
+   splitting a balloon at an overlap boundary.
+7. Fuse detector-confirmed bubbles without accepted OCR with the independent
+   glyph-probability field. A bubble-local adaptive threshold proposes tight
+   faint or stylized text bands, while the unchanged OCR confidence and Latin
+   script gates reject empty bubbles and visual noise.
+8. Segment source glyph pixels with the learned manga text model, constrain the
    mask to accepted text regions, expand it by measured source geometry, and
-   restore the masked artwork with the manga-trained LaMa model.
-8. Queue accepted regions for translation and reprioritize visible work at
+   restore the masked artwork with the manga-trained LaMa model. Bubble
+   segmentation and inpainting operate on tiles intersecting the finalized
+   region supports, not an unconditional second pass over the entire image.
+9. Queue accepted regions for translation and reprioritize visible work at
    every OCR or detector boundary. Ready batches begin at three pending
    regions, contain at most six, and an undersized tail becomes eligible when
    its hard 75 ms batching deadline expires (or at the final forced drain).
    Boundary checks never sleep, and no page-wide translation call exists.
+10. The Firefox chapter coordinator may keep two visible image jobs in flight
+    when their combined decoded source-pixel cost remains below the normal
+    single-image admission limit. This lets a short cover/title image and the
+    following visible story strip share the daemon pipeline without allowing
+    an unbounded set of long pages to occupy memory.
 
 Low-confidence, undecodable, and non-Latin OCR are excluded before translation.
 Content is not rejected by hard-coded story, credit, role, or sound-effect word
@@ -258,7 +284,11 @@ The stitched learned text-probability field is produced once per detector tile
 and reused by OCR line discovery, per-line palette extraction, punctuation
 support, cleanup masking, and inpainting. Bubble grouping keeps those ordered
 appearance bands instead of replacing a mixed-color bubble with the style of
-its longest line.
+its longest line. Layout uses the complete connected bubble component rather
+than the OCR or detector rectangle. Its safe text polygon is a shape-preserving
+erosion whose clearance is bounded by both measured glyph height and the
+bubble's own smaller dimension; oversized source lettering therefore cannot
+collapse a large balloon into a tiny replacement-text area.
 
 An empty semantic mask fails the image and enters the extension's bounded
 automatic retry state machine. It never silently leaves half a balloon
@@ -287,23 +317,46 @@ Levels 3-4 permit familiar compound sentences while simplifying dense
 embedding and formal synonyms; levels 5-6 permit natural advanced grammar.
 The job's name preference is part of generation, validation, and both cache
 keys. `keep-original` preserves the source's exact Latin name spelling and
-permits those matched source names as HSK exceptions. `chinese` uses approved
-glossary forms first, then established Chinese names when certain and
-otherwise consistent phonetic transliteration. Neither mode translates a
+permits only exact source spans approved by a dedicated semantic NER pass as
+Latin HSK exceptions. Every proposed name is then independently classified as
+an opaque identifier or a transparent phrase: actual identifiers such as
+personal names are preserved, while roles, titles, descriptive epithets, and
+color-plus-noun codenames remain ordinary translation input. Page-function
+classification, name discovery, and candidate verification are separate
+generations with separate response contracts so none of those decisions can
+contaminate another. The approved spans enter opaque translation placeholders,
+deterministic validation, chapter entity memory, and both cache keys. `chinese`
+uses approved glossary forms first, then established Chinese names when certain
+and otherwise consistent phonetic transliteration. Neither mode translates a
 name by its dictionary meaning.
 
-The same contextual Qwen decision that translates a region may return the
-typed `[NON-STORY]` disposition for an entire publisher/site credit, watermark,
-advertisement, or navigation label. The protocol explicitly forbids that
-disposition for dialogue, narration, thoughts, captions, in-story signs or
-letters, titles, names, roles, fragments, and stylized emphasis. Excluded
-regions publish neither cleanup pixels nor replacement text, so the source
-image remains untouched. Standalone numbers remain exact-preservation
-requirements; digits embedded in Latin OCR tokens do not.
+Before translation, a dedicated semantic pass receives the page dimensions,
+normalized region geometry, enclosure topology, and every OCR item in the
+ready page section. It classifies both the page section and each region as
+story text, page furniture/unreadable OCR, or a standalone sound effect.
+Unattached free text can be excluded directly; disputed detector-backed
+non-story or sound-effect decisions require a focused independent verifier
+with the target and peer layout. A surviving region is thereafter
+authoritatively story content: the translation and repair stages must return
+Simplified Chinese and cannot independently remove it with `[NON-STORY]` or
+`[SFX]`. Excluded regions publish neither cleanup pixels nor replacement text,
+so the source image remains untouched. Standalone numbers remain
+exact-preservation requirements; digits embedded in Latin OCR tokens do not.
 
 `hsk-control` validates each returned story item. Items that already pass are
 accepted. Rejected items alone receive at most four prompt-changing targeted
 repair attempts with their rejected Chinese and exact deterministic problems.
+When names must remain unchanged, malformed or omitted numbered NER analysis is
+a retryable image failure rather than permission to transliterate an undecided
+span.
+Up to six rejected regions enter one logical numbered repair request. Before
+generation, the translator measures each candidate subbatch with the resident
+model's real tokenizer and chat template, chooses the largest ordered prefix
+whose prompt plus desired output fits the actual context window, and merges
+the results by application ID. Parsing, validation, avoid-lists, and
+convergence state remain isolated, so one malformed sibling cannot authorize
+or invalidate another and an oversized logical batch never burns retries on a
+known context overflow.
 Every distinct bounded strategy runs unless an earlier attempt succeeds; an
 unchanged answer cannot prevent the later source-first rewrite strategies.
 The deterministic validator also supplies a typed avoid-list that is refreshed
@@ -329,6 +382,11 @@ longest-match lookup. A progressive region carries:
 - browser-safe style and layout; and
 - requested level, learning mode, level coverage, exact teaching terms, strict
   validity, above-level tokens, and repair state.
+
+Source color bands remain vertical appearance samples. They are mapped onto
+the fitted output lines after layout and never force the Chinese translation
+to retain the source line count; polygon geometry and measured source glyph
+size determine the largest non-overflowing layout.
 
 ## Translation cache
 

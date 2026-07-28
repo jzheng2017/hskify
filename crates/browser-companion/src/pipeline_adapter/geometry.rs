@@ -217,6 +217,24 @@ impl Tile {
             && x < self.ownership_x1
             && y < self.ownership_y1
     }
+
+    pub(super) fn rect(self) -> PixelRect {
+        PixelRect {
+            x0: self.x as f32,
+            y0: self.y as f32,
+            x1: (self.x + self.width) as f32,
+            y1: (self.y + self.height) as f32,
+        }
+    }
+
+    pub(super) fn ownership_rect(self) -> PixelRect {
+        PixelRect {
+            x0: self.ownership_x0,
+            y0: self.ownership_y0,
+            x1: self.ownership_x1,
+            y1: self.ownership_y1,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -233,6 +251,12 @@ pub(super) struct Candidate {
     pub(super) confirmed_bubble_rect: PixelRect,
     pub(super) detector_confidence: f32,
     pub(super) has_detector_core: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct DetectedBubble {
+    pub(super) rect: PixelRect,
+    pub(super) confidence: f32,
 }
 
 pub(super) fn overlapping_tiles(image_width: u32, image_height: u32) -> Vec<Tile> {
@@ -303,12 +327,7 @@ pub(super) fn prioritize_tiles(
     reading_direction: ReadingDirection,
 ) {
     tiles.sort_by_key(|tile| {
-        let rect = PixelRect {
-            x0: tile.x as f32,
-            y0: tile.y as f32,
-            x1: (tile.x + tile.width) as f32,
-            y1: (tile.y + tile.height) as f32,
-        };
+        let rect = tile.rect();
         let visible =
             viewport_active && rect.intersects_viewport(visible_rects, image_width, image_height);
         (
@@ -317,6 +336,65 @@ pub(super) fn prioritize_tiles(
             tile.id,
         )
     });
+}
+
+pub(super) fn next_detector_batch_count(
+    tiles: &[Tile],
+    visible_rects: &[NormalizedRect],
+    viewport_active: bool,
+    image_width: u32,
+    image_height: u32,
+    maximum: usize,
+) -> usize {
+    let maximum = maximum.min(tiles.len());
+    if !viewport_active || maximum == 0 {
+        return maximum;
+    }
+    let visible_prefix = tiles
+        .iter()
+        .take(maximum)
+        .take_while(|tile| {
+            tile.rect()
+                .intersects_viewport(visible_rects, image_width, image_height)
+        })
+        .count();
+    if visible_prefix == 0 {
+        maximum
+    } else {
+        visible_prefix
+    }
+}
+
+pub(super) fn take_finalized_lines(
+    lines: &mut Vec<super::RecognizedLine>,
+    unprocessed_tiles: &[Tile],
+    image_width: u32,
+    image_height: u32,
+) -> Vec<super::RecognizedLine> {
+    let mut finalized = Vec::new();
+    let mut pending = Vec::with_capacity(lines.len());
+    for line in lines.drain(..) {
+        if !line.candidate.has_detector_core {
+            pending.push(line);
+            continue;
+        }
+        let bubble = line.candidate.confirmed_bubble_rect;
+        let margin = (line.candidate.text_rect.height() * 2.0).clamp(32.0, 128.0);
+        let support =
+            bubble
+                .union(line.candidate.text_rect)
+                .expand(margin, image_width, image_height);
+        if unprocessed_tiles
+            .iter()
+            .any(|tile| tile.ownership_rect().intersection(support).is_some())
+        {
+            pending.push(line);
+        } else {
+            finalized.push(line);
+        }
+    }
+    *lines = pending;
+    finalized
 }
 
 pub(super) fn candidates_for_tile(
@@ -384,6 +462,137 @@ pub(super) fn candidates_for_tile(
             },
         )
         .collect()
+}
+
+pub(super) fn bubbles_for_tile(
+    detection: &ComicTextBubbleDetection,
+    tile: &Tile,
+) -> Vec<DetectedBubble> {
+    detection
+        .detections
+        .iter()
+        .filter(|detection| detection.is_bubble())
+        .filter(|detection| detection.score.is_finite() && detection.score >= MIN_DETECTOR_SCORE)
+        .filter_map(|detection| {
+            let rect = PixelRect::from_local_bounds(detection.bbox, tile)?;
+            let center = rect.center();
+            tile.owns(center.0, center.1).then_some(DetectedBubble {
+                rect,
+                confidence: detection.score,
+            })
+        })
+        .collect()
+}
+
+/// Fuse the bubble detector with the independent glyph-probability field.
+///
+/// A bubble is strong structural evidence that text may be present even when
+/// the box detector misses its lettering. The threshold is derived from each
+/// bubble's own probability distribution, which recovers faint or stylized
+/// lettering without lowering a page-global detector threshold. Every proposal
+/// remains subject to the normal English OCR confidence and script gates.
+pub(super) fn bubble_segmentation_fallback_candidates(
+    probabilities: &ProbabilityMap,
+    image_width: u32,
+    image_height: u32,
+    bubbles: &[DetectedBubble],
+    existing: &[PixelRect],
+) -> Vec<Candidate> {
+    const MIN_LOCAL_MAXIMUM: f32 = 0.08;
+    const MIN_LOCAL_THRESHOLD: f32 = 0.05;
+    const MAX_LOCAL_THRESHOLD: f32 = 0.18;
+    const MAX_ROW_GAP: u32 = 3;
+    if probabilities.width != image_width
+        || probabilities.height != image_height
+        || image_width == 0
+        || image_height == 0
+    {
+        return Vec::new();
+    }
+    let width = image_width as usize;
+    let mut proposals = Vec::new();
+    for bubble in bubbles {
+        if existing.iter().any(|known| {
+            bubble.rect.contains_point(known.center())
+                || known.overlap_over_smaller(bubble.rect) >= 0.10
+        }) {
+            continue;
+        }
+        let bounds = bubble.rect.pixel_bounds(image_width, image_height);
+        let mut maximum = 0.0_f32;
+        for y in bounds.y..bounds.y + bounds.height {
+            for x in bounds.x..bounds.x + bounds.width {
+                let value = probabilities.values[y as usize * width + x as usize];
+                if value.is_finite() {
+                    maximum = maximum.max(value);
+                }
+            }
+        }
+        if maximum < MIN_LOCAL_MAXIMUM {
+            continue;
+        }
+        let threshold = (maximum * 0.45).clamp(MIN_LOCAL_THRESHOLD, MAX_LOCAL_THRESHOLD);
+        let row_is_active = |y: u32| {
+            (bounds.x..bounds.x + bounds.width)
+                .filter(|x| probabilities.values[y as usize * width + *x as usize] >= threshold)
+                .take(2)
+                .count()
+                >= 2
+        };
+        let mut row_bands = Vec::<(u32, u32)>::new();
+        let mut start = None::<u32>;
+        let mut last_active = bounds.y;
+        for y in bounds.y..bounds.y + bounds.height {
+            if row_is_active(y) {
+                start.get_or_insert(y);
+                last_active = y;
+            } else if let Some(y0) = start
+                && y.saturating_sub(last_active) > MAX_ROW_GAP
+            {
+                row_bands.push((y0, last_active + 1));
+                start = None;
+            }
+        }
+        if let Some(y0) = start {
+            row_bands.push((y0, last_active + 1));
+        }
+
+        for (y0, y1) in row_bands {
+            let band_height = y1.saturating_sub(y0);
+            if !(5..=192).contains(&band_height) {
+                continue;
+            }
+            let mut x0 = bounds.x + bounds.width;
+            let mut x1 = bounds.x;
+            let mut active = 0_usize;
+            for y in y0..y1 {
+                for x in bounds.x..bounds.x + bounds.width {
+                    let value = probabilities.values[y as usize * width + x as usize];
+                    if value.is_finite() && value >= threshold {
+                        x0 = x0.min(x);
+                        x1 = x1.max(x + 1);
+                        active += 1;
+                    }
+                }
+            }
+            let area = (x1.saturating_sub(x0) as usize).saturating_mul(band_height as usize);
+            if x1.saturating_sub(x0) < 5 || active < 8 || active.saturating_mul(150) < area {
+                continue;
+            }
+            let Some(text_rect) = PixelRect::new(x0 as f32, y0 as f32, x1 as f32, y1 as f32) else {
+                continue;
+            };
+            proposals.push(Candidate {
+                kind: CandidateKind::StoryText,
+                text_rect: text_rect.expand(2.0, image_width, image_height),
+                bubble_rect: bubble.rect,
+                confirmed_bubble_rect: bubble.rect,
+                detector_confidence: bubble.confidence.min(maximum).max(MIN_DETECTOR_SCORE),
+                has_detector_core: true,
+            });
+        }
+    }
+    spatially_dedupe(proposals, existing)
 }
 
 /// Recover text blocks the box detector missed from the independent learned
@@ -649,6 +858,39 @@ mod tests {
     }
 
     #[test]
+    fn first_detector_batch_contains_only_the_visible_tile_frontier() {
+        let mut tiles = overlapping_tiles(900, 16_000);
+        let viewport = [NormalizedRect {
+            x: 0.0,
+            y: 0.45,
+            width: 1.0,
+            height: 0.03,
+        }];
+        prioritize_tiles(
+            &mut tiles,
+            &viewport,
+            true,
+            900,
+            16_000,
+            ReadingDirection::Auto,
+        );
+
+        let count = next_detector_batch_count(&tiles, &viewport, true, 900, 16_000, 6);
+
+        assert!((1..6).contains(&count));
+        assert!(
+            tiles[..count]
+                .iter()
+                .all(|tile| tile.rect().intersects_viewport(&viewport, 900, 16_000))
+        );
+        assert!(
+            !tiles[count]
+                .rect()
+                .intersects_viewport(&viewport, 900, 16_000)
+        );
+    }
+
+    #[test]
     fn overlap_ownership_emits_a_line_once() {
         let tiles = overlapping_tiles(900, 2_000);
         let global_y = 900.0;
@@ -722,6 +964,55 @@ mod tests {
                 .iter()
                 .any(|candidate| candidate.text_rect.y0 > 50.0)
         );
+    }
+
+    #[test]
+    fn bubble_fusion_recovers_locally_faint_text_without_lowering_page_threshold() {
+        let mut probabilities = ProbabilityMap::zeros(200, 140);
+        for y in 45..58 {
+            for x in 55..145 {
+                probabilities.values[y * 200 + x] = 0.12;
+            }
+        }
+        probabilities.values[5] = 0.95;
+        let bubble = DetectedBubble {
+            rect: PixelRect::new(30.0, 20.0, 170.0, 100.0).unwrap(),
+            confidence: 0.92,
+        };
+
+        let candidates =
+            bubble_segmentation_fallback_candidates(&probabilities, 200, 140, &[bubble], &[]);
+
+        assert_eq!(candidates.len(), 1);
+        assert!(candidates[0].has_detector_core);
+        assert_eq!(candidates[0].confirmed_bubble_rect, bubble.rect);
+        assert!(candidates[0].text_rect.x0 > bubble.rect.x0);
+        assert!(candidates[0].text_rect.x1 < bubble.rect.x1);
+    }
+
+    #[test]
+    fn bubble_fusion_does_not_re_read_a_bubble_with_accepted_text() {
+        let mut probabilities = ProbabilityMap::zeros(200, 140);
+        for y in 45..58 {
+            for x in 55..145 {
+                probabilities.values[y * 200 + x] = 0.12;
+            }
+        }
+        let bubble = DetectedBubble {
+            rect: PixelRect::new(30.0, 20.0, 170.0, 100.0).unwrap(),
+            confidence: 0.92,
+        };
+        let accepted = PixelRect::new(50.0, 42.0, 150.0, 62.0).unwrap();
+
+        let candidates = bubble_segmentation_fallback_candidates(
+            &probabilities,
+            200,
+            140,
+            &[bubble],
+            &[accepted],
+        );
+
+        assert!(candidates.is_empty());
     }
 
     #[test]

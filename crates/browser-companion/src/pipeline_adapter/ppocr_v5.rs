@@ -223,6 +223,22 @@ impl EnglishPpOcrV5 {
             .into_iter()
             .zip(block_crops.iter().zip(text_probabilities))
             .map(|(predictions, (crop, probabilities))| {
+                if std::env::var_os("HSKIFY_TRACE_REJECTED_OCR").is_some_and(|value| value == "1") {
+                    eprintln!(
+                        "hskify-ocr-sublines {:?}",
+                        predictions
+                            .iter()
+                            .map(|(prediction, bounds)| (
+                                prediction.text.as_str(),
+                                prediction.confidence,
+                                bounds.left,
+                                bounds.top,
+                                bounds.right,
+                                bounds.bottom,
+                            ))
+                            .collect::<Vec<_>>()
+                    );
+                }
                 let confidence = if predictions.is_empty() {
                     0.0
                 } else {

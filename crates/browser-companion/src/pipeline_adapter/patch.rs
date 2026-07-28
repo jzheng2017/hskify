@@ -605,6 +605,7 @@ pub(super) fn make_inpainted_patch(
 
 pub(super) fn region_polygons(
     bubbles: &GrayImage,
+    bubble_components: &BTreeMap<u8, PixelRect>,
     text_rect: PixelRect,
     fallback_bubble_rect: PixelRect,
     measured_font_height: f32,
@@ -618,13 +619,12 @@ pub(super) fn region_polygons(
             text_rect.polygon(bubbles.width(), bubbles.height()),
         );
     };
-    let support = fallback_bubble_rect
-        .union(text_rect)
-        .expand(
-            measured_font_height.max(1.0),
-            bubbles.width(),
-            bubbles.height(),
-        )
+    let support_rect = bubble_components
+        .get(&bubble_id)
+        .copied()
+        .unwrap_or_else(|| fallback_bubble_rect.union(text_rect));
+    let support = support_rect
+        .expand(1.0, bubbles.width(), bubbles.height())
         .pixel_bounds(bubbles.width(), bubbles.height());
     let binary = GrayImage::from_fn(support.width, support.height, |x, y| {
         if bubbles.get_pixel(support.x + x, support.y + y).0[0] == bubble_id {
@@ -649,10 +649,16 @@ pub(super) fn region_polygons(
     )
     .unwrap_or_else(|| fallback_bubble_rect.polygon(bubbles.width(), bubbles.height()));
 
-    // Clearance follows the measured source glyph height. This preserves a
-    // comparable amount of breathing room for small and large balloons
-    // without assuming a fixed percentage of the detector box.
-    let clearance = (measured_font_height * 0.45).round().clamp(1.0, 255.0) as u8;
+    // Build a scale-invariant interior: glyph scale provides typographic
+    // breathing room, while the bubble's smaller dimension prevents large
+    // source lettering from eroding most of an otherwise spacious balloon.
+    // This preserves the real segmented shape and removes outlines/tails
+    // without collapsing the usable text area back toward the OCR rectangle.
+    let smaller_dimension = support_rect.width().min(support_rect.height());
+    let clearance = (measured_font_height * 0.25)
+        .min(smaller_dimension * 0.06)
+        .round()
+        .clamp(1.0, 255.0) as u8;
     let safe_mask = erode(&binary, Norm::LInf, clearance);
     let safe_polygon = contour_polygon(
         &safe_mask,
@@ -665,6 +671,37 @@ pub(super) fn region_polygons(
     .filter(|polygon| !polygon.is_empty())
     .unwrap_or_else(|| text_rect.polygon(bubbles.width(), bubbles.height()));
     (bubble_polygon, safe_polygon)
+}
+
+pub(super) fn bubble_component_bounds(bubbles: &GrayImage) -> BTreeMap<u8, PixelRect> {
+    let mut bounds = BTreeMap::<u8, (u32, u32, u32, u32)>::new();
+    for (x, y, pixel) in bubbles.enumerate_pixels() {
+        let id = pixel.0[0];
+        if id == 0 {
+            continue;
+        }
+        bounds
+            .entry(id)
+            .and_modify(|rect| {
+                rect.0 = rect.0.min(x);
+                rect.1 = rect.1.min(y);
+                rect.2 = rect.2.max(x);
+                rect.3 = rect.3.max(y);
+            })
+            .or_insert((x, y, x, y));
+    }
+    bounds
+        .into_iter()
+        .filter_map(|(id, (x0, y0, x1, y1))| {
+            PixelRect::new(
+                x0 as f32,
+                y0 as f32,
+                x1.saturating_add(1) as f32,
+                y1.saturating_add(1) as f32,
+            )
+            .map(|rect| (id, rect))
+        })
+        .collect()
 }
 
 pub(super) fn bubble_id_for_rect(mask: &GrayImage, rect: PixelRect) -> Option<u8> {
@@ -1045,6 +1082,75 @@ mod tests {
         let labels = label_bubble_components(&union);
         assert_eq!(labels.get_pixel(5, 3).0[0], labels.get_pixel(7, 3).0[0]);
         assert_ne!(labels.get_pixel(5, 3).0[0], 0);
+    }
+
+    #[test]
+    fn region_layout_uses_the_complete_segmented_bubble_component() {
+        let labels = GrayImage::from_fn(30, 30, |x, y| {
+            if (3..27).contains(&x) && (4..26).contains(&y) {
+                Luma([1])
+            } else {
+                Luma([0])
+            }
+        });
+        let text = PixelRect::new(12.0, 12.0, 18.0, 17.0).unwrap();
+        let detector_fallback = PixelRect::new(10.0, 10.0, 20.0, 19.0).unwrap();
+        let components = bubble_component_bounds(&labels);
+
+        let (bubble, safe) = region_polygons(&labels, &components, text, detector_fallback, 2.0);
+        let vertical_span = |polygon: &[Point]| {
+            let minimum = polygon
+                .iter()
+                .map(|point| point.y)
+                .fold(f32::INFINITY, f32::min);
+            let maximum = polygon
+                .iter()
+                .map(|point| point.y)
+                .fold(f32::NEG_INFINITY, f32::max);
+            maximum - minimum
+        };
+
+        assert!(vertical_span(&bubble) > 0.65);
+        assert!(vertical_span(&safe) > 0.55);
+        assert!(vertical_span(&safe) > text.height() / labels.height() as f32);
+    }
+
+    #[test]
+    fn large_source_lettering_cannot_collapse_the_safe_bubble_interior() {
+        let labels = GrayImage::from_fn(240, 140, |x, y| {
+            if (20..220).contains(&x) && (20..120).contains(&y) {
+                Luma([1])
+            } else {
+                Luma([0])
+            }
+        });
+        let text = PixelRect::new(75.0, 45.0, 165.0, 95.0).unwrap();
+        let components = bubble_component_bounds(&labels);
+        let (bubble, safe) = region_polygons(&labels, &components, text, text, 80.0);
+        let bounds = |polygon: &[Point]| {
+            let x0 = polygon
+                .iter()
+                .map(|point| point.x)
+                .fold(f32::INFINITY, f32::min);
+            let x1 = polygon
+                .iter()
+                .map(|point| point.x)
+                .fold(f32::NEG_INFINITY, f32::max);
+            let y0 = polygon
+                .iter()
+                .map(|point| point.y)
+                .fold(f32::INFINITY, f32::min);
+            let y1 = polygon
+                .iter()
+                .map(|point| point.y)
+                .fold(f32::NEG_INFINITY, f32::max);
+            (x1 - x0, y1 - y0)
+        };
+        let (bubble_width, bubble_height) = bounds(&bubble);
+        let (safe_width, safe_height) = bounds(&safe);
+
+        assert!(safe_width / bubble_width > 0.85);
+        assert!(safe_height / bubble_height > 0.75);
     }
 
     #[test]

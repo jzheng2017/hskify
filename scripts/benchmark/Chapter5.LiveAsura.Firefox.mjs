@@ -622,11 +622,20 @@ async function main() {
       requestedChapterUrl,
       finalChapterUrl,
     )
-    const firstPatch = finalized.dom.events.find(
+    const proofPatch = finalized.dom.events.find(
       (event) => event.index === finalized.proof.domOrdering.patchEventIndex,
     )
-    const firstText = finalized.dom.events.find(
+    const proofText = finalized.dom.events.find(
       (event) => event.index === finalized.proof.domOrdering.selectableTextEventIndex,
+    )
+    const firstPatch = finalized.dom.events.find(
+      (event) =>
+        event.epochMs >= action.issuedAtEpochMs && event.type === 'patchDomCommitted',
+    )
+    const firstText = finalized.dom.events.find(
+      (event) =>
+        event.epochMs >= action.issuedAtEpochMs &&
+        event.type === 'selectableTextDomCommitted',
     )
     evidence = {
       schemaVersion: 1,
@@ -666,10 +675,16 @@ async function main() {
           firstPatch === undefined ? undefined : firstPatch.epochMs - action.issuedAtEpochMs,
         firstSelectableTextAfterActionMs:
           firstText === undefined ? undefined : firstText.epochMs - action.issuedAtEpochMs,
+        proofPatchAfterActionMs:
+          proofPatch === undefined
+            ? undefined
+            : proofPatch.epochMs - action.issuedAtEpochMs,
+        proofSelectableTextAfterActionMs:
+          proofText === undefined ? undefined : proofText.epochMs - action.issuedAtEpochMs,
         stateAtProof,
         finalState,
         note:
-          'These end-to-end milestones can include live image acquisition; they are not local-only benchmark timings.',
+          'First-patch milestones measure the first DOM commit of any translated region. Proof milestones identify the separate policy-audited dialogue region. These end-to-end milestones can include live image acquisition and are not local-only benchmark timings.',
       },
       timings,
       localRouteReplay: finalized.routes,

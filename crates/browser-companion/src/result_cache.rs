@@ -12,7 +12,8 @@ use hsk_control::{
     UNICODE_NORMALIZATION_TABLES_SHA256,
 };
 use koharu_app::llm::{
-    HSK_TRANSLATION_MODEL_REVISION, HSK_TRANSLATION_PROMPT_HASH, HSK_TRANSLATION_VALIDATOR_HASH,
+    HSK_SEMANTIC_ANALYSIS_REVISION, HSK_TRANSLATION_MODEL_REVISION, HSK_TRANSLATION_PROMPT_HASH,
+    HSK_TRANSLATION_VALIDATOR_HASH,
 };
 use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
@@ -29,7 +30,7 @@ const RESULT_CACHE_MAX_ENTRY_BYTES: u64 = 512 * 1024 * 1024;
 const RESULT_CACHE_MAX_DECODED_PATCH_BYTES: u64 = 256 * 1024 * 1024;
 const RESULT_CACHE_SCHEMA: &str = "hskify-progressive-result-2026-07-27-v5";
 const RESULT_CACHE_PIPELINE_REVISION: &str =
-    "direct-browser-pipeline-natural-strict-repair-convergence-v22-2026-07-28";
+    "direct-browser-pipeline-natural-strict-repair-convergence-v24-2026-07-28";
 const MODEL_RESOURCE_MANIFEST: &[u8] = include_bytes!("../../../data/model-packs/manifest.v1.json");
 
 #[derive(Debug, Clone)]
@@ -355,6 +356,7 @@ fn pipeline_fingerprint() -> Result<String> {
         RESULT_CACHE_PIPELINE_REVISION,
         model_resources,
         HSK_TRANSLATION_MODEL_REVISION,
+        HSK_SEMANTIC_ANALYSIS_REVISION,
         HSK_TRANSLATION_PROMPT_HASH,
         HSK_TRANSLATION_VALIDATOR_HASH,
         (HSK_RESOURCE_BYTES, HSK_RESOURCE_SHA256),

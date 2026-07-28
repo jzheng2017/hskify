@@ -25,9 +25,10 @@ use hsk_control::{
 use image::{DynamicImage, GenericImageView};
 use koharu_app::llm::{
     HSK_TRANSLATION_MODEL, HskLearningMode, HskNameHandling, HskPrecedingUtterance,
-    HskProtectedName, HskRepairUtterance, HskSourceUtterance, HskTranslationBatchRequest,
-    HskTranslationDisposition, HskTranslationOutcome, HskTranslationRepairRequest,
-    HskUtteranceKind, MAX_HSK_PRECEDING_UTTERANCES,
+    HskProtectedName, HskRepairUtterance, HskSemanticLayout, HskSourceUtterance,
+    HskTranslationBatchRequest, HskTranslationDisposition, HskTranslationIssue,
+    HskTranslationOutcome, HskTranslationRepairBatchRequest, HskUtteranceKind,
+    MAX_HSK_PRECEDING_UTTERANCES,
 };
 use koharu_app::{App, AppConfig};
 use koharu_ml::comic_text_bubble_detector::{ComicTextBubbleDetector, DETECTOR_TILE_BATCH_SIZE};
@@ -43,14 +44,17 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{OnceCell, oneshot};
 
 use self::geometry::{
-    Candidate, CandidateKind, PixelBounds, PixelRect, Tile, candidates_for_tile, ocr_crop_rect,
-    overlapping_tiles, prioritize_tiles, reading_order_key, segmentation_fallback_candidates,
-    spatially_dedupe, text_candidate_is_confirmed,
+    Candidate, CandidateKind, DetectedBubble, PixelBounds, PixelRect, Tile,
+    bubble_segmentation_fallback_candidates, bubbles_for_tile, candidates_for_tile,
+    next_detector_batch_count, ocr_crop_rect, overlapping_tiles, prioritize_tiles,
+    reading_order_key, segmentation_fallback_candidates, spatially_dedupe, take_finalized_lines,
+    text_candidate_is_confirmed,
 };
 use self::patch::{
-    CleanupMask, PatchPng, bubble_id_for_rect, bubble_id_mask, compact_cleanup_mask,
-    crop_probability_map, label_bubble_components, make_inpainted_patch, merge_binary_mask,
-    merge_cleanup_mask, merge_probability_map, region_polygons, verified_text_mask_for_regions,
+    CleanupMask, PatchPng, bubble_component_bounds, bubble_id_for_rect, bubble_id_mask,
+    compact_cleanup_mask, crop_probability_map, label_bubble_components, make_inpainted_patch,
+    merge_binary_mask, merge_cleanup_mask, merge_probability_map, region_polygons,
+    verified_text_mask_for_regions,
 };
 use self::ppocr_v5::{EnglishPpOcrV5, MAX_LINE_BATCH_SIZE, PpOcrAppearanceBand, PpOcrPrediction};
 use crate::contracts::{
@@ -77,7 +81,7 @@ const TRANSLATION_MAX_FLUSH_DELAY: Duration = Duration::from_millis(75);
 const MAX_TARGETED_REPAIR_ATTEMPTS: usize = 4;
 const BROWSER_QWEN_INFERENCE_THREADS: i32 = 6;
 const MIN_OCR_CONFIDENCE: f32 = 0.45;
-const TRANSLATION_CACHE_SCHEMA: &str = "hskify-direct-hsk-region-cache-v21";
+const TRANSLATION_CACHE_SCHEMA: &str = "hskify-direct-hsk-region-cache-v29";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -140,6 +144,8 @@ impl CleaningError {
 
 #[async_trait]
 pub(crate) trait CleaningPipeline: Send + Sync {
+    async fn warm_up(&self) -> std::result::Result<(), CleaningError>;
+
     async fn run(
         &self,
         input: CleaningInput,
@@ -161,7 +167,6 @@ pub(crate) struct KoharuPipeline {
     cuda_scheduler: Arc<CudaScheduler>,
     resident: OnceCell<Arc<ResidentState>>,
     hsk_control: OnceCell<Arc<HskControl>>,
-    resources: std::result::Result<ResidentResourcePaths, String>,
     translation_cache: Mutex<TranslationCache>,
     entity_memory: Mutex<ChapterEntityMemory>,
 }
@@ -173,18 +178,17 @@ impl KoharuPipeline {
             cuda_scheduler: global_cuda_scheduler(),
             resident: OnceCell::new(),
             hsk_control: OnceCell::new(),
-            resources: ResidentResourcePaths::discover().map_err(|error| format!("{error:#}")),
             translation_cache: Mutex::new(TranslationCache::default()),
             entity_memory: Mutex::new(ChapterEntityMemory::default()),
         }
     }
 
-    fn resource_paths(&self) -> Result<&ResidentResourcePaths> {
-        self.resources.as_ref().map_err(|error| anyhow!("{error}"))
+    fn resource_paths(&self) -> Result<ResidentResourcePaths> {
+        ResidentResourcePaths::discover()
     }
 
     async fn resident(&self) -> Result<&Arc<ResidentState>> {
-        let resources = self.resource_paths()?.clone();
+        let resources = self.resource_paths()?;
         let runtime_root = resources.runtime_root().to_path_buf();
         let app_state_root = self.cache_root.join("browser-runtime").join("app-state");
         self.resident
@@ -197,7 +201,7 @@ impl KoharuPipeline {
     }
 
     async fn hsk_control(&self) -> Result<&Arc<HskControl>> {
-        let resources = self.resource_paths()?.clone();
+        let resources = self.resource_paths()?;
         self.hsk_control
             .get_or_try_init(|| async move {
                 tokio::task::spawn_blocking(move || {
@@ -264,9 +268,11 @@ impl KoharuPipeline {
         let total_tiles_u32 = u32::try_from(total_tiles).unwrap_or(u32::MAX);
         let mut processed_tiles = 0usize;
         let mut seen_text_blocks = Vec::<PixelRect>::new();
+        let mut detected_bubbles = Vec::<DetectedBubble>::new();
         let mut recognized_lines = Vec::<RecognizedLine>::new();
         let mut text_probabilities = ProbabilityMap::zeros(image_width, image_height);
         let mut pending_translation = Vec::<PreparedRegion>::new();
+        let mut translation_latency_phase = TranslationLatencyPhase::AwaitingFirstVisibleRegion;
         let mut repair_queue = RepairQueue::default();
         let mut dialogue_context = translation_context(&input.request);
         let mut prepared_next_tiles: Option<TileBatchTask> = None;
@@ -285,7 +291,14 @@ impl KoharuPipeline {
                 image_height,
                 input.request.settings.reading_direction,
             );
-            let take = DETECTOR_TILE_BATCH_SIZE.min(tiles.len());
+            let take = next_detector_batch_count(
+                &tiles,
+                &viewport.visible_rects,
+                viewport.active,
+                image_width,
+                image_height,
+                DETECTOR_TILE_BATCH_SIZE,
+            );
             let use_prepared = prepared_next_tiles
                 .as_ref()
                 .is_some_and(|task| tiles_start_with(&tiles, &task.tiles));
@@ -332,7 +345,14 @@ impl KoharuPipeline {
                 input.request.settings.reading_direction,
             );
             if !tiles.is_empty() {
-                let next_count = DETECTOR_TILE_BATCH_SIZE.min(tiles.len());
+                let next_count = next_detector_batch_count(
+                    &tiles,
+                    &admission_viewport.visible_rects,
+                    admission_viewport.active,
+                    image_width,
+                    image_height,
+                    DETECTOR_TILE_BATCH_SIZE,
+                );
                 prepared_next_tiles = Some(TileBatchTask::start(
                     preprocessing.as_ref(),
                     source.clone(),
@@ -409,6 +429,8 @@ impl KoharuPipeline {
                 image_height,
                 &mut dialogue_context,
                 &mut repair_queue,
+                &mut translation_latency_phase,
+                false,
                 false,
             )
             .await?;
@@ -420,6 +442,12 @@ impl KoharuPipeline {
                     candidates_for_tile(detection, tile, image_width, image_height)
                 })
                 .collect::<Vec<_>>();
+            detected_bubbles.extend(
+                detections
+                    .iter()
+                    .zip(&tile_batch)
+                    .flat_map(|(detection, tile)| bubbles_for_tile(detection, tile)),
+            );
             let mut candidates = spatially_dedupe(candidates, &seen_text_blocks);
             candidates.retain(text_candidate_is_confirmed);
             if rejected_ocr_tracing_enabled() {
@@ -467,7 +495,87 @@ impl KoharuPipeline {
                 }
             }
             processed_tiles += tile_batch.len();
+            let finalized_lines =
+                take_finalized_lines(&mut recognized_lines, &tiles, image_width, image_height);
+            if !finalized_lines.is_empty() {
+                let (prepared_regions, probabilities) = prepare_grouped_regions(
+                    resident,
+                    source.clone(),
+                    finalized_lines,
+                    &input.request,
+                    &sink,
+                    cancel.clone(),
+                    &self.cuda_scheduler,
+                    &preprocessing,
+                    text_probabilities,
+                    overall,
+                )
+                .await?;
+                text_probabilities = probabilities;
+                pending_translation.extend(prepared_regions);
+                if !tiles.is_empty() {
+                    // Multi-tile pages remain progressive. On the final
+                    // detector batch, wait for the fast segmentation fallbacks
+                    // below so the semantic pass sees the complete page
+                    // section instead of classifying an isolated cover title.
+                    self.flush_translation_queue(
+                        resident,
+                        control,
+                        &input.request,
+                        &mut pending_translation,
+                        cancel.clone(),
+                        &sink,
+                        overall,
+                        image_width,
+                        image_height,
+                        &mut dialogue_context,
+                        &mut repair_queue,
+                        &mut translation_latency_phase,
+                        true,
+                        false,
+                    )
+                    .await?;
+                }
+            }
             cancellation_boundary(cancel.as_ref())?;
+        }
+
+        let mut bubble_fallback_candidates = bubble_segmentation_fallback_candidates(
+            &text_probabilities,
+            image_width,
+            image_height,
+            &detected_bubbles,
+            &seen_text_blocks,
+        );
+        if !bubble_fallback_candidates.is_empty() {
+            publish_progress(
+                &sink,
+                BrowserJobStage::Ocr,
+                None,
+                Some(0.84),
+                None,
+                None,
+                "Reading text from detected speech bubbles",
+            )?;
+        }
+        while !bubble_fallback_candidates.is_empty() {
+            let accepted = ocr_batch(
+                resident,
+                source.clone(),
+                &mut bubble_fallback_candidates,
+                OcrProposalSource::SegmentationFallback,
+                &input.request,
+                &sink,
+                cancel.clone(),
+                &self.cuda_scheduler,
+                &preprocessing,
+                &text_probabilities,
+            )
+            .await?;
+            for line in accepted {
+                seen_text_blocks.push(line.candidate.text_rect);
+                recognized_lines.push(line);
+            }
         }
 
         let mut fallback_candidates = segmentation_fallback_candidates(
@@ -507,7 +615,7 @@ impl KoharuPipeline {
             }
         }
 
-        let prepared_regions = prepare_grouped_regions(
+        let (prepared_regions, _text_probabilities) = prepare_grouped_regions(
             resident,
             source.clone(),
             recognized_lines,
@@ -517,6 +625,7 @@ impl KoharuPipeline {
             &self.cuda_scheduler,
             &preprocessing,
             text_probabilities,
+            0.88,
         )
         .await?;
         pending_translation.extend(prepared_regions);
@@ -532,6 +641,8 @@ impl KoharuPipeline {
             image_height,
             &mut dialogue_context,
             &mut repair_queue,
+            &mut translation_latency_phase,
+            true,
             true,
         )
         .await?;
@@ -575,7 +686,9 @@ impl KoharuPipeline {
         image_height: u32,
         context: &mut Vec<HskPrecedingUtterance>,
         repair_queue: &mut RepairQueue,
+        latency_phase: &mut TranslationLatencyPhase,
         force: bool,
+        page_semantics_complete: bool,
     ) -> std::result::Result<(), CleaningError> {
         while !pending.is_empty() {
             prioritize_pending_translation(pending, sink, image_width, image_height);
@@ -584,6 +697,9 @@ impl KoharuPipeline {
                 force,
                 tokio::time::Instant::now(),
                 cancel.load(Ordering::Acquire) || sink.is_cancelled(),
+                !page_semantics_complete
+                    && *latency_phase == TranslationLatencyPhase::AwaitingFirstVisibleRegion
+                    && pending.first().is_some_and(|region| region.visible),
             ) {
                 TranslationBoundaryAction::ContinueUpstream => {
                     // This is a CUDA scheduling boundary, not a timer owner.
@@ -603,20 +719,25 @@ impl KoharuPipeline {
                 ));
             }
             let batch = pending.drain(..count).collect::<Vec<_>>();
-            self.translate_and_publish(
-                resident,
-                control,
-                request,
-                batch,
-                cancel.clone(),
-                sink,
-                overall_progress,
-                image_width,
-                image_height,
-                context,
-                repair_queue,
-            )
-            .await?;
+            let batch_contains_visible = batch.iter().any(|region| region.visible);
+            let published = self
+                .translate_and_publish(
+                    resident,
+                    control,
+                    request,
+                    batch,
+                    cancel.clone(),
+                    sink,
+                    overall_progress,
+                    image_width,
+                    image_height,
+                    context,
+                    repair_queue,
+                )
+                .await?;
+            if published && batch_contains_visible {
+                *latency_phase = TranslationLatencyPhase::Throughput;
+            }
         }
         Ok(())
     }
@@ -627,7 +748,7 @@ impl KoharuPipeline {
         resident: &ResidentState,
         control: &HskControl,
         request: &BrowserJobRequest,
-        regions: Vec<PreparedRegion>,
+        mut regions: Vec<PreparedRegion>,
         cancel: Arc<AtomicBool>,
         sink: &JobUpdateSink,
         overall_progress: f32,
@@ -635,9 +756,9 @@ impl KoharuPipeline {
         image_height: u32,
         context: &mut Vec<HskPrecedingUtterance>,
         repair_queue: &mut RepairQueue,
-    ) -> std::result::Result<(), CleaningError> {
+    ) -> std::result::Result<bool, CleaningError> {
         if regions.is_empty() {
-            return Ok(());
+            return Ok(false);
         }
         if regions.len() > TRANSLATION_BATCH_MAX {
             return Err(CleaningError::new(
@@ -660,16 +781,36 @@ impl KoharuPipeline {
         let mut protected_names = translation_glossary(request);
         let needs_name_analysis =
             request.settings.name_translation == NameTranslation::KeepOriginal;
-        let mut semantic_exclusion_ids = HashSet::<String>::new();
-        let semantic_sources = regions
+        let mut semantic_sources = regions
             .iter()
             .map(|region| HskSourceUtterance {
                 id: region.id.clone(),
                 kind: hsk_utterance_kind(region.candidate.kind),
                 source_english: region.source_english.clone(),
+                semantic_layout: Some(HskSemanticLayout {
+                    detector_enclosed: region.candidate.has_detector_core,
+                    x0_millionths: normalized_millionths(
+                        region.candidate.text_rect.x0,
+                        image_width,
+                    ),
+                    y0_millionths: normalized_millionths(
+                        region.candidate.text_rect.y0,
+                        image_height,
+                    ),
+                    x1_millionths: normalized_millionths(
+                        region.candidate.text_rect.x1,
+                        image_width,
+                    ),
+                    y1_millionths: normalized_millionths(
+                        region.candidate.text_rect.y1,
+                        image_height,
+                    ),
+                    page_width: image_width,
+                    page_height: image_height,
+                }),
             })
             .collect::<Vec<_>>();
-        {
+        if needs_name_analysis {
             let remembered = self
                 .entity_memory
                 .lock()
@@ -677,106 +818,107 @@ impl KoharuPipeline {
                     CleaningError::new("ENTITY_MEMORY_FAILED", "Entity memory lock poisoned.")
                 })?
                 .names_for(&request.page_session_id);
-            if needs_name_analysis {
-                merge_protected_names(&mut protected_names, remembered);
-            }
-
-            let cuda_priority = prepared_region_priority(&regions, sink, image_width, image_height);
-            let cuda_permit = self
-                .cuda_scheduler
+            merge_protected_names(&mut protected_names, remembered);
+        }
+        let cuda_priority = prepared_region_priority(&regions, sink, image_width, image_height);
+        cancellation_boundary(cancel.as_ref())?;
+        let mut cuda_permit = Some(
+            self.cuda_scheduler
                 .acquire(cuda_priority, cancel.clone())
                 .await
-                .map_err(cuda_admission_error)?;
-            match tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(
-                    translator.classify_semantic_regions(&semantic_sources, cancel.as_ref()),
-                )
-            }) {
-                Ok(exclusions) => {
-                    for (id, disposition) in exclusions {
-                        let Some(region) = regions.iter().find(|region| region.id == id) else {
-                            continue;
-                        };
-                        match semantic_exclusion_action(
-                            &region.candidate,
-                            disposition,
-                            request.settings.translate_sound_effects,
-                        ) {
-                            SemanticExclusionAction::Exclude => {
-                                semantic_exclusion_ids.insert(id);
-                            }
-                            SemanticExclusionAction::Translate => {}
-                            SemanticExclusionAction::VerifyFurniture => {
-                                let near_page_edge = region.candidate.text_rect.y0
-                                    <= image_height as f32 * 0.08
-                                    || region.candidate.text_rect.y1 >= image_height as f32 * 0.92;
-                                match tokio::task::block_in_place(|| {
-                                    tokio::runtime::Handle::current().block_on(
-                                        translator.verify_page_furniture(
-                                            &region.source_english,
-                                            region.candidate.has_detector_core,
-                                            near_page_edge,
-                                            &semantic_sources,
-                                            cancel.as_ref(),
-                                        ),
-                                    )
-                                }) {
-                                    Ok(true) => {
-                                        semantic_exclusion_ids.insert(id);
-                                    }
-                                    Ok(false) => {}
-                                    Err(_)
-                                        if cancel.load(Ordering::Acquire)
-                                            || sink.is_cancelled() =>
-                                    {
-                                        return Err(CleaningError::cancelled());
-                                    }
-                                    Err(error) => {
-                                        eprintln!(
-                                            "hskify: conflicting furniture verification failed safe to story for source OCR {:?}: {error:#}",
-                                            region.source_english
-                                        );
-                                    }
-                                }
-                            }
+                .map_err(cuda_admission_error)?,
+        );
+        let semantic_classification = match tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(translator.classify_semantic_regions(&semantic_sources, cancel.as_ref()))
+        }) {
+            Ok(classifications) => classifications,
+            Err(_) if cancel.load(Ordering::Acquire) || sink.is_cancelled() => {
+                return Err(CleaningError::cancelled());
+            }
+            Err(error) => {
+                return Err(CleaningError::pipeline(
+                    error.context("run pre-translation semantic analysis"),
+                ));
+            }
+        };
+        if semantic_classification.page_is_furniture {
+            return Ok(false);
+        }
+        let mut semantic_exclusion_ids = HashSet::<String>::new();
+        for (id, disposition) in semantic_classification.regions {
+            let Some(region) = regions.iter().find(|region| region.id == id) else {
+                continue;
+            };
+            match semantic_exclusion_action(
+                &region.candidate,
+                disposition,
+                request.settings.translate_sound_effects,
+            ) {
+                SemanticExclusionAction::Exclude => {
+                    semantic_exclusion_ids.insert(id);
+                }
+                SemanticExclusionAction::Translate => {}
+                SemanticExclusionAction::VerifyExclusion => {
+                    let target = semantic_sources
+                        .iter()
+                        .find(|source| source.id == region.id)
+                        .expect("semantic source was built from every region");
+                    let verified = tokio::task::block_in_place(|| {
+                        tokio::runtime::Handle::current().block_on(
+                            translator.verify_excludable_region(
+                                target,
+                                &semantic_sources,
+                                !request.settings.translate_sound_effects,
+                                cancel.as_ref(),
+                            ),
+                        )
+                    });
+                    match verified {
+                        Ok(true) => {
+                            semantic_exclusion_ids.insert(id);
+                        }
+                        Ok(false) => {}
+                        Err(_) if cancel.load(Ordering::Acquire) || sink.is_cancelled() => {
+                            return Err(CleaningError::cancelled());
+                        }
+                        Err(error) => {
+                            return Err(CleaningError::pipeline(
+                                error.context("verify disputed non-story region"),
+                            ));
                         }
                     }
                 }
+            }
+        }
+        regions.retain(|region| !semantic_exclusion_ids.contains(&region.id));
+        if regions.is_empty() {
+            return Ok(false);
+        }
+        let retained_ids = regions
+            .iter()
+            .map(|region| region.id.as_str())
+            .collect::<HashSet<_>>();
+        semantic_sources.retain(|source| retained_ids.contains(source.id.as_str()));
+        if needs_name_analysis {
+            let detected = match tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(translator.detect_proper_names(
+                    &semantic_sources,
+                    &protected_names,
+                    cancel.as_ref(),
+                ))
+            }) {
+                Ok(detected) => detected,
                 Err(_) if cancel.load(Ordering::Acquire) || sink.is_cancelled() => {
                     return Err(CleaningError::cancelled());
                 }
                 Err(error) => {
-                    eprintln!(
-                        "hskify: semantic region analysis degraded to translation: {error:#}"
-                    );
+                    return Err(CleaningError::pipeline(
+                        error.context("run pre-translation proper-name analysis"),
+                    ));
                 }
-            }
-            let story_sources = semantic_sources
-                .iter()
-                .filter(|source| !semantic_exclusion_ids.contains(&source.id))
-                .cloned()
-                .collect::<Vec<_>>();
-            let detected = if needs_name_analysis && !story_sources.is_empty() {
-                match tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current()
-                        .block_on(translator.detect_proper_names(&story_sources, cancel.as_ref()))
-                }) {
-                    Ok(detected) => detected,
-                    Err(_) if cancel.load(Ordering::Acquire) || sink.is_cancelled() => {
-                        return Err(CleaningError::cancelled());
-                    }
-                    Err(error) => {
-                        eprintln!(
-                            "hskify: semantic proper-name analysis degraded to translation markup: {error:#}"
-                        );
-                        Vec::new()
-                    }
-                }
-            } else {
-                Vec::new()
             };
-            drop(cuda_permit);
-            if needs_name_analysis {
+            if !detected.is_empty() {
                 merge_protected_names(&mut protected_names, detected.clone());
                 self.entity_memory
                     .lock()
@@ -819,11 +961,6 @@ impl KoharuPipeline {
                     translator.validator_hash(),
                     control.cache_revision(),
                 );
-                if semantic_exclusion_ids.contains(&regions[index].id) {
-                    states[index] = Some(TranslationState::excluded());
-                    keys.push(key);
-                    continue;
-                }
                 let cached = cache.get(&key);
                 if cached
                     .as_ref()
@@ -866,6 +1003,7 @@ impl KoharuPipeline {
                     id: regions[*index].id.clone(),
                     kind: hsk_utterance_kind(regions[*index].candidate.kind),
                     source_english: regions[*index].source_english.clone(),
+                    semantic_layout: None,
                 })
                 .collect::<Vec<_>>();
             let index_by_id = generation_indices
@@ -873,12 +1011,14 @@ impl KoharuPipeline {
                 .map(|index| (regions[*index].id.clone(), *index))
                 .collect::<HashMap<_, _>>();
             cancellation_boundary(cancel.as_ref())?;
-            let cuda_priority = prepared_region_priority(&regions, sink, image_width, image_height);
-            let cuda_permit = self
-                .cuda_scheduler
-                .acquire(cuda_priority, cancel.clone())
-                .await
-                .map_err(cuda_admission_error)?;
+            let cuda_permit = match cuda_permit.take() {
+                Some(permit) => permit,
+                None => self
+                    .cuda_scheduler
+                    .acquire(cuda_priority, cancel.clone())
+                    .await
+                    .map_err(cuda_admission_error)?,
+            };
             let mut publish_streamed = |outcome: &HskTranslationOutcome| -> Result<()> {
                 cancellation_boundary(cancel.as_ref()).map_err(anyhow::Error::new)?;
                 let index = *index_by_id
@@ -887,13 +1027,12 @@ impl KoharuPipeline {
                 if translated[index].is_some() || states[index].is_some() {
                     return Ok(());
                 }
+                let outcome = normalize_preclassified_story_outcome(outcome.clone());
                 let state = TranslationState::from_initial(
-                    outcome.clone(),
+                    outcome,
                     control,
                     control_level,
                     &validator_names,
-                    &regions[index].source_english,
-                    request.settings.name_translation,
                     request.settings.learning_mode,
                 );
                 if let Some(mut translation) = state.initial_translation() {
@@ -946,12 +1085,10 @@ impl KoharuPipeline {
                 };
                 if translated[index].is_none() && states[index].is_none() {
                     states[index] = Some(TranslationState::from_initial(
-                        outcome,
+                        normalize_preclassified_story_outcome(outcome),
                         control,
                         control_level,
                         &validator_names,
-                        &regions[index].source_english,
-                        request.settings.name_translation,
                         request.settings.learning_mode,
                     ));
                 }
@@ -963,8 +1100,6 @@ impl KoharuPipeline {
                         control,
                         control_level,
                         &validator_names,
-                        &regions[index].source_english,
-                        request.settings.name_translation,
                         request.settings.learning_mode,
                     ));
                 }
@@ -1019,6 +1154,7 @@ impl KoharuPipeline {
             context.drain(..context.len() - MAX_HSK_PRECEDING_UTTERANCES);
         }
 
+        let published_any = published.iter().any(|published| *published);
         for (index, region) in regions.into_iter().enumerate() {
             let Some(state) = states[index].take() else {
                 continue;
@@ -1026,26 +1162,38 @@ impl KoharuPipeline {
             if state.problems.is_empty() {
                 continue;
             }
+            let mut problems = state.problems.clone();
+            problems.push(
+                "pre-translation semantic analysis already classified this as story content; return a complete Simplified Chinese translation"
+                    .to_owned(),
+            );
+            if rejected_ocr_tracing_enabled() {
+                eprintln!(
+                    "hskify-repair-queued source={:?} kind={:?} detector_core={} problems={:?}",
+                    region.source_english,
+                    region.candidate.kind,
+                    region.candidate.has_detector_core,
+                    problems,
+                );
+            }
             let utterance = HskRepairUtterance {
                 id: region.id.clone(),
                 kind: hsk_utterance_kind(region.candidate.kind),
                 source_english: region.source_english.clone(),
                 rejected_chinese: state.base_chinese.clone(),
                 avoid_chinese: state.avoid_chinese(),
-                problems: state.problems.clone(),
+                problems,
             };
             repair_queue.enqueue(PendingRepair {
                 cache_key: keys[index].clone(),
                 region,
                 utterance,
-                preceding_utterances: batch_context.clone(),
-                page_context: semantic_sources.clone(),
                 protected_names: protected_names.clone(),
                 state,
                 published: published[index],
             });
         }
-        Ok(())
+        Ok(published_any)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1080,28 +1228,52 @@ impl KoharuPipeline {
         let control_level = ControlHskLevel::new(level)
             .map_err(|error| CleaningError::new("INVALID_HSK_LEVEL", error.to_string()))?;
 
-        while let Some(mut job) = repair_queue.next() {
+        while !repair_queue.is_empty() {
             cancellation_boundary(cancel.as_ref())?;
             if sink.is_cancelled() {
                 return Err(CleaningError::cancelled());
             }
-
-            let mut repair_names = job.protected_names.clone();
-            if request.settings.name_translation == NameTranslation::KeepOriginal {
-                for name in &job.state.model_declared_names {
-                    if repair_names
-                        .iter()
-                        .any(|existing| existing.source_english == *name)
-                    {
-                        continue;
-                    }
-                    repair_names.push(HskProtectedName {
-                        source_english: name.clone(),
-                        chinese: name.clone(),
+            let mut jobs = repair_queue.take_batch(TRANSLATION_BATCH_MAX);
+            for attempt in 0..MAX_TARGETED_REPAIR_ATTEMPTS {
+                let active_indices = jobs
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, job)| (!job.state.repair_succeeded()).then_some(index))
+                    .collect::<Vec<_>>();
+                if active_indices.is_empty() {
+                    break;
+                }
+                let mut batch_names = Vec::<HskProtectedName>::new();
+                let mut utterances = Vec::<HskRepairUtterance>::with_capacity(active_indices.len());
+                for &index in &active_indices {
+                    let job = &jobs[index];
+                    merge_protected_names(&mut batch_names, repair_names_for_job(job));
+                    utterances.push(if attempt == 0 {
+                        job.utterance.clone()
+                    } else {
+                        let mut problems = if job.state.problems.is_empty() {
+                            vec![
+                                "the previous automatic repair was not safe to publish; return one complete Simplified Chinese line"
+                                    .to_owned(),
+                            ]
+                        } else {
+                            job.state.problems.clone()
+                        };
+                        problems.push(repair_convergence_instruction(
+                            repair_generation_mode(request.settings.learning_mode, attempt),
+                            request.settings.hsk_level,
+                            attempt,
+                        ));
+                        HskRepairUtterance {
+                            id: job.region.id.clone(),
+                            kind: hsk_utterance_kind(job.region.candidate.kind),
+                            source_english: job.region.source_english.clone(),
+                            rejected_chinese: job.state.rejected_for_repair(),
+                            avoid_chinese: job.state.avoid_chinese(),
+                            problems,
+                        }
                     });
                 }
-            }
-            for attempt in 0..MAX_TARGETED_REPAIR_ATTEMPTS {
                 // Primary work for this image has already drained. Offscreen
                 // admission also lets visible primary work from another job pass.
                 let cuda_permit = self
@@ -1110,44 +1282,19 @@ impl KoharuPipeline {
                     .await
                     .map_err(cuda_admission_error)?;
                 cancellation_boundary(cancel.as_ref())?;
-                let utterance = if attempt == 0 {
-                    job.utterance.clone()
-                } else {
-                    let mut problems = if job.state.problems.is_empty() {
-                        vec![
-                            "the previous automatic repair was not safe to publish; return one complete Simplified Chinese line"
-                                .to_owned(),
-                        ]
-                    } else {
-                        job.state.problems.clone()
-                    };
-                    problems.push(repair_convergence_instruction(
-                        repair_generation_mode(request.settings.learning_mode, attempt),
-                        request.settings.hsk_level,
-                        attempt,
-                    ));
-                    HskRepairUtterance {
-                        id: job.region.id.clone(),
-                        kind: hsk_utterance_kind(job.region.candidate.kind),
-                        source_english: job.region.source_english.clone(),
-                        rejected_chinese: job.state.rejected_for_repair(),
-                        avoid_chinese: job.state.avoid_chinese(),
-                        problems,
-                    }
-                };
                 let repair_result = tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current().block_on(translator.repair_invalid_item(
-                        &HskTranslationRepairRequest {
+                    tokio::runtime::Handle::current().block_on(translator.repair_invalid_batch(
+                        &HskTranslationRepairBatchRequest {
                             requested_level: level,
                             learning_mode: hsk_learning_mode(repair_generation_mode(
                                 request.settings.learning_mode,
                                 attempt,
                             )),
                             name_handling,
-                            translate_sound_effects: request.settings.translate_sound_effects,
-                            utterance,
-                            preceding_utterances: job.preceding_utterances.clone(),
-                            protected_names: repair_names.clone(),
+                            translate_sound_effects: true,
+                            utterances,
+                            preceding_utterances: Vec::new(),
+                            protected_names: batch_names,
                         },
                         cancel.as_ref(),
                     ))
@@ -1155,123 +1302,91 @@ impl KoharuPipeline {
                 drop(cuda_permit);
                 match repair_result {
                     Ok(repaired) => {
-                        job.state.apply_repair(
-                            repaired,
-                            control,
-                            control_level,
-                            &control_proper_names(&repair_names),
-                            &job.region.source_english,
-                            request.settings.name_translation,
-                        );
+                        let mut by_id = repaired
+                            .items
+                            .into_iter()
+                            .map(|outcome| (outcome.id.clone(), outcome))
+                            .collect::<HashMap<_, _>>();
+                        for index in active_indices {
+                            let job = &mut jobs[index];
+                            let outcome = by_id
+                                .remove(&job.region.id)
+                                .unwrap_or_else(|| missing_translation_outcome(&job.region.id));
+                            let repair_names = repair_names_for_job(job);
+                            job.state.apply_repair(
+                                outcome,
+                                control,
+                                control_level,
+                                &control_proper_names(&repair_names),
+                            );
+                        }
                     }
                     Err(_) if cancel.load(Ordering::Acquire) || sink.is_cancelled() => {
                         return Err(CleaningError::cancelled());
                     }
                     Err(error) => {
                         eprintln!(
-                            "hskify: targeted HSK repair attempt {} failed for source OCR {:?}: {error:#}",
+                            "hskify: batched HSK repair attempt {} failed for {} regions: {error:#}",
                             attempt + 1,
-                            job.region.source_english
+                            active_indices.len(),
                         );
-                        job.state.reject_failed_repair();
+                        for index in active_indices {
+                            jobs[index].state.reject_failed_repair();
+                        }
                     }
                 }
                 cancellation_boundary(cancel.as_ref())?;
-                if job.state.repair_succeeded() {
-                    break;
-                }
             }
-            let rejected_chinese = job.state.base_chinese.clone();
-            let rejection_problems = job.state.problems.clone();
-            let rejected_declared_names = job.state.model_declared_names.clone();
-            let mut result = match job.state.finish() {
-                Ok(result) => result,
-                Err(error) => {
-                    let near_page_edge = job.region.candidate.text_rect.y0
-                        <= image_height as f32 * 0.08
-                        || job.region.candidate.text_rect.y1 >= image_height as f32 * 0.92;
-                    let cuda_permit = self
-                        .cuda_scheduler
-                        .acquire(CudaPriority::Offscreen, cancel.clone())
-                        .await
-                        .map_err(cuda_admission_error)?;
-                    let verified_furniture = tokio::task::block_in_place(|| {
-                        tokio::runtime::Handle::current().block_on(
-                            translator.verify_page_furniture(
-                                &job.region.source_english,
-                                job.region.candidate.has_detector_core,
-                                near_page_edge,
-                                &job.page_context,
-                                cancel.as_ref(),
-                            ),
-                        )
-                    });
-                    drop(cuda_permit);
-                    match verified_furniture {
-                        Ok(true) => {
-                            eprintln!(
-                                "hskify: excluded terminally untranslatable page furniture {:?}",
-                                job.region.source_english
-                            );
-                            continue;
-                        }
-                        Ok(false) => {}
-                        Err(_) if cancel.load(Ordering::Acquire) || sink.is_cancelled() => {
-                            return Err(CleaningError::cancelled());
-                        }
-                        Err(verification_error) => {
-                            eprintln!(
-                                "hskify: page-furniture verification failed safe to story for source OCR {:?}: {verification_error:#}",
-                                job.region.source_english
-                            );
-                        }
+            for job in jobs {
+                let rejected_chinese = job.state.base_chinese.clone();
+                let rejection_problems = job.state.problems.clone();
+                let mut result = match job.state.finish() {
+                    Ok(result) => result,
+                    Err(error) => {
+                        eprintln!(
+                            "hskify: preserving original pixels for terminally unpublishable story OCR {:?}: {error:#}; rejected={:?}; problems={:?}",
+                            job.region.source_english, rejected_chinese, rejection_problems,
+                        );
+                        continue;
                     }
-                    eprintln!(
-                        "hskify: preserving original pixels for terminally unpublishable story OCR {:?}: {error:#}; rejected={:?}; problems={:?}; declared_names={:?}",
-                        job.region.source_english,
-                        rejected_chinese,
-                        rejection_problems,
-                        rejected_declared_names,
-                    );
-                    continue;
+                };
+                populate_pinyin(control, &mut result);
+                cancellation_boundary(cancel.as_ref())?;
+
+                if job.published {
+                    // A published primary must always receive a terminal
+                    // refinement. If the bounded repairs still contain only
+                    // unavoidable HSK-level wording, `finish` keeps the meaningful
+                    // primary and marks it rejected instead of leaving the browser
+                    // indefinitely pending.
+                    publish_refinement(
+                        sink,
+                        &job.region.id,
+                        &result,
+                        request.settings.hsk_level,
+                        request.settings.learning_mode,
+                        control,
+                    )?;
+                } else {
+                    publish_region(
+                        sink,
+                        &job.region,
+                        result.clone(),
+                        request.settings.hsk_level,
+                        request.settings.learning_mode,
+                        control,
+                        image_width,
+                        image_height,
+                    )?;
                 }
-            };
-            populate_pinyin(control, &mut result);
-            cancellation_boundary(cancel.as_ref())?;
 
-            if job.published {
-                // A published primary must always receive a terminal
-                // refinement. If the bounded repairs still contain only
-                // unavoidable HSK-level wording, `finish` keeps the meaningful
-                // primary and marks it rejected instead of leaving the browser
-                // indefinitely pending.
-                publish_refinement(
-                    sink,
-                    &job.region.id,
-                    &result,
-                    request.settings.hsk_level,
-                    request.settings.learning_mode,
-                    control,
-                )?;
-            } else {
-                publish_region(
-                    sink,
-                    &job.region,
-                    result.clone(),
-                    request.settings.hsk_level,
-                    request.settings.learning_mode,
-                    control,
-                    image_width,
-                    image_height,
-                )?;
+                self.translation_cache
+                    .lock()
+                    .map_err(|_| {
+                        CleaningError::new("CACHE_FAILED", "Translation cache lock poisoned.")
+                    })?
+                    .insert(job.cache_key, result);
             }
-
-            self.translation_cache
-                .lock()
-                .map_err(|_| {
-                    CleaningError::new("CACHE_FAILED", "Translation cache lock poisoned.")
-                })?
-                .insert(job.cache_key, result);
         }
         Ok(())
     }
@@ -1279,6 +1394,12 @@ impl KoharuPipeline {
 
 #[async_trait]
 impl CleaningPipeline for KoharuPipeline {
+    async fn warm_up(&self) -> std::result::Result<(), CleaningError> {
+        tokio::try_join!(self.resident(), self.hsk_control())
+            .map(|_| ())
+            .map_err(CleaningError::pipeline)
+    }
+
     async fn run(
         &self,
         input: CleaningInput,
@@ -1454,6 +1575,7 @@ struct PreparedRegion {
     reading_order: u32,
     prediction: PpOcrPrediction,
     appearance_bands: Vec<SourceAppearanceBand>,
+    measured_font_height: f32,
     patch: PatchPng,
     bubble_polygon: Vec<Point>,
     layout_polygon: Vec<Point>,
@@ -1497,11 +1619,13 @@ struct PendingRepair {
     cache_key: String,
     region: PreparedRegion,
     utterance: HskRepairUtterance,
-    preceding_utterances: Vec<HskPrecedingUtterance>,
-    page_context: Vec<HskSourceUtterance>,
     protected_names: Vec<HskProtectedName>,
     state: TranslationState,
     published: bool,
+}
+
+fn repair_names_for_job(job: &PendingRepair) -> Vec<HskProtectedName> {
+    job.protected_names.clone()
 }
 
 #[derive(Default)]
@@ -1522,12 +1646,18 @@ impl RepairQueue {
         self.primary_phase_complete = true;
     }
 
-    fn next(&mut self) -> Option<PendingRepair> {
-        if self.primary_phase_complete {
-            self.jobs.pop_front()
-        } else {
-            None
+    fn take_batch(&mut self, maximum: usize) -> Vec<PendingRepair> {
+        if !self.primary_phase_complete || maximum == 0 {
+            return Vec::new();
         }
+        let mut selected = Vec::with_capacity(maximum.min(self.jobs.len()));
+        while selected.len() < maximum {
+            match self.jobs.pop_front() {
+                Some(job) => selected.push(job),
+                None => break,
+            }
+        }
+        selected
     }
 
     fn is_empty(&self) -> bool {
@@ -1779,12 +1909,33 @@ async fn prepare_grouped_regions(
     cuda_scheduler: &Arc<CudaScheduler>,
     preprocessing: &Arc<PreprocessingPool>,
     text_probabilities: ProbabilityMap,
-) -> std::result::Result<Vec<PreparedRegion>, CleaningError> {
+    overall_progress: f32,
+) -> std::result::Result<(Vec<PreparedRegion>, ProbabilityMap), CleaningError> {
     if lines.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), text_probabilities));
     }
     let (image_width, image_height) = source.dimensions();
-    let cleanup_tiles = overlapping_tiles(image_width, image_height);
+    let cleanup_supports = lines
+        .iter()
+        .map(|line| {
+            line.candidate
+                .confirmed_bubble_rect
+                .union(line.candidate.text_rect)
+                .expand(
+                    (line.candidate.text_rect.height() * 2.0).clamp(48.0, 192.0),
+                    image_width,
+                    image_height,
+                )
+        })
+        .collect::<Vec<_>>();
+    let cleanup_tiles = overlapping_tiles(image_width, image_height)
+        .into_iter()
+        .filter(|tile| {
+            cleanup_supports
+                .iter()
+                .any(|support| tile.rect().intersection(*support).is_some())
+        })
+        .collect::<Vec<_>>();
     let tiles_for_crops = cleanup_tiles.clone();
     let source_for_crops = source.clone();
     let cleanup_crops = preprocessing
@@ -1885,7 +2036,7 @@ async fn prepare_grouped_regions(
         sink,
         BrowserJobStage::Inpainting,
         None,
-        Some(0.88),
+        Some(overall_progress),
         None,
         None,
         "Restoring the artwork behind the original text",
@@ -1905,7 +2056,7 @@ async fn prepare_grouped_regions(
     drop(cleanup_crops);
     drop(cleanup_tiles);
     let source_for_cleanup = source.clone();
-    let (cleaned_groups, erase_mask, text_blocks, bubble_mask) = preprocessing
+    let (cleaned_groups, erase_mask, text_blocks, bubble_mask, text_probabilities) = preprocessing
         .run(move || {
             let bubble_image = DynamicImage::ImageLuma8(bubble_mask.clone());
             let mut erase_mask = image::GrayImage::new(image_width, image_height);
@@ -1948,7 +2099,13 @@ async fn prepare_grouped_regions(
                     cleanup_mask,
                 });
             }
-            Ok((cleaned_groups, erase_mask, all_text_blocks, bubble_mask))
+            Ok((
+                cleaned_groups,
+                erase_mask,
+                all_text_blocks,
+                bubble_mask,
+                text_probabilities,
+            ))
         })
         .await
         .context("verify and isolate learned cleanup masks by bubble")
@@ -1975,6 +2132,7 @@ async fn prepare_grouped_regions(
 
     let prepared_groups = preprocessing
         .run(move || {
+            let bubble_components = bubble_component_bounds(&bubble_mask);
             cleaned_groups
                 .into_iter()
                 .map(|cleaned| {
@@ -1982,6 +2140,7 @@ async fn prepare_grouped_regions(
                     let patch = make_inpainted_patch(&inpainted, &cleaned.cleanup_mask)?;
                     let (bubble_polygon, layout_polygon) = region_polygons(
                         &bubble_mask,
+                        &bubble_components,
                         group.candidate.text_rect,
                         group.candidate.confirmed_bubble_rect,
                         group.measured_font_height,
@@ -1992,6 +2151,7 @@ async fn prepare_grouped_regions(
                         group.ocr_confidence,
                         group.prediction,
                         group.appearance_bands,
+                        group.measured_font_height,
                         patch,
                         bubble_polygon,
                         layout_polygon,
@@ -2004,48 +2164,53 @@ async fn prepare_grouped_regions(
         .map_err(CleaningError::pipeline)?;
     let latest_viewport = sink.viewport();
     let translation_queued_at = tokio::time::Instant::now();
-    Ok(prepared_groups
-        .into_iter()
-        .map(
-            |(
-                candidate,
-                source_english,
-                ocr_confidence,
-                prediction,
-                appearance_bands,
-                patch,
-                bubble_polygon,
-                layout_polygon,
-            )| {
-                let visible = latest_viewport.active
-                    && candidate.bubble_rect.intersects_viewport(
-                        &latest_viewport.visible_rects,
-                        image_width,
-                        image_height,
-                    );
-                let reading_order = reading_order_key(
-                    candidate.text_rect,
-                    image_width,
-                    image_height,
-                    request.settings.reading_direction,
-                );
-                PreparedRegion {
-                    id: stable_region_id(&request.source_sha256, candidate.text_rect),
+    Ok((
+        prepared_groups
+            .into_iter()
+            .map(
+                |(
                     candidate,
                     source_english,
                     ocr_confidence,
-                    reading_order,
                     prediction,
                     appearance_bands,
+                    measured_font_height,
                     patch,
                     bubble_polygon,
                     layout_polygon,
-                    visible,
-                    translation_queued_at,
-                }
-            },
-        )
-        .collect())
+                )| {
+                    let visible = latest_viewport.active
+                        && candidate.bubble_rect.intersects_viewport(
+                            &latest_viewport.visible_rects,
+                            image_width,
+                            image_height,
+                        );
+                    let reading_order = reading_order_key(
+                        candidate.text_rect,
+                        image_width,
+                        image_height,
+                        request.settings.reading_direction,
+                    );
+                    PreparedRegion {
+                        id: stable_region_id(&request.source_sha256, candidate.text_rect),
+                        candidate,
+                        source_english,
+                        ocr_confidence,
+                        reading_order,
+                        prediction,
+                        appearance_bands,
+                        measured_font_height,
+                        patch,
+                        bubble_polygon,
+                        layout_polygon,
+                        visible,
+                        translation_queued_at,
+                    }
+                },
+            )
+            .collect(),
+        text_probabilities,
+    ))
 }
 
 fn group_recognized_lines(
@@ -2098,8 +2263,24 @@ fn detector_bubble_cores_are_equivalent(left: &RecognizedLine, right: &Recognize
     if left.candidate.kind != right.candidate.kind {
         return false;
     }
-    if !left.candidate.has_detector_core || !right.candidate.has_detector_core {
-        return true;
+    match (
+        left.candidate.has_detector_core,
+        right.candidate.has_detector_core,
+    ) {
+        (true, false) => {
+            return left
+                .candidate
+                .confirmed_bubble_rect
+                .contains_point(right.candidate.text_rect.center());
+        }
+        (false, true) => {
+            return right
+                .candidate
+                .confirmed_bubble_rect
+                .contains_point(left.candidate.text_rect.center());
+        }
+        (false, false) => return true,
+        (true, true) => {}
     }
     let left_core = left.candidate.confirmed_bubble_rect;
     let right_core = right.candidate.confirmed_bubble_rect;
@@ -2297,6 +2478,13 @@ fn normalized_rects_intersect(left: &NormalizedRect, right: &NormalizedRect) -> 
         && right.y < left.y + left.height
 }
 
+fn normalized_millionths(coordinate: f32, extent: u32) -> u32 {
+    if extent == 0 {
+        return 0;
+    }
+    ((coordinate / extent as f32).clamp(0.0, 1.0) * 1_000_000.0).round() as u32
+}
+
 fn cuda_admission_error(error: CudaAdmissionError) -> CleaningError {
     match error {
         CudaAdmissionError::Cancelled => CleaningError::cancelled(),
@@ -2363,7 +2551,7 @@ fn hsk_utterance_kind(kind: CandidateKind) -> HskUtteranceKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SemanticExclusionAction {
     Exclude,
-    VerifyFurniture,
+    VerifyExclusion,
     Translate,
 }
 
@@ -2373,7 +2561,11 @@ fn semantic_exclusion_action(
     translate_sound_effects: bool,
 ) -> SemanticExclusionAction {
     match disposition {
-        HskTranslationDisposition::ExcludeSoundEffect if !translate_sound_effects => {
+        HskTranslationDisposition::ExcludeSoundEffect
+            if !translate_sound_effects
+                && candidate.kind == CandidateKind::FreeText
+                && !candidate.has_detector_core =>
+        {
             SemanticExclusionAction::Exclude
         }
         HskTranslationDisposition::ExcludeNonStory
@@ -2381,11 +2573,30 @@ fn semantic_exclusion_action(
         {
             SemanticExclusionAction::Exclude
         }
-        HskTranslationDisposition::ExcludeNonStory => SemanticExclusionAction::VerifyFurniture,
+        HskTranslationDisposition::ExcludeNonStory => SemanticExclusionAction::VerifyExclusion,
+        HskTranslationDisposition::ExcludeSoundEffect if !translate_sound_effects => {
+            SemanticExclusionAction::VerifyExclusion
+        }
         HskTranslationDisposition::ExcludeSoundEffect | HskTranslationDisposition::Translate => {
             SemanticExclusionAction::Translate
         }
     }
+}
+
+fn normalize_preclassified_story_outcome(
+    mut outcome: HskTranslationOutcome,
+) -> HskTranslationOutcome {
+    if !outcome.is_non_story() {
+        return outcome;
+    }
+
+    // The dedicated pre-translation semantic pass is authoritative. Once a
+    // region survives it, the translation model cannot independently remove
+    // that story text; a conflicting marker becomes a repairable missing
+    // translation.
+    outcome.disposition = HskTranslationDisposition::Translate;
+    outcome.issues.push(HskTranslationIssue::MissingLine);
+    outcome
 }
 
 fn is_latin_letter(character: char) -> bool {
@@ -2574,7 +2785,6 @@ struct TranslationState {
     displayed_chinese: Option<String>,
     latest_rejected_chinese: Option<String>,
     latest_rejected_report: Option<ValidationReport>,
-    model_declared_names: Vec<String>,
     report: Option<ValidationReport>,
     problems: Vec<String>,
     meaning_valid: bool,
@@ -2589,7 +2799,6 @@ impl TranslationState {
             displayed_chinese: None,
             latest_rejected_chinese: None,
             latest_rejected_report: None,
-            model_declared_names: Vec::new(),
             report: None,
             problems: Vec::new(),
             meaning_valid: true,
@@ -2603,24 +2812,17 @@ impl TranslationState {
         control: &HskControl,
         level: ControlHskLevel,
         proper_names: &[ProperName],
-        source_english: &str,
-        name_translation: NameTranslation,
         learning_mode: LearningMode,
     ) -> Self {
-        let model_declared_names = outcome.declared_names.clone();
+        if outcome.is_non_story() {
+            return Self::excluded();
+        }
         let mut problems = outcome.repair_problems();
         let meaning_valid = outcome.issues.is_empty();
         let base_chinese = nonempty_translation(outcome.text);
-        let report = base_chinese.as_deref().map(|text| {
-            let names = validation_names(
-                proper_names,
-                &model_declared_names,
-                source_english,
-                text,
-                name_translation,
-            );
-            control.validate(text, level, &names)
-        });
+        let report = base_chinese
+            .as_deref()
+            .map(|text| control.validate(text, level, proper_names));
         if let Some(report) = &report
             && !learning_policy_satisfied(report, learning_mode)
         {
@@ -2638,7 +2840,6 @@ impl TranslationState {
             base_chinese,
             latest_rejected_chinese: None,
             latest_rejected_report: None,
-            model_declared_names,
             report,
             problems,
             meaning_valid,
@@ -2657,7 +2858,6 @@ impl TranslationState {
             displayed_chinese: Some(translation.displayed_chinese),
             latest_rejected_chinese: None,
             latest_rejected_report: None,
-            model_declared_names: Vec::new(),
             report: Some(translation.report),
             problems,
             meaning_valid: true,
@@ -2721,8 +2921,6 @@ impl TranslationState {
         control: &HskControl,
         level: ControlHskLevel,
         proper_names: &[ProperName],
-        source_english: &str,
-        name_translation: NameTranslation,
     ) -> bool {
         let mut problems = outcome.repair_problems();
         let repaired_meaning_valid = outcome.issues.is_empty();
@@ -2730,16 +2928,7 @@ impl TranslationState {
         let report = repaired
             .as_deref()
             .filter(|_| repaired_meaning_valid)
-            .map(|repaired| {
-                let names = validation_names(
-                    proper_names,
-                    &self.model_declared_names,
-                    source_english,
-                    repaired,
-                    name_translation,
-                );
-                control.validate(repaired, level, &names)
-            });
+            .map(|repaired| control.validate(repaired, level, proper_names));
         if let Some(report) = &report
             && !learning_policy_satisfied(report, self.learning_mode)
         {
@@ -2834,7 +3023,6 @@ fn missing_translation_outcome(id: &str) -> HskTranslationOutcome {
         id: id.to_owned(),
         disposition: Default::default(),
         text: None,
-        declared_names: Vec::new(),
         issues: vec![HskTranslationIssue::MissingLine],
     }
 }
@@ -3031,44 +3219,6 @@ fn control_proper_names(names: &[HskProtectedName]) -> Vec<ProperName> {
             reason: ProperNameReason::UnavoidableProperNoun,
         })
         .collect()
-}
-
-fn validation_names(
-    configured: &[ProperName],
-    model_declared_names: &[String],
-    source_english: &str,
-    translated: &str,
-    preference: NameTranslation,
-) -> Vec<ProperName> {
-    let mut names = configured.to_vec();
-    if preference != NameTranslation::KeepOriginal {
-        return names;
-    }
-
-    for candidate in model_declared_names {
-        if !source_contains_exact_name(source_english, candidate)
-            || !translated.contains(candidate)
-            || names.iter().any(|name| name.text == *candidate)
-        {
-            continue;
-        }
-        names.push(ProperName {
-            text: candidate.to_owned(),
-            reason: ProperNameReason::UnavoidableProperNoun,
-        });
-    }
-    names
-}
-
-fn source_contains_exact_name(source: &str, candidate: &str) -> bool {
-    source.match_indices(candidate).any(|(start, matched)| {
-        let end = start + matched.len();
-        let starts_at_boundary =
-            start == 0 || !source.as_bytes()[start - 1].is_ascii_alphanumeric();
-        let ends_at_boundary =
-            end == source.len() || !source.as_bytes()[end].is_ascii_alphanumeric();
-        starts_at_boundary && ends_at_boundary
-    })
 }
 
 // Only an all-hit replay can skip the model. A partial hit regenerates every
@@ -3395,8 +3545,7 @@ fn style_and_layout(
         },
         BrowserTextLayout {
             suggested_lines: suggested_lines(displayed_chinese, suggested_line_count),
-            font_size_to_image_width: (region.candidate.text_rect.height() * 0.65
-                / image_width.max(1) as f32)
+            font_size_to_image_width: (region.measured_font_height / image_width.max(1) as f32)
                 .clamp(0.002, 0.25),
             safe_polygon: Some(bubble_polygon),
         },
@@ -3465,14 +3614,24 @@ enum TranslationBoundaryAction {
     Cancelled,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TranslationLatencyPhase {
+    AwaitingFirstVisibleRegion,
+    Throughput,
+}
+
 fn translation_boundary_action(
     pending: &[PreparedRegion],
     force: bool,
     now: tokio::time::Instant,
     cancelled: bool,
+    first_visible_region: bool,
 ) -> TranslationBoundaryAction {
     if cancelled {
         return TranslationBoundaryAction::Cancelled;
+    }
+    if first_visible_region {
+        return TranslationBoundaryAction::Dispatch(1);
     }
     let eligible = translation_queue_ready_len(pending, force, now);
     if eligible == 0 {
@@ -3666,7 +3825,6 @@ mod tests {
             displayed_chinese: Some("研究生".to_owned()),
             latest_rejected_chinese: None,
             latest_rejected_report: None,
-            model_declared_names: Vec::new(),
             report: Some(report),
             problems: vec!["replace invalid or above-level token `研究生` at 0..3".to_owned()],
             meaning_valid: true,
@@ -3701,6 +3859,7 @@ mod tests {
                     appearance_bands: Vec::new(),
                 },
                 appearance_bands: Vec::new(),
+                measured_font_height: rect.height(),
                 patch: PatchPng {
                     bounds: geometry::PixelBounds {
                         x: 1,
@@ -3723,8 +3882,6 @@ mod tests {
                 avoid_chinese: vec!["研究生".to_owned()],
                 problems: vec!["above level".to_owned()],
             },
-            preceding_utterances: Vec::new(),
-            page_context: Vec::new(),
             protected_names: Vec::new(),
             state: usable_pending_state(),
             published: true,
@@ -3940,6 +4097,52 @@ mod tests {
 
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].len(), 2);
+    }
+
+    #[test]
+    fn grouping_attaches_fallback_text_only_when_it_is_inside_the_detector_bubble() {
+        let core = PixelRect::new(20.0, 20.0, 190.0, 140.0).unwrap();
+        let prediction = || PpOcrPrediction {
+            text: "line".to_owned(),
+            confidence: 0.95,
+            text_color: [0, 0, 0],
+            stroke_color: [255, 255, 255],
+            has_stroke_color: false,
+            appearance_bands: Vec::new(),
+        };
+        let make_line = |text_rect, has_detector_core| RecognizedLine {
+            candidate: Candidate {
+                kind: CandidateKind::StoryText,
+                text_rect,
+                bubble_rect: if has_detector_core {
+                    core
+                } else {
+                    text_rect.expand(8.0, 240, 300)
+                },
+                confirmed_bubble_rect: if has_detector_core {
+                    core
+                } else {
+                    text_rect.expand(8.0, 240, 300)
+                },
+                detector_confidence: 0.95,
+                has_detector_core,
+            },
+            prediction: prediction(),
+            crop_bounds: text_rect.pixel_bounds(240, 300),
+        };
+        let lines = vec![
+            make_line(PixelRect::new(40.0, 50.0, 160.0, 70.0).unwrap(), true),
+            make_line(PixelRect::new(45.0, 82.0, 155.0, 102.0).unwrap(), false),
+            make_line(PixelRect::new(45.0, 200.0, 155.0, 220.0).unwrap(), false),
+        ];
+        // Deliberately one connected learned component, as on white gutters.
+        let bubble_mask = image::GrayImage::from_pixel(240, 300, image::Luma([1]));
+
+        let groups = group_recognized_lines(lines, &bubble_mask);
+
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].len(), 2);
+        assert_eq!(groups[1].len(), 1);
     }
 
     #[test]
@@ -4201,14 +4404,17 @@ mod tests {
     }
 
     #[test]
-    fn only_model_declared_original_names_become_hsk_exceptions() {
-        let names = validation_names(
-            &[],
-            &["Alice".to_owned(), "Bob".to_owned()],
-            "Alice met Bob near the gate.",
-            "Alice在门口见到了Bob。",
-            NameTranslation::KeepOriginal,
-        );
+    fn only_pretranslation_approved_names_become_hsk_exceptions() {
+        let names = control_proper_names(&[
+            HskProtectedName {
+                source_english: "Alice".to_owned(),
+                chinese: "Alice".to_owned(),
+            },
+            HskProtectedName {
+                source_english: "Bob".to_owned(),
+                chinese: "Bob".to_owned(),
+            },
+        ]);
 
         assert_eq!(
             names
@@ -4217,37 +4423,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["Alice", "Bob"]
         );
-        assert!(
-            validation_names(
-                &[],
-                &["Alice".to_owned(), "Bob".to_owned()],
-                "Alice met Bob.",
-                "Alice见到了Bob。",
-                NameTranslation::Chinese,
-            )
-            .is_empty()
-        );
-        assert!(
-            validation_names(
-                &[],
-                &["Alice".to_owned()],
-                "Alice said hello.",
-                "Hello，Alice。",
-                NameTranslation::KeepOriginal,
-            )
-            .iter()
-            .all(|name| name.text != "Hello")
-        );
-        assert!(
-            validation_names(
-                &[],
-                &[],
-                "THE HERO ARRIVED.",
-                "THE HERO来了。",
-                NameTranslation::KeepOriginal,
-            )
-            .is_empty()
-        );
+        assert!(control_proper_names(&[]).is_empty());
     }
 
     #[test]
@@ -4487,7 +4663,7 @@ mod tests {
     }
 
     #[test]
-    fn semantic_region_disposition_and_topology_route_conflicts_to_model_verification() {
+    fn semantic_region_disposition_requires_model_and_topology_agreement() {
         let candidate = |kind, has_detector_core| Candidate {
             kind,
             text_rect: PixelRect::new(10.0, 10.0, 100.0, 40.0).unwrap(),
@@ -4511,11 +4687,19 @@ mod tests {
                 HskTranslationDisposition::ExcludeNonStory,
                 false,
             ),
-            SemanticExclusionAction::VerifyFurniture
+            SemanticExclusionAction::VerifyExclusion
         );
         assert_eq!(
             semantic_exclusion_action(
                 &candidate(CandidateKind::StoryText, true),
+                HskTranslationDisposition::ExcludeSoundEffect,
+                false,
+            ),
+            SemanticExclusionAction::VerifyExclusion
+        );
+        assert_eq!(
+            semantic_exclusion_action(
+                &candidate(CandidateKind::FreeText, false),
                 HskTranslationDisposition::ExcludeSoundEffect,
                 false,
             ),
@@ -4537,6 +4721,14 @@ mod tests {
             ),
             SemanticExclusionAction::Translate
         );
+        let conflicted = normalize_preclassified_story_outcome(HskTranslationOutcome {
+            id: "story".to_owned(),
+            disposition: HskTranslationDisposition::ExcludeNonStory,
+            text: None,
+            issues: Vec::new(),
+        });
+        assert_eq!(conflicted.disposition, HskTranslationDisposition::Translate);
+        assert_eq!(conflicted.issues, [HskTranslationIssue::MissingLine]);
     }
 
     #[test]
@@ -4601,7 +4793,7 @@ mod tests {
             Some(now + TRANSLATION_MAX_FLUSH_DELAY)
         );
         assert_eq!(
-            translation_boundary_action(&one, false, now, false),
+            translation_boundary_action(&one, false, now, false, false),
             TranslationBoundaryAction::ContinueUpstream
         );
         assert_eq!(
@@ -4609,9 +4801,30 @@ mod tests {
                 &one,
                 false,
                 now + TRANSLATION_MAX_FLUSH_DELAY - Duration::from_nanos(1),
+                false,
                 false
             ),
             TranslationBoundaryAction::ContinueUpstream
+        );
+    }
+
+    #[test]
+    fn first_visible_translation_is_dispatched_alone_before_throughput_batching() {
+        let now = tokio::time::Instant::now();
+        let mut pending = (0..TRANSLATION_BATCH_MAX)
+            .map(|index| pending_repair(&format!("bubble-{index}")).region)
+            .collect::<Vec<_>>();
+        for region in &mut pending {
+            region.translation_queued_at = now;
+        }
+
+        assert_eq!(
+            translation_boundary_action(&pending, true, now, false, true),
+            TranslationBoundaryAction::Dispatch(1)
+        );
+        assert_eq!(
+            translation_boundary_action(&pending, true, now, false, false),
+            TranslationBoundaryAction::Dispatch(TRANSLATION_BATCH_MAX)
         );
     }
 
@@ -4629,7 +4842,7 @@ mod tests {
         // allowing the caller's already-available OCR/detector batch to run.
         let checked_at = tokio::time::Instant::now();
         assert_eq!(
-            translation_boundary_action(&two, false, now, false),
+            translation_boundary_action(&two, false, now, false, false),
             TranslationBoundaryAction::ContinueUpstream
         );
         assert!(checked_at.elapsed() < Duration::from_millis(5));
@@ -4650,12 +4863,19 @@ mod tests {
                 &tail,
                 false,
                 now + TRANSLATION_MAX_FLUSH_DELAY - Duration::from_nanos(1),
+                false,
                 false
             ),
             TranslationBoundaryAction::ContinueUpstream
         );
         assert_eq!(
-            translation_boundary_action(&tail, false, now + TRANSLATION_MAX_FLUSH_DELAY, false),
+            translation_boundary_action(
+                &tail,
+                false,
+                now + TRANSLATION_MAX_FLUSH_DELAY,
+                false,
+                false,
+            ),
             TranslationBoundaryAction::Dispatch(2)
         );
     }
@@ -4678,11 +4898,11 @@ mod tests {
             region.translation_queued_at = now;
         }
         assert_eq!(
-            translation_boundary_action(&full[..6], false, now, false),
+            translation_boundary_action(&full[..6], false, now, false, false),
             TranslationBoundaryAction::Dispatch(TRANSLATION_BATCH_MAX)
         );
         assert_eq!(
-            translation_boundary_action(&full, false, now, false),
+            translation_boundary_action(&full, false, now, false, false),
             TranslationBoundaryAction::Dispatch(4)
         );
 
@@ -4690,7 +4910,7 @@ mod tests {
         assert!(cancellation_boundary(&cancel).is_ok());
         cancel.store(true, Ordering::Release);
         assert_eq!(
-            translation_boundary_action(&full, false, now, cancel.load(Ordering::Acquire)),
+            translation_boundary_action(&full, false, now, cancel.load(Ordering::Acquire), false,),
             TranslationBoundaryAction::Cancelled
         );
         assert_eq!(
@@ -4706,12 +4926,14 @@ mod tests {
         queue.enqueue(pending_repair("bubble-a"));
 
         assert_eq!(queue.jobs.len(), 1);
-        assert!(queue.next().is_none());
+        assert!(queue.take_batch(TRANSLATION_BATCH_MAX).is_empty());
         assert_eq!(queue.jobs.len(), 1);
 
         queue.finish_primary_phase();
-        assert_eq!(queue.next().unwrap().region.id, "bubble-a");
-        assert!(queue.next().is_none());
+        let batch = queue.take_batch(TRANSLATION_BATCH_MAX);
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].region.id, "bubble-a");
+        assert!(queue.take_batch(TRANSLATION_BATCH_MAX).is_empty());
     }
 
     #[test]
@@ -4794,7 +5016,6 @@ mod tests {
             displayed_chinese: None,
             latest_rejected_chinese: None,
             latest_rejected_report: None,
-            model_declared_names: Vec::new(),
             report: Some(validation_report("索林来了。", Vec::new())),
             problems: vec!["protected name was not preserved".to_owned()],
             meaning_valid: false,
@@ -4815,7 +5036,6 @@ mod tests {
             displayed_chinese: None,
             latest_rejected_chinese: None,
             latest_rejected_report: None,
-            model_declared_names: vec!["Neris".to_owned()],
             report: Some(validation_report("我昨天看见索林了。", Vec::new())),
             problems: vec!["translate protected name `Neris` exactly as `Neris`".to_owned()],
             meaning_valid: false,

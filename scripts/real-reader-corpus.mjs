@@ -294,6 +294,24 @@ export function validateManifest(manifest) {
             (expectations.minimumRegionCount === undefined ||
               (Number.isSafeInteger(expectations.minimumRegionCount) &&
                 expectations.minimumRegionCount > 0)) &&
+            (expectations.maximumFirstRegionReadyMs === undefined ||
+              (Number.isSafeInteger(expectations.maximumFirstRegionReadyMs) &&
+                expectations.maximumFirstRegionReadyMs > 0)) &&
+            (expectations.initialVisibleRects === undefined ||
+              (Array.isArray(expectations.initialVisibleRects) &&
+                expectations.initialVisibleRects.length > 0 &&
+                expectations.initialVisibleRects.length <= 64 &&
+                expectations.initialVisibleRects.every(
+                  (rect) =>
+                    objectRecord(rect) &&
+                    [rect.x, rect.y, rect.width, rect.height].every(Number.isFinite) &&
+                    rect.x >= 0 &&
+                    rect.y >= 0 &&
+                    rect.width > 0 &&
+                    rect.height > 0 &&
+                    rect.x + rect.width <= 1 &&
+                    rect.y + rect.height <= 1,
+                ))) &&
             stringLists.every(
               (field) =>
                 expectations[field] === undefined ||
@@ -303,7 +321,7 @@ export function validateManifest(manifest) {
                     (value) => typeof value === 'string' && value.trim().length > 0,
                   )),
             ),
-          'supported non-empty semantic expectation lists',
+          'supported semantic expectations and normalized viewport probes',
           expectations,
         ),
       )

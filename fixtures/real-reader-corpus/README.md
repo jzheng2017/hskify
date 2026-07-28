@@ -1,6 +1,6 @@
 # Local real-reader regression corpus
 
-This manifest describes 20 real reader pages from seven chapters across Asura
+This manifest describes 21 real reader pages from eight chapters across Asura
 and WEBTOON. The source image bytes are intentionally not committed or
 redistributed. They live locally under:
 

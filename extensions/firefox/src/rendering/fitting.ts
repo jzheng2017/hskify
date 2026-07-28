@@ -36,6 +36,16 @@ export function estimatedLineUnits(text: string): number {
   return [...text].reduce((total, character) => total + charUnits(character), 0)
 }
 
+export function sourceDensityScale(source: string, translation: string): number {
+  const sourceUnits = estimatedLineUnits(source)
+  const translationUnits = estimatedLineUnits(translation)
+  if (sourceUnits <= 0 || translationUnits <= 0) return 1
+  // Preserve approximately the same glyph area as the source lettering.
+  // The polygon fitter, rather than an arbitrary scale ceiling, is the final
+  // authority on how large the translation can be inside the real bubble.
+  return Math.max(1, Math.sqrt(sourceUnits / translationUnits))
+}
+
 export function isLegalLineBreak(left: string, right: string): boolean {
   const previous = [...left].at(-1)
   const next = [...right][0]
@@ -259,18 +269,15 @@ function chooseFit(
   const text = region.displayedChinese
   const box = regionBox(region, imageWidth, imageHeight)
   const points = fitPolygonForRegion(region)
-  const allCandidates = nearbyLineCandidates(text, region.layout.suggestedLines)
-  const sourceBandCount = region.style.colorBands?.length ?? 0
-  const bandPreservingCandidates =
-    sourceBandCount > 1
-      ? allCandidates.filter((candidate) => candidate.length === sourceBandCount)
-      : []
-  const candidates =
-    bandPreservingCandidates.length > 0 ? bandPreservingCandidates : allCandidates
-  const initial = Math.max(
+  // Color samples describe vertical appearance, not linguistic line breaks.
+  // The renderer maps them onto whichever line layout best fits the bubble.
+  const candidates = nearbyLineCandidates(text, region.layout.suggestedLines)
+  const sourceFontSize = Math.max(
     ABSOLUTE_MINIMUM_FONT_PX,
     region.layout.fontSizeToImageWidth * imageWidth,
   )
+  const preferredFontSize =
+    sourceFontSize * sourceDensityScale(region.sourceEnglish, text)
   let best: TextFit | undefined
   for (const lines of candidates) {
     const fits = (fontSize: number): boolean =>
@@ -278,9 +285,9 @@ function chooseFit(
         ? polygonFits(lines, fontSize, points, box, region)
         : rectangleFits(lines, fontSize, box, region)
     let low = 0
-    let high = initial
-    if (fits(initial)) {
-      low = initial
+    let high = preferredFontSize
+    if (fits(preferredFontSize)) {
+      low = preferredFontSize
     } else {
       for (let iteration = 0; iteration < BINARY_SEARCH_STEPS; iteration += 1) {
         const midpoint = (low + high) / 2
@@ -290,7 +297,8 @@ function chooseFit(
     }
     // Stay fractionally inside the mathematical boundary so subpixel
     // rounding cannot create a one-pixel scroll overflow.
-    const fontSize = low === initial ? initial : low * 0.997
+    const fontSize =
+      low === preferredFontSize ? preferredFontSize : low * 0.997
     const candidate = {
       fontSize,
       lines,

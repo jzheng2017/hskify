@@ -1,4 +1,5 @@
 import { sha256Hex } from '../acquisition/hash'
+import { DEFAULT_IMAGE_LIMITS } from '../acquisition/image-format'
 import type {
   BrowserJobRequest,
   JobUpdateBatch,
@@ -280,7 +281,7 @@ export class PageTranslationController {
   private hskLevel: 1 | 2 | 3 | 4 | 5 | 6 = 5
   private learningMode: LearningMode = 'natural'
   private nameTranslation: NameTranslation = 'keep-original'
-  private activeJobId: string | undefined
+  private readonly activeJobIds = new Set<string>()
   private prefetchTargetId: string | undefined
   private prefetchEnabled = false
   private completionTimer: number | undefined
@@ -308,52 +309,59 @@ export class PageTranslationController {
         // data-fit="degraded" without interrupting the normal workflow.
       },
     })
-    this.queue = new VisibleFirstQueue((item, signal) => this.process(item, signal), {
-      onStart: (item) => {
-        this.cancelCompletion()
-        this.runState.start(item.value.candidate.element)
-      },
-      onSuccess: (item) => {
-        const image = item.value.candidate.element
-        this.queueIds.delete(image)
-        this.failures.delete(image)
-        this.runState.complete(image)
-        this.scheduleFinish()
-      },
-      onFailure: (item, error) => {
-        const image = item.value.candidate.element
-        const attempts = this.runState.automaticRetries(image)
-        if (shouldAutomaticallyRetryImage(error, attempts)) {
-          const retryNumber = this.runState.automaticRetryQueued(image)
-          if (
-            this.requeueFailedImage(
-              image,
-              `Trying again automatically (${retryNumber}/${AUTOMATIC_IMAGE_RETRY_LIMIT})`,
-            )
-          ) {
-            return
+    this.queue = new VisibleFirstQueue(
+      (item, signal) => this.process(item, signal),
+      {
+        onStart: (item) => {
+          this.cancelCompletion()
+          this.runState.start(item.value.candidate.element)
+        },
+        onSuccess: (item) => {
+          const image = item.value.candidate.element
+          this.queueIds.delete(image)
+          this.failures.delete(image)
+          this.runState.complete(image)
+          this.scheduleFinish()
+        },
+        onFailure: (item, error) => {
+          const image = item.value.candidate.element
+          const attempts = this.runState.automaticRetries(image)
+          if (shouldAutomaticallyRetryImage(error, attempts)) {
+            const retryNumber = this.runState.automaticRetryQueued(image)
+            if (
+              this.requeueFailedImage(
+                image,
+                `Trying again automatically (${retryNumber}/${AUTOMATIC_IMAGE_RETRY_LIMIT})`,
+              )
+            ) {
+              return
+            }
+            this.runState.start(image)
           }
-          this.runState.start(image)
-        }
-        this.runState.fail(image)
-        this.failures.set(image, {
-          sourceUrl: item.value.candidate.sourceUrl,
-          code:
-            error instanceof RuntimeMessageError
-              ? error.code
-              : typeof (error as { code?: unknown })?.code === 'string'
-                ? (error as { code: string }).code
-                : error instanceof Error
-                  ? error.name
-                  : 'UNKNOWN_ERROR',
-          message: error instanceof Error ? error.message : String(error),
-          retryable: error instanceof RuntimeMessageError ? error.retryable : false,
-        })
-        this.badge(image).failure(errorMessage(error))
-        this.scheduleFinish()
+          this.runState.fail(image)
+          this.failures.set(image, {
+            sourceUrl: item.value.candidate.sourceUrl,
+            code:
+              error instanceof RuntimeMessageError
+                ? error.code
+                : typeof (error as { code?: unknown })?.code === 'string'
+                  ? (error as { code: string }).code
+                  : error instanceof Error
+                    ? error.name
+                    : 'UNKNOWN_ERROR',
+            message: error instanceof Error ? error.message : String(error),
+            retryable: error instanceof RuntimeMessageError ? error.retryable : false,
+          })
+          this.badge(image).failure(errorMessage(error))
+          this.scheduleFinish()
+        },
+        onIdle: () => this.scheduleFinish(),
       },
-      onIdle: () => this.scheduleFinish(),
-    })
+      {
+        maximumConcurrent: 2,
+        maximumActiveCost: DEFAULT_IMAGE_LIMITS.maximumPixels,
+      },
+    )
     this.discovery = new ImageDiscovery((event) => this.onDiscovery(event))
     this.discovery.start()
     this.navigationTimer = window.setInterval(
@@ -526,13 +534,13 @@ export class PageTranslationController {
     this.cancelCompletion()
     this.queue.cancelAll()
     this.clearPrefetch()
-    if (this.activeJobId) {
+    for (const jobId of this.activeJobIds) {
       void sendBackgroundMessage({
         type: 'job:cancel',
-        jobId: this.activeJobId,
+        jobId,
       }).catch(() => undefined)
-      this.activeJobId = undefined
     }
+    this.activeJobIds.clear()
     const renderedImages = [...this.rendered.values()]
     this.rendered.clear()
     for (const rendered of renderedImages) rendered.destroy()
@@ -625,6 +633,7 @@ export class PageTranslationController {
       },
       visible: candidate.visible,
       order: candidate.domIndex,
+      cost: candidate.element.naturalWidth * candidate.element.naturalHeight,
     })
     if (!accepted) {
       this.queueIds.delete(candidate.element)
@@ -665,6 +674,7 @@ export class PageTranslationController {
       value: { candidate },
       visible: candidate.visible,
       order: candidate.domIndex,
+      cost: candidate.element.naturalWidth * candidate.element.naturalHeight,
     })
     if (!queued) return false
     this.badge(image).update(status)
@@ -799,7 +809,7 @@ export class PageTranslationController {
         )
       }
 
-      this.activeJobId = jobId
+      this.activeJobIds.add(jobId)
       this.prefetchEnabled = true
       this.refreshPrefetch()
       rendered = this.renderer.begin(
@@ -925,7 +935,7 @@ export class PageTranslationController {
     } finally {
       this.prefetchEnabled = false
       signal.removeEventListener('abort', cancelOnAbort)
-      if (this.activeJobId === jobId) this.activeJobId = undefined
+      if (jobId) this.activeJobIds.delete(jobId)
     }
   }
 

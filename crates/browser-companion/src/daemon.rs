@@ -73,6 +73,7 @@ pub async fn run_daemon(options: DaemonOptions) -> Result<DaemonExit, DaemonErro
     let mut config = BridgeConfig::for_port(port);
     config.idle_timeout = options.idle_timeout;
     let state = BridgeState::new(config, control_secret, paths.cache.clone());
+    state.start_pipeline_warmup();
     let service = router(state.clone());
     let serve_result = axum::serve(listener, service)
         .with_graceful_shutdown(wait_until_idle(state))

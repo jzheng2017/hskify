@@ -1289,6 +1289,8 @@ export async function chapterDomEvidence(page) {
       }
       for (const region of host.shadowRoot.querySelectorAll('.hmt-region')) {
         if (region.dataset.fit === 'degraded') degradedFitCount += 1
+        const fontSizePx = Number.parseFloat(getComputedStyle(region).fontSize)
+        const shortSidePx = Math.min(region.clientWidth, region.clientHeight)
         regions.push({
           page: pageNumber,
           regionId: region.dataset.regionId ?? '',
@@ -1297,6 +1299,13 @@ export async function chapterDomEvidence(page) {
           hskValid: region.dataset.hskValid ?? '',
           repairState: region.dataset.hskRepairState ?? '',
           fit: region.dataset.fit ?? 'normal',
+          fontSizePx,
+          boxWidthPx: region.clientWidth,
+          boxHeightPx: region.clientHeight,
+          fontToBoxShortSide:
+            Number.isFinite(fontSizePx) && shortSidePx > 0
+              ? fontSizePx / shortSidePx
+              : undefined,
           overflows:
             region.scrollWidth > region.clientWidth + 0.5 ||
             region.scrollHeight > region.clientHeight + 0.5,

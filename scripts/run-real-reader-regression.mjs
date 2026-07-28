@@ -339,7 +339,9 @@ async function runJob({ item, hskLevel, corpusRoot, baseUrl, session, outputDire
       translateSoundEffects: false,
       nameTranslation: 'keep-original',
     },
-    visibleRects: [{ x: 0, y: 0, width: 1, height: 1 }],
+    visibleRects: item.expectations?.initialVisibleRects ?? [
+      { x: 0, y: 0, width: 1, height: 1 },
+    ],
     precedingContext: [],
     properNameGlossary: [],
   }
@@ -350,9 +352,11 @@ async function runJob({ item, hskLevel, corpusRoot, baseUrl, session, outputDire
   const created = await responseJson(
     await fetch(`${baseUrl}/jobs`, { method: 'POST', headers, body: form }),
   )
+  const acceptedAt = Date.now()
   const updates = []
   let sequence = 0
   let terminal
+  let firstRegionReadyMs
   const deadline = Date.now() + timeoutMinutes * 60_000
   while (!terminal && Date.now() < deadline) {
     const batch = await responseJson(
@@ -363,6 +367,9 @@ async function runJob({ item, hskLevel, corpusRoot, baseUrl, session, outputDire
     for (const update of batch.updates ?? []) {
       updates.push(update)
       sequence = Math.max(sequence, update.sequence)
+      if (update.type === 'regionReady' && firstRegionReadyMs === undefined) {
+        firstRegionReadyMs = Date.now() - acceptedAt
+      }
       if (['complete', 'failed', 'cancelled'].includes(update.type)) terminal = update
     }
   }
@@ -385,12 +392,25 @@ async function runJob({ item, hskLevel, corpusRoot, baseUrl, session, outputDire
     })
   }
   const evaluated = assertCompletedJob(item, hskLevel, terminal, updates, patchRecords)
+  if (item.expectations?.maximumFirstRegionReadyMs !== undefined) {
+    evaluated.assertions.push(
+      check(
+        `performance.${item.id}.first-region-ready`,
+        Number.isFinite(firstRegionReadyMs) &&
+          firstRegionReadyMs <= item.expectations.maximumFirstRegionReadyMs,
+        `<= ${item.expectations.maximumFirstRegionReadyMs} ms`,
+        firstRegionReadyMs,
+        'A real partial-viewport request must publish a completed local bubble before the rest of the tall image finishes.',
+      ),
+    )
+  }
   const evidence = {
     caseId: item.id,
     hskLevel,
     objectPath,
     jobId: created.jobId,
     terminal,
+    firstRegionReadyMs,
     updates,
     regions: evaluated.regions,
     patches: patchRecords,
