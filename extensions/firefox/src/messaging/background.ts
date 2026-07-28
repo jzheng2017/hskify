@@ -9,11 +9,9 @@ import {
 } from '../contracts/browser'
 import {
   acquireRemoteImage,
-  ImagePermissionRequiredError,
   validateInlineImage,
   type AcquiredImage,
 } from '../acquisition/image-acquisition'
-import { PendingOriginPermissionStore } from '../acquisition/origin-permissions'
 import {
   DEFAULT_IMAGE_LIMITS,
   ImageValidationError,
@@ -35,14 +33,12 @@ import { NativeSessionError } from './native-session'
 import {
   parseBackgroundRequest,
   parsePageState,
-  parsePermissionPlan,
   type BackgroundRequest,
   type FontPayload,
   type MessageError,
   type MessageResponse,
   type PageState,
   type PatchPayload,
-  type PermissionPlan,
   type PopupState,
   type RecoveredJob,
   type RecoveryCandidate,
@@ -73,7 +69,6 @@ type BackgroundDependencies = {
   artifacts: PageArtifactStore
   companion: CompanionClient
   fixture: FixtureBackend
-  pendingPermissions: PendingOriginPermissionStore
   prefetches: SingleImagePrefetch<PrefetchedAcquisition>
   now: () => number
 }
@@ -204,7 +199,6 @@ export class BackgroundRouter {
   private readonly artifacts: PageArtifactStore
   private readonly companion: CompanionClient
   private readonly fixture: FixtureBackend | undefined
-  private readonly pendingPermissions: PendingOriginPermissionStore
   private readonly prefetches: SingleImagePrefetch<PrefetchedAcquisition>
   private readonly now: () => number
 
@@ -213,8 +207,6 @@ export class BackgroundRouter {
     this.artifacts = dependencies?.artifacts ?? new PageArtifactStore()
     this.companion = dependencies?.companion ?? new CompanionClient()
     this.fixture = dependencies?.fixture
-    this.pendingPermissions =
-      dependencies?.pendingPermissions ?? new PendingOriginPermissionStore()
     this.prefetches = dependencies?.prefetches ?? new SingleImagePrefetch()
     this.now = dependencies?.now ?? Date.now
   }
@@ -239,23 +231,9 @@ export class BackgroundRouter {
     }
   }
 
-  private async prepareContent(): Promise<PermissionPlan> {
+  private async prepareContent(): Promise<void> {
     const tabId = await this.activeTab()
     await this.ensureContent(tabId)
-    const raw = await browser.tabs.sendMessage(tabId, { type: 'content:prepare' })
-    const plan = parsePermissionPlan(raw)
-    const pending = await this.pendingPermissions.list(tabId)
-    const unresolved: string[] = []
-    for (const origin of pending) {
-      if (!(await browser.permissions.contains({ origins: [origin] }))) {
-        unresolved.push(origin)
-      }
-    }
-    await this.pendingPermissions.replace(tabId, unresolved)
-    return {
-      visibleOrigins: unique([...plan.visibleOrigins, ...unresolved]).sort(),
-      allOrigins: unique([...plan.allOrigins, ...unresolved]).sort(),
-    }
   }
 
   private async contentState(tabId: number): Promise<PageState | undefined> {
@@ -374,18 +352,9 @@ export class BackgroundRouter {
 
   private async acquireAndHash(
     message: ImageAcquisitionMessage,
-    tabId: number,
     signal?: AbortSignal,
   ): Promise<PrefetchedAcquisition> {
-    let acquired: AcquiredImage
-    try {
-      acquired = await this.acquire(message, signal)
-    } catch (error) {
-      if (error instanceof ImagePermissionRequiredError) {
-        await this.pendingPermissions.add(tabId, error.originPattern)
-      }
-      throw error
-    }
+    const acquired = await this.acquire(message, signal)
     if (
       acquired.width !== message.naturalWidth ||
       acquired.height !== message.naturalHeight
@@ -407,11 +376,10 @@ export class BackgroundRouter {
     message: Extract<BackgroundRequest, { type: 'image:prefetch' }>,
     sender: Sender,
   ): Promise<void> {
-    const { tabId } = senderLocation(sender)
     assertSenderDocument(sender, message.pageUrl)
     const identity = this.prefetchIdentity(message, sender)
     await this.prefetches.prefetch(identity, (signal) =>
-      this.acquireAndHash(message, tabId, signal),
+      this.acquireAndHash(message, signal),
     )
   }
 
@@ -441,7 +409,7 @@ export class BackgroundRouter {
     const identity = this.prefetchIdentity(message, sender)
     const prefetched = await this.prefetches.consume(identity)
     const { acquired, sourceSha256 } =
-      prefetched ?? (await this.acquireAndHash(message, tabId))
+      prefetched ?? (await this.acquireAndHash(message))
     const clientImageId = `${message.pageSessionId}-${message.pageIndex}-${sourceSha256.slice(0, 16)}`
     const request: BrowserJobRequest = {
       buildFingerprint: BUILD_FINGERPRINT,
@@ -884,7 +852,6 @@ export class BackgroundRouter {
     const records = await this.jobs.forTab(tabId)
     await Promise.allSettled(records.map((record) => this.cancelRecord(record)))
     await this.artifacts.removeForTab(tabId)
-    await this.pendingPermissions.removeForTab(tabId)
   }
 }
 

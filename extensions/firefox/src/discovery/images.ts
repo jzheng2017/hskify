@@ -5,6 +5,7 @@ const MIN_DISPLAY_HEIGHT = 140
 const MIN_DISPLAY_AREA = 36_000
 const EXCLUDED_SEMANTIC_WORDS =
   /\b(?:avatar|badge|button|comment|control|cover|emoji|favicon|icon|logo|profile|sprite|thumbnail|userpic)\b/i
+const DEFERRED_SOURCE_ATTRIBUTE = /^data-(?:.*(?:src|url|image|original).*)$/i
 
 export type ImageOwner = HTMLImageElement | HTMLPictureElement
 
@@ -38,12 +39,8 @@ type IntersectionObserverLike = {
 }
 
 export type ObserverFactories = {
-  mutation(
-    callback: MutationCallback,
-  ): Pick<MutationObserver, 'observe' | 'disconnect'>
-  intersection(
-    callback: IntersectionObserverCallback,
-  ): IntersectionObserverLike | undefined
+  mutation(callback: MutationCallback): Pick<MutationObserver, 'observe' | 'disconnect'>
+  intersection(callback: IntersectionObserverCallback): IntersectionObserverLike | undefined
 }
 
 const defaultFactories: ObserverFactories = {
@@ -78,11 +75,27 @@ function semanticText(image: HTMLImageElement): string {
 
 function hasUnsafeTransform(image: HTMLImageElement): boolean {
   const transform = getComputedStyle(image).transform
-  return (
-    transform !== '' &&
-    transform !== 'none' &&
-    transform !== 'matrix(1, 0, 0, 1, 0, 0)'
-  )
+  return transform !== '' && transform !== 'none' && transform !== 'matrix(1, 0, 0, 1, 0, 0)'
+}
+
+function normalizedImageUrl(value: string): string | undefined {
+  try {
+    const url = new URL(value, document.baseURI)
+    return ['http:', 'https:', 'blob:', 'data:'].includes(url.protocol) ? url.href : undefined
+  } catch {
+    return undefined
+  }
+}
+
+export function deferredImageSourceUrl(image: HTMLImageElement): string | undefined {
+  for (const attribute of image.attributes) {
+    if (!DEFERRED_SOURCE_ATTRIBUTE.test(attribute.name)) continue
+    const value = attribute.value.trim()
+    if (!value) continue
+    const normalized = normalizedImageUrl(value)
+    if (normalized) return normalized
+  }
+  return undefined
 }
 
 function isRendered(image: HTMLImageElement, rect: DOMRect): boolean {
@@ -100,21 +113,12 @@ function isRendered(image: HTMLImageElement, rect: DOMRect): boolean {
 
 export function isRectVisible(rect: DOMRect, view: Window = window): boolean {
   return (
-    rect.bottom > 0 &&
-    rect.right > 0 &&
-    rect.top < view.innerHeight &&
-    rect.left < view.innerWidth
+    rect.bottom > 0 && rect.right > 0 && rect.top < view.innerHeight && rect.left < view.innerWidth
   )
 }
 
-export function evaluateImage(
-  image: HTMLImageElement,
-  domIndex: number,
-): DiscoveryDecision {
-  if (
-    image.closest('[data-hmt-owned="true"]') ||
-    image.hasAttribute('data-hmt-original')
-  ) {
+export function evaluateImage(image: HTMLImageElement, domIndex: number): DiscoveryDecision {
+  if (image.closest('[data-hmt-owned="true"]') || image.hasAttribute('data-hmt-original')) {
     return { supported: false, reason: 'owned-by-extension' }
   }
   const sourceUrl = image.currentSrc || image.src
@@ -122,10 +126,7 @@ export function evaluateImage(
   if (!image.complete || image.naturalWidth === 0 || image.naturalHeight === 0) {
     return { supported: false, reason: 'not-loaded' }
   }
-  if (
-    image.naturalWidth < MIN_NATURAL_WIDTH ||
-    image.naturalHeight < MIN_NATURAL_HEIGHT
-  ) {
+  if (image.naturalWidth < MIN_NATURAL_WIDTH || image.naturalHeight < MIN_NATURAL_HEIGHT) {
     return { supported: false, reason: 'intrinsic-size' }
   }
   const rect = image.getBoundingClientRect()
@@ -158,22 +159,53 @@ export function evaluateImage(
   }
 }
 
+export function isDeferredPageImage(image: HTMLImageElement): boolean {
+  const deferredSource = deferredImageSourceUrl(image)
+  if (!deferredSource) return false
+  const decision = evaluateImage(image, 0)
+  if (decision.supported) return false
+  if (decision.reason !== 'not-loaded' && decision.reason !== 'intrinsic-size') {
+    return false
+  }
+  const currentSource = normalizedImageUrl(image.currentSrc || image.src)
+  if (decision.reason === 'intrinsic-size' && currentSource === deferredSource) {
+    return false
+  }
+  const rect = image.getBoundingClientRect()
+  if (!isRendered(image, rect)) return false
+  if (
+    rect.width < MIN_DISPLAY_WIDTH ||
+    rect.height < MIN_DISPLAY_HEIGHT ||
+    rect.width * rect.height < MIN_DISPLAY_AREA
+  ) {
+    return false
+  }
+  if (
+    image.closest('button,[role="button"]') ||
+    EXCLUDED_SEMANTIC_WORDS.test(semanticText(image)) ||
+    hasUnsafeTransform(image)
+  ) {
+    return false
+  }
+  return true
+}
+
+export function discoverDeferredImages(root: ParentNode = document): HTMLImageElement[] {
+  return [...root.querySelectorAll('img')].filter(isDeferredPageImage)
+}
+
 export function discoverImages(root: ParentNode = document): DiscoveredImage[] {
   return [...root.querySelectorAll('img')]
     .map((image, index) => evaluateImage(image, index))
     .filter(
-      (decision): decision is Extract<DiscoveryDecision, { supported: true }> =>
-        decision.supported,
+      (decision): decision is Extract<DiscoveryDecision, { supported: true }> => decision.supported,
     )
     .map((decision) => decision.candidate)
 }
 
-export function visibleFirst(
-  candidates: readonly DiscoveredImage[],
-): DiscoveredImage[] {
+export function visibleFirst(candidates: readonly DiscoveredImage[]): DiscoveredImage[] {
   return [...candidates].sort(
-    (left, right) =>
-      Number(right.visible) - Number(left.visible) || left.domIndex - right.domIndex,
+    (left, right) => Number(right.visible) - Number(left.visible) || left.domIndex - right.domIndex,
   )
 }
 
@@ -195,8 +227,7 @@ export class ImageDiscovery {
       for (const mutation of mutations) {
         if (
           mutation.type === 'childList' ||
-          (mutation.type === 'attributes' &&
-            mutation.target instanceof HTMLImageElement)
+          (mutation.type === 'attributes' && mutation.target instanceof HTMLImageElement)
         ) {
           needsScan = true
           break
@@ -241,6 +272,28 @@ export class ImageDiscovery {
     return visibleFirst([...this.candidates.values()])
   }
 
+  deferred(): HTMLImageElement[] {
+    return discoverDeferredImages(this.root)
+  }
+
+  completionKey(): string {
+    const images = [...this.root.querySelectorAll('img')]
+    const indexByImage = new Map(images.map((image, index) => [image, index]))
+    const candidates = this.current()
+      .map(
+        (candidate) =>
+          `ready:${candidate.domIndex}:${candidate.sourceUrl}:${candidate.element.naturalWidth}x${candidate.element.naturalHeight}`,
+      )
+      .sort()
+    const deferred = this.deferred()
+      .map(
+        (image) =>
+          `deferred:${indexByImage.get(image) ?? -1}:${image.currentSrc || image.src}:${deferredImageSourceUrl(image) ?? ''}`,
+      )
+      .sort()
+    return [...candidates, ...deferred].join('|')
+  }
+
   private readonly onLoad = (event: Event): void => {
     if (event.target instanceof HTMLImageElement) this.scan()
   }
@@ -259,8 +312,7 @@ export class ImageDiscovery {
       const previous = this.candidates.get(image)
       if (
         previous &&
-        (image.closest('[data-hmt-owned="true"]') ||
-          image.hasAttribute('data-hmt-original'))
+        (image.closest('[data-hmt-owned="true"]') || image.hasAttribute('data-hmt-original'))
       ) {
         const sourceUrl = image.currentSrc || image.src
         if (sourceUrl && sourceUrl !== previous.sourceUrl) {

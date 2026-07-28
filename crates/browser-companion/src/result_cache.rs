@@ -22,9 +22,9 @@ use crate::setup::{
 pub(crate) const RESULT_CACHE_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const RESULT_CACHE_MAX_ENTRY_BYTES: u64 = 512 * 1024 * 1024;
 const RESULT_CACHE_MAX_DECODED_PATCH_BYTES: u64 = 256 * 1024 * 1024;
-const RESULT_CACHE_SCHEMA: &str = "hskify-progressive-result-2026-07-26-v3";
+const RESULT_CACHE_SCHEMA: &str = "hskify-progressive-result-2026-07-27-v5";
 const RESULT_CACHE_PIPELINE_REVISION: &str =
-    "direct-browser-pipeline-shared-semantic-mask-style-bands-v11-2026-07-27";
+    "direct-browser-pipeline-segmentation-recall-furniture-verifier-v18-2026-07-27";
 const MODEL_RESOURCE_MANIFEST: &[u8] = include_bytes!("../../../data/model-packs/manifest.v1.json");
 
 #[derive(Debug, Clone)]
@@ -468,24 +468,29 @@ mod tests {
     }
 
     #[test]
-    fn key_ignores_browser_session_and_viewport_identity() -> Result<()> {
+    fn key_scopes_chapter_entity_memory_but_ignores_dom_and_viewport_identity() -> Result<()> {
         let first = serde_json::from_str::<crate::contracts::CreateJobRequest>(include_str!(
             "../../../fixtures/contracts/job-request.valid.json"
         ))?;
-        let mut second = first.clone();
-        second.client_image_id = "different-dom-image".to_owned();
-        second.page_session_id = "different-page-session".to_owned();
-        second.page_index = second.page_index.saturating_add(7);
-        second.visible_rects = vec![NormalizedRect {
+        let mut same_chapter = first.clone();
+        same_chapter.client_image_id = "different-dom-image".to_owned();
+        same_chapter.page_index = same_chapter.page_index.saturating_add(7);
+        same_chapter.visible_rects = vec![NormalizedRect {
             x: 0.25,
             y: 0.25,
             width: 0.5,
             height: 0.5,
         }];
+        let mut other_chapter = same_chapter.clone();
+        other_chapter.page_session_id = "different-page-session".to_owned();
 
         assert_eq!(
             ResultCache::key(&first.pipeline_request())?,
-            ResultCache::key(&second.pipeline_request())?
+            ResultCache::key(&same_chapter.pipeline_request())?
+        );
+        assert_ne!(
+            ResultCache::key(&first.pipeline_request())?,
+            ResultCache::key(&other_chapter.pipeline_request())?
         );
         Ok(())
     }

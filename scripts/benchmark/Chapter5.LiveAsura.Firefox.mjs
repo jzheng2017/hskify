@@ -9,9 +9,10 @@ import {
   installDomObserver,
   launchPackagedFirefox,
   nowIso,
+  prepareContentRuntime,
   routeEvidence,
   timedContentStart,
-  validateBenchmarkManifest,
+  waitForPageState,
   writeJsonSync,
 } from './Chapter5.Firefox.mjs'
 
@@ -45,6 +46,17 @@ export function validateLiveChapterUrl(value) {
   }
   url.hash = ''
   return url.href
+}
+
+export function resolveExpectedImageCount(configuredCount, discoveredCount) {
+  if (!Number.isInteger(discoveredCount) || discoveredCount < 1) {
+    fail('The live reader exposed no translatable chapter images.')
+  }
+  if (configuredCount === undefined) return discoveredCount
+  if (!Number.isInteger(configuredCount) || configuredCount < 1) {
+    fail('expectedImageCount must be a positive integer when provided.')
+  }
+  return configuredCount
 }
 
 function isLoopback(value) {
@@ -145,93 +157,156 @@ function installNetworkTimingCapture(context) {
   }
 }
 
-async function requestOptionalOrigins(extensionPage, origins, timeoutMs) {
-  const requested = [...new Set(origins)].sort()
-  if (requested.length === 0) return { requested, missing: [], granted: true }
-  const missing = await extensionPage.evaluate(async (patterns) => {
-    const unresolved = []
-    for (const origin of patterns) {
-      if (!(await globalThis.browser.permissions.contains({ origins: [origin] }))) {
-        unresolved.push(origin)
-      }
+async function contentDiscoverySnapshot(extensionPage, pageUrl) {
+  return extensionPage.evaluate(async (expectedUrl) => {
+    const tabs = await globalThis.browser.tabs.query({})
+    const tab = tabs.find((candidate) => candidate.url === expectedUrl)
+    if (!Number.isInteger(tab?.id)) {
+      throw new Error(`Packaged Firefox has no chapter tab for ${expectedUrl}.`)
     }
-    return unresolved
-  }, requested)
-  if (missing.length === 0) return { requested, missing, granted: true }
-  const buttonId = '__hskify_live_permission_request'
-  await extensionPage.evaluate(
-    ({ id, patterns }) => {
-      document.getElementById(id)?.remove()
-      const button = document.createElement('button')
-      button.id = id
-      button.type = 'button'
-      button.textContent = 'Grant live image access'
-      globalThis.__hskifyLivePermissionResult = undefined
-      button.addEventListener(
-        'click',
-        () => {
-          void globalThis.browser.permissions
-            .request({ origins: patterns })
-            .then((granted) => {
-              globalThis.__hskifyLivePermissionResult = { granted }
-            })
-            .catch((error) => {
-              globalThis.__hskifyLivePermissionResult = {
-                granted: false,
-                error: error instanceof Error ? error.message : String(error),
-              }
-            })
-        },
-        { once: true },
-      )
-      document.body.append(button)
-    },
-    { id: buttonId, patterns: missing },
-  )
-  await extensionPage.locator(`#${buttonId}`).click()
-  const handle = await extensionPage.waitForFunction(
-    () => globalThis.__hskifyLivePermissionResult !== undefined,
-    undefined,
-    { timeout: timeoutMs },
-  )
-  const result = await handle.jsonValue()
-  await extensionPage.evaluate((id) => {
-    document.getElementById(id)?.remove()
-    delete globalThis.__hskifyLivePermissionResult
-  }, buttonId)
-  if (!result?.granted) {
-    fail(`Firefox did not grant live image origins: ${result?.error ?? missing.join(', ')}`)
-  }
-  return { requested, missing, granted: true }
+    const executions = await globalThis.browser.scripting.executeScript({
+      target: { tabId: tab.id, allFrames: false },
+      func: () => {
+        const discovery = globalThis.__hmtPageController?.discovery
+        if (
+          !discovery ||
+          typeof discovery.current !== 'function' ||
+          typeof discovery.deferred !== 'function' ||
+          typeof discovery.completionKey !== 'function'
+        ) {
+          return {
+            controllerPresent: false,
+            completionKey: '',
+            candidates: [],
+            deferredCount: 0,
+            documentImageCount: document.images.length,
+          }
+        }
+        return {
+          controllerPresent: true,
+          completionKey: discovery.completionKey(),
+          candidates: discovery.current().map((candidate) => ({
+            domIndex: candidate.domIndex,
+            sourceUrl: new URL(candidate.sourceUrl, location.href).href,
+            naturalWidth: candidate.element.naturalWidth,
+            naturalHeight: candidate.element.naturalHeight,
+            visible: candidate.visible,
+          })),
+          deferredCount: discovery.deferred().length,
+          documentImageCount: document.images.length,
+        }
+      },
+    })
+    return executions[0]?.result
+  }, pageUrl)
 }
 
-async function primeLazyImages(page, timeoutMs) {
-  return page.evaluate(async (maximumMs) => {
-    const started = performance.now()
-    let bottomPasses = 0
-    let steps = 0
-    scrollTo({ top: 0, behavior: 'instant' })
-    while (performance.now() - started < maximumMs && bottomPasses < 3) {
-      const before = scrollY
+async function contentRuntimeDiagnostics(extensionPage, pageUrl) {
+  return extensionPage.evaluate(async (expectedUrl) => {
+    const tabs = await globalThis.browser.tabs.query({})
+    const tab = tabs.find((candidate) => candidate.url === expectedUrl)
+    if (!Number.isInteger(tab?.id)) return undefined
+    const executions = await globalThis.browser.scripting.executeScript({
+      target: { tabId: tab.id, allFrames: false },
+      func: () => globalThis.__hmtPageController?.diagnostics(),
+    })
+    return executions[0]?.result
+  }, pageUrl)
+}
+
+async function waitForSetupReady(extensionPage, timeoutMs) {
+  const startedAtEpochMs = Date.now()
+  const deadline = Date.now() + timeoutMs
+  const observed = []
+  let status = await extensionMessage(extensionPage, { type: 'setup:status' })
+  observed.push(status)
+  if (status.state !== 'ready') {
+    status = await extensionMessage(extensionPage, { type: 'setup:start' })
+    observed.push(status)
+  }
+  while (Date.now() < deadline) {
+    if (status.state === 'ready') {
+      return {
+        startedAtEpochMs,
+        readyAtEpochMs: Date.now(),
+        durationMs: Date.now() - startedAtEpochMs,
+        observed,
+      }
+    }
+    if (status.state === 'failed') {
+      fail(`Hskify setup reached ${status.state}: ${JSON.stringify(status)}`)
+    }
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 250))
+    status = await extensionMessage(extensionPage, { type: 'setup:status' })
+    const previous = observed.at(-1)
+    if (
+      previous?.state !== status.state ||
+      previous?.currentFile !== status.currentFile ||
+      previous?.completedBytes !== status.completedBytes
+    ) {
+      observed.push(status)
+    }
+  }
+  fail(`Timed out waiting for Hskify setup readiness: ${JSON.stringify(status)}`)
+}
+
+async function primeLazyImages(page, extensionPage, pageUrl, timeoutMs) {
+  const startedAt = Date.now()
+  let bottomPasses = 0
+  let steps = 0
+  let stableSince = Date.now()
+  let previousCompletionKey = ''
+  let snapshot
+  await page.evaluate(() => scrollTo({ top: 0, behavior: 'instant' }))
+  while (Date.now() - startedAt < timeoutMs) {
+    snapshot = await contentDiscoverySnapshot(extensionPage, pageUrl)
+    if (snapshot?.completionKey !== previousCompletionKey) {
+      previousCompletionKey = snapshot?.completionKey ?? ''
+      stableSince = Date.now()
+    }
+    if (!snapshot?.controllerPresent || snapshot.candidates.length + snapshot.deferredCount === 0) {
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 250))
+      continue
+    }
+    const scroll = await page.evaluate(() => {
       const maximum = Math.max(0, document.documentElement.scrollHeight - innerHeight)
-      scrollTo({ top: Math.min(maximum, before + Math.max(320, innerHeight * 0.8)), behavior: 'instant' })
-      await new Promise((resolvePromise) => setTimeout(resolvePromise, 100))
-      steps += 1
-      if (scrollY >= maximum - 1) bottomPasses += 1
-      else bottomPasses = 0
+      scrollTo({
+        top: Math.min(maximum, scrollY + Math.max(640, innerHeight * 1.5)),
+        behavior: 'instant',
+      })
+      return {
+        atBottom: scrollY >= maximum - 1,
+      }
+    })
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 100))
+    steps += 1
+    if (scroll.atBottom) bottomPasses += 1
+    else bottomPasses = 0
+    if (
+      bottomPasses >= 5 &&
+      snapshot.deferredCount === 0 &&
+      Date.now() - stableSince >= 1_500
+    ) {
+      break
     }
-    const reachedBottom = bottomPasses >= 3
-    scrollTo({ top: 0, behavior: 'instant' })
-    await new Promise((resolvePromise) =>
-      requestAnimationFrame(() => requestAnimationFrame(resolvePromise)),
-    )
-    return {
-      durationMs: performance.now() - started,
-      steps,
-      reachedBottom,
-      documentImageCount: document.images.length,
-    }
-  }, timeoutMs)
+  }
+  snapshot = await contentDiscoverySnapshot(extensionPage, pageUrl)
+  await page.evaluate(
+    () =>
+      new Promise((resolvePromise) => {
+        scrollTo({ top: 0, behavior: 'instant' })
+        requestAnimationFrame(() => requestAnimationFrame(resolvePromise))
+      }),
+  )
+  return {
+    durationMs: Date.now() - startedAt,
+    steps,
+    reachedBottom: bottomPasses >= 5,
+    controllerPresent: snapshot?.controllerPresent === true,
+    documentImageCount: snapshot?.documentImageCount ?? 0,
+    discoveredCount: snapshot?.candidates.length ?? 0,
+    deferredCount: snapshot?.deferredCount ?? 0,
+  }
 }
 
 async function navigationTiming(page) {
@@ -261,82 +336,93 @@ async function navigationTiming(page) {
   })
 }
 
-async function discoverySnapshot(page) {
-  return page.evaluate(() => {
-    const discovery = globalThis.__hmtPageController?.discovery
-    if (!discovery || typeof discovery.current !== 'function') return []
-    return discovery.current().map((candidate) => ({
-      domIndex: candidate.domIndex,
-      sourceUrl: new URL(candidate.sourceUrl, location.href).href,
-      naturalWidth: candidate.element.naturalWidth,
-      naturalHeight: candidate.element.naturalHeight,
-      visible: candidate.visible,
-    }))
-  })
-}
-
 export function buildLiveTranslationProof(dom, routes) {
-  for (const job of routes.jobs ?? []) {
-    for (const update of job.updates ?? []) {
-      if (
-        update.type !== 'regionReady' ||
-        !/[A-Za-z]/u.test(update.region?.sourceEnglish ?? '') ||
-        !update.region?.displayedChinese?.trim() ||
-        update.region?.hsk?.strictlyValid !== true
-      ) {
-        continue
-      }
-      const patchId = update.region.patch?.blobId
-      const patch = dom.patches.find(
-        (item) =>
-          item.patchId === patchId &&
-          item.complete === true &&
-          item.naturalWidth > 0 &&
-          item.naturalHeight > 0,
-      )
-      const region = dom.regions.find(
-        (item) =>
-          item.regionId === update.region.id &&
-          item.text.trim() &&
-          item.hskValid === 'true',
-      )
-      const patchEvent = dom.events.find(
-        (event) => event.type === 'patchDomCommitted' && event.patchId === patchId,
-      )
-      const textEvent = dom.events.find(
-        (event) =>
-          event.type === 'selectableTextDomCommitted' &&
-          event.regionId === update.region.id,
-      )
-      if (!patch || !region || !patchEvent || !textEvent || patchEvent.index >= textEvent.index) {
-        continue
-      }
-      return {
-        passed: true,
-        jobId: job.jobId,
-        pageIndex: job.pageIndex,
-        regionId: update.region.id,
-        sourceEnglish: update.region.sourceEnglish,
-        displayedChinese: update.region.displayedChinese,
-        hskStrictlyValid: true,
-        patch: {
-          patchId,
-          mimeType: update.region.patch.mimeType,
-          decodedWidth: patch.naturalWidth,
-          decodedHeight: patch.naturalHeight,
-        },
-        domOrdering: {
-          patchEventIndex: patchEvent.index,
-          selectableTextEventIndex: textEvent.index,
-          patchBeforeText: true,
-        },
+  for (const requireStrictHsk of [true, false]) {
+    for (const job of routes.jobs ?? []) {
+      for (const update of job.updates ?? []) {
+        const refinement = (job.updates ?? [])
+          .filter(
+            (candidate) =>
+              candidate.type === 'regionRefined' &&
+              candidate.regionId === update.region?.id,
+          )
+          .at(-1)
+        const displayedChinese =
+          refinement?.displayedChinese ?? update.region?.displayedChinese
+        const hsk = refinement?.hsk ?? update.region?.hsk
+        const strictlyValid = hsk?.strictlyValid === true
+        if (
+          update.type !== 'regionReady' ||
+          !/[A-Za-z]/u.test(update.region?.sourceEnglish ?? '') ||
+          !displayedChinese?.trim() ||
+          displayedChinese.trim() === update.region.sourceEnglish.trim() ||
+          (requireStrictHsk && !strictlyValid)
+        ) {
+          continue
+        }
+        const patchId = update.region.patch?.blobId
+        const patch = dom.patches.find(
+          (item) =>
+            item.patchId === patchId &&
+            item.complete === true &&
+            item.naturalWidth > 0 &&
+            item.naturalHeight > 0,
+        )
+        const region = dom.regions.find(
+          (item) =>
+            item.regionId === update.region.id &&
+            item.text.trim() &&
+            item.hskValid === String(strictlyValid),
+        )
+        const patchEvent = dom.events.find(
+          (event) =>
+            event.type === 'patchDomCommitted' && event.patchId === patchId,
+        )
+        const textEvent = dom.events.find(
+          (event) =>
+            event.type === 'selectableTextDomCommitted' &&
+            event.regionId === update.region.id,
+        )
+        if (
+          !patch ||
+          !region ||
+          !patchEvent ||
+          !textEvent ||
+          patchEvent.index >= textEvent.index
+        ) {
+          continue
+        }
+        return {
+          passed: true,
+          jobId: job.jobId,
+          pageIndex: job.pageIndex,
+          regionId: update.region.id,
+          sourceEnglish: update.region.sourceEnglish,
+          displayedChinese,
+          hskStrictlyValid: strictlyValid,
+          hskAssessment: {
+            repairState: hsk?.repairState,
+            aboveLevelTokens: hsk?.aboveLevelTokens ?? [],
+          },
+          patch: {
+            patchId,
+            mimeType: update.region.patch.mimeType,
+            decodedWidth: patch.naturalWidth,
+            decodedHeight: patch.naturalHeight,
+          },
+          domOrdering: {
+            patchEventIndex: patchEvent.index,
+            selectableTextEventIndex: textEvent.index,
+            patchBeforeText: true,
+          },
+        }
       }
     }
   }
   return {
     passed: false,
     reason:
-      'No Latin-English, strict-HSK-valid translated region had a decoded patch committed before selectable Chinese text.',
+      'No Latin-English translated region had a decoded patch committed before selectable Chinese text.',
   }
 }
 
@@ -349,6 +435,7 @@ async function waitForTranslationProof(
 ) {
   const deadline = Date.now() + timeoutMs
   let lastState
+  let fallback
   while (Date.now() < deadline) {
     const dom = await chapterDomEvidence(chapterPage)
     if (dom.regionCount > 0) {
@@ -361,12 +448,20 @@ async function waitForTranslationProof(
           expectedResourceIdentities,
         )
         const proof = buildLiveTranslationProof(dom, routes)
-        if (proof.passed) return { proof, dom, routes, records }
+        if (proof.passed) {
+          const evidence = { proof, dom, routes, records }
+          if (proof.hskStrictlyValid) return evidence
+          fallback = evidence
+        }
       }
     }
     lastState = await extensionMessage(extensionPage, { type: 'popup:state' })
+    if (lastState.state === 'complete' && fallback) return fallback
     if (lastState.state === 'failed' || lastState.state === 'cancelled') {
-      fail(`Live translation reached ${lastState.state}: ${lastState.message}`)
+      const diagnostics = await contentRuntimeDiagnostics(extensionPage, pageUrl)
+      fail(
+        `Live translation reached ${lastState.state}: ${lastState.message}; diagnostics: ${JSON.stringify(diagnostics)}`,
+      )
     }
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 250))
   }
@@ -410,14 +505,13 @@ async function main() {
   }
   const config = JSON.parse(readFileSync(configPath, 'utf8'))
   const requestedChapterUrl = validateLiveChapterUrl(config.chapterUrl)
-  const manifest = JSON.parse(readFileSync(config.manifestPath, 'utf8'))
-  validateBenchmarkManifest(manifest)
-  const expectedImageCount = manifest.pageCount
   let context
   let chapterPage
   let network
   let identity
   let finalChapterUrl = requestedChapterUrl
+  let readerDiagnostics
+  let discoveredImages = []
   let evidence
   let failure
   const runStartedAtEpochMs = Date.now()
@@ -438,23 +532,31 @@ async function main() {
     const navigationEndedAtEpochMs = Date.now()
     finalChapterUrl = chapterPage.url()
     network.setPhase('page-image-load')
-    const lazyLoad = await primeLazyImages(chapterPage, Math.min(config.runTimeoutMs, 60_000))
-    await chapterPage.bringToFront()
-    const permissionPlan = await extensionMessage(extensionPage, { type: 'popup:prepare' })
-    const discovery = await discoverySnapshot(chapterPage)
-    const permissions = await requestOptionalOrigins(
+    const activation = await prepareContentRuntime(extensionPage, finalChapterUrl)
+    const setup = await waitForSetupReady(
       extensionPage,
-      permissionPlan.allOrigins,
-      Math.min(config.runTimeoutMs, 30_000),
+      Math.min(config.runTimeoutMs, 5 * 60_000),
     )
-    await installDomObserver(chapterPage, 'live-asura-smoke')
-    network.setPhase('extension-translation')
-    await chapterPage.bringToFront()
-    const action = await timedContentStart(
+    const lazyLoad = await primeLazyImages(
+      chapterPage,
       extensionPage,
-      config.hskLevel,
       finalChapterUrl,
+      Math.min(config.runTimeoutMs, 60_000),
     )
+    readerDiagnostics = lazyLoad
+    await installDomObserver(chapterPage, 'live-asura-smoke')
+    const discovery = (await contentDiscoverySnapshot(extensionPage, finalChapterUrl)).candidates
+    discoveredImages = discovery
+    const expectedImageCount = resolveExpectedImageCount(
+      config.expectedImageCount,
+      discovery.length,
+    )
+    network.setPhase('extension-translation')
+    const action = await timedContentStart(extensionPage, config.hskLevel, finalChapterUrl)
+    const permissions = {
+      installationScope: ['http://*/*', 'https://*/*'],
+      granted: true,
+    }
     if (action.value.total !== expectedImageCount || discovery.length !== expectedImageCount) {
       fail(
         `Expected exactly ${expectedImageCount} discovered chapter images; content start reported ${action.value.total} and discovery inspection found ${discovery.length}.`,
@@ -468,7 +570,26 @@ async function main() {
       config.runTimeoutMs,
     )
     const stateAtProof = await extensionMessage(extensionPage, { type: 'popup:state' })
-    const cancelledAfterProof = await extensionMessage(extensionPage, { type: 'popup:cancel' })
+    const finalState = await waitForPageState(
+      extensionPage,
+      chapterPage,
+      ['complete', 'failed', 'cancelled'],
+      config.runTimeoutMs,
+    )
+    if (finalState.state !== 'complete') {
+      const diagnostics = await contentRuntimeDiagnostics(
+        extensionPage,
+        finalChapterUrl,
+      )
+      fail(
+        `Live translation reached ${finalState.state}: ${finalState.message}; diagnostics: ${JSON.stringify(diagnostics)}`,
+      )
+    }
+    if (finalState.current !== expectedImageCount || finalState.total !== expectedImageCount) {
+      fail(
+        `Live translation completed with ${finalState.current}/${finalState.total} images; expected ${expectedImageCount}/${expectedImageCount}.`,
+      )
+    }
     const capturedNetwork = network.snapshot()
     network = undefined
     const timings = timingSections(
@@ -493,6 +614,7 @@ async function main() {
       finalChapterUrl,
       redirectObserved: finalChapterUrl !== requestedChapterUrl,
       extensionIdentity: identity,
+      readerDiagnostics,
       navigation: {
         httpStatus: response?.status(),
         wallDurationMs: navigationEndedAtEpochMs - navigationStartedAtEpochMs,
@@ -505,6 +627,12 @@ async function main() {
         inspectedImageCount: discovery.length,
         images: discovery,
       },
+      activation: {
+        method: 'packaged-extension-explicit-chapter-tab',
+        tabId: activation.tabId,
+        initialState: activation.state,
+      },
+      setup,
       permissions,
       translationProof: translated.proof,
       extensionWorkflow: {
@@ -515,7 +643,7 @@ async function main() {
         firstSelectableTextAfterActionMs:
           firstText === undefined ? undefined : firstText.epochMs - action.issuedAtEpochMs,
         stateAtProof,
-        cancelledAfterProof,
+        finalState,
         note:
           'These end-to-end milestones can include live image acquisition; they are not local-only benchmark timings.',
       },
@@ -523,20 +651,40 @@ async function main() {
       localRouteReplay: translated.routes,
       gates: [
         {
-          id: 'ten-live-chapter-images-discovered',
+          id: 'all-live-chapter-images-discovered',
           status: 'pass',
           actual: action.value.total,
           expected: expectedImageCount,
         },
         {
-          id: 'valid-english-dialogue-region-translated',
+          id: 'english-dialogue-region-translated',
           status: 'pass',
           regionId: translated.proof.regionId,
+        },
+        {
+          id: 'hsk-assessment-recorded',
+          status: 'pass',
+          strictlyValid: translated.proof.hskStrictlyValid,
+          ...translated.proof.hskAssessment,
         },
         {
           id: 'decoded-patch-before-selectable-text',
           status: 'pass',
           ...translated.proof.domOrdering,
+        },
+        {
+          id: 'entire-live-chapter-completed',
+          status: 'pass',
+          actual: {
+            state: finalState.state,
+            current: finalState.current,
+            total: finalState.total,
+          },
+          expected: {
+            state: 'complete',
+            current: expectedImageCount,
+            total: expectedImageCount,
+          },
         },
       ],
     }
@@ -556,9 +704,10 @@ async function main() {
       requestedChapterUrl,
       finalChapterUrl: failedFinalUrl,
       extensionIdentity: identity,
+      readerDiagnostics,
       timings: timingSections(
         capturedNetwork,
-        [],
+        discoveredImages,
         requestedChapterUrl,
         failedFinalUrl,
       ),

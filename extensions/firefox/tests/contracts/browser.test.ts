@@ -272,6 +272,23 @@ describe('unversioned progressive browser contract', () => {
         3,
       ),
     ).toThrow(/sequence/)
+
+    const region = createFixtureRegions({
+      jobId: 'fixture-job',
+      sourceSha256: 'a'.repeat(64),
+      sourceWidth: 1200,
+      sourceHeight: 1800,
+    })[0]
+    const disconnected = structuredClone(region)
+    if (!disconnected) throw new Error('fixture region is required')
+    disconnected.patch.rect = { x: 0.85, y: 0.85, width: 0.1, height: 0.1 }
+    expect(() =>
+      parseJobUpdateBatch({
+        jobId: 'job',
+        nextSequence: 1,
+        updates: [{ sequence: 1, type: 'regionReady', region: disconnected }],
+      }),
+    ).toThrow(/must overlap/)
   })
 
   it('requires exact, lowercase, sorted resident resource identities', () => {

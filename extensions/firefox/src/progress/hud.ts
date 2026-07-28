@@ -150,11 +150,10 @@ export class PageHud {
   update(input: HudProgress): void {
     const status = input.status
     const state = 'running'
-    // The HUD represents one chapter-wide operation. Individual images can be
-    // in different pipeline stages concurrently, so exposing whichever image
-    // reported last makes the chapter status oscillate. Keep the chapter
-    // message stable; per-image badges still show local progress and retries.
-    const message = input.message ?? 'Translating this chapter'
+    // The queue has one active chapter image. Show a stable, user-facing phase
+    // rather than raw engine messages, which can change several times inside
+    // one model pass.
+    const message = input.message ?? (status ? friendlyProgressMessage(status) : 'Starting')
     this.state = {
       state,
       current: input.current,
@@ -162,7 +161,7 @@ export class PageHud {
       ...(status ? { stage: status.stage } : {}),
       message,
     }
-    this.title.textContent = `Image ${Math.min(input.current + 1, input.total)} of ${input.total}`
+    this.title.textContent = `Translating image ${Math.min(input.current + 1, input.total)} of ${input.total}`
     const measurable = status?.overallProgress
     if (measurable === undefined) this.progress.removeAttribute('value')
     else this.progress.value = measurable

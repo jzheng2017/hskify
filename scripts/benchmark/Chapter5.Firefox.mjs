@@ -21,7 +21,7 @@ import { isDeepStrictEqual } from 'node:util'
 
 const EXTENSION_ID = 'hsk-manga-translator@local.hskify'
 const EXTENSION_UUID = '7e9a74d0-34ad-4ff7-9c2c-1ea555945100'
-const BUILD_FINGERPRINT = 'hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-07-27-r6'
+export const BUILD_FINGERPRINT = 'hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-07-27-r6'
 const SESSION_STORAGE_KEY = 'hmt.nativeSession'
 const ACTIVE_JOB_PREFIX = 'hmt.activeJob.'
 const LONG_IMAGE_MIN_HEIGHT_PX = 10_000
@@ -777,10 +777,13 @@ export async function launchPackagedFirefox(config) {
       undefined,
       { timeout: 30_000, polling: 50 },
     )
-    const identity = await extensionPage.evaluate(() => ({
+    const identity = await extensionPage.evaluate(async () => ({
       id: globalThis.browser.runtime.id,
       manifest: globalThis.browser.runtime.getManifest(),
       origin: new URL(globalThis.browser.runtime.getURL('')).origin,
+      commands: globalThis.browser.commands?.getAll
+        ? await globalThis.browser.commands.getAll()
+        : [],
     }))
     if (identity.id !== EXTENSION_ID) {
       fail(`Packaged Firefox extension ID mismatch: ${identity.id}.`)
@@ -904,9 +907,10 @@ export async function timedContentStart(
   extensionPage,
   hskLevel,
   expectedPageUrl,
+  nameTranslation = 'keep-original',
 ) {
   const timed = await extensionPage.evaluate(
-    async ({ level, pageUrl }) => {
+    async ({ level, pageUrl, names }) => {
       const tabs = await globalThis.browser.tabs.query({})
       const tab = tabs.find((candidate) => candidate.url === pageUrl)
       if (!Number.isInteger(tab?.id)) {
@@ -923,6 +927,7 @@ export async function timedContentStart(
         type: 'content:start',
         scope: 'all',
         hskLevel: level,
+        nameTranslation: names,
       })
       return {
         issuedAtEpochMs,
@@ -930,7 +935,7 @@ export async function timedContentStart(
         response,
       }
     },
-    { level: hskLevel, pageUrl: expectedPageUrl },
+    { level: hskLevel, pageUrl: expectedPageUrl, names: nameTranslation },
   )
   if (
     !timed.response ||
@@ -944,6 +949,30 @@ export async function timedContentStart(
     responseAtEpochMs: timed.responseAtEpochMs,
     value: timed.response,
   }
+}
+
+export async function prepareContentRuntime(extensionPage, expectedPageUrl) {
+  return extensionPage.evaluate(async (pageUrl) => {
+    const tabs = await globalThis.browser.tabs.query({})
+    const tab = tabs.find((candidate) => candidate.url === pageUrl)
+    if (!Number.isInteger(tab?.id)) {
+      throw new Error(`Packaged Firefox has no chapter tab for ${pageUrl}.`)
+    }
+    await globalThis.browser.scripting.executeScript({
+      target: { tabId: tab.id, allFrames: false },
+      files: ['translator.js'],
+    })
+    const state = await globalThis.browser.tabs.sendMessage(tab.id, {
+      type: 'content:state',
+    })
+    if (!state || typeof state !== 'object' || typeof state.state !== 'string') {
+      throw new Error(`The packaged content runtime did not initialize for ${pageUrl}.`)
+    }
+    return {
+      tabId: tab.id,
+      state,
+    }
+  }, expectedPageUrl)
 }
 
 async function stopJobMonitor(extensionPage) {

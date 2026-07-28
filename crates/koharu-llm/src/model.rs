@@ -230,6 +230,32 @@ impl Llm {
             .context("failed to count model tokens")
     }
 
+    /// Return the exact number of completion tokens available after applying
+    /// the resident model's chat template to this constrained request.
+    ///
+    /// Callers use this before generation to partition variable-length OCR
+    /// batches without relying on character estimates or parsing an eventual
+    /// context-overflow error.
+    pub fn constrained_completion_capacity(
+        &self,
+        prompt: &str,
+        target_language: Language,
+        system_prompt: &str,
+    ) -> Result<usize> {
+        let rendered = self.prompt_renderer.format_chat_prompt_exact_system(
+            prompt.to_owned(),
+            target_language,
+            Some(system_prompt),
+        )?;
+        let prompt_tokens = self
+            .model
+            .str_to_token(&rendered, AddBos::Never)
+            .context("failed to tokenize constrained prompt for capacity planning")?;
+        Ok((self.session_context.n_ctx() as usize)
+            .saturating_sub(prompt_tokens.len())
+            .saturating_sub(1))
+    }
+
     pub fn generate(
         &mut self,
         prompt: &str,

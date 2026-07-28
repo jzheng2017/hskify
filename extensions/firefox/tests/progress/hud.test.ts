@@ -26,8 +26,8 @@ describe('page and image progress UI', () => {
       },
     })
     const shadow = hud.host.shadowRoot
-    expect(shadow?.textContent).toContain('Image 2 of 4')
-    expect(shadow?.textContent).toContain('Translating this chapter')
+    expect(shadow?.textContent).toContain('Translating image 2 of 4')
+    expect(shadow?.textContent).toContain('Reading the page')
     expect(shadow?.textContent).not.toContain('OCR')
     expect(shadow?.textContent).not.toContain('2 of 7')
     expect(shadow?.querySelector('progress')?.getAttribute('value')).toBe('0.3')

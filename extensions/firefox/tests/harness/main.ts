@@ -1,13 +1,6 @@
 import type { DiscoveredImage } from '../../src/discovery/images'
-import fixturePanelUrl from '../../../../fixtures/images/synthetic-panel-a.png?url'
-import longWebtoonUrl from '../../../../fixtures/images/synthetic-webtoon-long.webp?url'
-import {
-  createFixtureRegions,
-} from '../../src/messaging/fixture-service'
-import {
-  SelectableRenderer,
-  type RenderedImage,
-} from '../../src/rendering/renderer'
+import { createFixtureRegions } from '../../src/messaging/fixture-service'
+import { SelectableRenderer, type RenderedImage } from '../../src/rendering/renderer'
 
 const source = document.querySelector<HTMLImageElement>('#source')
 const frame = document.querySelector<HTMLElement>('#frame')
@@ -15,12 +8,47 @@ const link = document.querySelector<HTMLAnchorElement>('#reader-link')
 const navigationOutput = document.querySelector<HTMLOutputElement>('#navigation-count')
 if (!source || !frame || !link || !navigationOutput) throw new Error('Harness DOM is incomplete.')
 
-source.src = fixturePanelUrl
+const sourceUrl = '/__real-reader/webtoon-vigilante-1-page-20'
+const patchUrl = '/__real-reader/webtoon-rooftops-1-page-20'
+const longReaderUrl = '/__real-reader/asura-mercenary-98-page-6'
+const sourceWidth = 700
+const sourceHeight = 1280
+source.src = sourceUrl
 await source.decode()
-const patchImage = await (await fetch(fixturePanelUrl)).arrayBuffer()
+const patchSource = new Image()
+patchSource.src = patchUrl
+await patchSource.decode()
 const longWebtoonProbe = new Image()
-longWebtoonProbe.src = `${longWebtoonUrl}?chapter=synthetic&page=0`
+longWebtoonProbe.src = `${longReaderUrl}?case=asura-mercenary-98-page-6`
 await longWebtoonProbe.decode()
+
+async function localRegionPatch(region: ReturnType<typeof createFixtureRegions>[number]) {
+  const width = Math.max(1, Math.round(region.patch.rect.width * sourceWidth))
+  const height = Math.max(1, Math.round(region.patch.rect.height * sourceHeight))
+  const canvas = document.createElement('canvas')
+  canvas.width = width
+  canvas.height = height
+  const context = canvas.getContext('2d')
+  if (!context) throw new Error('The harness could not create a patch canvas.')
+  context.drawImage(
+    patchSource,
+    region.patch.rect.x * patchSource.naturalWidth,
+    region.patch.rect.y * patchSource.naturalHeight,
+    region.patch.rect.width * patchSource.naturalWidth,
+    region.patch.rect.height * patchSource.naturalHeight,
+    0,
+    0,
+    width,
+    height,
+  )
+  const blob = await new Promise<Blob>((resolve, reject) =>
+    canvas.toBlob(
+      (value) => (value ? resolve(value) : reject(new Error('Patch encoding failed.'))),
+      region.patch.mimeType,
+    ),
+  )
+  return blob.arrayBuffer()
+}
 
 let navigationCount = 0
 let directImageClickCount = 0
@@ -45,8 +73,8 @@ if (query.get('rotated') === '1') source.style.transform = 'rotate(3deg)'
 const regions = createFixtureRegions({
   jobId: 'playwright-fixture',
   sourceSha256: 'b'.repeat(64),
-  sourceWidth: 1200,
-  sourceHeight: 1800,
+  sourceWidth,
+  sourceHeight,
 })
 if (query.get('vertical') === '1' && regions[0]) {
   regions[0].style.writingMode = 'vertical-rl'
@@ -74,9 +102,6 @@ if (query.get('hover') === '1' && regions[0]) {
   regions[0].baseChinese = regions[0].displayedChinese
   regions[0].layout.suggestedLines = ['\u7814\u7a76\u751f\u79bb\u5f00']
 }
-for (const region of regions) {
-  region.patch.rect = { x: 0, y: 0, width: 1, height: 1 }
-}
 const candidate: DiscoveredImage = {
   element: source,
   owner: source,
@@ -102,21 +127,18 @@ try {
       const selectedText =
         request.interaction === 'selection'
           ? request.selectedText
-          : [
-              '\u7814\u7a76\u751f',
-              '\u7814\u7a76',
-              '\u79bb\u5f00',
-              '\u751f',
-              '\u5f00',
-            ].find((word) => suffix.startsWith(word)) ?? [...suffix][0] ?? ''
+          : (['\u7814\u7a76\u751f', '\u7814\u7a76', '\u79bb\u5f00', '\u751f', '\u5f00'].find(
+              (word) => suffix.startsWith(word),
+            ) ??
+            [...suffix][0] ??
+            '')
       return {
         selectedText,
         tokens: selectedText
           ? [
               {
                 simplified: selectedText,
-                pinyin:
-                  request.interaction === 'selection' ? 'lí kāi' : 'fixture',
+                pinyin: request.interaction === 'selection' ? 'lí kāi' : 'fixture',
                 definitions:
                   request.interaction === 'selection'
                     ? ['leave', 'depart']
@@ -135,11 +157,11 @@ try {
     },
   }).begin(candidate, {
     jobId: 'playwright-fixture',
-    sourceWidth: 1200,
-    sourceHeight: 1800,
+    sourceWidth,
+    sourceHeight,
   })
   for (const region of regions) {
-    await rendered.installRegion(region, patchImage)
+    await rendered.installRegion(region, await localRegionPatch(region))
   }
 } catch (error) {
   errorCode =

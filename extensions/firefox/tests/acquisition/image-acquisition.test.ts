@@ -4,11 +4,8 @@ import { acquireRemoteImage } from '../../src/acquisition/image-acquisition'
 import { sha256Hex } from '../../src/acquisition/hash'
 import {
   firefoxOriginPattern,
-  PendingOriginPermissionStore,
-  requiredCrossOriginPatterns,
 } from '../../src/acquisition/origin-permissions'
 import { pngHeader } from '../helpers/images'
-import { MemoryStorage } from '../helpers/storage'
 
 describe('background image acquisition', () => {
   it('uses only pre-granted exact redirect origins and validates the final body', async () => {
@@ -43,17 +40,10 @@ describe('background image acquisition', () => {
     expect(checked).toEqual([['https://cdn.test/*']])
   })
 
-  it('builds valid Firefox origin patterns without ports before the popup click', () => {
+  it('builds valid Firefox origin patterns without ports', () => {
     expect(firefoxOriginPattern('https://cdn.test:8443/pages/1.webp?token=abc')).toBe(
       'https://cdn.test/*',
     )
-    expect(
-      requiredCrossOriginPatterns('https://reader.test:4173/chapter', [
-        'https://reader.test:4173/page.png',
-        'https://cdn.test:9443/page.webp?x=1',
-        'https://cdn.test:9443/next.webp',
-      ]),
-    ).toEqual(['https://cdn.test/*'])
   })
 
   it('never prompts from the asynchronous background acquisition path', async () => {
@@ -67,22 +57,6 @@ describe('background image acquisition', () => {
       ),
     ).rejects.toMatchObject({ code: 'IMAGE_PERMISSION_REQUIRED' })
     expect(fetcher).not.toHaveBeenCalled()
-  })
-
-  it('retains a newly discovered exact redirect host for the next popup click', async () => {
-    const store = new PendingOriginPermissionStore(new MemoryStorage())
-    await store.add(7, 'https://redirect-cdn.test/*')
-    await store.add(7, 'https://redirect-cdn.test/*')
-    await store.add(7, 'http://images.test/*')
-
-    expect(await store.list(7)).toEqual([
-      'http://images.test/*',
-      'https://redirect-cdn.test/*',
-    ])
-    await store.replace(7, ['https://redirect-cdn.test/*'])
-    expect(await store.list(7)).toEqual(['https://redirect-cdn.test/*'])
-    await store.removeForTab(7)
-    expect(await store.list(7)).toEqual([])
   })
 
   it('tries credentials only after an unauthenticated 401', async () => {

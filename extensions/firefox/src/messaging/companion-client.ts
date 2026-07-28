@@ -19,6 +19,8 @@ const MAX_PATCH_BYTES = 25 * 1024 * 1024
 const MAX_FONT_BYTES = 32 * 1024 * 1024
 const EXTENSION_ORIGIN_HEADER = 'X-HSK-Manga-Extension-Origin'
 export const UPDATE_WAIT_MS = 20_000
+export const REQUEST_TIMEOUT_MS = 30_000
+export const UPDATE_TIMEOUT_GRACE_MS = 5_000
 
 export class CompanionHttpError extends Error {
   constructor(
@@ -140,19 +142,29 @@ export class CompanionClient {
     return headers
   }
 
-  private fetchSession(
+  private async fetchSession(
     session: NativeReadyResponse,
     path: string,
     init: RequestInit,
+    timeoutMs = REQUEST_TIMEOUT_MS,
   ): Promise<Response> {
-    return this.fetcher(
-      `http://127.0.0.1:${session.port}${path}`,
-      {
+    const controller = new AbortController()
+    const upstreamSignal = init.signal
+    const abortFromUpstream = (): void => controller.abort(upstreamSignal?.reason)
+    if (upstreamSignal?.aborted) abortFromUpstream()
+    else upstreamSignal?.addEventListener('abort', abortFromUpstream, { once: true })
+    const timer = setTimeout(() => controller.abort(new DOMException('Timed out', 'TimeoutError')), timeoutMs)
+    try {
+      return await this.fetcher(`http://127.0.0.1:${session.port}${path}`, {
         ...init,
         headers: this.headers(session, init),
         redirect: 'error',
-      },
-    )
+        signal: controller.signal,
+      })
+    } finally {
+      clearTimeout(timer)
+      upstreamSignal?.removeEventListener('abort', abortFromUpstream)
+    }
   }
 
   private transportError(error: unknown): CompanionHttpError {
@@ -182,7 +194,7 @@ export class CompanionClient {
       return lease.session
     }
     try {
-      const response = await this.fetchSession(lease.session, '/health', {})
+      const response = await this.fetchSession(lease.session, '/health', {}, 5_000)
       if (!response.ok) throw await responseError(response)
       parseHealthResponse(await parseJsonResponse(response))
       this.validatedSessionToken = lease.session.token
@@ -192,15 +204,19 @@ export class CompanionClient {
     }
   }
 
-  private async request(path: string, init: RequestInit = {}): Promise<Response> {
+  private async request(
+    path: string,
+    init: RequestInit = {},
+    timeoutMs = REQUEST_TIMEOUT_MS,
+  ): Promise<Response> {
     let session = await this.liveSession()
     let response: Response
     try {
-      response = await this.fetchSession(session, path, init)
+      response = await this.fetchSession(session, path, init, timeoutMs)
     } catch (error) {
       session = await this.freshSession()
       try {
-        response = await this.fetchSession(session, path, init)
+        response = await this.fetchSession(session, path, init, timeoutMs)
       } catch (retryError) {
         await this.sessions.invalidate()
         this.validatedSessionToken = undefined
@@ -210,7 +226,7 @@ export class CompanionClient {
     if (response.status === 401) {
       session = await this.freshSession()
       try {
-        response = await this.fetchSession(session, path, init)
+        response = await this.fetchSession(session, path, init, timeoutMs)
       } catch (error) {
         await this.sessions.invalidate()
         this.validatedSessionToken = undefined
@@ -256,6 +272,8 @@ export class CompanionClient {
     })
     const response = await this.request(
       `/jobs/${encodeURIComponent(jobId)}/updates?${query.toString()}`,
+      {},
+      waitMs + UPDATE_TIMEOUT_GRACE_MS,
     )
     return parseJobUpdateBatch(await parseJsonResponse(response), after)
   }

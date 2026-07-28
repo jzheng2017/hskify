@@ -6,6 +6,7 @@ import {
   type ImageLimits,
 } from './image-format'
 import { firefoxOriginPattern } from './origin-permissions'
+import { fetchImageWithPageReferrer } from './page-referrer-fetch'
 
 const MAX_REDIRECTS = 3
 
@@ -26,6 +27,12 @@ export type AcquiredImage = {
   height: number
   finalUrl: string
 }
+
+export type ImageFetcher = (
+  input: URL,
+  init: RequestInit,
+  pageOrigin: string,
+) => Promise<Response>
 
 export class ImagePermissionRequiredError extends ImageValidationError {
   constructor(
@@ -125,24 +132,27 @@ async function fetchWithRedirectChecks(
   initialUrl: URL,
   pageOrigin: string,
   permissions: PermissionApi,
-  fetcher: typeof fetch,
+  fetcher: ImageFetcher,
   credentials: RequestCredentials,
   signal?: AbortSignal,
 ): Promise<{ response: Response; finalUrl: URL }> {
   let current = initialUrl
   for (let redirects = 0; redirects <= MAX_REDIRECTS; redirects += 1) {
     await ensureOriginPermission(current, pageOrigin, permissions)
-    const response = await fetcher(current, {
-      method: 'GET',
-      credentials,
-      cache: 'no-store',
-      redirect: 'manual',
-      referrerPolicy: 'no-referrer',
-      ...(signal ? { signal } : {}),
-      headers: {
-        Accept: 'image/png,image/jpeg,image/webp,image/gif',
+    const response = await fetcher(
+      current,
+      {
+        method: 'GET',
+        credentials,
+        cache: 'no-store',
+        redirect: 'manual',
+        ...(signal ? { signal } : {}),
+        headers: {
+          Accept: 'image/png,image/jpeg,image/webp,image/gif',
+        },
       },
-    })
+      pageOrigin,
+    )
     if (response.status < 300 || response.status >= 400) {
       return { response, finalUrl: current }
     }
@@ -175,7 +185,7 @@ export async function acquireRemoteImage(
   sourceUrl: string,
   options: AcquisitionOptions,
   permissions: PermissionApi = browser.permissions,
-  fetcher: typeof fetch = fetch,
+  fetcher: ImageFetcher = fetchImageWithPageReferrer,
 ): Promise<AcquiredImage> {
   const limits = options.limits ?? DEFAULT_IMAGE_LIMITS
   const initialUrl = safeHttpUrl(sourceUrl)

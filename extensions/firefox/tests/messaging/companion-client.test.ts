@@ -1,7 +1,11 @@
 import { describe, expect, it, vi } from 'vitest'
 
 import { BUILD_FINGERPRINT, type BrowserJobRequest } from '../../src/contracts/browser'
-import { CompanionClient } from '../../src/messaging/companion-client'
+import {
+  CompanionClient,
+  UPDATE_TIMEOUT_GRACE_MS,
+  UPDATE_WAIT_MS,
+} from '../../src/messaging/companion-client'
 import { NativeSessionManager, SESSION_STORAGE_KEY } from '../../src/messaging/native-session'
 import { pngHeader } from '../helpers/images'
 import { MemoryStorage } from '../helpers/storage'
@@ -64,6 +68,36 @@ function emptyUpdates(jobId = 'job', nextSequence = 0): Response {
 }
 
 describe('authenticated unversioned companion client', () => {
+  it('abandons an unresponsive daemon lease, starts a fresh one, and retries the long poll', async () => {
+    vi.useFakeTimers()
+    try {
+      const { manager, runtime } = sessionManager()
+      let requests = 0
+      const client = new CompanionClient(manager, async (_input, init) => {
+        requests += 1
+        if (requests === 1) {
+          return new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener(
+              'abort',
+              () => reject(init.signal?.reason ?? new DOMException('Aborted', 'AbortError')),
+              { once: true },
+            )
+          })
+        }
+        return emptyUpdates()
+      })
+
+      const updates = client.getJobUpdates('job', 0)
+      await vi.advanceTimersByTimeAsync(UPDATE_WAIT_MS + UPDATE_TIMEOUT_GRACE_MS)
+
+      expect((await updates).updates).toEqual([])
+      expect(requests).toBe(2)
+      expect(runtime.sendNativeMessage).toHaveBeenCalledTimes(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('re-handshakes and retries exactly once after a 401 without a protocol header', async () => {
     const { manager, runtime } = sessionManager()
     const authorizations: string[] = []

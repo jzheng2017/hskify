@@ -11,8 +11,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::{Result, bail};
 use koharu_llm::direct_hsk_protocol::{
     DirectHskContext, DirectHskName, DirectHskNameStyle, context_budget_text,
-    primary_system_prompt_with_name_style, primary_user_prompt,
-    repair_system_prompt_with_name_style, repair_user_prompt,
+    primary_system_prompt_with_policy, primary_user_prompt_with_name_style,
+    repair_system_prompt_with_policy, repair_user_prompt_with_name_style,
+    restore_approved_name_placeholders,
 };
 use koharu_llm::{GenerateOptions, Language, ModelId};
 use serde::{Deserialize, Serialize};
@@ -54,6 +55,7 @@ const MIN_OUTPUT_TOKENS: usize = 24;
 const MAX_OUTPUT_TOKENS: usize = 256;
 const OUTPUT_TOKENS_PER_UTTERANCE: usize = 8;
 const NON_STORY_MARKER: &str = "[NON-STORY]";
+const SOUND_EFFECT_MARKER: &str = "[SFX]";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -61,6 +63,8 @@ pub struct HskTranslationBatchRequest {
     pub requested_level: u8,
     #[serde(default)]
     pub name_handling: HskNameHandling,
+    #[serde(default = "default_translate_sound_effects")]
+    pub translate_sound_effects: bool,
     pub utterances: Vec<HskSourceUtterance>,
     #[serde(default)]
     pub preceding_utterances: Vec<HskPrecedingUtterance>,
@@ -74,6 +78,10 @@ pub enum HskNameHandling {
     KeepOriginal,
     #[default]
     Chinese,
+}
+
+const fn default_translate_sound_effects() -> bool {
+    true
 }
 
 impl From<HskNameHandling> for DirectHskNameStyle {
@@ -142,6 +150,7 @@ pub enum HskTranslationDisposition {
     #[default]
     Translate,
     ExcludeNonStory,
+    ExcludeSoundEffect,
 }
 
 impl HskTranslationOutcome {
@@ -157,8 +166,11 @@ impl HskTranslationOutcome {
 
     #[must_use]
     pub fn is_non_story(&self) -> bool {
-        self.disposition == HskTranslationDisposition::ExcludeNonStory
-            && self.issues.is_empty()
+        matches!(
+            self.disposition,
+            HskTranslationDisposition::ExcludeNonStory
+                | HskTranslationDisposition::ExcludeSoundEffect
+        ) && self.issues.is_empty()
             && self.text.is_none()
     }
 
@@ -221,10 +233,11 @@ impl HskTranslationIssue {
 {chinese_characters} Chinese characters"
             ),
             Self::InvalidNameMarkup => {
-                "wrap each retained proper name once as `⟦exact source spelling⟧`".to_owned()
+                "copy only the supplied opaque approved-name placeholders; do not add name markers"
+                    .to_owned()
             }
             Self::UnmarkedLatinText => {
-                "translate ordinary English; retain only proper names wrapped as `⟦name⟧`"
+                "translate every Latin word outside the supplied opaque approved-name placeholders"
                     .to_owned()
             }
         }
@@ -233,13 +246,15 @@ impl HskTranslationIssue {
 
 /// A repair request contains exactly one candidate rejected by parsing,
 /// preservation checks, or the caller's deterministic HSK vocabulary
-/// validator. The caller may schedule at most one such request per bubble.
+/// validator. The caller owns the small bounded retry policy.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct HskTranslationRepairRequest {
     pub requested_level: u8,
     #[serde(default)]
     pub name_handling: HskNameHandling,
+    #[serde(default = "default_translate_sound_effects")]
+    pub translate_sound_effects: bool,
     pub utterance: HskRepairUtterance,
     #[serde(default)]
     pub preceding_utterances: Vec<HskPrecedingUtterance>,
@@ -260,6 +275,13 @@ pub struct HskRepairUtterance {
 
 trait Generator {
     async fn token_count(&self, text: &str) -> Result<usize>;
+
+    async fn constrained_completion_capacity(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+        target_language: Language,
+    ) -> Result<usize>;
 
     async fn generate_streaming(
         &self,
@@ -314,6 +336,52 @@ impl DirectHskTranslator<'_> {
         translate_with(self.model, request, cancel).await
     }
 
+    /// Run a dedicated semantic NER pass with the same resident model before
+    /// keep-original translation. The compact result contains only exact
+    /// source spans, so later translation and deterministic validation can
+    /// enforce the model's entity decision rather than guessing from casing.
+    pub async fn detect_proper_names(
+        &self,
+        utterances: &[HskSourceUtterance],
+        cancel: &AtomicBool,
+    ) -> Result<Vec<HskProtectedName>> {
+        detect_proper_names_with(self.model, utterances, cancel).await
+    }
+
+    /// Classify standalone sound effects with the same semantic model used for
+    /// translation. The result is advisory and contains only application IDs;
+    /// callers can exclude those regions before translation when the user has
+    /// disabled sound effects.
+    pub async fn classify_semantic_regions(
+        &self,
+        utterances: &[HskSourceUtterance],
+        cancel: &AtomicBool,
+    ) -> Result<Vec<(String, HskTranslationDisposition)>> {
+        classify_semantic_regions_with(self.model, utterances, cancel).await
+    }
+
+    /// Resolve an otherwise unpublishable region as page furniture or story
+    /// content. Callers supply independent layout evidence; the model still
+    /// owns the semantic decision and uncertainty fails safe to story.
+    pub async fn verify_page_furniture(
+        &self,
+        source_english: &str,
+        has_detector_core: bool,
+        near_page_edge: bool,
+        page_context: &[HskSourceUtterance],
+        cancel: &AtomicBool,
+    ) -> Result<bool> {
+        verify_page_furniture_with(
+            self.model,
+            source_english,
+            has_detector_core,
+            near_page_edge,
+            page_context,
+            cancel,
+        )
+        .await
+    }
+
     /// Translate a batch while publishing each complete numbered line as soon
     /// as it is decoded. Application-owned IDs are restored before the
     /// callback runs.
@@ -326,7 +394,8 @@ impl DirectHskTranslator<'_> {
         translate_with_streaming(self.model, request, cancel, on_item).await
     }
 
-    /// Perform the sole targeted repair operation for one rejected bubble.
+    /// Perform one targeted repair attempt for a rejected bubble. The caller
+    /// owns the bounded retry policy and changes the feedback between attempts.
     pub async fn repair_invalid_item(
         &self,
         request: &HskTranslationRepairRequest,
@@ -336,11 +405,363 @@ impl DirectHskTranslator<'_> {
     }
 }
 
+async fn detect_proper_names_with<G>(
+    generator: &G,
+    utterances: &[HskSourceUtterance],
+    cancel: &AtomicBool,
+) -> Result<Vec<HskProtectedName>>
+where
+    G: Generator + ?Sized,
+{
+    check_cancelled(cancel)?;
+    if utterances.is_empty() {
+        return Ok(Vec::new());
+    }
+    if utterances.len() > MAX_HSK_TRANSLATION_BATCH {
+        bail!(
+            "proper-name detection batches may contain at most {MAX_HSK_TRANSLATION_BATCH} items"
+        );
+    }
+    validate_common(
+        utterances
+            .iter()
+            .map(|utterance| (utterance.id.as_str(), utterance.source_english.as_str())),
+        &[],
+        &[],
+    )?;
+    let mut user_prompt = String::from("English lines:\n");
+    for (index, utterance) in utterances.iter().enumerate() {
+        use std::fmt::Write as _;
+        writeln!(
+            &mut user_prompt,
+            "{}\t{}",
+            index + 1,
+            compact_field(&utterance.source_english)
+        )
+        .expect("writing to String cannot fail");
+    }
+    let system_prompt = format!(
+        "Perform semantic named-entity recognition on exactly {} numbered English OCR lines. \
+        A proper name is a lexicalized identifier for a particular person, place, organization, \
+        named event, or unique entity. Common relational terms, roles, occupations, ranks, titles, \
+        species, ordinary noun phrases, sentence-initial capitalization, and emphasized words are \
+        not names unless the complete span is an attested unique entity. For each line output its \
+        position, one tab, then exact boundary-aligned source spellings separated by ` | `, or `-` \
+        when there is no proper name. Preserve source casing and punctuation boundaries. Return \
+        exactly {} ordered non-empty lines and nothing else.",
+        utterances.len(),
+        utterances.len()
+    );
+    let raw = generator
+        .generate_streaming(
+            &system_prompt,
+            &user_prompt,
+            &GenerateOptions::greedy(
+                16usize
+                    .saturating_add(
+                        utterances
+                            .iter()
+                            .map(|item| item.source_english.len())
+                            .sum::<usize>()
+                            / 3,
+                    )
+                    .clamp(MIN_OUTPUT_TOKENS, MAX_OUTPUT_TOKENS),
+            ),
+            Language::ChineseSimplified,
+            cancel,
+            &mut |_| Ok(()),
+        )
+        .await?;
+    check_cancelled(cancel)?;
+    trace_semantic_output("proper-name", &raw);
+    parse_detected_names(&raw, utterances)
+}
+
+fn parse_detected_names(
+    output: &str,
+    utterances: &[HskSourceUtterance],
+) -> Result<Vec<HskProtectedName>> {
+    let mut slots = vec![None::<Vec<String>>; utterances.len()];
+    for raw_line in output.lines().filter(|line| !line.trim().is_empty()) {
+        let digit_count = raw_line
+            .as_bytes()
+            .iter()
+            .take_while(|byte| byte.is_ascii_digit())
+            .count();
+        if digit_count == 0 {
+            continue;
+        }
+        let Ok(position) = raw_line[..digit_count].parse::<usize>() else {
+            continue;
+        };
+        if position == 0 || position > utterances.len() || slots[position - 1].is_some() {
+            continue;
+        }
+        let Some(payload) = raw_line[digit_count..]
+            .strip_prefix('\t')
+            .or_else(|| raw_line[digit_count..].strip_prefix(' '))
+            .map(str::trim)
+            .filter(|payload| !payload.is_empty())
+        else {
+            continue;
+        };
+        let source = &utterances[position - 1].source_english;
+        let names = if payload == "-" {
+            Vec::new()
+        } else {
+            let mut names = Vec::new();
+            for candidate in payload.split('|').map(str::trim) {
+                let Some(candidate) = canonical_source_span(source, candidate) else {
+                    continue;
+                };
+                if !names.iter().any(|name| name == candidate) {
+                    names.push(candidate.to_owned());
+                }
+            }
+            names
+        };
+        slots[position - 1] = Some(names);
+    }
+    let mut detected = Vec::new();
+    for names in slots.into_iter().flatten() {
+        for name in names {
+            if detected.iter().any(|existing: &HskProtectedName| {
+                existing.source_english.eq_ignore_ascii_case(&name)
+            }) {
+                continue;
+            }
+            detected.push(HskProtectedName {
+                source_english: name.clone(),
+                chinese: name,
+            });
+        }
+    }
+    Ok(detected)
+}
+
+async fn classify_semantic_regions_with<G>(
+    generator: &G,
+    utterances: &[HskSourceUtterance],
+    cancel: &AtomicBool,
+) -> Result<Vec<(String, HskTranslationDisposition)>>
+where
+    G: Generator + ?Sized,
+{
+    check_cancelled(cancel)?;
+    if utterances.is_empty() {
+        return Ok(Vec::new());
+    }
+    if utterances.len() > MAX_HSK_TRANSLATION_BATCH {
+        bail!(
+            "semantic region classification batches may contain at most {MAX_HSK_TRANSLATION_BATCH} items"
+        );
+    }
+    validate_common(
+        utterances
+            .iter()
+            .map(|utterance| (utterance.id.as_str(), utterance.source_english.as_str())),
+        &[],
+        &[],
+    )?;
+    let mut user_prompt = String::from("English OCR lines:\n");
+    for (index, utterance) in utterances.iter().enumerate() {
+        use std::fmt::Write as _;
+        writeln!(
+            &mut user_prompt,
+            "{}\t{}",
+            index + 1,
+            compact_field(&utterance.source_english)
+        )
+        .expect("writing to String cannot fail");
+    }
+    let system_prompt = format!(
+        "Classify exactly {} numbered English comic OCR lines by semantic function. \
+        Output position, one tab, then SFX only for a standalone onomatopoeia, sound cue, \
+        or nonverbal auditory effect; output FURNITURE only for an unrelated publisher/site credit, \
+        watermark, advertisement, or reader navigation label; output STORY for dialogue, thoughts, \
+        narration, in-story labels and titles, names, roles, and ordinary language. Judge meaning \
+        in context rather than word shape or capitalization. Return exactly {} ordered lines and \
+        nothing else.",
+        utterances.len(),
+        utterances.len()
+    );
+    let raw = generator
+        .generate_streaming(
+            &system_prompt,
+            &user_prompt,
+            &GenerateOptions::greedy(
+                12usize
+                    .saturating_add(utterances.len().saturating_mul(4))
+                    .clamp(MIN_OUTPUT_TOKENS, MAX_OUTPUT_TOKENS),
+            ),
+            Language::ChineseSimplified,
+            cancel,
+            &mut |_| Ok(()),
+        )
+        .await?;
+    check_cancelled(cancel)?;
+    trace_semantic_output("exclusion", &raw);
+    Ok(parse_semantic_regions(&raw, utterances))
+}
+
+fn trace_semantic_output(stage: &str, output: &str) {
+    if std::env::var_os("HSKIFY_TRACE_REJECTED_OCR").is_some_and(|value| value == "1") {
+        eprintln!("hskify-semantic-{stage}-output={output:?}");
+    }
+}
+
+async fn verify_page_furniture_with<G>(
+    generator: &G,
+    source_english: &str,
+    has_detector_core: bool,
+    near_page_edge: bool,
+    page_context: &[HskSourceUtterance],
+    cancel: &AtomicBool,
+) -> Result<bool>
+where
+    G: Generator + ?Sized,
+{
+    check_cancelled(cancel)?;
+    if source_english.trim().is_empty() {
+        bail!("page-furniture verification requires non-empty OCR text");
+    }
+    let system_prompt = "Adjudicate one disputed comic OCR region using its meaning, fallible layout \
+        evidence, and nearby OCR from the same page section. First decide whether the target itself is \
+        a complete in-story utterance, narration, caption, sign, letter, character title, role, or other \
+        world content; if so return exactly STORY. Otherwise decide whether the target is a title-like or \
+        branding noun phrase that identifies the work, series, chapter, publisher, site, scan staff, \
+        advertisement, or navigation; if so return exactly FURNITURE. Do not require the work or brand \
+        to be known, and tolerate merged words, misspellings, duplicated title words, or possessive title \
+        phrases from OCR. A work/series logo or chapter card remains FURNITURE when a detector encloses \
+        its decorative contour or its words resemble a narrative title. Return exactly STORY for any \
+        remaining uncertain case. Detector enclosure and page-edge position are fallible independent \
+        evidence, not decisive rules. Classify the target's own semantic function; \
+        never inherit the category of nearby lines. Dialogue peers support STORY only when the target \
+        itself continues that dialogue or narration. An unrelated work/series title or logo remains \
+        FURNITURE when story dialogue appears elsewhere on the same page. A cluster of credits, watermarks, \
+        logos, or OCR-corrupted staff labels also supports FURNITURE. Infer semantic function despite \
+        reasonable OCR corruption or duplicated tokens; do not classify from capitalization, styling, \
+        or shortness.";
+    let mut user_prompt = format!(
+        "Inside detector bubble-like component: {}\nNear page edge: {}\nTarget OCR source: {}\nNearby OCR sources:",
+        if has_detector_core { "yes" } else { "no" },
+        if near_page_edge { "yes" } else { "no" },
+        compact_field(source_english)
+    );
+    let mut peer_count = 0;
+    for peer in page_context
+        .iter()
+        .filter(|peer| !peer.source_english.eq_ignore_ascii_case(source_english))
+        .take(MAX_HSK_TRANSLATION_BATCH.saturating_sub(1))
+    {
+        use std::fmt::Write as _;
+        write!(
+            &mut user_prompt,
+            "\n- {}",
+            compact_field(&peer.source_english)
+        )
+        .expect("writing to String cannot fail");
+        peer_count += 1;
+    }
+    if peer_count == 0 {
+        user_prompt.push_str("\n- none");
+    }
+    let raw = generator
+        .generate_streaming(
+            system_prompt,
+            &user_prompt,
+            &GenerateOptions::greedy(12),
+            Language::ChineseSimplified,
+            cancel,
+            &mut |_| Ok(()),
+        )
+        .await?;
+    check_cancelled(cancel)?;
+    trace_semantic_output("furniture-verifier", &raw);
+    Ok(raw.trim().eq_ignore_ascii_case("FURNITURE"))
+}
+
+fn parse_semantic_regions(
+    output: &str,
+    utterances: &[HskSourceUtterance],
+) -> Vec<(String, HskTranslationDisposition)> {
+    let mut decisions = vec![None::<HskTranslationDisposition>; utterances.len()];
+    for raw_line in output.lines().filter(|line| !line.trim().is_empty()) {
+        let digit_count = raw_line
+            .as_bytes()
+            .iter()
+            .take_while(|byte| byte.is_ascii_digit())
+            .count();
+        if digit_count == 0 {
+            continue;
+        }
+        let Ok(position) = raw_line[..digit_count].parse::<usize>() else {
+            continue;
+        };
+        if position == 0 || position > utterances.len() || decisions[position - 1].is_some() {
+            continue;
+        }
+        let Some(payload) = raw_line[digit_count..]
+            .strip_prefix('\t')
+            .or_else(|| raw_line[digit_count..].strip_prefix(' '))
+            .map(str::trim)
+        else {
+            continue;
+        };
+        decisions[position - 1] = match payload.to_ascii_uppercase().as_str() {
+            "SFX" => Some(HskTranslationDisposition::ExcludeSoundEffect),
+            "FURNITURE" => Some(HskTranslationDisposition::ExcludeNonStory),
+            "STORY" => Some(HskTranslationDisposition::Translate),
+            _ => None,
+        };
+    }
+    decisions
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, decision)| match decision {
+            Some(
+                disposition @ (HskTranslationDisposition::ExcludeSoundEffect
+                | HskTranslationDisposition::ExcludeNonStory),
+            ) => Some((utterances[index].id.clone(), disposition)),
+            Some(HskTranslationDisposition::Translate) | None => None,
+        })
+        .collect()
+}
+
 impl Generator for Model {
     async fn token_count(&self, text: &str) -> Result<usize> {
         let state = self.state.read().await;
         match &*state {
             State::ReadyLocal(llm) if llm.id() == HSK_TRANSLATION_MODEL => llm.token_count(text),
+            State::ReadyLocal(llm) => bail!(
+                "direct HSK translation requires local model `{}`, but `{}` is loaded",
+                HSK_TRANSLATION_MODEL,
+                llm.id()
+            ),
+            State::ReadyProvider { .. } => {
+                bail!("direct HSK translation is local-only; remote providers are disabled")
+            }
+            State::Loading { .. } => bail!("direct HSK translation model is still loading"),
+            State::Failed { error, .. } => {
+                bail!("direct HSK translation model failed to load: {error}")
+            }
+            State::Empty => {
+                bail!("direct HSK translation model `{HSK_TRANSLATION_MODEL}` is not loaded")
+            }
+        }
+    }
+
+    async fn constrained_completion_capacity(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+        target_language: Language,
+    ) -> Result<usize> {
+        let state = self.state.read().await;
+        match &*state {
+            State::ReadyLocal(llm) if llm.id() == HSK_TRANSLATION_MODEL => {
+                llm.constrained_completion_capacity(user_prompt, target_language, system_prompt)
+            }
             State::ReadyLocal(llm) => bail!(
                 "direct HSK translation requires local model `{}`, but `{}` is loaded",
                 HSK_TRANSLATION_MODEL,
@@ -433,17 +854,114 @@ where
         return Ok(HskTranslationBatchResult { items: Vec::new() });
     }
 
-    let mut bounded_request = request.clone();
-    bounded_request.preceding_utterances =
-        bounded_context(generator, &request.preceding_utterances).await?;
+    let mut remaining = request.utterances.as_slice();
+    let mut rolling_context = request.preceding_utterances.clone();
+    let mut items = Vec::with_capacity(request.utterances.len());
+    while !remaining.is_empty() {
+        check_cancelled(cancel)?;
+        let (bounded_request, options) =
+            plan_translation_subbatch(generator, request, remaining, &rolling_context).await?;
+        let consumed = bounded_request.utterances.len();
+        let result = translate_prepared_request_streaming(
+            generator,
+            &bounded_request,
+            options,
+            cancel,
+            on_item,
+        )
+        .await?;
+        for outcome in &result.items {
+            if !outcome.is_valid() {
+                continue;
+            }
+            let Some(source) = bounded_request
+                .utterances
+                .iter()
+                .find(|utterance| utterance.id == outcome.id)
+            else {
+                continue;
+            };
+            rolling_context.push(HskPrecedingUtterance {
+                source_english: source.source_english.clone(),
+                chinese: outcome.text.clone().expect("valid outcome has text"),
+            });
+        }
+        if rolling_context.len() > MAX_HSK_PRECEDING_UTTERANCES {
+            rolling_context.drain(..rolling_context.len() - MAX_HSK_PRECEDING_UTTERANCES);
+        }
+        items.extend(result.items);
+        remaining = &remaining[consumed..];
+    }
+    Ok(HskTranslationBatchResult { items })
+}
+
+async fn plan_translation_subbatch<G>(
+    generator: &G,
+    request: &HskTranslationBatchRequest,
+    remaining: &[HskSourceUtterance],
+    rolling_context: &[HskPrecedingUtterance],
+) -> Result<(HskTranslationBatchRequest, GenerateOptions)>
+where
+    G: Generator + ?Sized,
+{
+    for count in (1..=remaining.len().min(MAX_HSK_TRANSLATION_BATCH)).rev() {
+        let mut candidate = request.clone();
+        candidate.utterances = remaining[..count].to_vec();
+        candidate.preceding_utterances = bounded_context(generator, rolling_context).await?;
+        loop {
+            let prompt = build_translation_prompt(&candidate);
+            let system_prompt = translation_system_prompt(
+                candidate.requested_level,
+                candidate.utterances.len(),
+                candidate.name_handling,
+                candidate.translate_sound_effects,
+            );
+            let desired_output_tokens = output_token_budget(
+                candidate
+                    .utterances
+                    .iter()
+                    .map(|utterance| utterance.source_english.as_str()),
+                candidate.utterances.len(),
+            );
+            let completion_capacity = generator
+                .constrained_completion_capacity(
+                    &system_prompt,
+                    &prompt,
+                    Language::ChineseSimplified,
+                )
+                .await?;
+            if completion_capacity >= desired_output_tokens {
+                return Ok((candidate, GenerateOptions::greedy(desired_output_tokens)));
+            }
+            if !candidate.preceding_utterances.is_empty() {
+                candidate.preceding_utterances.remove(0);
+                continue;
+            }
+            if count == 1 && completion_capacity >= MIN_OUTPUT_TOKENS {
+                return Ok((
+                    candidate,
+                    GenerateOptions::greedy(completion_capacity.min(desired_output_tokens)),
+                ));
+            }
+            break;
+        }
+    }
+    bail!(
+        "one OCR utterance cannot fit the resident translation context even after removing preceding context"
+    )
+}
+
+async fn translate_prepared_request_streaming<G>(
+    generator: &G,
+    bounded_request: &HskTranslationBatchRequest,
+    options: GenerateOptions,
+    cancel: &AtomicBool,
+    on_item: &mut dyn FnMut(&HskTranslationOutcome) -> Result<()>,
+) -> Result<HskTranslationBatchResult>
+where
+    G: Generator + ?Sized,
+{
     let prompt = build_translation_prompt(&bounded_request);
-    let options = GenerateOptions::greedy(output_token_budget(
-        bounded_request
-            .utterances
-            .iter()
-            .map(|utterance| utterance.source_english.as_str()),
-        bounded_request.utterances.len(),
-    ));
     let expected = bounded_request
         .utterances
         .iter()
@@ -466,6 +984,7 @@ where
                 &expected,
                 &bounded_request.protected_names,
                 bounded_request.name_handling,
+                bounded_request.translate_sound_effects,
             ) && streamed_ids.insert(outcome.id.clone())
             {
                 on_item(&outcome)?;
@@ -479,6 +998,7 @@ where
                 bounded_request.requested_level,
                 bounded_request.utterances.len(),
                 bounded_request.name_handling,
+                bounded_request.translate_sound_effects,
             ),
             &prompt,
             &options,
@@ -494,6 +1014,7 @@ where
         &expected,
         &bounded_request.protected_names,
         bounded_request.name_handling,
+        bounded_request.translate_sound_effects,
     );
     for outcome in &result.items {
         if streamed_ids.insert(outcome.id.clone()) {
@@ -527,6 +1048,7 @@ where
             &repair_system_prompt(
                 bounded_request.requested_level,
                 bounded_request.name_handling,
+                bounded_request.translate_sound_effects,
             ),
             &prompt,
             &options,
@@ -545,6 +1067,7 @@ where
         },
         &bounded_request.protected_names,
         bounded_request.name_handling,
+        bounded_request.translate_sound_effects,
     ))
 }
 
@@ -579,12 +1102,21 @@ fn render_context_for_budget(context: &[HskPrecedingUtterance]) -> String {
     context_budget_text(&context)
 }
 
-fn translation_system_prompt(level: u8, count: usize, name_handling: HskNameHandling) -> String {
-    primary_system_prompt_with_name_style(level, count, name_handling.into())
+fn translation_system_prompt(
+    level: u8,
+    count: usize,
+    name_handling: HskNameHandling,
+    translate_sound_effects: bool,
+) -> String {
+    primary_system_prompt_with_policy(level, count, name_handling.into(), translate_sound_effects)
 }
 
-fn repair_system_prompt(level: u8, name_handling: HskNameHandling) -> String {
-    repair_system_prompt_with_name_style(level, name_handling.into())
+fn repair_system_prompt(
+    level: u8,
+    name_handling: HskNameHandling,
+    translate_sound_effects: bool,
+) -> String {
+    repair_system_prompt_with_policy(level, name_handling.into(), translate_sound_effects)
 }
 
 fn build_translation_prompt(request: &HskTranslationBatchRequest) -> String {
@@ -609,7 +1141,7 @@ fn build_translation_prompt(request: &HskTranslationBatchRequest) -> String {
         .iter()
         .map(|utterance| utterance.source_english.as_str())
         .collect::<Vec<_>>();
-    primary_user_prompt(&context, &names, &sources)
+    primary_user_prompt_with_name_style(&context, &names, &sources, request.name_handling.into())
 }
 
 fn build_repair_prompt(request: &HskTranslationRepairRequest) -> String {
@@ -630,11 +1162,12 @@ fn build_repair_prompt(request: &HskTranslationRepairRequest) -> String {
             chinese: &name.chinese,
         })
         .collect::<Vec<_>>();
-    repair_user_prompt(
+    repair_user_prompt_with_name_style(
         &utterance.source_english,
         utterance.rejected_chinese.as_deref(),
         &problems,
         &names,
+        request.name_handling.into(),
     )
 }
 
@@ -767,6 +1300,7 @@ struct ExpectedUtterance<'a> {
 enum ParsedLine {
     Candidate { text: String },
     ExcludeNonStory,
+    ExcludeSoundEffect,
     Malformed,
 }
 
@@ -781,6 +1315,7 @@ fn parse_numbered_output(
         expected,
         protected_names,
         HskNameHandling::Chinese,
+        true,
     )
 }
 
@@ -789,6 +1324,7 @@ fn parse_numbered_output_with_name_handling(
     expected: &[ExpectedUtterance<'_>],
     protected_names: &[HskProtectedName],
     name_handling: HskNameHandling,
+    translate_sound_effects: bool,
 ) -> HskTranslationBatchResult {
     let mut slots = (0..expected.len())
         .map(|_| Vec::<ParsedLine>::new())
@@ -810,7 +1346,13 @@ fn parse_numbered_output_with_name_handling(
         .iter()
         .zip(slots)
         .map(|(expected, lines)| {
-            outcome_from_lines(expected, lines, protected_names, name_handling)
+            outcome_from_lines(
+                expected,
+                lines,
+                protected_names,
+                name_handling,
+                translate_sound_effects,
+            )
         })
         .collect();
     HskTranslationBatchResult { items }
@@ -821,6 +1363,7 @@ fn parse_streamed_line(
     expected: &[ExpectedUtterance<'_>],
     protected_names: &[HskProtectedName],
     name_handling: HskNameHandling,
+    translate_sound_effects: bool,
 ) -> Option<HskTranslationOutcome> {
     let (position, parsed) = parse_output_line(line, expected.len())?;
     if is_source_echo(&parsed, expected[position - 1].source_english) {
@@ -831,6 +1374,7 @@ fn parse_streamed_line(
         vec![parsed],
         protected_names,
         name_handling,
+        translate_sound_effects,
     ))
 }
 
@@ -839,13 +1383,20 @@ fn parse_repair_output_with_name_handling(
     expected: &ExpectedUtterance<'_>,
     protected_names: &[HskProtectedName],
     name_handling: HskNameHandling,
+    translate_sound_effects: bool,
 ) -> HskTranslationOutcome {
     let mut lines = output
         .split('\n')
         .map(|line| line.strip_suffix('\r').unwrap_or(line))
         .filter(|line| !line.trim().is_empty());
     let Some(line) = lines.next() else {
-        return outcome_from_lines(expected, Vec::new(), protected_names, name_handling);
+        return outcome_from_lines(
+            expected,
+            Vec::new(),
+            protected_names,
+            name_handling,
+            translate_sound_effects,
+        );
     };
     if lines.next().is_some() || line.contains('\t') {
         return outcome_from_lines(
@@ -853,6 +1404,7 @@ fn parse_repair_output_with_name_handling(
             vec![ParsedLine::Malformed],
             protected_names,
             name_handling,
+            translate_sound_effects,
         );
     }
     if compact_field(line) == compact_field(expected.source_english) {
@@ -870,6 +1422,16 @@ fn parse_repair_output_with_name_handling(
             vec![ParsedLine::Malformed],
             protected_names,
             name_handling,
+            translate_sound_effects,
+        );
+    }
+    if line.trim().eq_ignore_ascii_case(SOUND_EFFECT_MARKER) {
+        return outcome_from_lines(
+            expected,
+            vec![ParsedLine::ExcludeSoundEffect],
+            protected_names,
+            name_handling,
+            translate_sound_effects,
         );
     }
     let mut outcome = outcome_from_lines(
@@ -879,6 +1441,7 @@ fn parse_repair_output_with_name_handling(
         }],
         protected_names,
         name_handling,
+        translate_sound_effects,
     );
     if let Some(text) = outcome.text.as_deref() {
         let markup_issues = outcome
@@ -909,6 +1472,7 @@ fn parse_repair_output(
         expected,
         protected_names,
         HskNameHandling::Chinese,
+        true,
     )
 }
 
@@ -925,6 +1489,7 @@ fn outcome_from_lines(
     mut lines: Vec<ParsedLine>,
     protected_names: &[HskProtectedName],
     name_handling: HskNameHandling,
+    translate_sound_effects: bool,
 ) -> HskTranslationOutcome {
     if lines.is_empty() {
         return HskTranslationOutcome {
@@ -938,9 +1503,10 @@ fn outcome_from_lines(
     if lines.len() > 1 {
         let text = lines.drain(..).find_map(|line| match line {
             ParsedLine::Candidate { text, .. } if !text.trim().is_empty() => Some(text),
-            ParsedLine::Candidate { .. } | ParsedLine::ExcludeNonStory | ParsedLine::Malformed => {
-                None
-            }
+            ParsedLine::Candidate { .. }
+            | ParsedLine::ExcludeNonStory
+            | ParsedLine::ExcludeSoundEffect
+            | ParsedLine::Malformed => None,
         });
         return HskTranslationOutcome {
             id: expected.id.to_owned(),
@@ -957,6 +1523,24 @@ fn outcome_from_lines(
             return HskTranslationOutcome {
                 id: expected.id.to_owned(),
                 disposition: HskTranslationDisposition::ExcludeNonStory,
+                text: None,
+                declared_names: Vec::new(),
+                issues: Vec::new(),
+            };
+        }
+        ParsedLine::ExcludeSoundEffect => {
+            if translate_sound_effects {
+                return HskTranslationOutcome {
+                    id: expected.id.to_owned(),
+                    disposition: HskTranslationDisposition::Translate,
+                    text: None,
+                    declared_names: Vec::new(),
+                    issues: vec![HskTranslationIssue::MalformedLine],
+                };
+            }
+            return HskTranslationOutcome {
+                id: expected.id.to_owned(),
+                disposition: HskTranslationDisposition::ExcludeSoundEffect,
                 text: None,
                 declared_names: Vec::new(),
                 issues: Vec::new(),
@@ -983,8 +1567,22 @@ fn outcome_from_lines(
         };
     }
 
-    let (mut text, declared_names, mut markup_issues) =
-        validate_and_strip_name_markup(expected.source_english, &text, name_handling);
+    if name_handling == HskNameHandling::KeepOriginal {
+        let names = protected_names
+            .iter()
+            .map(|name| DirectHskName {
+                source_english: &name.source_english,
+                chinese: &name.chinese,
+            })
+            .collect::<Vec<_>>();
+        text = restore_approved_name_placeholders(expected.source_english, &text, &names);
+    }
+    let (mut text, declared_names, mut markup_issues) = validate_and_strip_name_markup(
+        expected.source_english,
+        &text,
+        name_handling,
+        protected_names,
+    );
     normalize_full_width_digits(&mut text);
     normalize_question_punctuation(expected.source_english, &mut text);
     let mut issues = preservation_issues(expected.source_english, &text, protected_names, false);
@@ -1034,6 +1632,9 @@ fn parse_output_line(line: &str, expected_count: usize) -> Option<(usize, Parsed
     if text.trim().eq_ignore_ascii_case(NON_STORY_MARKER) {
         return Some((position, ParsedLine::ExcludeNonStory));
     }
+    if text.trim().eq_ignore_ascii_case(SOUND_EFFECT_MARKER) {
+        return Some((position, ParsedLine::ExcludeSoundEffect));
+    }
     Some((
         position,
         ParsedLine::Candidate {
@@ -1046,6 +1647,7 @@ fn validate_and_strip_name_markup(
     source_english: &str,
     translation: &str,
     name_handling: HskNameHandling,
+    protected_names: &[HskProtectedName],
 ) -> (String, Vec<String>, Vec<HskTranslationIssue>) {
     const OPEN: char = '⟦';
     const CLOSE: char = '⟧';
@@ -1102,13 +1704,39 @@ fn validate_and_strip_name_markup(
     if invalid_markup {
         issues.push(HskTranslationIssue::InvalidNameMarkup);
     }
-    if name_handling == HskNameHandling::KeepOriginal && unmarked_latin {
+    if name_handling == HskNameHandling::KeepOriginal
+        && unmarked_latin
+        && !all_latin_is_protected(&output, protected_names, &names)
+    {
         issues.push(HskTranslationIssue::UnmarkedLatinText);
     }
     if name_handling == HskNameHandling::Chinese {
         names.clear();
     }
     (output, names, issues)
+}
+
+fn all_latin_is_protected(
+    translation: &str,
+    protected_names: &[HskProtectedName],
+    declared_names: &[String],
+) -> bool {
+    let mut covered = vec![false; translation.len()];
+    for allowed in protected_names
+        .iter()
+        .map(|name| name.chinese.as_str())
+        .chain(declared_names.iter().map(String::as_str))
+        .filter(|name| !name.is_empty())
+    {
+        for (start, matched) in translation.match_indices(allowed) {
+            for byte in covered.iter_mut().take(start + matched.len()).skip(start) {
+                *byte = true;
+            }
+        }
+    }
+    translation.char_indices().all(|(index, character)| {
+        !character.is_ascii_alphabetic() || covered.get(index).copied().unwrap_or(false)
+    })
 }
 
 fn source_contains_exact_span(source: &str, name: &str) -> bool {
@@ -1120,6 +1748,25 @@ fn source_contains_exact_span(source: &str, name: &str) -> bool {
             end == source.len() || !source.as_bytes()[end].is_ascii_alphanumeric();
         starts_at_boundary && ends_at_boundary
     })
+}
+
+fn canonical_source_span<'a>(source: &'a str, candidate: &str) -> Option<&'a str> {
+    let candidate = candidate.trim();
+    if candidate.is_empty() {
+        return None;
+    }
+    source
+        .char_indices()
+        .filter(|(start, _)| {
+            *start == 0 || !source.as_bytes()[start.saturating_sub(1)].is_ascii_alphanumeric()
+        })
+        .find_map(|(start, _)| {
+            let end = start.checked_add(candidate.len())?;
+            let actual = source.get(start..end)?;
+            let ends_at_boundary =
+                end == source.len() || !source.as_bytes()[end].is_ascii_alphanumeric();
+            (ends_at_boundary && actual.eq_ignore_ascii_case(candidate)).then_some(actual)
+        })
 }
 
 fn preservation_issues(
@@ -1283,24 +1930,43 @@ fn ascii_numbers(text: &str) -> Vec<String> {
         if byte.is_ascii_digit() {
             start.get_or_insert(index);
         } else if let Some(number_start) = start.take() {
-            let touches_latin_ocr = number_start
-                .checked_sub(1)
-                .is_some_and(|before| bytes[before].is_ascii_alphabetic())
-                || byte.is_ascii_alphabetic();
-            if !touches_latin_ocr {
+            if ascii_number_is_semantic(bytes, number_start, index) {
                 numbers.push(text[number_start..index].to_owned());
             }
         }
     }
     if let Some(number_start) = start {
-        let touches_latin_ocr = number_start
-            .checked_sub(1)
-            .is_some_and(|before| bytes[before].is_ascii_alphabetic());
-        if !touches_latin_ocr {
+        if ascii_number_is_semantic(bytes, number_start, bytes.len()) {
             numbers.push(text[number_start..].to_owned());
         }
     }
     numbers
+}
+
+fn ascii_number_is_semantic(bytes: &[u8], start: usize, end: usize) -> bool {
+    let left_alpha = start
+        .checked_sub(1)
+        .is_some_and(|index| bytes[index].is_ascii_alphabetic());
+    let right_alpha = bytes
+        .get(end)
+        .is_some_and(|byte| byte.is_ascii_alphabetic());
+    if !left_alpha && !right_alpha {
+        return true;
+    }
+
+    let left_multiplier = start.checked_sub(1).is_some_and(|marker| {
+        matches!(bytes[marker], b'x' | b'X')
+            && marker
+                .checked_sub(1)
+                .is_none_or(|before| !bytes[before].is_ascii_alphanumeric())
+    });
+    let right_multiplier = bytes.get(end).is_some_and(|marker| {
+        matches!(marker, b'x' | b'X')
+            && bytes
+                .get(end + 1)
+                .is_none_or(|after| !after.is_ascii_alphanumeric())
+    });
+    left_multiplier || right_multiplier
 }
 
 fn has_question_intent(source_lower: &str) -> bool {
@@ -1410,6 +2076,67 @@ mod tests {
         calls: AtomicUsize,
     }
 
+    struct MaxTwoUtteranceGenerator {
+        inner: FakeGenerator,
+    }
+
+    impl MaxTwoUtteranceGenerator {
+        fn new(outputs: impl IntoIterator<Item = &'static str>) -> Self {
+            Self {
+                inner: FakeGenerator::new(outputs),
+            }
+        }
+    }
+
+    impl Generator for MaxTwoUtteranceGenerator {
+        async fn token_count(&self, text: &str) -> Result<usize> {
+            self.inner.token_count(text).await
+        }
+
+        async fn constrained_completion_capacity(
+            &self,
+            _system_prompt: &str,
+            user_prompt: &str,
+            _target_language: Language,
+        ) -> Result<usize> {
+            let numbered_lines = user_prompt
+                .lines()
+                .filter(|line| {
+                    line.split_once('\t')
+                        .is_some_and(|(position, _)| position.parse::<usize>().is_ok())
+                })
+                .count();
+            Ok(
+                if numbered_lines <= 2 && !user_prompt.contains("Previous translations") {
+                    usize::MAX
+                } else {
+                    0
+                },
+            )
+        }
+
+        async fn generate_streaming(
+            &self,
+            system_prompt: &str,
+            user_prompt: &str,
+            options: &GenerateOptions,
+            target_language: Language,
+            cancel: &AtomicBool,
+            on_piece: &mut dyn FnMut(&str) -> Result<()>,
+        ) -> Result<String> {
+            self.inner
+                .generate_streaming(
+                    system_prompt,
+                    user_prompt,
+                    options,
+                    target_language,
+                    cancel,
+                    on_piece,
+                )
+                .await
+        }
+    }
+
     impl FakeGenerator {
         fn new(outputs: impl IntoIterator<Item = &'static str>) -> Self {
             Self {
@@ -1426,6 +2153,15 @@ mod tests {
     impl Generator for FakeGenerator {
         async fn token_count(&self, text: &str) -> Result<usize> {
             Ok(text.chars().count())
+        }
+
+        async fn constrained_completion_capacity(
+            &self,
+            _system_prompt: &str,
+            _user_prompt: &str,
+            _target_language: Language,
+        ) -> Result<usize> {
+            Ok(usize::MAX)
         }
 
         async fn generate_streaming(
@@ -1467,6 +2203,7 @@ mod tests {
         let input = HskTranslationBatchRequest {
             requested_level: 3,
             name_handling: HskNameHandling::KeepOriginal,
+            translate_sound_effects: false,
             utterances: vec![source("dialogue", "I saw Tarin Voss yesterday.")],
             preceding_utterances: Vec::new(),
             protected_names: Vec::new(),
@@ -1494,6 +2231,7 @@ mod tests {
         let input = HskTranslationBatchRequest {
             requested_level: 3,
             name_handling: HskNameHandling::KeepOriginal,
+            translate_sound_effects: false,
             utterances: vec![source("dialogue", "THE SENIOR ADMINISTRATOR ARRIVED.")],
             preceding_utterances: Vec::new(),
             protected_names: Vec::new(),
@@ -1506,6 +2244,132 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn semantic_name_detection_generalizes_to_unseen_roles_and_entities() -> Result<()> {
+        let generator = FakeGenerator::new(["1\tSable\n2\tIlyan"]);
+        let utterances = vec![
+            source("a", "The guild quartermaster Sable opened the gate."),
+            source("b", "Our regent asked cartographer Ilyan to return."),
+        ];
+
+        let names =
+            detect_proper_names_with(&generator, &utterances, &AtomicBool::new(false)).await?;
+
+        assert_eq!(
+            names,
+            vec![
+                HskProtectedName {
+                    source_english: "Sable".to_owned(),
+                    chinese: "Sable".to_owned(),
+                },
+                HskProtectedName {
+                    source_english: "Ilyan".to_owned(),
+                    chinese: "Ilyan".to_owned(),
+                },
+            ]
+        );
+        let prompt = generator.system_prompts.lock().unwrap()[0].to_ascii_lowercase();
+        assert!(prompt.contains("common relational terms"));
+        assert!(prompt.contains("roles, occupations, ranks, titles"));
+        assert!(!prompt.contains("wife"));
+        assert!(!prompt.contains("academy headmaster"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn semantic_name_detection_discards_hallucinations_without_losing_valid_siblings()
+    -> Result<()> {
+        let generator = FakeGenerator::new(["1\tInvented | neris\n2\t-\nmalformed"]);
+        let utterances = vec![
+            source("a", "The courier Neris arrived."),
+            source("b", "The headmaster opened the gate."),
+        ];
+
+        let names =
+            detect_proper_names_with(&generator, &utterances, &AtomicBool::new(false)).await?;
+
+        assert_eq!(
+            names,
+            [HskProtectedName {
+                source_english: "Neris".to_owned(),
+                chinese: "Neris".to_owned(),
+            }]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn semantic_region_classification_is_model_driven_and_fail_soft() -> Result<()> {
+        let generator = FakeGenerator::new(["1\tSFX\n2\tSTORY\n3\tFURNITURE\n4\tUNKNOWN\n99\tSFX"]);
+        let utterances = vec![
+            source("a", "THUD"),
+            source("b", "I heard a thud outside."),
+            source("c", "EXAMPLESCANS.COM"),
+            source("d", "Chapter 3"),
+        ];
+
+        let classified =
+            classify_semantic_regions_with(&generator, &utterances, &AtomicBool::new(false))
+                .await?;
+
+        assert_eq!(
+            classified,
+            [
+                (
+                    "a".to_owned(),
+                    HskTranslationDisposition::ExcludeSoundEffect
+                ),
+                ("c".to_owned(), HskTranslationDisposition::ExcludeNonStory),
+            ]
+        );
+        let prompt = generator.system_prompts.lock().unwrap()[0].to_ascii_lowercase();
+        assert!(prompt.contains("semantic function"));
+        assert!(prompt.contains("ordinary language"));
+        assert!(prompt.contains("publisher/site credit"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn furniture_verification_is_focused_and_fails_safe_to_story() -> Result<()> {
+        let furniture = FakeGenerator::new(["FURNITURE"]);
+        let story = FakeGenerator::new(["not sure"]);
+
+        assert!(
+            verify_page_furniture_with(
+                &furniture,
+                "Example Series Title",
+                true,
+                false,
+                &[source("peer", "ExampleScans.com")],
+                &AtomicBool::new(false)
+            )
+            .await?
+        );
+        assert!(
+            !verify_page_furniture_with(
+                &story,
+                "The captain entered.",
+                false,
+                true,
+                &[source("peer", "We have to leave now.")],
+                &AtomicBool::new(false)
+            )
+            .await?
+        );
+        let prompt = furniture.system_prompts.lock().unwrap()[0].to_ascii_lowercase();
+        assert!(prompt.contains("fallible independent evidence"));
+        assert!(prompt.contains("work/series logo"));
+        assert!(prompt.contains("complete in-story utterance"));
+        assert!(prompt.contains("duplicated title words"));
+        assert!(prompt.contains("never inherit the category of nearby lines"));
+        assert!(prompt.contains("uncertain case"));
+        assert!(!prompt.contains("example series title"));
+        let user_prompt = furniture.user_prompts.lock().unwrap()[0].to_ascii_lowercase();
+        assert!(user_prompt.contains("target ocr source"));
+        assert!(user_prompt.contains("examplescans.com"));
+        Ok(())
+    }
+
     #[test]
     fn name_markup_is_mechanical_exact_and_never_semantic_code() {
         let source = "Tarin Voss met the senior administrator.";
@@ -1513,6 +2377,7 @@ mod tests {
             source,
             "⟦Tarin Voss⟧见到了高级管理员。",
             HskNameHandling::KeepOriginal,
+            &[],
         );
         assert_eq!(text, "Tarin Voss见到了高级管理员。");
         assert_eq!(names, ["Tarin Voss"]);
@@ -1522,6 +2387,7 @@ mod tests {
             source,
             "我见到了⟦TARIN VOSS⟧。",
             HskNameHandling::KeepOriginal,
+            &[],
         );
         assert_eq!(altered, [HskTranslationIssue::InvalidNameMarkup]);
 
@@ -1529,8 +2395,26 @@ mod tests {
             source,
             "Tarin Voss见到了高级管理员。",
             HskNameHandling::KeepOriginal,
+            &[],
         );
         assert_eq!(unmarked, [HskTranslationIssue::UnmarkedLatinText]);
+    }
+
+    #[test]
+    fn approved_keep_original_names_do_not_require_fragile_model_markup() {
+        let protected = [HskProtectedName {
+            source_english: "Tarin Voss".to_owned(),
+            chinese: "Tarin Voss".to_owned(),
+        }];
+        let (text, _, issues) = validate_and_strip_name_markup(
+            "Tarin Voss met the administrator.",
+            "Tarin Voss见到了管理员。",
+            HskNameHandling::KeepOriginal,
+            &protected,
+        );
+
+        assert_eq!(text, "Tarin Voss见到了管理员。");
+        assert!(issues.is_empty());
     }
 
     fn source(id: &str, source_english: &str) -> HskSourceUtterance {
@@ -1545,6 +2429,7 @@ mod tests {
         HskTranslationBatchRequest {
             requested_level: 2,
             name_handling: HskNameHandling::Chinese,
+            translate_sound_effects: true,
             utterances: vec![
                 source("private-bubble-a", "Alice does not have 2 tickets."),
                 source("private-bubble-b", "Are you ready?"),
@@ -1613,6 +2498,41 @@ mod tests {
         assert!(generator.system_prompts.lock().unwrap()[0].contains("HSK 2.0 level 2"));
         assert!(generator.system_prompts.lock().unwrap()[0].contains("exactly 3 non-empty lines"));
         assert!(generator.system_prompts.lock().unwrap()[0].contains("start with `1\t`"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn oversized_translation_batches_are_partitioned_before_generation() -> Result<()> {
+        let generator = MaxTwoUtteranceGenerator::new([
+            concat!("1\t爱丽丝没有2张票。\n", "2\t你准备好了吗？"),
+            "1\t我们走吧！",
+        ]);
+
+        let result = translate_with(&generator, &request(), &AtomicBool::new(false)).await?;
+
+        assert!(result.items.iter().all(HskTranslationOutcome::is_valid));
+        assert_eq!(generator.inner.calls.load(Ordering::Relaxed), 2);
+        let prompts = generator.inner.user_prompts.lock().unwrap();
+        assert_eq!(
+            prompts
+                .iter()
+                .map(|prompt| {
+                    prompt
+                        .lines()
+                        .filter(|line| {
+                            line.split_once('\t')
+                                .is_some_and(|(position, _)| position.parse::<usize>().is_ok())
+                        })
+                        .count()
+                })
+                .collect::<Vec<_>>(),
+            [2, 1]
+        );
+        assert!(
+            prompts
+                .iter()
+                .all(|prompt| !prompt.contains("Previous translations"))
+        );
         Ok(())
     }
 
@@ -1755,6 +2675,72 @@ mod tests {
     }
 
     #[test]
+    fn sound_effect_disposition_is_controlled_by_the_user_policy() {
+        let expected = [ExpectedUtterance {
+            id: "effect",
+            source_english: "KLANG!",
+        }];
+        let excluded = parse_numbered_output_with_name_handling(
+            "1\t[SFX]",
+            &expected,
+            &[],
+            HskNameHandling::Chinese,
+            false,
+        );
+        assert_eq!(
+            excluded.items[0].disposition,
+            HskTranslationDisposition::ExcludeSoundEffect
+        );
+        assert!(excluded.items[0].issues.is_empty());
+
+        let translated = parse_numbered_output_with_name_handling(
+            "1\t[SFX]",
+            &expected,
+            &[],
+            HskNameHandling::Chinese,
+            true,
+        );
+        assert_eq!(
+            translated.items[0].disposition,
+            HskTranslationDisposition::Translate
+        );
+        assert_eq!(
+            translated.items[0].issues,
+            vec![HskTranslationIssue::MalformedLine]
+        );
+    }
+
+    #[test]
+    fn repair_can_confirm_a_sound_effect_exclusion_only_when_disabled() {
+        let expected = ExpectedUtterance {
+            id: "effect",
+            source_english: "THUD!",
+        };
+        let excluded = parse_repair_output_with_name_handling(
+            SOUND_EFFECT_MARKER,
+            &expected,
+            &[],
+            HskNameHandling::Chinese,
+            false,
+        );
+        assert_eq!(
+            excluded.disposition,
+            HskTranslationDisposition::ExcludeSoundEffect
+        );
+        assert!(excluded.issues.is_empty());
+
+        let invalid = parse_repair_output_with_name_handling(
+            SOUND_EFFECT_MARKER,
+            &expected,
+            &[],
+            HskNameHandling::Chinese,
+            true,
+        );
+        assert_eq!(invalid.disposition, HskTranslationDisposition::Translate);
+        assert_eq!(invalid.issues, vec![HskTranslationIssue::MalformedLine]);
+    }
+
+    #[test]
     fn repair_parser_rejects_non_story_disposition() {
         let expected = ExpectedUtterance {
             id: "story-region",
@@ -1793,6 +2779,7 @@ mod tests {
         let repair = HskTranslationRepairRequest {
             requested_level: input.requested_level,
             name_handling: input.name_handling,
+            translate_sound_effects: input.translate_sound_effects,
             utterance: HskRepairUtterance {
                 id: input.utterances[0].id.clone(),
                 kind: input.utterances[0].kind,
@@ -1957,6 +2944,16 @@ mod tests {
     }
 
     #[test]
+    fn deterministic_validator_preserves_multiplier_notation_without_treating_ocr_noise_as_numbers()
+    {
+        assert_eq!(
+            ascii_numbers("THIRTY OF THEM!!! X3; another 3x, but IDENTIT4 and M4"),
+            vec!["3", "3"]
+        );
+        assert!(preservation_issues("THIRTY OF THEM!!! X3", "三十个！×3", &[], false,).is_empty());
+    }
+
+    #[test]
     fn deterministic_validator_rejects_cross_item_expansion_of_short_fragments() {
         let issues = preservation_issues(
             "\"ASSASSINATION REQUESTS.\"",
@@ -2050,26 +3047,23 @@ mod tests {
 
     #[test]
     fn name_handling_changes_primary_and_repair_instructions() {
-        let original = translation_system_prompt(3, 1, HskNameHandling::KeepOriginal);
-        let chinese = translation_system_prompt(3, 1, HskNameHandling::Chinese);
-        let repair = repair_system_prompt(3, HskNameHandling::KeepOriginal);
+        let original = translation_system_prompt(3, 1, HskNameHandling::KeepOriginal, true);
+        let chinese = translation_system_prompt(3, 1, HskNameHandling::Chinese, true);
+        let repair = repair_system_prompt(3, HskNameHandling::KeepOriginal, true);
 
-        assert!(original.contains("exactly as written in the English source"));
+        assert!(original.contains("complete approved name set"));
         assert!(repair.contains("Decide proper names from the complete source meaning"));
-        assert!(repair.contains("⟦exact source spelling⟧"));
+        assert!(repair.contains("opaque approved-name placeholder"));
         assert!(chinese.contains("phonetic Chinese transliteration"));
     }
 
     #[test]
-    fn cache_metadata_helpers_are_stable_and_layered() {
-        assert_eq!(
-            direct_hsk_prompt_hash(),
-            "sha256:55190968a85b2619aca2d48087d9a52e22c48a881aee959aa69cbe25904dc558"
-        );
-        assert_eq!(
-            direct_hsk_validator_hash(),
-            "sha256:1c23256323cef94f965c4d1c093392a3515f61249eba5d79cd73aa6689a4a1b1"
-        );
+    fn cache_metadata_helpers_expose_protocol_owned_identities() {
+        assert_eq!(direct_hsk_prompt_hash(), HSK_TRANSLATION_PROMPT_HASH);
+        assert_eq!(direct_hsk_validator_hash(), HSK_TRANSLATION_VALIDATOR_HASH);
+        assert!(direct_hsk_prompt_hash().starts_with("sha256:"));
+        assert!(direct_hsk_validator_hash().starts_with("sha256:"));
+        assert_ne!(direct_hsk_prompt_hash(), direct_hsk_validator_hash());
         assert_eq!(HSK_TRANSLATION_MODEL, ModelId::Qwen3_5_4b);
         assert_eq!(
             HSK_TRANSLATION_MODEL_REVISION,
@@ -2120,6 +3114,7 @@ mod tests {
         let repair = HskTranslationRepairRequest {
             requested_level: 2,
             name_handling: HskNameHandling::Chinese,
+            translate_sound_effects: true,
             utterance: HskRepairUtterance {
                 id: "id".to_owned(),
                 kind: HskUtteranceKind::Dialogue,

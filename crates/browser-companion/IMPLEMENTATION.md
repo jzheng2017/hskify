@@ -273,10 +273,12 @@ image remains untouched. Standalone numbers remain exact-preservation
 requirements; digits embedded in Latin OCR tokens do not.
 
 `hsk-control` validates each returned story item. Items that already pass are
-accepted. Rejected items alone may be sent once to the targeted repair call
-with their rejected Chinese and exact deterministic problems. The repair is
-bounded to one batch; it is not a second general translation pass and never
-restarts the page.
+accepted. Rejected items alone receive at most two prompt-changing targeted
+repair attempts with their rejected Chinese and exact deterministic problems.
+The repair never restarts the page. If one OCR region remains unsafe to
+publish, its original pixels remain untouched and the other regions still
+complete; deterministic per-region validation exhaustion is not promoted into
+a retry of the whole image.
 
 Pinyin is derived after the accepted/rejected final state by local
 longest-match lookup. A progressive region carries:

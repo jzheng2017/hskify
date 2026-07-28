@@ -502,7 +502,7 @@ function Build-CurrentExtensionPackage {
 
     Push-Location $extensionRoot
     try {
-        & $wxtCommand 'build' '-b' 'firefox'
+        & $wxtCommand 'build' '-b' 'firefox' | Out-Host
         if ($LASTEXITCODE -ne 0) {
             throw "Current Firefox extension build failed with exit code $LASTEXITCODE"
         }
@@ -2087,6 +2087,15 @@ $profileDirectory = Join-Path $OutputDirectory 'firefox-profile'
 $isolatedLocalAppData = Join-Path $OutputDirectory 'isolated-local-appdata'
 $stateDirectory = Join-Path $isolatedLocalAppData 'Hskify\browser-companion'
 $runtimeResourcesDirectory = $prerequisites.resourcesDirectory
+[IO.Directory]::CreateDirectory((Join-Path $isolatedLocalAppData 'Hskify')) | Out-Null
+$isolatedResourcesDirectory = Join-Path $isolatedLocalAppData 'Hskify\resources'
+if (Test-Path -LiteralPath $isolatedResourcesDirectory) {
+    throw "Isolated resource mount must not already exist: $isolatedResourcesDirectory"
+}
+New-Item `
+    -ItemType Junction `
+    -Path $isolatedResourcesDirectory `
+    -Target $runtimeResourcesDirectory | Out-Null
 [IO.Directory]::CreateDirectory($stateDirectory) | Out-Null
 if (@(Get-ChildItem -LiteralPath $stateDirectory -Force).Count -ne 0) {
     throw "Installed-cold isolated daemon state is not empty: $stateDirectory"
@@ -2206,6 +2215,7 @@ $environmentEvidence = [ordered]@{
         localAppData = $isolatedLocalAppData
         daemonState = $stateDirectory
         runtimeResourceRoot = $runtimeResourcesDirectory
+        isolatedResourceMount = $isolatedResourcesDirectory
         exactNativeHostRegistryPath = $prerequisites.nativeRegistryPath
         nativeRegistrationLifetime = 'measurement-process-only; previous exact-key value restored in finally'
         discoveryRecord = 'daemon-state.json'

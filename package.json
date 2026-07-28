@@ -10,6 +10,8 @@
     "dev:firefox": ".\\dev-firefox.cmd",
     "build:firefox": "bun run --filter @hskify/firefox build",
     "test:firefox": "bun run --filter @hskify/firefox test",
+    "test:real-reader:manifest": "node scripts/real-reader-corpus.mjs manifest",
+    "test:real-reader:smoke": "node scripts/run-real-reader-regression.mjs --selection smoke",
     "typecheck:firefox": "bun run --filter @hskify/firefox typecheck",
     "lint:ui": "bun run --filter ui lint",
     "test:ui": "bun run --filter ui test",

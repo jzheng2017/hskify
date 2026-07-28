@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import {
   ImageDiscovery,
+  discoverDeferredImages,
   discoverImages,
   evaluateImage,
   visibleFirst,
@@ -46,7 +47,11 @@ describe('conservative image discovery', () => {
   })
 
   it.each([
-    ['tiny intrinsic dimensions', loadedImage('https://reader.test/tiny.png', 64, 64), 'intrinsic-size'],
+    [
+      'tiny intrinsic dimensions',
+      loadedImage('https://reader.test/tiny.png', 64, 64),
+      'intrinsic-size',
+    ],
     ['avatar semantics', loadedImage(), 'page-control'],
     ['CSS rotation', loadedImage(), 'unsupported-transform'],
   ])('rejects %s', (_label, image, expectedReason) => {
@@ -76,12 +81,12 @@ describe('conservative image discovery', () => {
   })
 
   it('selects exactly 20 long query-string webtoon pages among 154 site images', () => {
-    const cover = loadedImage(
-      'https://reader.test/images/cover.png',
-      1200,
-      1800,
-      { width: 320, height: 480, right: 320, bottom: 480 },
-    )
+    const cover = loadedImage('https://reader.test/images/cover.png', 1200, 1800, {
+      width: 320,
+      height: 480,
+      right: 320,
+      bottom: 480,
+    })
     cover.className = 'manga-cover'
     document.body.append(cover)
 
@@ -104,12 +109,12 @@ describe('conservative image discovery', () => {
     }
 
     for (let index = 0; index < 133; index += 1) {
-      const avatar = loadedImage(
-        `https://cdn.test/avatar.webp?user=${index}`,
-        900,
-        900,
-        { width: 48, height: 48, right: 48, bottom: 48 },
-      )
+      const avatar = loadedImage(`https://cdn.test/avatar.webp?user=${index}`, 900, 900, {
+        width: 48,
+        height: 48,
+        right: 48,
+        bottom: 48,
+      })
       avatar.className = 'comment-avatar'
       document.body.append(avatar)
     }
@@ -148,6 +153,49 @@ describe('conservative image discovery', () => {
       { ...discoverCandidate(1), visible: true },
     ]
     expect(visibleFirst(candidates).map((candidate) => candidate.domIndex)).toEqual([1, 5, 2])
+  })
+
+  it('tracks large cross-site lazy reader placeholders until their real source loads', () => {
+    const webtoon = loadedImage(
+      'https://webtoons-static.pstatic.net/image/bg_transparency.png',
+      1,
+      1,
+      { width: 700, height: 1280, right: 700, bottom: 1280 },
+    )
+    webtoon.className = '_images'
+    webtoon.dataset.url = 'https://webtoon-phinf.pstatic.net/episode/page-001.jpg?type=q90'
+
+    const asura = loadedImage(
+      'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==',
+      1,
+      1,
+      { width: 800, height: 1200, right: 800, bottom: 1200 },
+    )
+    asura.className = 'chapter-image'
+    asura.dataset.src = 'https://cdn.asura.example/chapter/page-002.webp'
+
+    const thumbnail = loadedImage('https://reader.test/placeholder.png', 1, 1, {
+      width: 92,
+      height: 87,
+      right: 92,
+      bottom: 87,
+    })
+    thumbnail.className = 'episode-thumbnail'
+    thumbnail.dataset.url = 'https://reader.test/thumbnail.jpg'
+    document.body.append(webtoon, asura, thumbnail)
+
+    expect(discoverImages()).toEqual([])
+    expect(discoverDeferredImages()).toEqual([webtoon, asura])
+
+    const resolved = webtoon.dataset.url!
+    webtoon.src = resolved
+    Object.defineProperties(webtoon, {
+      currentSrc: { configurable: true, value: resolved },
+      naturalWidth: { configurable: true, value: 700 },
+      naturalHeight: { configurable: true, value: 1280 },
+    })
+    expect(discoverImages().map((candidate) => candidate.element)).toEqual([webtoon])
+    expect(discoverDeferredImages()).toEqual([asura])
   })
 
   it('does not treat a root-margin prefetch intersection as true viewport visibility', () => {
@@ -235,14 +283,10 @@ describe('conservative image discovery', () => {
     events.splice(0)
 
     document.body.prepend(second)
-    mutationCallback(
-      [{ type: 'childList' } as MutationRecord],
-      {} as MutationObserver,
-    )
+    mutationCallback([{ type: 'childList' } as MutationRecord], {} as MutationObserver)
 
     const updates = events.filter(
-      (event): event is Extract<DiscoveryEvent, { type: 'updated' }> =>
-        event.type === 'updated',
+      (event): event is Extract<DiscoveryEvent, { type: 'updated' }> => event.type === 'updated',
     )
     expect(
       updates.map((event) => ({
@@ -255,10 +299,7 @@ describe('conservative image discovery', () => {
       { element: second, previousDomIndex: 1, domIndex: 0, sameSource: true },
       { element: first, previousDomIndex: 0, domIndex: 1, sameSource: true },
     ])
-    expect(discovery.current().map((candidate) => candidate.element)).toEqual([
-      second,
-      first,
-    ])
+    expect(discovery.current().map((candidate) => candidate.element)).toEqual([second, first])
     discovery.stop()
   })
 
@@ -284,10 +325,7 @@ describe('conservative image discovery', () => {
     discovery.start()
     const image = loadedImage()
     document.body.append(image)
-    mutationCallback(
-      [{ type: 'childList' } as MutationRecord],
-      {} as MutationObserver,
-    )
+    mutationCallback([{ type: 'childList' } as MutationRecord], {} as MutationObserver)
     expect(events.at(-1)?.type).toBe('added')
 
     intersectionCallback(
@@ -315,10 +353,7 @@ describe('conservative image discovery', () => {
     expect(events.at(-1)?.type).toBe('updated')
 
     image.remove()
-    mutationCallback(
-      [{ type: 'childList' } as MutationRecord],
-      {} as MutationObserver,
-    )
+    mutationCallback([{ type: 'childList' } as MutationRecord], {} as MutationObserver)
     expect(events.at(-1)?.type).toBe('removed')
     discovery.stop()
   })

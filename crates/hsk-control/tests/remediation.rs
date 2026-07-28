@@ -35,7 +35,7 @@ fn disallowed_span_may_begin_and_end_inside_primary_tokens() {
 }
 
 #[test]
-fn overlapping_disallowed_spans_are_all_reported_deterministically() {
+fn overlapping_disallowed_spans_choose_one_deterministic_best_path() {
     let control = control(
         "overlapping-spans",
         ["甲", "乙", "丙", "丁"]
@@ -59,7 +59,7 @@ fn overlapping_disallowed_spans_are_all_reported_deterministically() {
                 violation.end_char
             ))
             .collect::<Vec<_>>(),
-        vec![("甲乙丙", 0, 3), ("乙丙", 1, 3), ("丙丁", 2, 4)]
+        vec![("甲乙丙", 0, 3)]
     );
 }
 

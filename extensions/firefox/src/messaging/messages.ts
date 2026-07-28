@@ -22,11 +22,6 @@ const MAX_RECOVERY_CANDIDATES = 512
 
 export type TranslationScope = 'visible' | 'all'
 
-export type PermissionPlan = {
-  visibleOrigins: string[]
-  allOrigins: string[]
-}
-
 export type PopupPrepareMessage = { type: 'popup:prepare' }
 export type PopupStartMessage = {
   type: 'popup:start'
@@ -39,7 +34,6 @@ export type PopupStateMessage = { type: 'popup:state' }
 export type SetupStatusMessage = { type: 'setup:status' }
 export type SetupStartMessage = { type: 'setup:start' }
 
-export type ContentPrepareMessage = { type: 'content:prepare' }
 export type ContentStartMessage = {
   type: 'content:start'
   scope: TranslationScope
@@ -163,7 +157,6 @@ export type BackgroundRequest =
   | FontMessage
 
 export type ContentRequest =
-  | ContentPrepareMessage
   | ContentStartMessage
   | ContentCancelMessage
   | ContentStateMessage
@@ -225,7 +218,7 @@ export type MessageResponse<T> =
   | { ok: false; error: MessageError }
 
 export type MessageResultMap = {
-  'popup:prepare': PermissionPlan
+  'popup:prepare': undefined
   'popup:start': PageState
   'popup:cancel': PageState
   'popup:state': PopupState
@@ -679,7 +672,6 @@ export function parseContentRequest(value: unknown): ContentRequest {
   const item = record(value)
   const type = string(item.type, '$.type', 64)
   switch (type) {
-    case 'content:prepare':
     case 'content:cancel':
     case 'content:state':
       exact(item, ['type'])
@@ -705,21 +697,6 @@ export function parseContentRequest(value: unknown): ContentRequest {
       }
     default:
       throw new RuntimeMessageValidationError(`$.type "${type}" is not supported.`)
-  }
-}
-
-export function parsePermissionPlan(value: unknown): PermissionPlan {
-  const item = record(value)
-  exact(item, ['visibleOrigins', 'allOrigins'])
-  const validatePattern = (pattern: string): string => {
-    if (!/^https?:\/\/(?:\[[0-9a-f:]+\]|[^/:*]+)\/\*$/iu.test(pattern)) {
-      throw new RuntimeMessageValidationError('Permission plans must contain exact, portless origins.')
-    }
-    return pattern
-  }
-  return {
-    visibleOrigins: stringArray(item.visibleOrigins, '$.visibleOrigins').map(validatePattern),
-    allOrigins: stringArray(item.allOrigins, '$.allOrigins').map(validatePattern),
   }
 }
 
@@ -797,7 +774,10 @@ function parseResult<T extends BackgroundRequest['type']>(
   let parsed: unknown
   switch (request.type) {
     case 'popup:prepare':
-      parsed = parsePermissionPlan(value)
+      if (value !== undefined) {
+        throw new RuntimeMessageValidationError('$ must be undefined.')
+      }
+      parsed = undefined
       break
     case 'popup:start':
     case 'popup:cancel':

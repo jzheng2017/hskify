@@ -72,3 +72,7 @@ site/
 
 # integration-tests shared runtime cache
 .cache/
+
+# Real reader regression images are copyrighted source material. Their
+# content-addressed manifest is tracked; local bytes are not redistributed.
+/local-corpus/

@@ -564,6 +564,7 @@ pub(crate) struct BrowserJobRequest {
     pub source_mime_type: String,
     pub natural_width: u32,
     pub natural_height: u32,
+    pub page_session_id: String,
     pub settings: BrowserJobSettings,
     pub preceding_context: Option<Vec<DialogueContext>>,
     pub proper_name_glossary: Option<Vec<ProperNameGlossaryEntry>>,
@@ -576,6 +577,7 @@ impl CreateJobRequest {
             source_mime_type: self.source_mime_type.clone(),
             natural_width: self.natural_width,
             natural_height: self.natural_height,
+            page_session_id: self.page_session_id.clone(),
             settings: self.settings.clone(),
             preceding_context: self.preceding_context.clone(),
             proper_name_glossary: self.proper_name_glossary.clone(),
@@ -974,6 +976,20 @@ impl ProgressiveRegion {
             require_polygon(&format!("{path}.bubblePolygon"), points)?;
         }
         self.patch.validate_at(&format!("{path}.patch"))?;
+        let (text_x0, text_y0, text_x1, text_y1) =
+            polygon_bounds(&self.text_polygon).expect("validated polygon is non-empty");
+        let patch_x0 = self.patch.rect.x;
+        let patch_y0 = self.patch.rect.y;
+        let patch_x1 = patch_x0 + self.patch.rect.width;
+        let patch_y1 = patch_y0 + self.patch.rect.height;
+        let overlap_width = text_x1.min(patch_x1) - text_x0.max(patch_x0);
+        let overlap_height = text_y1.min(patch_y1) - text_y0.max(patch_y0);
+        if overlap_width <= f32::EPSILON || overlap_height <= f32::EPSILON {
+            return Err(ContractError::at(
+                format!("{path}.patch.rect"),
+                "must overlap the source text polygon",
+            ));
+        }
         require_nonempty(&format!("{path}.sourceEnglish"), &self.source_english)?;
         require_nonempty(&format!("{path}.baseChinese"), &self.base_chinese)?;
         require_nonempty(&format!("{path}.displayedChinese"), &self.displayed_chinese)?;
@@ -983,6 +999,21 @@ impl ProgressiveRegion {
         self.layout.validate_at(&format!("{path}.layout"))?;
         self.hsk.validate_at(&format!("{path}.hsk"))
     }
+}
+
+fn polygon_bounds(points: &[Point]) -> Option<(f32, f32, f32, f32)> {
+    let first = points.first()?;
+    Some(points.iter().skip(1).fold(
+        (first.x, first.y, first.x, first.y),
+        |(x0, y0, x1, y1), point| {
+            (
+                x0.min(point.x),
+                y0.min(point.y),
+                x1.max(point.x),
+                y1.max(point.y),
+            )
+        },
+    ))
 }
 
 impl Validate for ProgressiveRegion {
@@ -1376,6 +1407,59 @@ impl Validate for ErrorResponse {
 mod tests {
     use super::*;
 
+    fn progressive_region(patch_rect: NormalizedRect) -> ProgressiveRegion {
+        let text_polygon = vec![
+            Point { x: 0.2, y: 0.3 },
+            Point { x: 0.4, y: 0.3 },
+            Point { x: 0.4, y: 0.4 },
+            Point { x: 0.2, y: 0.4 },
+        ];
+        ProgressiveRegion {
+            id: "region-1".to_owned(),
+            text_polygon: text_polygon.clone(),
+            bubble_polygon: Some(text_polygon.clone()),
+            patch: RegionPatch {
+                blob_id: "patch-1".to_owned(),
+                mime_type: PatchMimeType::Png,
+                rect: patch_rect,
+            },
+            source_english: "HELLO".to_owned(),
+            base_chinese: "ä½ å¥½".to_owned(),
+            displayed_chinese: "ä½ å¥½".to_owned(),
+            pinyin: "nÇ hÇŽo".to_owned(),
+            ocr_confidence: 0.99,
+            reading_order: 1,
+            style: BrowserTextStyle {
+                font_id: "hmt-sans".to_owned(),
+                category: FontCategory::Sans,
+                foreground: "#000".to_owned(),
+                weight: 400,
+                italic_degrees: 0.0,
+                outline_color: None,
+                outline_width_ratio: 0.0,
+                shadow_color: None,
+                shadow_x_ratio: 0.0,
+                shadow_y_ratio: 0.0,
+                alignment: TextAlignment::Center,
+                writing_mode: WritingMode::HorizontalTb,
+                line_height: 1.1,
+                letter_spacing_em: 0.0,
+                color_bands: Vec::new(),
+            },
+            layout: BrowserTextLayout {
+                suggested_lines: vec!["ä½ å¥½".to_owned()],
+                font_size_to_image_width: 0.05,
+                safe_polygon: Some(text_polygon),
+            },
+            hsk: ProgressiveHskStatus {
+                requested_level: HskLevel::try_from(3).unwrap(),
+                strictly_valid: true,
+                above_level_tokens: Vec::new(),
+                repair_state: HskRepairState::NotNeeded,
+            },
+        }
+    }
+
     fn resource_identity(id: &str) -> ResourceIdentity {
         ResourceIdentity {
             id: id.to_owned(),
@@ -1437,6 +1521,28 @@ mod tests {
         let mut unordered = valid;
         unordered.color_bands.reverse();
         assert!(unordered.validate_at("style").is_err());
+    }
+
+    #[test]
+    fn progressive_region_rejects_cleanup_disconnected_from_source_text() {
+        progressive_region(NormalizedRect {
+            x: 0.21,
+            y: 0.31,
+            width: 0.18,
+            height: 0.08,
+        })
+        .validate()
+        .unwrap();
+
+        let error = progressive_region(NormalizedRect {
+            x: 0.6,
+            y: 0.6,
+            width: 0.1,
+            height: 0.1,
+        })
+        .validate()
+        .unwrap_err();
+        assert!(error.to_string().contains("must overlap"));
     }
 
     #[test]

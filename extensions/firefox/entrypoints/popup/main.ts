@@ -2,7 +2,6 @@ import type { BrowserSetupStatus, HskLevel } from '../../src/contracts/browser'
 import {
   RuntimeMessageError,
   sendBackgroundMessage,
-  type PermissionPlan,
   type PopupState,
 } from '../../src/messaging/messages'
 import {
@@ -35,7 +34,7 @@ const productName = document.querySelector<HTMLElement>('#product-name')
 
 if (productName) productName.textContent = browser.runtime.getManifest().name
 
-let preparedPermissions: PermissionPlan | undefined
+let pagePrepared = false
 let startInFlight = false
 let refreshInFlight = false
 let setupReady = false
@@ -55,7 +54,7 @@ function selectedNameTranslation(): NameTranslation {
 
 function setBusy(busy: boolean): void {
   const unavailable = busy || startInFlight
-  translateAll.disabled = unavailable || !setupReady || !preparedPermissions
+  translateAll.disabled = unavailable || !setupReady || !pagePrepared
   levelSelect.disabled = unavailable || !setupReady
   nameTranslationSelect.disabled = unavailable || !setupReady
   setupPrimary.disabled = unavailable
@@ -101,16 +100,13 @@ function renderError(error: unknown): void {
   cancel.hidden = true
   statusProgress.hidden = true
   statusTitle.textContent = 'Could not start'
-  statusDetail.textContent =
-    error instanceof RuntimeMessageError && error.code === 'IMAGE_PERMISSION_DENIED'
-      ? 'Allow Hskify to read the page images, then try again.'
-      : 'Hskify couldn’t complete that action. Please try again.'
+  statusDetail.textContent = 'Hskify couldn’t complete that action. Please try again.'
 }
 
 function renderCompanionMissing(_error: unknown): void {
   setupReady = false
   setupAction = 'reconnect'
-  preparedPermissions = undefined
+  pagePrepared = false
   cancel.hidden = true
   statusProgress.hidden = true
   setupPrimary.hidden = false
@@ -141,7 +137,7 @@ function renderSetup(status: BrowserSetupStatus): void {
     return
   }
 
-  preparedPermissions = undefined
+  pagePrepared = false
   statusTitle.textContent =
     status.state === 'missing-models'
       ? 'One-time download needed'
@@ -178,17 +174,8 @@ function renderSetup(status: BrowserSetupStatus): void {
 async function finishStart(
   hskLevel: HskLevel,
   nameTranslation: NameTranslation,
-  permissionRequest: Promise<boolean>,
 ): Promise<void> {
   try {
-    const granted = await permissionRequest
-    if (!granted) {
-      throw new RuntimeMessageError(
-        'IMAGE_PERMISSION_DENIED',
-        'Firefox image access was denied. The page was left unchanged.',
-        true,
-      )
-    }
     await Promise.all([saveHskLevel(hskLevel), saveNameTranslation(nameTranslation)])
     const state = await sendBackgroundMessage({
       type: 'popup:start',
@@ -206,37 +193,19 @@ async function finishStart(
 
 function startChapter(): void {
   if (startInFlight) return
-  const plan = preparedPermissions
-  if (!plan) {
-    renderError(new Error('Image hosts are still being inspected. Please try again.'))
+  if (!pagePrepared) {
+    renderError(new Error('The chapter is still being prepared. Please try again.'))
     return
   }
   const hskLevel = selectedLevel()
   const nameTranslation = selectedNameTranslation()
-  const origins = plan.allOrigins
   startInFlight = true
   setBusy(true)
   statusTitle.textContent = 'Preparing chapter'
-  statusDetail.textContent =
-    origins.length > 0
-      ? 'Waiting for permission to read the images…'
-      : 'Finding the chapter images…'
+  statusDetail.textContent = 'Finding the chapter images…'
   statusProgress.hidden = false
   statusProgress.removeAttribute('value')
-  let permissionRequest: Promise<boolean>
-  try {
-    // Keep this invocation directly in the click stack. Firefox will reject an
-    // optional host prompt after asynchronous background/content work.
-    permissionRequest =
-      origins.length > 0
-        ? browser.permissions.request({ origins })
-        : Promise.resolve(true)
-  } catch (error) {
-    startInFlight = false
-    renderError(error)
-    return
-  }
-  void finishStart(hskLevel, nameTranslation, permissionRequest)
+  void finishStart(hskLevel, nameTranslation)
 }
 
 translateAll.addEventListener('click', startChapter)
@@ -298,18 +267,19 @@ async function refresh(): Promise<void> {
 }
 
 async function prepareReadyPage(): Promise<void> {
-  if (!preparedPermissions && !pagePreparationFailed) {
+  if (!pagePrepared && !pagePreparationFailed) {
     statusTitle.textContent = 'Preparing chapter'
     statusDetail.textContent = 'Finding the chapter images…'
     try {
-      preparedPermissions = await sendBackgroundMessage({ type: 'popup:prepare' })
+      await sendBackgroundMessage({ type: 'popup:prepare' })
+      pagePrepared = true
     } catch (error) {
       pagePreparationFailed = true
       renderError(error)
       return
     }
   }
-  if (preparedPermissions) await refresh()
+  if (pagePrepared) await refresh()
 }
 
 async function refreshAll(): Promise<void> {

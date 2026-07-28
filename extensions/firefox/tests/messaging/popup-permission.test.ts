@@ -47,7 +47,7 @@ describe('popup permission gesture', () => {
         }
       }
       if (message.type === 'popup:prepare') {
-        return { ok: true, value: { visibleOrigins: [], allOrigins: [] } }
+        return { ok: true, value: undefined }
       }
       if (message.type === 'popup:state') {
         stateCalls += 1
@@ -103,7 +103,7 @@ describe('popup permission gesture', () => {
     })
   })
 
-  it('requests exact origins directly on click before starting async content work', async () => {
+  it('starts immediately after the page is prepared', async () => {
     document.body.innerHTML = `
       <select id="hsk-level"><option value="5" selected>5</option></select>
       <select id="name-translation"><option value="keep-original" selected>Keep</option></select>
@@ -114,7 +114,6 @@ describe('popup permission gesture', () => {
       <progress id="status-progress"></progress>
       <button id="setup-primary" hidden></button>
     `
-    const permission = deferred<boolean>()
     const order: string[] = []
     const sendMessage = vi.fn(async (message: { type: string }) => {
       if (message.type === 'setup:status') {
@@ -128,13 +127,7 @@ describe('popup permission gesture', () => {
         }
       }
       if (message.type === 'popup:prepare') {
-        return {
-          ok: true,
-          value: {
-            visibleOrigins: ['https://cdn.test/*'],
-            allOrigins: ['https://cdn.test/*'],
-          },
-        }
+        return { ok: true, value: undefined }
       }
       if (message.type === 'popup:state') {
         return {
@@ -166,12 +159,6 @@ describe('popup permission gesture', () => {
     const storage: Record<string, unknown> = {}
     vi.stubGlobal('browser', {
       runtime: { sendMessage },
-      permissions: {
-        request: vi.fn((request: browser.permissions.Permissions) => {
-          order.push(`permission:${request.origins?.join(',')}`)
-          return permission.promise
-        }),
-      },
       storage: {
         local: {
           async get(key: string) {
@@ -190,12 +177,7 @@ describe('popup permission gesture', () => {
     expect(document.querySelector('#status-title')?.textContent).toBe('Ready')
     chapter?.click()
     chapter?.click()
-    expect(order).toEqual(['permission:https://cdn.test/*'])
-    expect(browser.permissions.request).toHaveBeenCalledTimes(1)
-    expect(sendMessage.mock.calls.some(([message]) => message.type === 'popup:start')).toBe(false)
-
-    permission.resolve(true)
-    await vi.waitFor(() => expect(order).toEqual(['permission:https://cdn.test/*', 'start']))
+    await vi.waitFor(() => expect(order).toEqual(['start']))
     expect(sendMessage).toHaveBeenCalledWith(
       expect.objectContaining({
         type: 'popup:start',

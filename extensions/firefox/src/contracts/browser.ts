@@ -648,15 +648,40 @@ function parseRegion(value: unknown, path: string): BrowserRegion {
   )
   const patch = record(item.patch, `${path}.patch`)
   exact(patch, ['blobId', 'mimeType', 'rect'], `${path}.patch`)
+  const textPolygon = polygon(item.textPolygon, `${path}.textPolygon`)
+  const patchRect = normalizedRect(patch.rect, `${path}.patch.rect`)
+  const firstTextPoint = textPolygon[0]
+  if (!firstTextPoint) fail(`${path}.textPolygon`, 'must contain at least one point')
+  const textBounds = textPolygon.reduce(
+    (bounds, point) => ({
+      x0: Math.min(bounds.x0, point.x),
+      y0: Math.min(bounds.y0, point.y),
+      x1: Math.max(bounds.x1, point.x),
+      y1: Math.max(bounds.y1, point.y),
+    }),
+    {
+      x0: firstTextPoint.x,
+      y0: firstTextPoint.y,
+      x1: firstTextPoint.x,
+      y1: firstTextPoint.y,
+    },
+  )
+  const overlapWidth =
+    Math.min(textBounds.x1, patchRect.x + patchRect.width) - Math.max(textBounds.x0, patchRect.x)
+  const overlapHeight =
+    Math.min(textBounds.y1, patchRect.y + patchRect.height) - Math.max(textBounds.y0, patchRect.y)
+  if (overlapWidth <= Number.EPSILON || overlapHeight <= Number.EPSILON) {
+    fail(`${path}.patch.rect`, 'must overlap the source text polygon')
+  }
   const bubblePolygon = optional(item.bubblePolygon, `${path}.bubblePolygon`, polygon)
   return {
     id: string(item.id, `${path}.id`, false, 512),
-    textPolygon: polygon(item.textPolygon, `${path}.textPolygon`),
+    textPolygon,
     ...(bubblePolygon === undefined ? {} : { bubblePolygon }),
     patch: {
       blobId: string(patch.blobId, `${path}.patch.blobId`, false, 512),
       mimeType: oneOf(patch.mimeType, `${path}.patch.mimeType`, ['image/png'] as const),
-      rect: normalizedRect(patch.rect, `${path}.patch.rect`),
+      rect: patchRect,
     },
     sourceEnglish: string(item.sourceEnglish, `${path}.sourceEnglish`, false, 4_096),
     baseChinese: string(item.baseChinese, `${path}.baseChinese`, false, 4_096),

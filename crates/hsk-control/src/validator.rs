@@ -261,7 +261,7 @@ impl HskControl {
         }
 
         for token in tokens {
-            if span_is_fully_covered(token.start, token.end, &guards) {
+            if span_intersects_guard(token.start, token.end, &guards) {
                 continue;
             }
             if is_ignorable_token(&token.text)
@@ -367,7 +367,7 @@ impl HskControl {
         // A selected-level HSK headword is valid as a whole even if a shorter
         // dictionary spelling happens to occur inside it. Cross-boundary spans
         // (the failure mode this guard addresses) are not contained and remain
-        // violations. Preserve all other overlapping disallowed matches.
+        // candidates.
         candidates.retain(|candidate| {
             !allowed_spans.iter().any(|(start, end)| {
                 *start <= candidate.start
@@ -383,7 +383,7 @@ impl HskControl {
         candidates.dedup_by(|left, right| {
             left.start == right.start && left.end == right.end && left.reason == right.reason
         });
-        candidates
+        best_nonoverlapping_guard_path(candidates, gap_start, gap_end)
     }
 
     fn known_disallowed_reason(
@@ -653,7 +653,7 @@ struct PrimaryToken {
     end: usize,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct CompoundGuard {
     start: usize,
     end: usize,
@@ -723,21 +723,68 @@ fn push_unique(values: &mut Vec<String>, value: &str) {
     }
 }
 
-fn span_is_fully_covered(start: usize, end: usize, guards: &[CompoundGuard]) -> bool {
-    let mut cursor = start;
-    for guard in guards {
-        if guard.end <= cursor {
-            continue;
-        }
-        if guard.start > cursor {
-            return false;
-        }
-        cursor = cursor.max(guard.end);
-        if cursor >= end {
-            return true;
-        }
+fn span_intersects_guard(start: usize, end: usize, guards: &[CompoundGuard]) -> bool {
+    guards
+        .iter()
+        .any(|guard| guard.start < end && start < guard.end)
+}
+
+#[derive(Clone, Debug, Default)]
+struct GuardPath {
+    lexical_weight: usize,
+    covered_characters: usize,
+    guards: Vec<CompoundGuard>,
+}
+
+fn best_nonoverlapping_guard_path(
+    candidates: Vec<CompoundGuard>,
+    gap_start: usize,
+    gap_end: usize,
+) -> Vec<CompoundGuard> {
+    let mut starts = vec![Vec::<CompoundGuard>::new(); gap_end.saturating_add(1)];
+    for candidate in candidates {
+        starts[candidate.start].push(candidate);
     }
-    false
+    for candidates in &mut starts {
+        candidates.sort_by(|left, right| {
+            right
+                .end
+                .cmp(&left.end)
+                .then_with(|| left.start.cmp(&right.start))
+        });
+    }
+
+    let mut best = vec![GuardPath::default(); gap_end.saturating_add(1)];
+    for position in (gap_start..gap_end).rev() {
+        let mut selected = best[position + 1].clone();
+        for candidate in &starts[position] {
+            let length = candidate.end - candidate.start;
+            let mut path = best[candidate.end].clone();
+            path.lexical_weight = path
+                .lexical_weight
+                .saturating_add(length.saturating_mul(length));
+            path.covered_characters = path.covered_characters.saturating_add(length);
+            path.guards.insert(0, candidate.clone());
+            if guard_path_is_better(&path, &selected) {
+                selected = path;
+            }
+        }
+        best[position] = selected;
+    }
+    best[gap_start].guards.clone()
+}
+
+fn guard_path_is_better(candidate: &GuardPath, current: &GuardPath) -> bool {
+    candidate
+        .lexical_weight
+        .cmp(&current.lexical_weight)
+        .then_with(|| {
+            candidate
+                .covered_characters
+                .cmp(&current.covered_characters)
+        })
+        .then_with(|| current.guards.len().cmp(&candidate.guards.len()))
+        == Ordering::Greater
 }
 
 fn gloss_terms(glosses: &[String]) -> BTreeSet<String> {

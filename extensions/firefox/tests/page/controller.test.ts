@@ -2,20 +2,20 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { DiscoveredImage, DiscoveryEvent } from '../../src/discovery/images'
 import type { VisibleFirstQueue } from '../../src/discovery/queue'
+import { RuntimeMessageError } from '../../src/messaging/messages'
 import {
   AUTOMATIC_IMAGE_RETRY_LIMIT,
   PageTranslationController,
   shouldAutomaticallyRetryImage,
 } from '../../src/page/controller'
-import { RuntimeMessageError } from '../../src/messaging/messages'
-import {
-  SelectableRenderer,
-  type RenderedImage,
-} from '../../src/rendering/renderer'
+import { SelectableRenderer, type RenderedImage } from '../../src/rendering/renderer'
 import { loadedImage } from '../helpers/images'
 
 type ControllerInternals = {
   renderer: SelectableRenderer
+  discovery: {
+    scan(): void
+  }
   rendered: Map<HTMLImageElement, RenderedImage>
   processed: Set<HTMLImageElement>
   scope: 'visible' | 'all' | undefined
@@ -55,10 +55,7 @@ type ChapterFixture = {
 function candidate(image: HTMLImageElement, domIndex: number): DiscoveredImage {
   return {
     element: image,
-    owner:
-      image.parentElement instanceof HTMLPictureElement
-        ? image.parentElement
-        : image,
+    owner: image.parentElement instanceof HTMLPictureElement ? image.parentElement : image,
     sourceUrl: image.currentSrc || image.src,
     domIndex,
     visible: true,
@@ -77,8 +74,7 @@ function fixture(): ChapterFixture {
   source.srcset = 'https://reader.test/page-1.avif 1x'
   source.sizes = '(max-width: 800px) 100vw, 800px'
   const first = loadedImage('https://reader.test/page-1.webp')
-  first.srcset =
-    'https://reader.test/page-1-small.webp 480w, https://reader.test/page-1.webp 1200w'
+  first.srcset = 'https://reader.test/page-1-small.webp 480w, https://reader.test/page-1.webp 1200w'
   first.sizes = '(max-width: 800px) 100vw, 800px'
   first.className = 'webtoon-page first-page'
   first.setAttribute('style', 'display: block; width: 100%; height: auto;')
@@ -149,16 +145,65 @@ function expectExactChapter(
 ): void {
   expect(fixture.chapter.innerHTML).toBe(expectedHtml)
   expect([...fixture.chapter.childNodes]).toEqual(expectedChildren)
-  expect([...fixture.chapter.querySelectorAll('img')]).toEqual([
-    fixture.first,
-    fixture.second,
-  ])
+  expect([...fixture.chapter.querySelectorAll('img')]).toEqual([fixture.first, fixture.second])
   expect(fixture.first.parentElement).toBe(fixture.picture)
   expect(fixture.picture.nextSibling).toBe(expectedChildren[2])
   expect(fixture.second.previousSibling).toBe(expectedChildren[5])
   expect(fixture.chapter.querySelector('[data-hmt-owned], [data-hmt-original]')).toBeNull()
   expect(fixture.chapter.querySelector('.hmt-wrapper')).toBeNull()
   expect(document.querySelector('[data-hmt-mode-controls="true"]')).toBeNull()
+}
+
+function installJobLifecycle(failuresBeforeSuccess: number): {
+  submitCount(): number
+} {
+  let submitted = 0
+  const sendMessage = vi.mocked(browser.runtime.sendMessage)
+  sendMessage.mockImplementation(async (raw: unknown) => {
+    const message = raw as Record<string, unknown>
+    const type = String(message.type)
+    if (type === 'jobs:recover') {
+      return { ok: true, value: [] }
+    }
+    if (type === 'job:submit') {
+      submitted += 1
+      return {
+        ok: true,
+        value: {
+          jobId: `job-${submitted}`,
+          clientImageId: `image-${submitted}`,
+          sourceSha256: 'a'.repeat(64),
+          sourceUrl: message.imageUrl,
+          sourceWidth: message.naturalWidth,
+          sourceHeight: message.naturalHeight,
+          acknowledgedSequence: 0,
+        },
+      }
+    }
+    if (type === 'job:updates') {
+      const attempt = Number(String(message.jobId).split('-').at(-1))
+      const update =
+        attempt <= failuresBeforeSuccess
+          ? {
+              sequence: 1,
+              type: 'failed',
+              code: 'TEMPORARY_PIPELINE_FAILURE',
+              message: 'Temporary fixture failure',
+              retryable: true,
+            }
+          : { sequence: 1, type: 'complete', message: 'Complete' }
+      return {
+        ok: true,
+        value: {
+          jobId: message.jobId,
+          nextSequence: 1,
+          updates: [update],
+        },
+      }
+    }
+    return { ok: true, value: undefined }
+  })
+  return { submitCount: () => submitted }
 }
 
 beforeEach(() => {
@@ -182,29 +227,149 @@ afterEach(() => {
 
 describe('page controller terminal restoration', () => {
   it('automatically retries only retryable image failures within the limit', () => {
-    const retryable = new RuntimeMessageError(
-      'PIPELINE_FAILED',
-      'Temporary local failure',
-      true,
-    )
-    const permanent = new RuntimeMessageError(
-      'UNSUPPORTED_IMAGE',
-      'Unsupported image',
-      false,
-    )
+    const retryable = new RuntimeMessageError('PIPELINE_FAILED', 'Temporary local failure', true)
+    const permanent = new RuntimeMessageError('UNSUPPORTED_IMAGE', 'Unsupported image', false)
 
     expect(shouldAutomaticallyRetryImage(retryable, 0)).toBe(true)
-    expect(
-      shouldAutomaticallyRetryImage(
-        retryable,
-        AUTOMATIC_IMAGE_RETRY_LIMIT - 1,
-      ),
-    ).toBe(true)
-    expect(
-      shouldAutomaticallyRetryImage(retryable, AUTOMATIC_IMAGE_RETRY_LIMIT),
-    ).toBe(false)
+    expect(shouldAutomaticallyRetryImage(retryable, AUTOMATIC_IMAGE_RETRY_LIMIT - 1)).toBe(true)
+    expect(shouldAutomaticallyRetryImage(retryable, AUTOMATIC_IMAGE_RETRY_LIMIT)).toBe(false)
     expect(shouldAutomaticallyRetryImage(permanent, 0)).toBe(false)
     expect(shouldAutomaticallyRetryImage(new Error('unknown'), 0)).toBe(false)
+  })
+
+  it('retries a transient image twice and publishes one stable chapter completion', async () => {
+    const image = loadedImage('https://reader.test/retry-page.webp')
+    document.body.append(image)
+    const lifecycle = installJobLifecycle(2)
+    const controller = new PageTranslationController()
+
+    await controller.start('all', 3, 'keep-original')
+    await vi.waitFor(
+      () =>
+        expect(controller.snapshot()).toMatchObject({
+          state: 'complete',
+          current: 1,
+          total: 1,
+        }),
+      { timeout: 3_000 },
+    )
+    expect(lifecycle.submitCount()).toBe(3)
+    await new Promise((resolve) => setTimeout(resolve, AUTOMATIC_IMAGE_RETRY_LIMIT * 25))
+    expect(controller.snapshot().state).toBe('complete')
+    expect(lifecycle.submitCount()).toBe(3)
+    controller.destroy()
+  })
+
+  it('exhausts the automatic retry budget before publishing attention state', async () => {
+    const image = loadedImage('https://reader.test/retry-page.webp')
+    document.body.append(image)
+    const lifecycle = installJobLifecycle(Number.POSITIVE_INFINITY)
+    const controller = new PageTranslationController()
+
+    await controller.start('all', 3, 'keep-original')
+    await vi.waitFor(
+      () =>
+        expect(controller.snapshot()).toMatchObject({
+          state: 'failed',
+          current: 0,
+          total: 1,
+        }),
+      { timeout: 3_000 },
+    )
+    expect(lifecycle.submitCount()).toBe(1 + AUTOMATIC_IMAGE_RETRY_LIMIT)
+    controller.destroy()
+  })
+
+  it('does not publish complete while a cross-site lazy chapter image is unresolved', async () => {
+    const ready = loadedImage('https://reader.test/ready-page.webp')
+    const deferred = loadedImage('https://reader.test/transparent-placeholder.png', 1, 1, {
+      width: 800,
+      height: 1280,
+      right: 800,
+      bottom: 1280,
+    })
+    deferred.className = 'chapter-image'
+    deferred.dataset.url = 'https://cdn.reader.test/deferred-page.webp'
+    document.body.append(ready, deferred)
+    const lifecycle = installJobLifecycle(0)
+    const controller = new PageTranslationController()
+    const internals = controller as unknown as ControllerInternals
+
+    await controller.start('all', 3, 'keep-original')
+    await vi.waitFor(
+      () =>
+        expect(controller.snapshot()).toMatchObject({
+          state: 'running',
+          current: 1,
+          total: 2,
+        }),
+      { timeout: 3_000 },
+    )
+    expect(lifecycle.submitCount()).toBe(1)
+
+    const resolvedSource = deferred.dataset.url!
+    deferred.src = resolvedSource
+    Object.defineProperties(deferred, {
+      currentSrc: { configurable: true, value: resolvedSource },
+      naturalWidth: { configurable: true, value: 800 },
+      naturalHeight: { configurable: true, value: 1280 },
+    })
+    internals.discovery.scan()
+
+    await vi.waitFor(
+      () =>
+        expect(controller.snapshot()).toMatchObject({
+          state: 'complete',
+          current: 2,
+          total: 2,
+        }),
+      { timeout: 3_000 },
+    )
+    expect(lifecycle.submitCount()).toBe(2)
+    controller.destroy()
+  })
+
+  it('waits instead of failing when the chapter initially contains only lazy placeholders', async () => {
+    const deferred = loadedImage('https://reader.test/transparent-placeholder.png', 1, 1, {
+      width: 800,
+      height: 1280,
+      right: 800,
+      bottom: 1280,
+    })
+    deferred.className = 'chapter-image'
+    deferred.dataset.lazySourceUrl = 'https://cdn.reader.test/deferred-page.webp'
+    document.body.append(deferred)
+    const lifecycle = installJobLifecycle(0)
+    const controller = new PageTranslationController()
+    const internals = controller as unknown as ControllerInternals
+
+    await expect(controller.start('all', 3, 'keep-original')).resolves.toMatchObject({
+      state: 'running',
+      current: 0,
+      total: 1,
+    })
+    expect(lifecycle.submitCount()).toBe(0)
+
+    const resolvedSource = deferred.dataset.lazySourceUrl!
+    deferred.src = resolvedSource
+    Object.defineProperties(deferred, {
+      currentSrc: { configurable: true, value: resolvedSource },
+      naturalWidth: { configurable: true, value: 800 },
+      naturalHeight: { configurable: true, value: 1280 },
+    })
+    internals.discovery.scan()
+
+    await vi.waitFor(
+      () =>
+        expect(controller.snapshot()).toMatchObject({
+          state: 'complete',
+          current: 1,
+          total: 1,
+        }),
+      { timeout: 3_000 },
+    )
+    expect(lifecycle.submitCount()).toBe(1)
+    controller.destroy()
   })
 
   it('cancellation restores completed and partial overlays to an exact DOM snapshot', () => {

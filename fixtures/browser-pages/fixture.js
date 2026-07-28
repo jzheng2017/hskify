@@ -11,9 +11,9 @@ replaceButton?.addEventListener('click', () => {
   const current = document.querySelector('#spa-image')
   if (!(current instanceof HTMLImageElement)) return
   const replacement = current.cloneNode(false)
-  replacement.src = current.src.includes('panel-a')
-    ? '../images/synthetic-panel-b.png'
-    : '../images/synthetic-panel-a.png'
+  replacement.src = current.src.includes('e278e36e')
+    ? '../../local-corpus/real-reader-v1/objects/95bb904a4b9c10908d5f2de250d1dbd87ab91cfe5b47db8c2974504566b7144d.png'
+    : '../../local-corpus/real-reader-v1/objects/e278e36ed24ad2f5a7ea7acaf4bbb92291d79dc26e5ff2d8ea85ffebee581ca7.jpg'
   current.replaceWith(replacement)
 })
 
@@ -27,7 +27,7 @@ document.querySelector('.reader-link')?.addEventListener('click', (event) => {
 
 for (const image of document.querySelectorAll('img[data-cross-origin-src]')) {
   const port = new URL(location.href).searchParams.get('cdnPort') ?? '4174'
-  image.src = `http://127.0.0.1:${port}/fixtures/images/${image.dataset.crossOriginSrc}`
+  image.src = `http://127.0.0.1:${port}/${image.dataset.crossOriginSrc}`
 }
 
 const syntheticComments = document.querySelector('#synthetic-comments')
@@ -37,7 +37,7 @@ if (syntheticComments) {
     comment.className = 'synthetic-comment'
     const avatar = document.createElement('img')
     avatar.className = 'comment-avatar'
-    avatar.src = `../images/synthetic-panel-wide.png?avatar=${index}`
+    avatar.src = `../../local-corpus/real-reader-v1/objects/95bb904a4b9c10908d5f2de250d1dbd87ab91cfe5b47db8c2974504566b7144d.png?avatar=${index}`
     avatar.alt = `Synthetic commenter avatar ${index + 1}`
     const text = document.createElement('p')
     text.textContent = `Synthetic site-neutral comment ${index + 1}.`

@@ -16,6 +16,7 @@ import Ajv2020 from 'ajv/dist/2020.js'
 import {
   BENCHMARK_LIMITS,
   BENCHMARK_QUALITY_LIMITS,
+  BUILD_FINGERPRINT,
   assertCompleteTranslationGold,
   assertRequiredGates,
   buildJobRequestEvidence,
@@ -866,7 +867,7 @@ test('job request evidence gates the direct request contract and rolling six-ite
     translateSoundEffects: false,
   }
   const makeRequest = (pageIndex, precedingContext) => ({
-    buildFingerprint: 'hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-07-26-r2',
+    buildFingerprint: BUILD_FINGERPRINT,
     clientImageId: `${session}-${pageIndex}-${hashes[pageIndex].slice(0, 16)}`,
     sourceSha256: hashes[pageIndex],
     sourceMimeType: 'image/webp',

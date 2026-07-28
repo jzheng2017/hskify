@@ -8,9 +8,15 @@ export default defineConfig({
     name: mode === 'development' ? 'Hskify Dev' : 'Hskify',
     description: 'Translate English manga lettering into selectable, HSK-controlled Chinese.',
     version: '0.1.0',
-    permissions: ['activeTab', 'scripting', 'storage', 'nativeMessaging'],
-    host_permissions: ['http://127.0.0.1/*'],
-    optional_host_permissions: ['http://*/*', 'https://*/*'],
+    permissions: [
+      'activeTab',
+      'scripting',
+      'storage',
+      'nativeMessaging',
+      'webRequest',
+      'webRequestBlocking',
+    ],
+    host_permissions: ['http://*/*', 'https://*/*'],
     browser_specific_settings: {
       gecko: {
         id: 'hsk-manga-translator@local.hskify',
