@@ -1,5 +1,5 @@
 export const BUILD_FINGERPRINT =
-  'hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-07-27-r6' as const
+  'hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-07-28-r7' as const
 export const HSK_STANDARD = '2.0' as const
 export const SOURCE_LANGUAGE = 'en' as const
 export const TARGET_LANGUAGE = 'zh-CN' as const
@@ -8,6 +8,7 @@ export const MAX_PROPER_NAME_GLOSSARY = 64
 
 export type HskLevel = 1 | 2 | 3 | 4 | 5 | 6
 export type NameTranslation = 'keep-original' | 'chinese'
+export type LearningMode = 'natural' | 'strict'
 export type Point = { x: number; y: number }
 
 export type NormalizedRect = {
@@ -74,6 +75,7 @@ export type BrowserJobRequest = {
     readingDirection: 'auto' | 'ltr' | 'rtl'
     translateSoundEffects: false
     nameTranslation: NameTranslation
+    learningMode: LearningMode
   }
   precedingContext?: Array<{
     sourceEnglish: string
@@ -97,8 +99,19 @@ export type ViewportUpdate = {
 
 export type RegionHsk = {
   requestedLevel: HskLevel
+  learningMode: LearningMode
   strictlyValid: boolean
+  levelCoverage: number
   aboveLevelTokens: string[]
+  teachingTerms: Array<{
+    text: string
+    startChar: number
+    endChar: number
+    pinyin: string
+    definitions: string[]
+    requiredLevel?: HskLevel
+    reason: 'above-level' | 'outside-list'
+  }>
   repairState: 'not-needed' | 'pending' | 'accepted' | 'rejected'
 }
 
@@ -498,21 +511,71 @@ function stringArray(
 
 function parseHsk(value: unknown, path: string): RegionHsk {
   const item = record(value, path)
-  exact(item, ['requestedLevel', 'strictlyValid', 'aboveLevelTokens', 'repairState'], path)
+  exact(
+    item,
+    [
+      'requestedLevel',
+      'learningMode',
+      'strictlyValid',
+      'levelCoverage',
+      'aboveLevelTokens',
+      'teachingTerms',
+      'repairState',
+    ],
+    path,
+  )
   const aboveLevelTokens = stringArray(
     item.aboveLevelTokens,
     `${path}.aboveLevelTokens`,
     false,
     512,
   )
+  const teachingTerms = array(item.teachingTerms, `${path}.teachingTerms`, 512).map(
+    (value, index) => {
+      const termPath = `${path}.teachingTerms[${index}]`
+      const term = record(value, termPath)
+      exact(
+        term,
+        ['text', 'startChar', 'endChar', 'pinyin', 'definitions', 'requiredLevel', 'reason'],
+        termPath,
+      )
+      const startChar = integer(term.startChar, `${termPath}.startChar`)
+      const endChar = integer(term.endChar, `${termPath}.endChar`, 1)
+      if (endChar <= startChar) {
+        fail(`${termPath}.endChar`, 'must be greater than startChar')
+      }
+      const requiredLevel = optional(term.requiredLevel, `${termPath}.requiredLevel`, hskLevel)
+      return {
+        text: string(term.text, `${termPath}.text`, false, 256),
+        startChar,
+        endChar,
+        pinyin: string(term.pinyin, `${termPath}.pinyin`, false, 512),
+        definitions: stringArray(term.definitions, `${termPath}.definitions`, false, 32),
+        ...(requiredLevel === undefined ? {} : { requiredLevel }),
+        reason: oneOf(term.reason, `${termPath}.reason`, [
+          'above-level',
+          'outside-list',
+        ] as const),
+      }
+    },
+  )
   const strictlyValid = boolean(item.strictlyValid, `${path}.strictlyValid`)
   if (strictlyValid && aboveLevelTokens.length > 0) {
     fail(`${path}.strictlyValid`, 'cannot be true when above-level tokens are present')
   }
+  if (strictlyValid && teachingTerms.length > 0) {
+    fail(`${path}.strictlyValid`, 'cannot be true when teaching terms are present')
+  }
   return {
     requestedLevel: hskLevel(item.requestedLevel, `${path}.requestedLevel`),
+    learningMode: oneOf(item.learningMode, `${path}.learningMode`, [
+      'natural',
+      'strict',
+    ] as const),
     strictlyValid,
+    levelCoverage: unit(item.levelCoverage, `${path}.levelCoverage`),
     aboveLevelTokens,
+    teachingTerms,
     repairState: oneOf(item.repairState, `${path}.repairState`, [
       'not-needed',
       'pending',
@@ -818,6 +881,7 @@ export function parseBrowserJobRequest(value: unknown): BrowserJobRequest {
       'readingDirection',
       'translateSoundEffects',
       'nameTranslation',
+      'learningMode',
     ],
     'settings',
   )
@@ -900,6 +964,10 @@ export function parseBrowserJobRequest(value: unknown): BrowserJobRequest {
       nameTranslation: oneOf(settings.nameTranslation, 'settings.nameTranslation', [
         'keep-original',
         'chinese',
+      ] as const),
+      learningMode: oneOf(settings.learningMode, 'settings.learningMode', [
+        'natural',
+        'strict',
       ] as const),
     },
     ...(precedingContext === undefined ? {} : { precedingContext }),

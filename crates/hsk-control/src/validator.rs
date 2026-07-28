@@ -98,7 +98,7 @@ impl HskControl {
             let selected = HskLevel::ALL[level_index];
             let mut trie = AllowedWordTrie::new();
             for entry in hsk.entries() {
-                if entry.level <= selected && entry.independently_usable {
+                if entry.level <= selected {
                     trie.insert(&entry.simplified);
                 }
             }
@@ -174,6 +174,7 @@ impl HskControl {
             .collect::<Vec<_>>();
         let boundaries = char_boundaries(&normalized_text);
         let mut violations = Vec::new();
+        let mut lexical_token_count = 0;
         let mut cursor = 0;
 
         for name in &name_matches {
@@ -185,6 +186,7 @@ impl HskControl {
                 name.start,
                 selected_level,
                 &mut violations,
+                &mut lexical_token_count,
             );
             cursor = name.end;
         }
@@ -196,6 +198,7 @@ impl HskControl {
             characters.len(),
             selected_level,
             &mut violations,
+            &mut lexical_token_count,
         );
 
         violations.sort_by(|left, right| {
@@ -214,6 +217,8 @@ impl HskControl {
             normalized_text,
             requested_level: selected_level,
             strictly_valid: violations.is_empty(),
+            lexical_token_count,
+            above_level_token_count: violations.len().min(lexical_token_count),
             violations,
             exceptions,
             cache_revision: self.cache_revision.clone(),
@@ -230,6 +235,7 @@ impl HskControl {
         end: usize,
         selected_level: HskLevel,
         violations: &mut Vec<HskViolation>,
+        lexical_token_count: &mut usize,
     ) {
         if start >= end {
             return;
@@ -262,6 +268,7 @@ impl HskControl {
 
         for token in tokens {
             if span_intersects_guard(token.start, token.end, &guards) {
+                *lexical_token_count = (*lexical_token_count).saturating_add(1);
                 continue;
             }
             if is_ignorable_token(&token.text)
@@ -271,6 +278,7 @@ impl HskControl {
                 continue;
             }
             if self.hsk.is_allowed(&token.text, selected_level) {
+                *lexical_token_count = (*lexical_token_count).saturating_add(1);
                 continue;
             }
 
@@ -278,21 +286,21 @@ impl HskControl {
                 && required_level > selected_level
             {
                 Some(ViolationReason::AboveSelectedHskLevel { required_level })
+            } else if let Some(parts) =
+                self.allowed_surface_decomposition(&token.text, selected_level)
+            {
+                *lexical_token_count = (*lexical_token_count).saturating_add(parts.len());
+                None
             } else if self.dictionary.contains_word(&token.text) {
                 Some(ViolationReason::KnownDictionaryWord)
             } else if is_all_han(&token.text) {
-                let decomposition =
-                    self.allowed_tries[selected_level.index()].best_decomposition(&token.text);
-                if decomposition.as_ref().is_some_and(|parts| parts.len() >= 2) {
-                    None
-                } else {
-                    Some(ViolationReason::UnknownChineseWord)
-                }
+                Some(ViolationReason::UnknownChineseWord)
             } else {
                 Some(ViolationReason::NonChineseLexicalToken)
             };
 
             if let Some(reason) = reason {
+                *lexical_token_count = (*lexical_token_count).saturating_add(1);
                 violations.push(self.make_violation(
                     characters,
                     token.start,
@@ -332,6 +340,19 @@ impl HskControl {
         }
 
         reachable[characters.len()] && used_numeric[characters.len()]
+    }
+
+    fn allowed_surface_decomposition(
+        &self,
+        token: &str,
+        selected_level: HskLevel,
+    ) -> Option<Vec<String>> {
+        if !is_all_han(token) {
+            return None;
+        }
+        self.allowed_tries[selected_level.index()]
+            .best_decomposition(token)
+            .filter(|parts| parts.len() >= 2)
     }
 
     fn disallowed_spans(
@@ -398,6 +419,12 @@ impl HskControl {
             && required_level > selected_level
         {
             return Some(ViolationReason::AboveSelectedHskLevel { required_level });
+        }
+        if self
+            .allowed_surface_decomposition(word, selected_level)
+            .is_some()
+        {
+            return None;
         }
         self.dictionary
             .contains_word(word)

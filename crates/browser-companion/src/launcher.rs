@@ -366,7 +366,7 @@ mod tests {
             &mut frame,
             &json!({
                 "type": "start-or-discover-daemon",
-                "buildFingerprint": "hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-07-27-r6",
+                "buildFingerprint": "hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-07-28-r7",
                 "extensionVersion": "0.1.0",
                 "extensionOrigin": "moz-extension://00000000-0000-4000-8000-000000000001"
             }),

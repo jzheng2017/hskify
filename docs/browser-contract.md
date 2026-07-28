@@ -34,7 +34,7 @@ Every browser route requires:
   standard `Origin` header.
 
 There is deliberately no protocol header. The exact fingerprint
-`hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-07-27-r6` is validated in the native handshake and job
+`hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-07-28-r7` is validated in the native handshake and job
 request and echoed by native readiness, health, and job creation. Unknown JSON
 fields are rejected by the contracts.
 
@@ -46,9 +46,9 @@ fields are rejected by the contracts.
   sniffed type, SHA-256, and decoded dimensions agree;
 - `request`: `application/json` metadata containing the exact build
   fingerprint, source identity, dimensions, page identity, HSK 2.0 level 1–6,
-  name preference (`keep-original` or `chinese`), reading direction, visible
-  rectangles, up to six preceding utterances, and an optional bounded
-  proper-name glossary.
+  learning mode (`natural` or `strict`), name preference (`keep-original` or
+  `chinese`), reading direction, visible rectangles, up to six preceding
+  utterances, and an optional bounded proper-name glossary.
 
 The only supported language pair is English to Simplified Chinese. Sound-effect
 translation must be false. A successful request returns HTTP 202 with only the
@@ -107,9 +107,17 @@ normalized PNG patch rectangle and blob ID, source English, direct/base and
 displayed Chinese, pinyin, OCR confidence, reading order, validated style and
 layout, and HSK status. Style can include ordered `colorBands` sampled from
 learned source-text lines, so an atomic region can preserve multiple foreground
-and outline colors. The status carries requested level, strict validity,
-above-level tokens, and one of `not-needed`, `pending`, `accepted`, or
-`rejected`.
+and outline colors. The status carries requested level, learning mode, strict
+validity, level-appropriate lexical coverage, above-level tokens, exact
+teaching-term character ranges, and one of `not-needed`, `pending`, `accepted`,
+or `rejected`. Each teaching term includes pinyin, local dictionary
+definitions, an optional required HSK level, and an `above-level` or
+`outside-list` reason.
+
+Natural learning targets 90% level-appropriate lexical coverage at levels 1-3,
+93% at level 4, and 95% at levels 5-6 while bounding the absolute number of
+preserved terms. Strict mode requires strict vocabulary validity. Proper-name
+exceptions are controlled independently by the Names setting.
 
 ## Patch-before-text invariant
 

@@ -19,6 +19,7 @@ describe('popup permission gesture', () => {
   it('does not replace the page status with setup-ready text while polling', async () => {
     document.body.innerHTML = `
       <select id="hsk-level"><option value="5" selected>5</option></select>
+      <select id="learning-mode"><option value="natural" selected>Natural</option></select>
       <select id="name-translation"><option value="keep-original" selected>Keep</option></select>
       <button id="translate-all">All</button>
       <button id="cancel">Cancel</button>
@@ -35,6 +36,7 @@ describe('popup permission gesture', () => {
         total: number
         message: string
         hskLevel: 5
+        learningMode: 'natural'
         nameTranslation: 'keep-original'
       }
     }>()
@@ -60,6 +62,7 @@ describe('popup permission gesture', () => {
             total: 1,
             message: 'Done',
             hskLevel: 5,
+            learningMode: 'natural',
             nameTranslation: 'keep-original',
           },
         }
@@ -98,6 +101,7 @@ describe('popup permission gesture', () => {
         total: 1,
         message: 'Done',
         hskLevel: 5,
+        learningMode: 'natural',
         nameTranslation: 'keep-original',
       },
     })
@@ -106,6 +110,7 @@ describe('popup permission gesture', () => {
   it('starts immediately after the page is prepared', async () => {
     document.body.innerHTML = `
       <select id="hsk-level"><option value="5" selected>5</option></select>
+      <select id="learning-mode"><option value="natural" selected>Natural</option></select>
       <select id="name-translation"><option value="keep-original" selected>Keep</option></select>
       <button id="translate-all">All</button>
       <button id="cancel">Cancel</button>
@@ -138,6 +143,7 @@ describe('popup permission gesture', () => {
             total: 0,
             message: 'Ready',
             hskLevel: 5,
+            learningMode: 'natural',
             nameTranslation: 'keep-original',
           },
         }
@@ -182,6 +188,7 @@ describe('popup permission gesture', () => {
       expect.objectContaining({
         type: 'popup:start',
         scope: 'all',
+        learningMode: 'natural',
         nameTranslation: 'keep-original',
       }),
     )
@@ -190,6 +197,7 @@ describe('popup permission gesture', () => {
   it('keeps a failed start inside the popup without opening a setup tab', async () => {
     document.body.innerHTML = `
       <select id="hsk-level"><option value="5" selected>5</option></select>
+      <select id="learning-mode"><option value="natural" selected>Natural</option></select>
       <select id="name-translation"><option value="keep-original" selected>Keep</option></select>
       <button id="translate-all">All</button>
       <button id="cancel">Cancel</button>
@@ -239,6 +247,7 @@ describe('popup permission gesture', () => {
   it('starts model setup and renders measured byte progress', async () => {
     document.body.innerHTML = `
       <select id="hsk-level"><option value="5" selected>5</option></select>
+      <select id="learning-mode"><option value="natural" selected>Natural</option></select>
       <select id="name-translation"><option value="keep-original" selected>Keep</option></select>
       <button id="translate-all">All</button>
       <button id="cancel">Cancel</button>

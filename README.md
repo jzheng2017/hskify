@@ -27,8 +27,11 @@ and selectable Chinese text for each accepted region.
 4. Qwen3.5 4B makes one contextual decision for each OCR region: translate
    story text directly to the requested HSK level, or return the typed
    non-story disposition for unrelated page furniture. Excluded regions keep
-   their original pixels. Vocabulary and meaning validation accepts each
-   translation or sends only the rejected item through one targeted repair.
+   their original pixels. Natural learning simplifies first but may preserve a
+   small number of useful story terms and explains them on hover; Strict HSK
+   requires level-valid non-name vocabulary. Vocabulary and meaning validation
+   accepts each translation or sends only the rejected item through one
+   targeted repair.
 5. The browser fetches and decodes each PNG patch, installs it before the
    corresponding selectable text, and can continue rendering while later
    regions are still running.
@@ -36,7 +39,7 @@ and selectable Chinese text for each accepted region.
 There is no versioned browser API, job-result endpoint, full cleaned-page
 payload, project/history store, page-wide translation pass, or retranslation
 route. The extension, native host, daemon, and contract fixtures instead share
-the exact build fingerprint `hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-07-27-r6`; a mismatch is a
+the exact build fingerprint `hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-07-28-r7`; a mismatch is a
 hard failure, not a negotiation opportunity.
 
 Pinyin, longest-match local dictionary lookup, original/Chinese comparison,

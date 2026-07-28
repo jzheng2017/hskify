@@ -6,6 +6,11 @@ use std::time::SystemTime;
 use anyhow::{Context, Result, bail};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
+use hsk_control::{
+    JIEBA_CRATE_VERSION, JIEBA_EMBEDDED_DICTIONARY_SHA256, LOOKUP_REVISION, NORMALIZATION_REVISION,
+    SEGMENTATION_REVISION, UNICODE_NORMALIZATION_CRATE_VERSION,
+    UNICODE_NORMALIZATION_TABLES_SHA256,
+};
 use koharu_app::llm::{
     HSK_TRANSLATION_MODEL_REVISION, HSK_TRANSLATION_PROMPT_HASH, HSK_TRANSLATION_VALIDATOR_HASH,
 };
@@ -24,7 +29,7 @@ const RESULT_CACHE_MAX_ENTRY_BYTES: u64 = 512 * 1024 * 1024;
 const RESULT_CACHE_MAX_DECODED_PATCH_BYTES: u64 = 256 * 1024 * 1024;
 const RESULT_CACHE_SCHEMA: &str = "hskify-progressive-result-2026-07-27-v5";
 const RESULT_CACHE_PIPELINE_REVISION: &str =
-    "direct-browser-pipeline-segmentation-recall-furniture-verifier-v18-2026-07-27";
+    "direct-browser-pipeline-natural-strict-repair-convergence-v22-2026-07-28";
 const MODEL_RESOURCE_MANIFEST: &[u8] = include_bytes!("../../../data/model-packs/manifest.v1.json");
 
 #[derive(Debug, Clone)]
@@ -354,6 +359,15 @@ fn pipeline_fingerprint() -> Result<String> {
         HSK_TRANSLATION_VALIDATOR_HASH,
         (HSK_RESOURCE_BYTES, HSK_RESOURCE_SHA256),
         (DICTIONARY_RESOURCE_BYTES, DICTIONARY_RESOURCE_SHA256),
+        (
+            NORMALIZATION_REVISION,
+            SEGMENTATION_REVISION,
+            LOOKUP_REVISION,
+            JIEBA_CRATE_VERSION,
+            JIEBA_EMBEDDED_DICTIONARY_SHA256,
+            UNICODE_NORMALIZATION_CRATE_VERSION,
+            UNICODE_NORMALIZATION_TABLES_SHA256,
+        ),
     ))
     .context("serialize result-cache pipeline fingerprint")?;
     Ok(sha256_hex(&material))
@@ -435,8 +449,11 @@ mod tests {
             },
             hsk: ProgressiveHskStatus {
                 requested_level: HskLevel::Two,
+                learning_mode: crate::contracts::LearningMode::Natural,
                 strictly_valid: true,
+                level_coverage: 1.0,
                 above_level_tokens: Vec::new(),
+                teaching_terms: Vec::new(),
                 repair_state: HskRepairState::NotNeeded,
             },
         }

@@ -18,6 +18,7 @@ describe('strict extension runtime messages', () => {
       sourceMimeType: 'image/webp',
       sourceBytes: Uint8Array.of(1, 2, 3).buffer,
       hskLevel: 4,
+      learningMode: 'natural',
       nameTranslation: 'keep-original',
       visibleRects: [{ x: 0, y: 0.25, width: 1, height: 0.5 }],
       properNameGlossary: [{ sourceEnglish: 'Cheon Yeo Woon', chinese: '天汝云' }],
@@ -116,6 +117,7 @@ describe('strict extension runtime messages', () => {
         type: 'content:start',
         scope: 'all',
         hskLevel: 5,
+        learningMode: 'natural',
         nameTranslation: 'keep-original',
         properNameGlossary: [
           { sourceEnglish: 'Cheon Yeo Woon', chinese: '天汝云' },
@@ -129,6 +131,7 @@ describe('strict extension runtime messages', () => {
         type: 'content:start',
         scope: 'everything',
         hskLevel: 9,
+        learningMode: 'natural',
         nameTranslation: 'literal',
       }),
     ).toThrow(/scope/i)
@@ -137,6 +140,7 @@ describe('strict extension runtime messages', () => {
         type: 'content:start',
         scope: 'all',
         hskLevel: 3,
+        learningMode: 'natural',
         nameTranslation: 'literal',
       }),
     ).toThrow(/nameTranslation/i)

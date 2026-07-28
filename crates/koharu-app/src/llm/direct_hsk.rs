@@ -10,10 +10,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Result, bail};
 use koharu_llm::direct_hsk_protocol::{
-    DirectHskContext, DirectHskName, DirectHskNameStyle, context_budget_text,
-    primary_system_prompt_with_policy, primary_user_prompt_with_name_style,
-    repair_system_prompt_with_policy, repair_user_prompt_with_name_style,
-    restore_approved_name_placeholders,
+    DirectHskContext, DirectHskLearningMode, DirectHskName, DirectHskNameStyle,
+    context_budget_text, primary_system_prompt_with_learning_policy,
+    primary_user_prompt_with_name_style, repair_system_prompt_with_learning_policy,
+    repair_user_prompt_with_constraints, restore_approved_name_placeholders,
 };
 use koharu_llm::{GenerateOptions, Language, ModelId};
 use serde::{Deserialize, Serialize};
@@ -62,6 +62,8 @@ const SOUND_EFFECT_MARKER: &str = "[SFX]";
 pub struct HskTranslationBatchRequest {
     pub requested_level: u8,
     #[serde(default)]
+    pub learning_mode: HskLearningMode,
+    #[serde(default)]
     pub name_handling: HskNameHandling,
     #[serde(default = "default_translate_sound_effects")]
     pub translate_sound_effects: bool,
@@ -78,6 +80,23 @@ pub enum HskNameHandling {
     KeepOriginal,
     #[default]
     Chinese,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum HskLearningMode {
+    #[default]
+    Natural,
+    Strict,
+}
+
+impl From<HskLearningMode> for DirectHskLearningMode {
+    fn from(value: HskLearningMode) -> Self {
+        match value {
+            HskLearningMode::Natural => Self::Natural,
+            HskLearningMode::Strict => Self::Strict,
+        }
+    }
 }
 
 const fn default_translate_sound_effects() -> bool {
@@ -252,6 +271,8 @@ impl HskTranslationIssue {
 pub struct HskTranslationRepairRequest {
     pub requested_level: u8,
     #[serde(default)]
+    pub learning_mode: HskLearningMode,
+    #[serde(default)]
     pub name_handling: HskNameHandling,
     #[serde(default = "default_translate_sound_effects")]
     pub translate_sound_effects: bool,
@@ -270,6 +291,8 @@ pub struct HskRepairUtterance {
     pub source_english: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rejected_chinese: Option<String>,
+    #[serde(default)]
+    pub avoid_chinese: Vec<String>,
     pub problems: Vec<String>,
 }
 
@@ -915,6 +938,7 @@ where
                 candidate.utterances.len(),
                 candidate.name_handling,
                 candidate.translate_sound_effects,
+                candidate.learning_mode,
             );
             let desired_output_tokens = output_token_budget(
                 candidate
@@ -999,6 +1023,7 @@ where
                 bounded_request.utterances.len(),
                 bounded_request.name_handling,
                 bounded_request.translate_sound_effects,
+                bounded_request.learning_mode,
             ),
             &prompt,
             &options,
@@ -1049,6 +1074,7 @@ where
                 bounded_request.requested_level,
                 bounded_request.name_handling,
                 bounded_request.translate_sound_effects,
+                bounded_request.learning_mode,
             ),
             &prompt,
             &options,
@@ -1107,16 +1133,29 @@ fn translation_system_prompt(
     count: usize,
     name_handling: HskNameHandling,
     translate_sound_effects: bool,
+    learning_mode: HskLearningMode,
 ) -> String {
-    primary_system_prompt_with_policy(level, count, name_handling.into(), translate_sound_effects)
+    primary_system_prompt_with_learning_policy(
+        level,
+        count,
+        name_handling.into(),
+        translate_sound_effects,
+        learning_mode.into(),
+    )
 }
 
 fn repair_system_prompt(
     level: u8,
     name_handling: HskNameHandling,
     translate_sound_effects: bool,
+    learning_mode: HskLearningMode,
 ) -> String {
-    repair_system_prompt_with_policy(level, name_handling.into(), translate_sound_effects)
+    repair_system_prompt_with_learning_policy(
+        level,
+        name_handling.into(),
+        translate_sound_effects,
+        learning_mode.into(),
+    )
 }
 
 fn build_translation_prompt(request: &HskTranslationBatchRequest) -> String {
@@ -1162,12 +1201,13 @@ fn build_repair_prompt(request: &HskTranslationRepairRequest) -> String {
             chinese: &name.chinese,
         })
         .collect::<Vec<_>>();
-    repair_user_prompt_with_name_style(
+    repair_user_prompt_with_constraints(
         &utterance.source_english,
         utterance.rejected_chinese.as_deref(),
         &problems,
         &names,
         request.name_handling.into(),
+        &utterance.avoid_chinese,
     )
 }
 
@@ -1238,6 +1278,17 @@ fn validate_repair_request(request: &HskTranslationRepairRequest) -> Result<()> 
     {
         bail!(
             "targeted HSK repair item `{}` has an empty rejected translation",
+            utterance.id
+        );
+    }
+    if utterance.avoid_chinese.len() > 32
+        || utterance
+            .avoid_chinese
+            .iter()
+            .any(|term| term.trim().is_empty())
+    {
+        bail!(
+            "targeted HSK repair item `{}` requires at most 32 non-empty validator avoid terms",
             utterance.id
         );
     }
@@ -2202,6 +2253,7 @@ mod tests {
         let generator = FakeGenerator::new(["1\t我昨天见到了⟦Tarin Voss⟧。"]);
         let input = HskTranslationBatchRequest {
             requested_level: 3,
+            learning_mode: HskLearningMode::Strict,
             name_handling: HskNameHandling::KeepOriginal,
             translate_sound_effects: false,
             utterances: vec![source("dialogue", "I saw Tarin Voss yesterday.")],
@@ -2230,6 +2282,7 @@ mod tests {
         let generator = FakeGenerator::new(["1\t那位年长的管理员来了。"]);
         let input = HskTranslationBatchRequest {
             requested_level: 3,
+            learning_mode: HskLearningMode::Strict,
             name_handling: HskNameHandling::KeepOriginal,
             translate_sound_effects: false,
             utterances: vec![source("dialogue", "THE SENIOR ADMINISTRATOR ARRIVED.")],
@@ -2428,6 +2481,7 @@ mod tests {
     fn request() -> HskTranslationBatchRequest {
         HskTranslationBatchRequest {
             requested_level: 2,
+            learning_mode: HskLearningMode::Strict,
             name_handling: HskNameHandling::Chinese,
             translate_sound_effects: true,
             utterances: vec![
@@ -2778,6 +2832,7 @@ mod tests {
 
         let repair = HskTranslationRepairRequest {
             requested_level: input.requested_level,
+            learning_mode: input.learning_mode,
             name_handling: input.name_handling,
             translate_sound_effects: input.translate_sound_effects,
             utterance: HskRepairUtterance {
@@ -2785,6 +2840,7 @@ mod tests {
                 kind: input.utterances[0].kind,
                 source_english: input.utterances[0].source_english.clone(),
                 rejected_chinese: initial.items[0].text.clone(),
+                avoid_chinese: Vec::new(),
                 problems: initial.items[0].repair_problems(),
             },
             preceding_utterances: input.preceding_utterances.clone(),
@@ -3047,9 +3103,26 @@ mod tests {
 
     #[test]
     fn name_handling_changes_primary_and_repair_instructions() {
-        let original = translation_system_prompt(3, 1, HskNameHandling::KeepOriginal, true);
-        let chinese = translation_system_prompt(3, 1, HskNameHandling::Chinese, true);
-        let repair = repair_system_prompt(3, HskNameHandling::KeepOriginal, true);
+        let original = translation_system_prompt(
+            3,
+            1,
+            HskNameHandling::KeepOriginal,
+            true,
+            HskLearningMode::Strict,
+        );
+        let chinese = translation_system_prompt(
+            3,
+            1,
+            HskNameHandling::Chinese,
+            true,
+            HskLearningMode::Strict,
+        );
+        let repair = repair_system_prompt(
+            3,
+            HskNameHandling::KeepOriginal,
+            true,
+            HskLearningMode::Strict,
+        );
 
         assert!(original.contains("complete approved name set"));
         assert!(repair.contains("Decide proper names from the complete source meaning"));
@@ -3113,6 +3186,7 @@ mod tests {
 
         let repair = HskTranslationRepairRequest {
             requested_level: 2,
+            learning_mode: HskLearningMode::Strict,
             name_handling: HskNameHandling::Chinese,
             translate_sound_effects: true,
             utterance: HskRepairUtterance {
@@ -3120,6 +3194,7 @@ mod tests {
                 kind: HskUtteranceKind::Dialogue,
                 source_english: "Hello".to_owned(),
                 rejected_chinese: None,
+                avoid_chinese: Vec::new(),
                 problems: Vec::new(),
             },
             preceding_utterances: Vec::new(),

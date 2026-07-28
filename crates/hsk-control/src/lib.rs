@@ -41,8 +41,7 @@ pub const HSK_STANDARD: &str = "2.0";
 pub const DATA_SCHEMA_VERSION: u32 = 1;
 
 /// Segmentation policy revision included in cache identities.
-pub const SEGMENTATION_REVISION: &str =
-    "jieba-full-lexicon-boundary-independent-conservative-span-guard-v2";
+pub const SEGMENTATION_REVISION: &str = "jieba-hsk-headword-guard-level-surface-decomposition-v4";
 
 /// Dictionary lookup policy revision included in cache identities.
 pub const LOOKUP_REVISION: &str =

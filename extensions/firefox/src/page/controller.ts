@@ -3,6 +3,7 @@ import type {
   BrowserJobRequest,
   JobUpdateBatch,
   JobUpdate,
+  LearningMode,
   LookupRequest,
   NameTranslation,
 } from '../contracts/browser'
@@ -277,6 +278,7 @@ export class PageTranslationController {
   private hud: PageHud | undefined
   private scope: TranslationScope | undefined
   private hskLevel: 1 | 2 | 3 | 4 | 5 | 6 = 5
+  private learningMode: LearningMode = 'natural'
   private nameTranslation: NameTranslation = 'keep-original'
   private activeJobId: string | undefined
   private prefetchTargetId: string | undefined
@@ -363,6 +365,7 @@ export class PageTranslationController {
   async start(
     scope: TranslationScope,
     hskLevel: 1 | 2 | 3 | 4 | 5 | 6,
+    learningMode: LearningMode,
     nameTranslation: NameTranslation,
     properNameGlossary: BrowserJobRequest['properNameGlossary'] = [],
   ): Promise<PageState> {
@@ -371,6 +374,7 @@ export class PageTranslationController {
     if (replacingRun) this.restoreAll()
     this.scope = scope
     this.hskLevel = hskLevel
+    this.learningMode = learningMode
     this.nameTranslation = nameTranslation
     this.properNameGlossary = properNameGlossary.slice()
     this.cancelledState = false
@@ -745,6 +749,7 @@ export class PageTranslationController {
           ...(inline?.mimeType ? { sourceMimeType: inline.mimeType } : {}),
           ...(inline ? { sourceBytes: inline.bytes } : {}),
           hskLevel: this.hskLevel,
+          learningMode: this.learningMode,
           nameTranslation: this.nameTranslation,
           visibleRects: visibleImageRects(
             candidate.element,
@@ -1137,6 +1142,7 @@ export function bootContentRuntime(): void {
         return controller.start(
           message.scope,
           message.hskLevel,
+          message.learningMode,
           message.nameTranslation,
           message.properNameGlossary,
         )

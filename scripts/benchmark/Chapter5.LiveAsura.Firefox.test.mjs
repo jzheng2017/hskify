@@ -65,7 +65,7 @@ test('translation proof correlates one English region with patch-before-text', (
   assert.equal(buildLiveTranslationProof(dom, routes).passed, false)
 })
 
-test('translation proof records a non-strict HSK result without hiding browser completion', () => {
+test('translation proof accepts a finalized natural-learning result at its coverage target', () => {
   const update = {
     type: 'regionReady',
     region: {
@@ -73,8 +73,11 @@ test('translation proof records a non-strict HSK result without hiding browser c
       sourceEnglish: 'A goddess descended from another realm.',
       displayedChinese: '一位女神从另一个世界来到这里。',
       hsk: {
+        requestedLevel: 3,
+        learningMode: 'natural',
         strictlyValid: false,
-        repairState: 'rejected',
+        levelCoverage: 0.91,
+        repairState: 'not-needed',
         aboveLevelTokens: ['女神'],
       },
       patch: { blobId: 'patch-literary', mimeType: 'image/png' },
@@ -117,7 +120,10 @@ test('translation proof records a non-strict HSK result without hiding browser c
               region: {
                 ...update.region,
                 hsk: {
+                  requestedLevel: 3,
+                  learningMode: 'natural',
                   strictlyValid: false,
+                  levelCoverage: 0.72,
                   repairState: 'pending',
                   aboveLevelTokens: ['å¥³ç¥ž'],
                 },
@@ -128,8 +134,11 @@ test('translation proof records a non-strict HSK result without hiding browser c
               regionId: 'region-literary',
               displayedChinese: 'ä¸€ä½å¥³ç¥žä»Žå¦ä¸€ä¸ªä¸–ç•Œæ¥åˆ°è¿™é‡Œã€‚',
               hsk: {
+                requestedLevel: 3,
+                learningMode: 'natural',
                 strictlyValid: false,
-                repairState: 'rejected',
+                levelCoverage: 0.91,
+                repairState: 'accepted',
                 aboveLevelTokens: ['å¥³ç¥ž'],
               },
             },
@@ -141,6 +150,7 @@ test('translation proof records a non-strict HSK result without hiding browser c
 
   assert.equal(proof.passed, true)
   assert.equal(proof.hskStrictlyValid, false)
-  assert.equal(proof.hskAssessment.repairState, 'rejected')
+  assert.equal(proof.hskAssessment.repairState, 'accepted')
+  assert.equal(proof.hskAssessment.levelCoverage, 0.91)
   assert.equal(proof.hskAssessment.aboveLevelTokens.length, 1)
 })

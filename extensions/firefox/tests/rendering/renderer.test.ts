@@ -272,8 +272,11 @@ describe('progressive selectable image renderer', () => {
       pinyin: 'wǒ men xiàn zài jiù zǒu',
       hsk: {
         requestedLevel: 2,
+        learningMode: 'strict',
         strictlyValid: true,
+        levelCoverage: 1,
         aboveLevelTokens: [],
+        teachingTerms: [],
         repairState: 'accepted',
       },
     })
@@ -282,6 +285,47 @@ describe('progressive selectable image renderer', () => {
     expect(refined?.dataset.pinyin).toBe('wǒ men xiàn zài jiù zǒu')
     expect(refined?.dataset.hskRepairState).toBe('accepted')
     expect(shadow.querySelector(`[data-patch-id="${region.patch.blobId}"]`)).toBe(patch)
+  })
+
+  it('underlines only preserved learning terms without changing selectable text', async () => {
+    const image = loadedImage()
+    document.body.append(image)
+    const rendered = await renderAll(image)
+    const shadow = shadowOf(rendered)
+    const region = fixtureRegions()[0]!
+
+    rendered.refineRegion({
+      sequence: 10,
+      type: 'regionRefined',
+      regionId: region.id,
+      displayedChinese: '我们现在要走！',
+      pinyin: 'wǒ men xiàn zài yào zǒu',
+      hsk: {
+        requestedLevel: 2,
+        learningMode: 'natural',
+        strictlyValid: false,
+        levelCoverage: 0.8,
+        aboveLevelTokens: ['现在'],
+        teachingTerms: [
+          {
+            text: '现在',
+            startChar: 2,
+            endChar: 4,
+            pinyin: 'xiàn zài',
+            definitions: ['now'],
+            requiredLevel: 3,
+            reason: 'above-level',
+          },
+        ],
+        repairState: 'accepted',
+      },
+    })
+
+    const translated = shadow.querySelector<HTMLElement>(`[data-region-id="${region.id}"]`)
+    expect(translated?.textContent).toBe('我们现在要走！')
+    expect(translated?.querySelector('.hmt-learning-term')?.textContent).toBe('现在')
+    expect(translated?.dataset.hskLearningMode).toBe('natural')
+    expect(translated?.dataset.hskTeachingTerms).toBe('1')
   })
 
   it('keeps selection, dictionary pinyin, and Mandarin speech wired to progressive text', async () => {

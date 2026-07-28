@@ -57,8 +57,11 @@ export function createFixtureRegions(input: FixtureRegionInput): BrowserRegion[]
         readingOrder: 0,
         hsk: {
           requestedLevel,
+          learningMode: 'natural',
           strictlyValid: true,
+          levelCoverage: 1,
           aboveLevelTokens: [],
+          teachingTerms: [],
           repairState: 'not-needed',
         },
         style: {
@@ -113,8 +116,11 @@ export function createFixtureRegions(input: FixtureRegionInput): BrowserRegion[]
         readingOrder: 1,
         hsk: {
           requestedLevel,
+          learningMode: 'natural',
           strictlyValid: true,
+          levelCoverage: 1,
           aboveLevelTokens: [],
+          teachingTerms: [],
           repairState: 'not-needed',
         },
         style: {
@@ -191,8 +197,11 @@ function fixtureTimeline(record: ActiveJobRecord): Array<{ at: number; update: J
         pinyin: 'wǒ men xiàn zài jiù zǒu',
         hsk: {
           requestedLevel: record.hskLevel,
+          learningMode: record.submittedRequest.settings.learningMode,
           strictlyValid: true,
+          levelCoverage: 1,
           aboveLevelTokens: [],
+          teachingTerms: [],
           repairState: 'accepted',
         },
       }),

@@ -81,7 +81,7 @@ fn numeric_prefix_cannot_hide_a_known_higher_level_compound() {
 }
 
 #[test]
-fn dictionary_compound_guard_beats_an_allowed_component_split() {
+fn dictionary_phrase_with_allowed_surface_words_is_not_a_shadow_hsk_violation() {
     let hsk = vec![
         entry("研究", HskLevel::ONE, &["research"]),
         entry("生", HskLevel::ONE, &["student"]),
@@ -94,12 +94,12 @@ fn dictionary_compound_guard_beats_an_allowed_component_split() {
     let control = custom_control("ambiguous-compound", hsk, dictionary);
 
     let report = control.validate("研究生", HskLevel::ONE, &[]);
-    assert_eq!(report.violations.len(), 1);
-    assert_eq!(report.violations[0].text, "研究生");
-    assert_eq!(
-        report.violations[0].reason,
-        ViolationReason::KnownDictionaryWord
+    assert!(
+        report.strictly_valid,
+        "dictionary phrase boundaries must not override the selected HSK surface vocabulary: {:?}",
+        report.violations
     );
+    assert_eq!(report.lexical_token_count, 2);
 }
 
 #[test]

@@ -12,7 +12,7 @@ packager and are updated through the normal Firefox release channel.
 ## Companion contract
 
 Every native and HTTP handshake is pinned to the build fingerprint
-`hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-07-27-r6`. A different fingerprint is a hard failure,
+`hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-07-28-r7`. A different fingerprint is a hard failure,
 not a negotiated compatibility mode.
 
 The background worker uses these loopback routes:
@@ -33,8 +33,9 @@ Setup, dictionary, and font requests remain authenticated root routes:
 `regionRefined`, `complete`, `failed`, and `cancelled`. `regionReady` carries
 geometry, patch identity and rectangle, English/base/displayed Chinese,
 pinyin, OCR confidence, reading order, typography/layout, and HSK validation
-and repair state. `regionRefined` can change only displayed Chinese, pinyin,
-and HSK state.
+and repair state. Its HSK state also carries the selected learning mode,
+level-appropriate lexical coverage, and exact teaching-term ranges.
+`regionRefined` can change only displayed Chinese, pinyin, and HSK state.
 
 ## MV3 recovery and ownership
 
@@ -121,3 +122,12 @@ page,” “Writing the Chinese text,” and “Fitting the text.”
 The persisted Names setting defaults to `keep-original`; readers may switch to
 `chinese`. The selected value travels through the strict popup/content/job
 contracts and is included in the companion request.
+
+The persisted Learning style defaults to `natural`. Natural learning asks for
+simple vocabulary and grammar while allowing a small number of useful story
+terms; those terms receive a dotted underline and use the same position-aware
+hover explanation as every other translated expression. `strict` accepts only
+translations whose non-name vocabulary is inside the selected HSK level. The
+learning mode travels through the popup, background, content, job, cache, and
+progressive-region contracts, so changing it cannot reuse output from the
+other mode.

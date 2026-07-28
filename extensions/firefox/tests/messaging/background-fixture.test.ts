@@ -28,6 +28,7 @@ function submitMessage(pageSessionId = 'fixture-page-session') {
     naturalWidth: 1200,
     naturalHeight: 1800,
     hskLevel: 5 as const,
+    learningMode: 'natural' as const,
     nameTranslation: 'keep-original' as const,
     visibleRects,
   }

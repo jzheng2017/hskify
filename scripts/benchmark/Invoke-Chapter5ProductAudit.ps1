@@ -182,8 +182,10 @@ try {
                 targetLanguage = "zh-CN"
                 hskStandard = "2.0"
                 hskLevel = $HskLevel
+                learningMode = "natural"
                 readingDirection = "auto"
                 translateSoundEffects = $false
+                nameTranslation = "keep-original"
             }
             visibleRects = @(
                 [ordered]@{ x = 0.0; y = 0.0; width = 1.0; height = 0.45 }

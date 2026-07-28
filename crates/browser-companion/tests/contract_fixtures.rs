@@ -32,7 +32,7 @@ fn job_request_and_viewport_are_unversioned_and_valid() {
     let serialized = serde_json::to_value(request).unwrap();
     assert_eq!(
         serialized["buildFingerprint"],
-        "hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-07-27-r6"
+        "hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-07-28-r7"
     );
     assert!(serialized.get("protocolVersion").is_none());
 }

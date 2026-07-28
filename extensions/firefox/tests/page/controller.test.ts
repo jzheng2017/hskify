@@ -243,7 +243,7 @@ describe('page controller terminal restoration', () => {
     const lifecycle = installJobLifecycle(2)
     const controller = new PageTranslationController()
 
-    await controller.start('all', 3, 'keep-original')
+    await controller.start('all', 3, 'natural', 'keep-original')
     await vi.waitFor(
       () =>
         expect(controller.snapshot()).toMatchObject({
@@ -266,7 +266,7 @@ describe('page controller terminal restoration', () => {
     const lifecycle = installJobLifecycle(Number.POSITIVE_INFINITY)
     const controller = new PageTranslationController()
 
-    await controller.start('all', 3, 'keep-original')
+    await controller.start('all', 3, 'natural', 'keep-original')
     await vi.waitFor(
       () =>
         expect(controller.snapshot()).toMatchObject({
@@ -295,7 +295,7 @@ describe('page controller terminal restoration', () => {
     const controller = new PageTranslationController()
     const internals = controller as unknown as ControllerInternals
 
-    await controller.start('all', 3, 'keep-original')
+    await controller.start('all', 3, 'natural', 'keep-original')
     await vi.waitFor(
       () =>
         expect(controller.snapshot()).toMatchObject({
@@ -343,7 +343,7 @@ describe('page controller terminal restoration', () => {
     const controller = new PageTranslationController()
     const internals = controller as unknown as ControllerInternals
 
-    await expect(controller.start('all', 3, 'keep-original')).resolves.toMatchObject({
+    await expect(controller.start('all', 3, 'natural', 'keep-original')).resolves.toMatchObject({
       state: 'running',
       current: 0,
       total: 1,

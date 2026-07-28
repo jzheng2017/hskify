@@ -337,29 +337,35 @@ async function navigationTiming(page) {
 }
 
 export function buildLiveTranslationProof(dom, routes) {
-  for (const requireStrictHsk of [true, false]) {
-    for (const job of routes.jobs ?? []) {
-      for (const update of job.updates ?? []) {
-        const refinement = (job.updates ?? [])
-          .filter(
-            (candidate) =>
-              candidate.type === 'regionRefined' &&
-              candidate.regionId === update.region?.id,
-          )
-          .at(-1)
-        const displayedChinese =
-          refinement?.displayedChinese ?? update.region?.displayedChinese
-        const hsk = refinement?.hsk ?? update.region?.hsk
-        const strictlyValid = hsk?.strictlyValid === true
-        if (
-          update.type !== 'regionReady' ||
-          !/[A-Za-z]/u.test(update.region?.sourceEnglish ?? '') ||
-          !displayedChinese?.trim() ||
-          displayedChinese.trim() === update.region.sourceEnglish.trim() ||
-          (requireStrictHsk && !strictlyValid)
-        ) {
-          continue
-        }
+  for (const job of routes.jobs ?? []) {
+    for (const update of job.updates ?? []) {
+      const refinement = (job.updates ?? [])
+        .filter(
+          (candidate) =>
+            candidate.type === 'regionRefined' &&
+            candidate.regionId === update.region?.id,
+        )
+        .at(-1)
+      const displayedChinese =
+        refinement?.displayedChinese ?? update.region?.displayedChinese
+      const hsk = refinement?.hsk ?? update.region?.hsk
+      const strictlyValid = hsk?.strictlyValid === true
+      const target = hsk?.requestedLevel <= 3 ? 0.9 : hsk?.requestedLevel === 4 ? 0.93 : 0.95
+      const naturalAccepted =
+        hsk?.learningMode === 'natural' &&
+        hsk?.repairState !== 'pending' &&
+        hsk?.repairState !== 'rejected' &&
+        Number.isFinite(hsk?.levelCoverage) &&
+        hsk.levelCoverage >= target
+      if (
+        update.type !== 'regionReady' ||
+        !/[A-Za-z]/u.test(update.region?.sourceEnglish ?? '') ||
+        !displayedChinese?.trim() ||
+        displayedChinese.trim() === update.region.sourceEnglish.trim() ||
+        (!strictlyValid && !naturalAccepted)
+      ) {
+        continue
+      }
         const patchId = update.region.patch?.blobId
         const patch = dom.patches.find(
           (item) =>
@@ -402,7 +408,9 @@ export function buildLiveTranslationProof(dom, routes) {
           hskStrictlyValid: strictlyValid,
           hskAssessment: {
             repairState: hsk?.repairState,
+            levelCoverage: hsk?.levelCoverage,
             aboveLevelTokens: hsk?.aboveLevelTokens ?? [],
+            teachingTerms: hsk?.teachingTerms ?? [],
           },
           patch: {
             patchId,
@@ -416,13 +424,12 @@ export function buildLiveTranslationProof(dom, routes) {
             patchBeforeText: true,
           },
         }
-      }
     }
   }
   return {
     passed: false,
     reason:
-      'No Latin-English translated region had a decoded patch committed before selectable Chinese text.',
+      'No finalized HSK-policy-accepted Latin-English region had a decoded patch committed before selectable Chinese text.',
   }
 }
 
@@ -590,6 +597,23 @@ async function main() {
         `Live translation completed with ${finalState.current}/${finalState.total} images; expected ${expectedImageCount}/${expectedImageCount}.`,
       )
     }
+    const finalDom = await chapterDomEvidence(chapterPage)
+    const finalRoutes = await routeEvidence(
+      extensionPage,
+      translated.records,
+      false,
+      config.expectedResourceIdentities,
+    )
+    const finalProof = buildLiveTranslationProof(finalDom, finalRoutes)
+    if (!finalProof.passed) {
+      fail(`Live translation completed without final HSK-policy proof: ${finalProof.reason}`)
+    }
+    const finalized = {
+      ...translated,
+      proof: finalProof,
+      dom: finalDom,
+      routes: finalRoutes,
+    }
     const capturedNetwork = network.snapshot()
     network = undefined
     const timings = timingSections(
@@ -598,11 +622,11 @@ async function main() {
       requestedChapterUrl,
       finalChapterUrl,
     )
-    const firstPatch = translated.dom.events.find(
-      (event) => event.index === translated.proof.domOrdering.patchEventIndex,
+    const firstPatch = finalized.dom.events.find(
+      (event) => event.index === finalized.proof.domOrdering.patchEventIndex,
     )
-    const firstText = translated.dom.events.find(
-      (event) => event.index === translated.proof.domOrdering.selectableTextEventIndex,
+    const firstText = finalized.dom.events.find(
+      (event) => event.index === finalized.proof.domOrdering.selectableTextEventIndex,
     )
     evidence = {
       schemaVersion: 1,
@@ -634,7 +658,7 @@ async function main() {
       },
       setup,
       permissions,
-      translationProof: translated.proof,
+      translationProof: finalized.proof,
       extensionWorkflow: {
         actionIssuedAtEpochMs: action.issuedAtEpochMs,
         actionResponseLatencyMs: action.responseAtEpochMs - action.issuedAtEpochMs,
@@ -648,7 +672,7 @@ async function main() {
           'These end-to-end milestones can include live image acquisition; they are not local-only benchmark timings.',
       },
       timings,
-      localRouteReplay: translated.routes,
+      localRouteReplay: finalized.routes,
       gates: [
         {
           id: 'all-live-chapter-images-discovered',
@@ -659,18 +683,18 @@ async function main() {
         {
           id: 'english-dialogue-region-translated',
           status: 'pass',
-          regionId: translated.proof.regionId,
+          regionId: finalized.proof.regionId,
         },
         {
           id: 'hsk-assessment-recorded',
           status: 'pass',
-          strictlyValid: translated.proof.hskStrictlyValid,
-          ...translated.proof.hskAssessment,
+          strictlyValid: finalized.proof.hskStrictlyValid,
+          ...finalized.proof.hskAssessment,
         },
         {
           id: 'decoded-patch-before-selectable-text',
           status: 'pass',
-          ...translated.proof.domOrdering,
+          ...finalized.proof.domOrdering,
         },
         {
           id: 'entire-live-chapter-completed',

@@ -2,12 +2,16 @@ import { describe, expect, it } from 'vitest'
 
 import {
   DEFAULT_HSK_LEVEL,
+  DEFAULT_LEARNING_MODE,
   DEFAULT_NAME_TRANSLATION,
   HSK_LEVEL_KEY,
+  LEARNING_MODE_KEY,
   NAME_TRANSLATION_KEY,
   loadHskLevel,
+  loadLearningMode,
   loadNameTranslation,
   saveHskLevel,
+  saveLearningMode,
   saveNameTranslation,
 } from '../../src/messaging/settings'
 import { MemoryStorage } from '../helpers/storage'
@@ -37,5 +41,15 @@ describe('popup HSK persistence', () => {
     expect(storage.values[NAME_TRANSLATION_KEY]).toBe('chinese')
     storage.values[NAME_TRANSLATION_KEY] = 'literal-translation'
     expect(await loadNameTranslation(storage)).toBe('keep-original')
+  })
+
+  it('uses natural learning by default and remembers strict HSK mode', async () => {
+    const storage = new MemoryStorage()
+    expect(await loadLearningMode(storage)).toBe(DEFAULT_LEARNING_MODE)
+    await saveLearningMode('strict', storage)
+    expect(await loadLearningMode(storage)).toBe('strict')
+    expect(storage.values[LEARNING_MODE_KEY]).toBe('strict')
+    storage.values[LEARNING_MODE_KEY] = 'automatic'
+    expect(await loadLearningMode(storage)).toBe('natural')
   })
 })

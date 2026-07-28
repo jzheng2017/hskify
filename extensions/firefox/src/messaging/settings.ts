@@ -2,10 +2,13 @@ import type { HskLevel } from '../contracts/browser'
 
 export const HSK_LEVEL_KEY = 'hmt.settings.hskLevel'
 export const NAME_TRANSLATION_KEY = 'hmt.settings.nameTranslation'
+export const LEARNING_MODE_KEY = 'hmt.settings.learningMode'
 export const DEFAULT_HSK_LEVEL: HskLevel = 5
 export const DEFAULT_NAME_TRANSLATION: NameTranslation = 'keep-original'
+export const DEFAULT_LEARNING_MODE: LearningMode = 'natural'
 
 export type NameTranslation = 'keep-original' | 'chinese'
+export type LearningMode = 'natural' | 'strict'
 
 export type StorageArea = {
   get(keys?: string | string[] | Record<string, unknown> | null): Promise<Record<string, unknown>>
@@ -24,6 +27,10 @@ export function isHskLevel(value: unknown): value is HskLevel {
 
 export function isNameTranslation(value: unknown): value is NameTranslation {
   return value === 'keep-original' || value === 'chinese'
+}
+
+export function isLearningMode(value: unknown): value is LearningMode {
+  return value === 'natural' || value === 'strict'
 }
 
 export async function loadHskLevel(
@@ -54,4 +61,20 @@ export async function saveNameTranslation(
   storage: StorageArea = browser.storage.local,
 ): Promise<void> {
   await storage.set({ [NAME_TRANSLATION_KEY]: preference })
+}
+
+export async function loadLearningMode(
+  storage: StorageArea = browser.storage.local,
+): Promise<LearningMode> {
+  const values = await storage.get(LEARNING_MODE_KEY)
+  return isLearningMode(values[LEARNING_MODE_KEY])
+    ? values[LEARNING_MODE_KEY]
+    : DEFAULT_LEARNING_MODE
+}
+
+export async function saveLearningMode(
+  mode: LearningMode,
+  storage: StorageArea = browser.storage.local,
+): Promise<void> {
+  await storage.set({ [LEARNING_MODE_KEY]: mode })
 }

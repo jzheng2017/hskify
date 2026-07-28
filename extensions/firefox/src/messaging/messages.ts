@@ -10,6 +10,7 @@ import {
   type BrowserSetupStatus,
   type HskLevel,
   type JobUpdateBatch,
+  type LearningMode,
   type LookupRequest,
   type LookupResult,
   type NameTranslation,
@@ -27,6 +28,7 @@ export type PopupStartMessage = {
   type: 'popup:start'
   scope: TranslationScope
   hskLevel: HskLevel
+  learningMode: LearningMode
   nameTranslation: NameTranslation
 }
 export type PopupCancelMessage = { type: 'popup:cancel' }
@@ -38,6 +40,7 @@ export type ContentStartMessage = {
   type: 'content:start'
   scope: TranslationScope
   hskLevel: HskLevel
+  learningMode: LearningMode
   nameTranslation: NameTranslation
   properNameGlossary?: BrowserJobRequest['properNameGlossary']
 }
@@ -55,6 +58,7 @@ export type SubmitImageMessage = {
   sourceMimeType?: string
   sourceBytes?: ArrayBuffer
   hskLevel: HskLevel
+  learningMode: LearningMode
   nameTranslation: NameTranslation
   visibleRects: NormalizedRect[]
   precedingContext?: BrowserJobRequest['precedingContext']
@@ -204,6 +208,7 @@ export type RecoveredJob = {
 
 export type PopupState = PageState & {
   hskLevel: HskLevel
+  learningMode: LearningMode
   nameTranslation: NameTranslation
 }
 
@@ -338,6 +343,13 @@ function nameTranslation(value: unknown, path: string): NameTranslation {
   return value
 }
 
+function learningMode(value: unknown, path: string): LearningMode {
+  if (value !== 'natural' && value !== 'strict') {
+    throw new RuntimeMessageValidationError(`${path} must be "natural" or "strict".`)
+  }
+  return value
+}
+
 function terminalType(
   value: unknown,
   path: string,
@@ -398,7 +410,16 @@ function pageState(value: unknown, includeHsk = false): PopupState | PageState {
   exact(
     item,
     includeHsk
-      ? ['state', 'current', 'total', 'stage', 'message', 'hskLevel', 'nameTranslation']
+      ? [
+          'state',
+          'current',
+          'total',
+          'stage',
+          'message',
+          'hskLevel',
+          'learningMode',
+          'nameTranslation',
+        ]
       : ['state', 'current', 'total', 'stage', 'message'],
   )
   if (
@@ -421,6 +442,7 @@ function pageState(value: unknown, includeHsk = false): PopupState | PageState {
     ? {
         ...parsed,
         hskLevel: hskLevel(item.hskLevel, '$.hskLevel'),
+        learningMode: learningMode(item.learningMode, '$.learningMode'),
         nameTranslation: nameTranslation(item.nameTranslation, '$.nameTranslation'),
       }
     : parsed
@@ -503,11 +525,12 @@ export function parseBackgroundRequest(value: unknown): BackgroundRequest {
       exact(item, ['type'])
       return { type }
     case 'popup:start':
-      exact(item, ['type', 'scope', 'hskLevel', 'nameTranslation'])
+      exact(item, ['type', 'scope', 'hskLevel', 'learningMode', 'nameTranslation'])
       return {
         type,
         scope: translationScope(item.scope, '$.scope'),
         hskLevel: hskLevel(item.hskLevel, '$.hskLevel'),
+        learningMode: learningMode(item.learningMode, '$.learningMode'),
         nameTranslation: nameTranslation(item.nameTranslation, '$.nameTranslation'),
       }
     case 'image:prefetch':
@@ -548,6 +571,7 @@ export function parseBackgroundRequest(value: unknown): BackgroundRequest {
         'sourceMimeType',
         'sourceBytes',
         'hskLevel',
+        'learningMode',
         'nameTranslation',
         'visibleRects',
         'precedingContext',
@@ -580,6 +604,7 @@ export function parseBackgroundRequest(value: unknown): BackgroundRequest {
         ...(sourceMimeType === undefined ? {} : { sourceMimeType }),
         ...(sourceBytes === undefined ? {} : { sourceBytes }),
         hskLevel: hskLevel(item.hskLevel, '$.hskLevel'),
+        learningMode: learningMode(item.learningMode, '$.learningMode'),
         nameTranslation: nameTranslation(item.nameTranslation, '$.nameTranslation'),
         visibleRects: normalizedRects(item.visibleRects, '$.visibleRects'),
         ...(precedingContext === undefined ? {} : { precedingContext }),
@@ -681,6 +706,7 @@ export function parseContentRequest(value: unknown): ContentRequest {
         'type',
         'scope',
         'hskLevel',
+        'learningMode',
         'nameTranslation',
         'properNameGlossary',
       ])
@@ -692,6 +718,7 @@ export function parseContentRequest(value: unknown): ContentRequest {
         type,
         scope: translationScope(item.scope, '$.scope'),
         hskLevel: hskLevel(item.hskLevel, '$.hskLevel'),
+        learningMode: learningMode(item.learningMode, '$.learningMode'),
         nameTranslation: nameTranslation(item.nameTranslation, '$.nameTranslation'),
         ...(properNameGlossary === undefined ? {} : { properNameGlossary }),
       }

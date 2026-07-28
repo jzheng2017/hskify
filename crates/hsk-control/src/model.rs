@@ -375,6 +375,10 @@ pub struct ValidationReport {
     pub normalized_text: String,
     pub requested_level: HskLevel,
     pub strictly_valid: bool,
+    #[serde(default)]
+    pub lexical_token_count: usize,
+    #[serde(default)]
+    pub above_level_token_count: usize,
     pub violations: Vec<HskViolation>,
     pub exceptions: Vec<HskException>,
     pub cache_revision: String,

@@ -38,7 +38,7 @@ markers.
 Rust and TypeScript compile the same fingerprint:
 
 ```text
-hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-07-27-r6
+hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-07-28-r7
 ```
 
 The native handshake request/response, health response, job metadata, and job
@@ -125,6 +125,35 @@ field must be JSON. Before source retention, the server validates:
 
 The direct adapter decodes the retained source once more for inference and
 rechecks that its dimensions match job metadata.
+
+## Learning policy
+
+Every job selects one explicit learning mode, and that mode is part of the
+translation-cache identity:
+
+- `natural` simplifies vocabulary and grammar first, then permits a small,
+  level-dependent number of indispensable story terms. Levels 1-3 target at
+  least 90% level-appropriate lexical tokens, level 4 targets 93%, and levels
+  5-6 target 95%. Short dialogue may keep one useful term where a longer
+  paraphrase would be less readable.
+- `strict` requires every non-exempt lexical token to pass the selected HSK
+  vocabulary level before the result is accepted.
+
+Protected proper names remain separate from this policy and follow the
+reader's Names setting. Every accepted above-level occurrence is emitted as a
+bounded `teachingTerm` with exact Unicode character offsets, pinyin, local
+dictionary definitions, its known required HSK level, and whether it is above
+the selected level or outside the HSK list. The extension therefore teaches
+the actual final wording; it does not rely on a second model call or a
+hard-coded list of story phrases.
+
+Vocabulary validation treats explicit higher-level HSK headwords as atomic
+violations. A dictionary phrase that is fully decomposable into HSK headwords
+at the selected level is counted by those allowed surface words
+instead of becoming a shadow HSK violation merely because the dictionary also
+stores the phrase. Semantic composition and meaning preservation remain model
+responsibilities; the deterministic validator controls the selected
+vocabulary inventory.
 
 ## Resident CUDA path
 
@@ -273,8 +302,16 @@ image remains untouched. Standalone numbers remain exact-preservation
 requirements; digits embedded in Latin OCR tokens do not.
 
 `hsk-control` validates each returned story item. Items that already pass are
-accepted. Rejected items alone receive at most two prompt-changing targeted
+accepted. Rejected items alone receive at most four prompt-changing targeted
 repair attempts with their rejected Chinese and exact deterministic problems.
+Every distinct bounded strategy runs unless an earlier attempt succeeds; an
+unchanged answer cannot prevent the later source-first rewrite strategies.
+The deterministic validator also supplies a typed avoid-list that is refreshed
+from each rejected candidate. Strict repair must emit none of those exact terms.
+Natural repair remains governed by Natural learning on every attempt: it must
+simplify the avoid-list while retaining at most the level-specific budget of
+indispensable story terms. It never silently escalates to Strict and discards a
+core story concept merely to improve the vocabulary score.
 The repair never restarts the page. If one OCR region remains unsafe to
 publish, its original pixels remain untouched and the other regions still
 complete; deterministic per-region validation exhaustion is not promoted into
@@ -290,7 +327,8 @@ longest-match lookup. A progressive region carries:
 - OCR confidence and reading order;
 - normalized text/bubble/patch geometry;
 - browser-safe style and layout; and
-- requested level, strict validity, above-level tokens, and repair state.
+- requested level, learning mode, level coverage, exact teaching terms, strict
+  validity, above-level tokens, and repair state.
 
 ## Translation cache
 
@@ -302,6 +340,7 @@ schema
 OCR text
 last six preceding utterances
 HSK level
+learning mode
 model ID
 model revision
 prompt hash
@@ -316,7 +355,10 @@ project, browser history, persistent page artifact, or retranslation facility.
 
 The separate 2 GiB persistent result cache stores only complete per-image
 regions and their patch PNGs. Its key covers the strict request, build
-fingerprint, source identity, and all output-affecting resource identities.
+fingerprint, source identity, all output-affecting resource identities, and
+the HSK normalization, segmentation, lookup, Jieba, and Unicode-table policy
+revisions. A validator-code change therefore cannot replay regions assessed by
+the previous policy.
 Each entry is installed with one atomic rename after visible processing
 finishes. Size accounting and eviction occur on that store path. A replay
 computes the exact key and opens only that entry; it does not scan all cached

@@ -334,6 +334,7 @@ async function runJob({ item, hskLevel, corpusRoot, baseUrl, session, outputDire
       targetLanguage: 'zh-CN',
       hskStandard: '2.0',
       hskLevel,
+      learningMode: 'natural',
       readingDirection: 'auto',
       translateSoundEffects: false,
       nameTranslation: 'keep-original',

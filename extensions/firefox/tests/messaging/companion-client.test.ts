@@ -53,6 +53,7 @@ function request(): BrowserJobRequest {
       targetLanguage: 'zh-CN',
       hskStandard: '2.0',
       hskLevel: 5,
+      learningMode: 'natural',
       readingDirection: 'auto',
       translateSoundEffects: false,
       nameTranslation: 'keep-original',

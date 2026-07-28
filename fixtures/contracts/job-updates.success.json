@@ -71,8 +71,21 @@
         },
         "hsk": {
           "requestedLevel": 2,
+          "learningMode": "strict",
           "strictlyValid": false,
+          "levelCoverage": 0.75,
           "aboveLevelTokens": ["马上"],
+          "teachingTerms": [
+            {
+              "text": "马上",
+              "startChar": 3,
+              "endChar": 5,
+              "pinyin": "mǎ shàng",
+              "definitions": ["immediately", "at once"],
+              "requiredLevel": 3,
+              "reason": "above-level"
+            }
+          ],
           "repairState": "pending"
         }
       }
@@ -85,8 +98,11 @@
       "pinyin": "wǒ men xiàn zài yào zǒu",
       "hsk": {
         "requestedLevel": 2,
+        "learningMode": "strict",
         "strictlyValid": true,
+        "levelCoverage": 1,
         "aboveLevelTokens": [],
+        "teachingTerms": [],
         "repairState": "accepted"
       }
     },

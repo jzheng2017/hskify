@@ -20,14 +20,14 @@ use async_trait::async_trait;
 use camino::Utf8PathBuf;
 use hsk_control::{
     HskControl, HskLevel as ControlHskLevel, LookupRegionContext as ControlLookupRegion,
-    ProperName, ProperNameReason, ValidationReport,
+    ProperName, ProperNameReason, ValidationReport, ViolationReason,
 };
 use image::{DynamicImage, GenericImageView};
 use koharu_app::llm::{
-    HSK_TRANSLATION_MODEL, HskNameHandling, HskPrecedingUtterance, HskProtectedName,
-    HskRepairUtterance, HskSourceUtterance, HskTranslationBatchRequest, HskTranslationDisposition,
-    HskTranslationOutcome, HskTranslationRepairRequest, HskUtteranceKind,
-    MAX_HSK_PRECEDING_UTTERANCES,
+    HSK_TRANSLATION_MODEL, HskLearningMode, HskNameHandling, HskPrecedingUtterance,
+    HskProtectedName, HskRepairUtterance, HskSourceUtterance, HskTranslationBatchRequest,
+    HskTranslationDisposition, HskTranslationOutcome, HskTranslationRepairRequest,
+    HskUtteranceKind, MAX_HSK_PRECEDING_UTTERANCES,
 };
 use koharu_app::{App, AppConfig};
 use koharu_ml::comic_text_bubble_detector::{ComicTextBubbleDetector, DETECTOR_TILE_BATCH_SIZE};
@@ -55,9 +55,9 @@ use self::patch::{
 use self::ppocr_v5::{EnglishPpOcrV5, MAX_LINE_BATCH_SIZE, PpOcrAppearanceBand, PpOcrPrediction};
 use crate::contracts::{
     BrowserJobRequest, BrowserJobStage, BrowserTextColorBand, BrowserTextLayout, BrowserTextStyle,
-    FontCategory, HskLevel, HskRepairState, LookupRegion, LookupResult, LookupToken,
-    NameTranslation, NormalizedRect, Point, ProgressiveHskStatus, ProgressiveRegion, TextAlignment,
-    WritingMode,
+    FontCategory, HskLevel, HskRepairState, LearningMode, LookupRegion, LookupResult, LookupToken,
+    NameTranslation, NormalizedRect, Point, ProgressiveHskStatus, ProgressiveRegion, TeachingTerm,
+    TeachingTermReason, TextAlignment, WritingMode,
 };
 use crate::crypto::sha256_hex;
 use crate::cuda_scheduler::{
@@ -77,7 +77,7 @@ const TRANSLATION_MAX_FLUSH_DELAY: Duration = Duration::from_millis(75);
 const MAX_TARGETED_REPAIR_ATTEMPTS: usize = 4;
 const BROWSER_QWEN_INFERENCE_THREADS: i32 = 6;
 const MIN_OCR_CONFIDENCE: f32 = 0.45;
-const TRANSLATION_CACHE_SCHEMA: &str = "hskify-direct-hsk-region-cache-v16";
+const TRANSLATION_CACHE_SCHEMA: &str = "hskify-direct-hsk-region-cache-v21";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -811,6 +811,7 @@ impl KoharuPipeline {
                     &batch_context,
                     &protected_names,
                     request.settings.name_translation,
+                    request.settings.learning_mode,
                     level,
                     &model_id,
                     translator.model_revision(),
@@ -828,7 +829,9 @@ impl KoharuPipeline {
                     .as_ref()
                     .is_some_and(|translation| translation.repair_state == HskRepairState::Pending)
                 {
-                    states[index] = cached.clone().map(TranslationState::from_cached);
+                    states[index] = cached.clone().map(|translation| {
+                        TranslationState::from_cached(translation, request.settings.learning_mode)
+                    });
                 }
                 translated[index] = cached;
                 if translated[index].is_none() {
@@ -848,6 +851,8 @@ impl KoharuPipeline {
                 &regions[index],
                 translation,
                 request.settings.hsk_level,
+                request.settings.learning_mode,
+                control,
                 image_width,
                 image_height,
             )?;
@@ -889,6 +894,7 @@ impl KoharuPipeline {
                     &validator_names,
                     &regions[index].source_english,
                     request.settings.name_translation,
+                    request.settings.learning_mode,
                 );
                 if let Some(mut translation) = state.initial_translation() {
                     populate_pinyin(control, &mut translation);
@@ -897,6 +903,8 @@ impl KoharuPipeline {
                         &regions[index],
                         translation.clone(),
                         request.settings.hsk_level,
+                        request.settings.learning_mode,
+                        control,
                         image_width,
                         image_height,
                     )
@@ -915,6 +923,7 @@ impl KoharuPipeline {
                 tokio::runtime::Handle::current().block_on(translator.translate_batch_streaming(
                     &HskTranslationBatchRequest {
                         requested_level: level,
+                        learning_mode: hsk_learning_mode(request.settings.learning_mode),
                         name_handling,
                         translate_sound_effects: request.settings.translate_sound_effects,
                         utterances,
@@ -943,6 +952,7 @@ impl KoharuPipeline {
                         &validator_names,
                         &regions[index].source_english,
                         request.settings.name_translation,
+                        request.settings.learning_mode,
                     ));
                 }
             }
@@ -955,6 +965,7 @@ impl KoharuPipeline {
                         &validator_names,
                         &regions[index].source_english,
                         request.settings.name_translation,
+                        request.settings.learning_mode,
                     ));
                 }
             }
@@ -975,6 +986,8 @@ impl KoharuPipeline {
                     &regions[index],
                     primary.clone(),
                     request.settings.hsk_level,
+                    request.settings.learning_mode,
+                    control,
                     image_width,
                     image_height,
                 )?;
@@ -1018,6 +1031,7 @@ impl KoharuPipeline {
                 kind: hsk_utterance_kind(region.candidate.kind),
                 source_english: region.source_english.clone(),
                 rejected_chinese: state.base_chinese.clone(),
+                avoid_chinese: state.avoid_chinese(),
                 problems: state.problems.clone(),
             };
             repair_queue.enqueue(PendingRepair {
@@ -1087,10 +1101,6 @@ impl KoharuPipeline {
                     });
                 }
             }
-            let mut seen_rejected = HashSet::new();
-            if let Some(initial) = job.state.rejected_for_repair() {
-                seen_rejected.insert(initial);
-            }
             for attempt in 0..MAX_TARGETED_REPAIR_ATTEMPTS {
                 // Primary work for this image has already drained. Offscreen
                 // admission also lets visible primary work from another job pass.
@@ -1103,25 +1113,36 @@ impl KoharuPipeline {
                 let utterance = if attempt == 0 {
                     job.utterance.clone()
                 } else {
+                    let mut problems = if job.state.problems.is_empty() {
+                        vec![
+                            "the previous automatic repair was not safe to publish; return one complete Simplified Chinese line"
+                                .to_owned(),
+                        ]
+                    } else {
+                        job.state.problems.clone()
+                    };
+                    problems.push(repair_convergence_instruction(
+                        repair_generation_mode(request.settings.learning_mode, attempt),
+                        request.settings.hsk_level,
+                        attempt,
+                    ));
                     HskRepairUtterance {
                         id: job.region.id.clone(),
                         kind: hsk_utterance_kind(job.region.candidate.kind),
                         source_english: job.region.source_english.clone(),
                         rejected_chinese: job.state.rejected_for_repair(),
-                        problems: if job.state.problems.is_empty() {
-                            vec![
-                                "the previous automatic repair was not safe to publish; return one complete Simplified Chinese line"
-                                    .to_owned(),
-                            ]
-                        } else {
-                            job.state.problems.clone()
-                        },
+                        avoid_chinese: job.state.avoid_chinese(),
+                        problems,
                     }
                 };
                 let repair_result = tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current().block_on(translator.repair_invalid_item(
                         &HskTranslationRepairRequest {
                             requested_level: level,
+                            learning_mode: hsk_learning_mode(repair_generation_mode(
+                                request.settings.learning_mode,
+                                attempt,
+                            )),
                             name_handling,
                             translate_sound_effects: request.settings.translate_sound_effects,
                             utterance,
@@ -1157,9 +1178,6 @@ impl KoharuPipeline {
                 }
                 cancellation_boundary(cancel.as_ref())?;
                 if job.state.repair_succeeded() {
-                    break;
-                }
-                if !job.state.repair_made_progress(&mut seen_rejected) {
                     break;
                 }
             }
@@ -1227,13 +1245,22 @@ impl KoharuPipeline {
                 // unavoidable HSK-level wording, `finish` keeps the meaningful
                 // primary and marks it rejected instead of leaving the browser
                 // indefinitely pending.
-                publish_refinement(sink, &job.region.id, &result, request.settings.hsk_level)?;
+                publish_refinement(
+                    sink,
+                    &job.region.id,
+                    &result,
+                    request.settings.hsk_level,
+                    request.settings.learning_mode,
+                    control,
+                )?;
             } else {
                 publish_region(
                     sink,
                     &job.region,
                     result.clone(),
                     request.settings.hsk_level,
+                    request.settings.learning_mode,
+                    control,
                     image_width,
                     image_height,
                 )?;
@@ -2546,10 +2573,12 @@ struct TranslationState {
     base_chinese: Option<String>,
     displayed_chinese: Option<String>,
     latest_rejected_chinese: Option<String>,
+    latest_rejected_report: Option<ValidationReport>,
     model_declared_names: Vec<String>,
     report: Option<ValidationReport>,
     problems: Vec<String>,
     meaning_valid: bool,
+    learning_mode: LearningMode,
     repair_state: HskRepairState,
 }
 
@@ -2559,10 +2588,12 @@ impl TranslationState {
             base_chinese: None,
             displayed_chinese: None,
             latest_rejected_chinese: None,
+            latest_rejected_report: None,
             model_declared_names: Vec::new(),
             report: None,
             problems: Vec::new(),
             meaning_valid: true,
+            learning_mode: LearningMode::Natural,
             repair_state: HskRepairState::NotNeeded,
         }
     }
@@ -2574,6 +2605,7 @@ impl TranslationState {
         proper_names: &[ProperName],
         source_english: &str,
         name_translation: NameTranslation,
+        learning_mode: LearningMode,
     ) -> Self {
         let model_declared_names = outcome.declared_names.clone();
         let mut problems = outcome.repair_problems();
@@ -2589,7 +2621,9 @@ impl TranslationState {
             );
             control.validate(text, level, &names)
         });
-        if let Some(report) = &report {
+        if let Some(report) = &report
+            && !learning_policy_satisfied(report, learning_mode)
+        {
             append_validation_problems(&mut problems, report);
         }
         let valid = problems.is_empty() && report.is_some();
@@ -2603,25 +2637,31 @@ impl TranslationState {
             }),
             base_chinese,
             latest_rejected_chinese: None,
+            latest_rejected_report: None,
             model_declared_names,
             report,
             problems,
             meaning_valid,
+            learning_mode,
             repair_state: HskRepairState::NotNeeded,
         }
     }
 
-    fn from_cached(translation: CachedTranslation) -> Self {
+    fn from_cached(translation: CachedTranslation, learning_mode: LearningMode) -> Self {
         let mut problems = Vec::new();
-        append_validation_problems(&mut problems, &translation.report);
+        if !learning_policy_satisfied(&translation.report, learning_mode) {
+            append_validation_problems(&mut problems, &translation.report);
+        }
         Self {
             base_chinese: Some(translation.base_chinese),
             displayed_chinese: Some(translation.displayed_chinese),
             latest_rejected_chinese: None,
+            latest_rejected_report: None,
             model_declared_names: Vec::new(),
             report: Some(translation.report),
             problems,
             meaning_valid: true,
+            learning_mode,
             repair_state: translation.repair_state,
         }
     }
@@ -2640,9 +2680,21 @@ impl TranslationState {
             .or_else(|| self.base_chinese.clone())
     }
 
-    fn repair_made_progress(&self, seen_rejected: &mut HashSet<String>) -> bool {
-        self.rejected_for_repair()
-            .is_some_and(|rejected| seen_rejected.insert(rejected))
+    fn avoid_chinese(&self) -> Vec<String> {
+        let report = self
+            .latest_rejected_report
+            .as_ref()
+            .or(self.report.as_ref());
+        let mut terms = Vec::new();
+        if let Some(report) = report {
+            for violation in &report.violations {
+                let term = violation.text.trim();
+                if !term.is_empty() && !terms.iter().any(|existing| existing == term) {
+                    terms.push(term.to_owned());
+                }
+            }
+        }
+        terms
     }
 
     fn initial_translation(&self) -> Option<CachedTranslation> {
@@ -2688,7 +2740,9 @@ impl TranslationState {
                 );
                 control.validate(repaired, level, &names)
             });
-        if let Some(report) = &report {
+        if let Some(report) = &report
+            && !learning_policy_satisfied(report, self.learning_mode)
+        {
             append_validation_problems(&mut problems, report);
         }
         self.apply_evaluated_repair(
@@ -2707,6 +2761,11 @@ impl TranslationState {
         let had_usable_primary = self.can_publish();
         let accepted = repaired.is_some() && report.is_some() && problems.is_empty();
         self.latest_rejected_chinese = if accepted { None } else { repaired.clone() };
+        if accepted {
+            self.latest_rejected_report = None;
+        } else if report.is_some() {
+            self.latest_rejected_report = report.clone();
+        }
         if let (Some(repaired), Some(report)) = (repaired, report)
             && (accepted || !had_usable_primary)
         {
@@ -2829,6 +2888,77 @@ fn append_validation_problems(problems: &mut Vec<String>, report: &ValidationRep
     }
 }
 
+fn level_coverage(report: &ValidationReport) -> f32 {
+    if report.lexical_token_count == 0 {
+        return 1.0;
+    }
+    let accepted = report.lexical_token_count.saturating_sub(
+        report
+            .above_level_token_count
+            .min(report.lexical_token_count),
+    );
+    accepted as f32 / report.lexical_token_count as f32
+}
+
+fn natural_learning_term_budget(report: &ValidationReport) -> usize {
+    let absolute_budget = match report.requested_level.get() {
+        1..=3 => 1,
+        4..=5 => 2,
+        _ => 3,
+    };
+    let percentage_budget = report.lexical_token_count.div_ceil(20);
+    absolute_budget.max(percentage_budget)
+}
+
+fn learning_policy_satisfied(report: &ValidationReport, mode: LearningMode) -> bool {
+    if report.strictly_valid {
+        return true;
+    }
+    if mode == LearningMode::Strict {
+        return false;
+    }
+    let target = match report.requested_level.get() {
+        1..=3 => 0.90,
+        4 => 0.93,
+        _ => 0.95,
+    };
+    report.above_level_token_count <= natural_learning_term_budget(report)
+        && (level_coverage(report) >= target || report.lexical_token_count <= 10)
+}
+
+fn repair_convergence_instruction(mode: LearningMode, level: HskLevel, attempt: usize) -> String {
+    let target = match u8::from(level) {
+        1..=3 => 90,
+        4 => 93,
+        _ => 95,
+    };
+    let term_limit = match u8::from(level) {
+        1..=3 => 1,
+        4..=5 => 2,
+        _ => 3,
+    };
+    let strategy = match attempt {
+        1 => "Replace the listed terms by paraphrasing their meanings with everyday words.",
+        2 => "Rebuild the answer as short, direct clauses instead of editing the previous wording.",
+        _ => "Use the simplest complete clause structure that preserves every source detail.",
+    };
+    match mode {
+        LearningMode::Natural => format!(
+            "The previous answer still failed Natural learning. Reach at least {target}% \
+            level-appropriate lexical occurrences and keep at most {term_limit} listed \
+            above-level occurrence in the whole line. {strategy}"
+        ),
+        LearningMode::Strict => format!(
+            "The previous answer still failed Strict HSK. Keep none of the listed invalid \
+            vocabulary or grammar. {strategy}"
+        ),
+    }
+}
+
+fn repair_generation_mode(requested: LearningMode, _attempt: usize) -> LearningMode {
+    requested
+}
+
 fn translation_context(request: &BrowserJobRequest) -> Vec<HskPrecedingUtterance> {
     let context = request.preceding_context.as_deref().unwrap_or_default();
     let start = context.len().saturating_sub(MAX_HSK_PRECEDING_UTTERANCES);
@@ -2883,6 +3013,13 @@ fn hsk_name_handling(preference: NameTranslation) -> HskNameHandling {
     match preference {
         NameTranslation::KeepOriginal => HskNameHandling::KeepOriginal,
         NameTranslation::Chinese => HskNameHandling::Chinese,
+    }
+}
+
+fn hsk_learning_mode(mode: LearningMode) -> HskLearningMode {
+    match mode {
+        LearningMode::Natural => HskLearningMode::Natural,
+        LearningMode::Strict => HskLearningMode::Strict,
     }
 }
 
@@ -2965,6 +3102,7 @@ fn translation_cache_key(
     context: &[HskPrecedingUtterance],
     protected_names: &[HskProtectedName],
     name_translation: NameTranslation,
+    learning_mode: LearningMode,
     hsk_level: u8,
     model_id: &str,
     model_revision: &str,
@@ -2981,6 +3119,7 @@ fn translation_cache_key(
         context: &'a [HskPrecedingUtterance],
         protected_names: &'a [HskProtectedName],
         name_translation: NameTranslation,
+        learning_mode: LearningMode,
         hsk_level: u8,
         model_id: &'a str,
         model_revision: &'a str,
@@ -2997,6 +3136,7 @@ fn translation_cache_key(
         context: &context[start..],
         protected_names,
         name_translation,
+        learning_mode,
         hsk_level,
         model_id,
         model_revision,
@@ -3013,6 +3153,8 @@ fn publish_region(
     region: &PreparedRegion,
     translation: CachedTranslation,
     requested_level: HskLevel,
+    learning_mode: LearningMode,
+    control: &HskControl,
     image_width: u32,
     image_height: u32,
 ) -> std::result::Result<(), CleaningError> {
@@ -3031,6 +3173,7 @@ fn publish_region(
         .store_patch_png(patch_rect, region.patch.bytes.clone())
         .map_err(|error| publish_error(error, sink))?;
     let above_level_tokens = above_level_tokens(&translation.report);
+    let teaching_terms = teaching_terms(control, &translation.report);
     let progressive = ProgressiveRegion {
         id: region.id.clone(),
         text_polygon,
@@ -3046,8 +3189,11 @@ fn publish_region(
         layout,
         hsk: ProgressiveHskStatus {
             requested_level,
+            learning_mode,
             strictly_valid: translation.report.strictly_valid,
+            level_coverage: level_coverage(&translation.report),
             above_level_tokens,
+            teaching_terms,
             repair_state: translation.repair_state,
         },
     };
@@ -3080,6 +3226,8 @@ fn publish_refinement(
     region_id: &str,
     translation: &CachedTranslation,
     requested_level: HskLevel,
+    learning_mode: LearningMode,
+    control: &HskControl,
 ) -> std::result::Result<(), CleaningError> {
     sink.publish(JobUpdateDraft::RegionRefined {
         region_id: region_id.to_owned(),
@@ -3087,8 +3235,11 @@ fn publish_refinement(
         pinyin: translation.pinyin.clone(),
         hsk: ProgressiveHskStatus {
             requested_level,
+            learning_mode,
             strictly_valid: translation.report.strictly_valid,
+            level_coverage: level_coverage(&translation.report),
             above_level_tokens: above_level_tokens(&translation.report),
+            teaching_terms: teaching_terms(control, &translation.report),
             repair_state: translation.repair_state,
         },
     })
@@ -3117,6 +3268,55 @@ fn above_level_tokens(report: &ValidationReport) -> Vec<String> {
         }
     }
     tokens
+}
+
+fn teaching_terms(control: &HskControl, report: &ValidationReport) -> Vec<TeachingTerm> {
+    let mut terms = Vec::new();
+    let mut previous_end = 0;
+    for violation in &report.violations {
+        if violation.start_char < previous_end || violation.start_char >= violation.end_char {
+            continue;
+        }
+        let lookup = control.lookup(&violation.text, &[]);
+        let mut pinyin = Vec::new();
+        let mut definitions = Vec::new();
+        for token in lookup.tokens {
+            if !token.pinyin.trim().is_empty() {
+                pinyin.push(token.pinyin);
+            }
+            for definition in token.definitions {
+                if !definition.trim().is_empty() && !definitions.contains(&definition) {
+                    definitions.push(definition);
+                }
+            }
+        }
+        if definitions.is_empty() {
+            definitions
+                .push("Story term kept because a simpler wording would be less clear.".to_owned());
+        }
+        let (required_level, reason) = match violation.reason {
+            ViolationReason::AboveSelectedHskLevel { required_level } => (
+                HskLevel::try_from(required_level.get()).ok(),
+                TeachingTermReason::AboveLevel,
+            ),
+            _ => (None, TeachingTermReason::OutsideList),
+        };
+        terms.push(TeachingTerm {
+            text: violation.text.clone(),
+            start_char: violation.start_char,
+            end_char: violation.end_char,
+            pinyin: if pinyin.is_empty() {
+                violation.text.clone()
+            } else {
+                pinyin.join(" ")
+            },
+            definitions,
+            required_level,
+            reason,
+        });
+        previous_end = violation.end_char;
+    }
+    terms
 }
 
 fn populate_pinyin(control: &HskControl, translation: &mut CachedTranslation) {
@@ -3363,10 +3563,13 @@ mod tests {
     use hsk_control::{HskViolation, ViolationReason};
 
     fn validation_report(text: &str, violations: Vec<HskViolation>) -> ValidationReport {
+        let above_level_token_count = violations.len();
         ValidationReport {
             normalized_text: text.to_owned(),
             requested_level: ControlHskLevel::new(1).unwrap(),
             strictly_valid: violations.is_empty(),
+            lexical_token_count: above_level_token_count.max(1),
+            above_level_token_count,
             violations,
             exceptions: Vec::new(),
             cache_revision: "test-control-r1".to_owned(),
@@ -3406,16 +3609,68 @@ mod tests {
         assert!(problems[0].contains("choose only what preserves the source meaning"));
     }
 
+    #[test]
+    fn natural_learning_accepts_one_teachable_term_but_strict_mode_does_not() {
+        let mut report = validation_report("侦探看了看。", vec![above_level_violation("侦探")]);
+        report.lexical_token_count = 4;
+        report.above_level_token_count = 1;
+
+        assert!(learning_policy_satisfied(&report, LearningMode::Natural));
+        assert!(!learning_policy_satisfied(&report, LearningMode::Strict));
+        assert_eq!(level_coverage(&report), 0.75);
+    }
+
+    #[test]
+    fn natural_learning_rejects_excess_advanced_vocabulary_in_a_short_line() {
+        let mut second = above_level_violation("证据");
+        second.start_char = 2;
+        second.end_char = 4;
+        let mut report = validation_report("侦探证据", vec![above_level_violation("侦探"), second]);
+        report.lexical_token_count = 5;
+        report.above_level_token_count = 2;
+
+        assert!(!learning_policy_satisfied(&report, LearningMode::Natural));
+    }
+
+    #[test]
+    fn repair_convergence_changes_strategy_and_states_the_acceptance_boundary() {
+        let first_retry = repair_convergence_instruction(LearningMode::Natural, HskLevel::Three, 1);
+        let second_retry =
+            repair_convergence_instruction(LearningMode::Natural, HskLevel::Three, 2);
+        let strict = repair_convergence_instruction(LearningMode::Strict, HskLevel::Three, 1);
+
+        assert!(first_retry.contains("at least 90%"));
+        assert!(first_retry.contains("at most 1"));
+        assert!(first_retry.contains("paraphrasing their meanings"));
+        assert!(second_retry.contains("short, direct clauses"));
+        assert_ne!(first_retry, second_retry);
+        assert!(strict.contains("Keep none"));
+        assert_eq!(
+            repair_generation_mode(LearningMode::Natural, 0),
+            LearningMode::Natural
+        );
+        assert_eq!(
+            repair_generation_mode(LearningMode::Natural, 1),
+            LearningMode::Natural
+        );
+        assert_eq!(
+            repair_generation_mode(LearningMode::Strict, 2),
+            LearningMode::Strict
+        );
+    }
+
     fn usable_pending_state() -> TranslationState {
         let report = validation_report("研究生", vec![above_level_violation("研究生")]);
         TranslationState {
             base_chinese: Some("研究生".to_owned()),
             displayed_chinese: Some("研究生".to_owned()),
             latest_rejected_chinese: None,
+            latest_rejected_report: None,
             model_declared_names: Vec::new(),
             report: Some(report),
             problems: vec!["replace invalid or above-level token `研究生` at 0..3".to_owned()],
             meaning_valid: true,
+            learning_mode: LearningMode::Strict,
             repair_state: HskRepairState::Pending,
         }
     }
@@ -3465,6 +3720,7 @@ mod tests {
                 kind: HskUtteranceKind::Dialogue,
                 source_english: "Graduate student".to_owned(),
                 rejected_chinese: Some("研究生".to_owned()),
+                avoid_chinese: vec!["研究生".to_owned()],
                 problems: vec!["above level".to_owned()],
             },
             preceding_utterances: Vec::new(),
@@ -3872,6 +4128,7 @@ mod tests {
                 &context,
                 &[],
                 NameTranslation::KeepOriginal,
+                LearningMode::Natural,
                 2,
                 "qwen",
                 "model-r1",
@@ -3885,6 +4142,7 @@ mod tests {
                 &context,
                 &[],
                 NameTranslation::KeepOriginal,
+                LearningMode::Natural,
                 2,
                 "qwen",
                 "model-r1",
@@ -3904,6 +4162,7 @@ mod tests {
                 &[],
                 &[],
                 name_translation,
+                LearningMode::Natural,
                 3,
                 "qwen",
                 "model-r1",
@@ -3917,6 +4176,28 @@ mod tests {
             key(NameTranslation::KeepOriginal),
             key(NameTranslation::Chinese)
         );
+    }
+
+    #[test]
+    fn cache_key_separates_natural_and_strict_learning_modes() {
+        let key = |learning_mode| {
+            translation_cache_key(
+                "The detective checked the evidence.",
+                HskUtteranceKind::Dialogue,
+                &[],
+                &[],
+                NameTranslation::KeepOriginal,
+                learning_mode,
+                3,
+                "qwen",
+                "model-r1",
+                "prompt-r1",
+                "validator-r1",
+                "control-r1",
+            )
+        };
+
+        assert_ne!(key(LearningMode::Natural), key(LearningMode::Strict));
     }
 
     #[test]
@@ -3986,6 +4267,7 @@ mod tests {
                 context,
                 protected_names,
                 NameTranslation::KeepOriginal,
+                LearningMode::Natural,
                 hsk_level,
                 model_id,
                 model_revision,
@@ -4474,9 +4756,7 @@ mod tests {
         ));
         assert!(!worse_state.repair_succeeded());
         assert_eq!(worse_state.rejected_for_repair().as_deref(), Some("教授"));
-        let mut seen_rejected = HashSet::from(["研究生".to_owned()]);
-        assert!(worse_state.repair_made_progress(&mut seen_rejected));
-        assert!(!worse_state.repair_made_progress(&mut seen_rejected));
+        assert_eq!(worse_state.avoid_chinese(), vec!["教授"]);
         let worse = worse_state.finish().unwrap();
         assert_eq!(worse.base_chinese, "研究生");
         assert_eq!(worse.displayed_chinese, "研究生");
@@ -4513,10 +4793,12 @@ mod tests {
             base_chinese: Some("索林来了。".to_owned()),
             displayed_chinese: None,
             latest_rejected_chinese: None,
+            latest_rejected_report: None,
             model_declared_names: Vec::new(),
             report: Some(validation_report("索林来了。", Vec::new())),
             problems: vec!["protected name was not preserved".to_owned()],
             meaning_valid: false,
+            learning_mode: LearningMode::Natural,
             repair_state: HskRepairState::Pending,
         };
 
@@ -4532,10 +4814,12 @@ mod tests {
             base_chinese: Some("我昨天看见索林了。".to_owned()),
             displayed_chinese: None,
             latest_rejected_chinese: None,
+            latest_rejected_report: None,
             model_declared_names: vec!["Neris".to_owned()],
             report: Some(validation_report("我昨天看见索林了。", Vec::new())),
             problems: vec!["translate protected name `Neris` exactly as `Neris`".to_owned()],
             meaning_valid: false,
+            learning_mode: LearningMode::Natural,
             repair_state: HskRepairState::Pending,
         };
 

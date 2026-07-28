@@ -71,6 +71,12 @@ const RENDERER_CSS = `
 }
 .hmt-region-text { display: block; }
 .hmt-region-line { display: block; }
+.hmt-learning-term {
+  text-decoration-line: underline;
+  text-decoration-style: dotted;
+  text-decoration-thickness: 0.06em;
+  text-underline-offset: 0.12em;
+}
 .hmt-region:focus {
   outline: 2px solid #3b82f6;
   outline-offset: 2px;
@@ -423,14 +429,50 @@ async function decodePatchImage(image: HTMLImageElement): Promise<void> {
   })
 }
 
-function applyChosenLines(element: HTMLElement, lines: readonly string[], text: string): void {
+function appendLearningText(
+  lineElement: HTMLElement,
+  line: string,
+  lineStart: number,
+  terms: BrowserRegion['hsk']['teachingTerms'],
+): void {
+  const characters = [...line]
+  const lineEnd = lineStart + characters.length
+  let cursor = lineStart
+  for (const term of terms) {
+    const start = Math.max(lineStart, term.startChar)
+    const end = Math.min(lineEnd, term.endChar)
+    if (start >= end || start < cursor) continue
+    if (start > cursor) {
+      lineElement.append(document.createTextNode(characters.slice(cursor - lineStart, start - lineStart).join('')))
+    }
+    const learning = document.createElement('span')
+    learning.className = 'hmt-learning-term'
+    learning.dataset.learningTerm = term.text
+    learning.dataset.learningReason = term.reason
+    learning.textContent = characters.slice(start - lineStart, end - lineStart).join('')
+    lineElement.append(learning)
+    cursor = end
+  }
+  if (cursor < lineEnd) {
+    lineElement.append(document.createTextNode(characters.slice(cursor - lineStart).join('')))
+  }
+}
+
+function applyChosenLines(
+  element: HTMLElement,
+  lines: readonly string[],
+  text: string,
+  terms: BrowserRegion['hsk']['teachingTerms'] = [],
+): void {
   const chosen = lines.length > 0 && lines.join('') === text ? lines : [text]
   const nodes: Node[] = []
+  let lineStart = 0
   for (const line of chosen) {
     const lineElement = document.createElement('span')
     lineElement.className = 'hmt-region-line'
-    lineElement.textContent = line
+    appendLearningText(lineElement, line, lineStart, terms)
     nodes.push(lineElement)
+    lineStart += [...line].length
   }
   element.replaceChildren(...nodes)
 }
@@ -447,6 +489,9 @@ function regionElement(region: BrowserRegion): {
   element.dataset.pinyin = region.pinyin
   element.dataset.hskValid = String(region.hsk.strictlyValid)
   element.dataset.hskRepairState = region.hsk.repairState
+  element.dataset.hskLearningMode = region.hsk.learningMode
+  element.dataset.hskLevelCoverage = String(region.hsk.levelCoverage)
+  element.dataset.hskTeachingTerms = String(region.hsk.teachingTerms.length)
   element.setAttribute(
     'aria-label',
     region.pinyin ? `${region.displayedChinese}; ${region.pinyin}` : region.displayedChinese,
@@ -577,6 +622,9 @@ export class RenderedImage {
     view.element.dataset.pinyin = view.region.pinyin
     view.element.dataset.hskValid = String(view.region.hsk.strictlyValid)
     view.element.dataset.hskRepairState = view.region.hsk.repairState
+    view.element.dataset.hskLearningMode = view.region.hsk.learningMode
+    view.element.dataset.hskLevelCoverage = String(view.region.hsk.levelCoverage)
+    view.element.dataset.hskTeachingTerms = String(view.region.hsk.teachingTerms.length)
     view.element.setAttribute(
       'aria-label',
       view.region.pinyin
@@ -699,7 +747,12 @@ export class RenderedImage {
       this.geometry.image.width,
       this.geometry.image.height,
     )
-    applyChosenLines(view.textElement, fit.lines, view.region.displayedChinese)
+    applyChosenLines(
+      view.textElement,
+      fit.lines,
+      view.region.displayedChinese,
+      view.region.hsk.teachingTerms,
+    )
     const applyStyle = (fontSize: number): void => {
       applyRegionStyle(view.element, view.region, fontSize, view.fontFamily)
       applyRegionColorBands(view.textElement, view.region, fontSize)

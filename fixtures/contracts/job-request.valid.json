@@ -1,5 +1,5 @@
 {
-  "buildFingerprint": "hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-07-27-r6",
+  "buildFingerprint": "hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-07-28-r7",
   "clientImageId": "fixture-page-0001-image-0001",
   "sourceSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "sourceMimeType": "image/png",
@@ -12,6 +12,7 @@
     "targetLanguage": "zh-CN",
     "hskStandard": "2.0",
     "hskLevel": 2,
+    "learningMode": "natural",
     "readingDirection": "auto",
     "translateSoundEffects": false,
     "nameTranslation": "keep-original"

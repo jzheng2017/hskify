@@ -7,7 +7,7 @@ use thiserror::Error;
 ///
 /// This is deliberately not a negotiable protocol version. A mismatched build
 /// must restart the native/daemon pair that shipped with the extension.
-pub const BUILD_FINGERPRINT: &str = "hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-07-27-r6";
+pub const BUILD_FINGERPRINT: &str = "hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-07-28-r7";
 pub const HSK_STANDARD: &str = "2.0";
 pub const SOURCE_LANGUAGE: &str = "en";
 pub const TARGET_LANGUAGE: &str = "zh-CN";
@@ -609,6 +609,8 @@ pub struct BrowserJobSettings {
     pub reading_direction: ReadingDirection,
     pub translate_sound_effects: bool,
     pub name_translation: NameTranslation,
+    #[serde(default)]
+    pub learning_mode: LearningMode,
 }
 
 impl Validate for BrowserJobSettings {
@@ -654,6 +656,14 @@ pub enum ReadingDirection {
 pub enum NameTranslation {
     KeepOriginal,
     Chinese,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LearningMode {
+    #[default]
+    Natural,
+    Strict,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -922,13 +932,37 @@ pub enum HskRepairState {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProgressiveHskStatus {
     pub requested_level: HskLevel,
+    pub learning_mode: LearningMode,
     pub strictly_valid: bool,
+    pub level_coverage: f32,
     pub above_level_tokens: Vec<String>,
+    pub teaching_terms: Vec<TeachingTerm>,
     pub repair_state: HskRepairState,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TeachingTerm {
+    pub text: String,
+    pub start_char: usize,
+    pub end_char: usize,
+    pub pinyin: String,
+    pub definitions: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_level: Option<HskLevel>,
+    pub reason: TeachingTermReason,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TeachingTermReason {
+    AboveLevel,
+    OutsideList,
 }
 
 impl ProgressiveHskStatus {
     fn validate_at(&self, path: &str) -> Result<(), ContractError> {
+        require_unit(&format!("{path}.levelCoverage"), self.level_coverage)?;
         let mut tokens = HashSet::with_capacity(self.above_level_tokens.len());
         for (index, token) in self.above_level_tokens.iter().enumerate() {
             require_nonempty(&format!("{path}.aboveLevelTokens[{index}]"), token)?;
@@ -944,6 +978,43 @@ impl ProgressiveHskStatus {
                 format!("{path}.strictlyValid"),
                 "strictly valid text cannot retain above-level tokens",
             ));
+        }
+        if self.strictly_valid && !self.teaching_terms.is_empty() {
+            return Err(ContractError::at(
+                format!("{path}.strictlyValid"),
+                "strictly valid text cannot retain teaching terms",
+            ));
+        }
+        let mut previous_end = 0;
+        for (index, term) in self.teaching_terms.iter().enumerate() {
+            let term_path = format!("{path}.teachingTerms[{index}]");
+            require_nonempty(&format!("{term_path}.text"), &term.text)?;
+            require_nonempty(&format!("{term_path}.pinyin"), &term.pinyin)?;
+            if term.definitions.is_empty() {
+                return Err(ContractError::at(
+                    format!("{term_path}.definitions"),
+                    "must contain at least one definition",
+                ));
+            }
+            for (definition_index, definition) in term.definitions.iter().enumerate() {
+                require_nonempty(
+                    &format!("{term_path}.definitions[{definition_index}]"),
+                    definition,
+                )?;
+            }
+            if term.start_char >= term.end_char {
+                return Err(ContractError::at(
+                    format!("{term_path}.endChar"),
+                    "must be greater than startChar",
+                ));
+            }
+            if index > 0 && term.start_char < previous_end {
+                return Err(ContractError::at(
+                    format!("{term_path}.startChar"),
+                    "teaching terms must be ordered and non-overlapping",
+                ));
+            }
+            previous_end = term.end_char;
         }
         Ok(())
     }
@@ -1453,8 +1524,11 @@ mod tests {
             },
             hsk: ProgressiveHskStatus {
                 requested_level: HskLevel::try_from(3).unwrap(),
+                learning_mode: LearningMode::Natural,
                 strictly_valid: true,
+                level_coverage: 1.0,
                 above_level_tokens: Vec::new(),
+                teaching_terms: Vec::new(),
                 repair_state: HskRepairState::NotNeeded,
             },
         }

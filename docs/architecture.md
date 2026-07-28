@@ -37,7 +37,7 @@ flowchart LR
 
 ## Build affinity and trust boundary
 
-`hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-07-27-r6` is compiled into the TypeScript and Rust
+`hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-07-28-r7` is compiled into the TypeScript and Rust
 contracts. Native handshake requests and responses, health responses, and job
 creation metadata must carry that exact value. A different value is rejected.
 There is no protocol-version header, range negotiation, compatibility shim, or
@@ -102,7 +102,17 @@ credential, or remote translation path is mounted.
    protocol validator checks protected names, standalone numbers, question
    intent, and output structure. Digits embedded in Latin OCR tokens such as
    `IDENTIT4` are not treated as semantic numbers. Only rejected items may
-   enter one targeted repair batch.
+   enter one targeted repair batch, whose distinct bounded strategies run
+   unless an earlier attempt succeeds. Each rejected candidate refreshes a
+   typed validator avoid-list that strict repair must remove. Natural repair
+   remains Natural across all attempts so it cannot discard an indispensable
+   story concept merely to achieve a strict score. Natural learning accepts a bounded number
+   of indispensable advanced terms after simplification and publishes their
+   exact offsets, pinyin, definitions, and required level for hover teaching;
+   strict mode accepts only level-valid non-name vocabulary. Explicit
+   higher-HSK headwords stay atomic, while ordinary dictionary phrases made
+   entirely from selected-level HSK headwords are counted by
+   those surface words instead of being misclassified as advanced vocabulary.
    This is not a page-wide faithful pass followed by an HSK rewrite.
 8. For each completed region, the daemon stores the patch blob first and then
    appends `regionReady`, which carries the patch descriptor, geometry, source
@@ -149,6 +159,7 @@ The 64 MiB byte-bounded in-memory translation cache is keyed by:
 - up to six preceding dialogue utterances;
 - the complete proper-name glossary;
 - requested HSK level;
+- natural or strict learning mode;
 - model ID and exact model revision;
 - prompt hash;
 - validator hash; and

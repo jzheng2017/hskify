@@ -35,7 +35,7 @@ fn disallowed_span_may_begin_and_end_inside_primary_tokens() {
 }
 
 #[test]
-fn overlapping_disallowed_spans_choose_one_deterministic_best_path() {
+fn decomposable_dictionary_spans_do_not_create_overlapping_shadow_violations() {
     let control = control(
         "overlapping-spans",
         ["甲", "乙", "丙", "丁"]
@@ -49,18 +49,8 @@ fn overlapping_disallowed_spans_choose_one_deterministic_best_path() {
     );
 
     let report = control.validate("甲乙丙丁", HskLevel::ONE, &[]);
-    assert_eq!(
-        report
-            .violations
-            .iter()
-            .map(|violation| (
-                violation.text.as_str(),
-                violation.start_char,
-                violation.end_char
-            ))
-            .collect::<Vec<_>>(),
-        vec![("甲乙丙", 0, 3)]
-    );
+    assert!(report.strictly_valid, "{:?}", report.violations);
+    assert_eq!(report.lexical_token_count, 4);
 }
 
 #[test]

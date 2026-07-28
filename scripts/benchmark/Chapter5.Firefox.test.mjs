@@ -863,6 +863,7 @@ test('job request evidence gates the direct request contract and rolling six-ite
     targetLanguage: 'zh-CN',
     hskStandard: '2.0',
     hskLevel: 5,
+    learningMode: 'natural',
     readingDirection: 'auto',
     translateSoundEffects: false,
   }

@@ -6,13 +6,18 @@ import {
 } from '../../src/messaging/messages'
 import {
   DEFAULT_HSK_LEVEL,
+  DEFAULT_LEARNING_MODE,
   DEFAULT_NAME_TRANSLATION,
   isHskLevel,
+  isLearningMode,
   isNameTranslation,
   loadHskLevel,
+  loadLearningMode,
   loadNameTranslation,
   saveHskLevel,
+  saveLearningMode,
   saveNameTranslation,
+  type LearningMode,
   type NameTranslation,
 } from '../../src/messaging/settings'
 
@@ -23,6 +28,7 @@ function requiredElement<T extends Element>(selector: string): T {
 }
 
 const levelSelect = requiredElement<HTMLSelectElement>('#hsk-level')
+const learningModeSelect = requiredElement<HTMLSelectElement>('#learning-mode')
 const nameTranslationSelect = requiredElement<HTMLSelectElement>('#name-translation')
 const translateAll = requiredElement<HTMLButtonElement>('#translate-all')
 const cancel = requiredElement<HTMLButtonElement>('#cancel')
@@ -52,10 +58,17 @@ function selectedNameTranslation(): NameTranslation {
     : DEFAULT_NAME_TRANSLATION
 }
 
+function selectedLearningMode(): LearningMode {
+  return isLearningMode(learningModeSelect.value)
+    ? learningModeSelect.value
+    : DEFAULT_LEARNING_MODE
+}
+
 function setBusy(busy: boolean): void {
   const unavailable = busy || startInFlight
   translateAll.disabled = unavailable || !setupReady || !pagePrepared
   levelSelect.disabled = unavailable || !setupReady
+  learningModeSelect.disabled = unavailable || !setupReady
   nameTranslationSelect.disabled = unavailable || !setupReady
   setupPrimary.disabled = unavailable
 }
@@ -65,6 +78,7 @@ function renderState(state: PopupState): void {
   setupAction = undefined
   setupPrimary.hidden = true
   levelSelect.value = String(state.hskLevel)
+  learningModeSelect.value = state.learningMode
   nameTranslationSelect.value = state.nameTranslation
   const active = state.state === 'running'
   cancel.hidden = !active
@@ -173,18 +187,24 @@ function renderSetup(status: BrowserSetupStatus): void {
 
 async function finishStart(
   hskLevel: HskLevel,
+  learningMode: LearningMode,
   nameTranslation: NameTranslation,
 ): Promise<void> {
   try {
-    await Promise.all([saveHskLevel(hskLevel), saveNameTranslation(nameTranslation)])
+    await Promise.all([
+      saveHskLevel(hskLevel),
+      saveLearningMode(learningMode),
+      saveNameTranslation(nameTranslation),
+    ])
     const state = await sendBackgroundMessage({
       type: 'popup:start',
       scope: 'all',
       hskLevel,
+      learningMode,
       nameTranslation,
     })
     startInFlight = false
-    renderState({ ...state, hskLevel, nameTranslation })
+    renderState({ ...state, hskLevel, learningMode, nameTranslation })
   } catch (error) {
     startInFlight = false
     renderError(error)
@@ -198,6 +218,7 @@ function startChapter(): void {
     return
   }
   const hskLevel = selectedLevel()
+  const learningMode = selectedLearningMode()
   const nameTranslation = selectedNameTranslation()
   startInFlight = true
   setBusy(true)
@@ -205,7 +226,7 @@ function startChapter(): void {
   statusDetail.textContent = 'Finding the chapter images…'
   statusProgress.hidden = false
   statusProgress.removeAttribute('value')
-  void finishStart(hskLevel, nameTranslation)
+  void finishStart(hskLevel, learningMode, nameTranslation)
 }
 
 translateAll.addEventListener('click', startChapter)
@@ -215,6 +236,7 @@ cancel.addEventListener('click', async () => {
     renderState({
       ...state,
       hskLevel: selectedLevel(),
+      learningMode: selectedLearningMode(),
       nameTranslation: selectedNameTranslation(),
     })
   } catch (error) {
@@ -222,6 +244,9 @@ cancel.addEventListener('click', async () => {
   }
 })
 levelSelect.addEventListener('change', () => void saveHskLevel(selectedLevel()))
+learningModeSelect.addEventListener('change', () =>
+  void saveLearningMode(selectedLearningMode()),
+)
 nameTranslationSelect.addEventListener('change', () =>
   void saveNameTranslation(selectedNameTranslation()),
 )
@@ -256,11 +281,13 @@ async function refresh(): Promise<void> {
   try {
     renderState(await sendBackgroundMessage({ type: 'popup:state' }))
   } catch (error) {
-    const [hskLevel, nameTranslation] = await Promise.all([
+    const [hskLevel, learningMode, nameTranslation] = await Promise.all([
       loadHskLevel(),
+      loadLearningMode(),
       loadNameTranslation(),
     ])
     levelSelect.value = String(hskLevel)
+    learningModeSelect.value = learningMode
     nameTranslationSelect.value = nameTranslation
     renderError(error)
   }
