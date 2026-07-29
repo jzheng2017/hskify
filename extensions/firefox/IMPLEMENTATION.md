@@ -30,12 +30,13 @@ Setup, dictionary, and font requests remain authenticated root routes:
 `/setup`, `/setup/models`, `/lookup`, and `/fonts/{fontId}`.
 
 `JobUpdate` is the discriminated union `progress`, `regionReady`,
-`regionRefined`, `complete`, `failed`, and `cancelled`. `regionReady` carries
+`artworkPreserved`, `complete`, `failed`, and `cancelled`. `regionReady` carries
 geometry, patch identity and rectangle, English/base/displayed Chinese,
 pinyin, OCR confidence, reading order, typography/layout, and HSK validation
 and repair state. Its HSK state also carries the selected learning mode,
-level-appropriate lexical coverage, and exact teaching-term ranges.
-`regionRefined` can change only displayed Chinese, pinyin, and HSK state.
+level-appropriate lexical coverage, and exact teaching-term ranges. It is
+terminal for that region: pending translations are rejected by the contract
+and cannot be installed.
 
 ## MV3 recovery and ownership
 
@@ -67,9 +68,9 @@ layout-preserving wrapper adds a Shadow DOM containing:
 For each `regionReady`, the patch blob is downloaded and decoded completely
 off-DOM. Only then is the patch synchronously installed, followed by its text
 node. A corrupt, stale, or cancelled patch can therefore never expose Chinese
-over source lettering. `regionRefined` replaces text-node content and updates
-pinyin/HSK metadata without changing geometry, styling, or the installed
-patch.
+over source lettering. An `artworkPreserved` update carries evidence only; it
+never changes the source pixels or installs ordinary text over decorative
+lettering.
 
 Original and compare modes hide only the overlay. They never hide or replace
 the page image. Destroying the renderer restores the original node to its
@@ -106,7 +107,7 @@ npm run build
 
 The Vitest suite covers strict progressive contracts, exact root endpoints,
 update acknowledgement/recovery, patch ownership, atomic patch installation,
-refinement, viewport messages, measured fitting, hover hit-testing, selection, dictionary
+final-only publication, viewport messages, measured fitting, hover hit-testing, selection, dictionary
 pinyin, and Mandarin speech. The Playwright Firefox harness covers real image
 decode, normalized geometry, object-fit mapping, compare modes, navigation,
 position-anchored expression lookup, selection, vertical text, and long WebP

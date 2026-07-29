@@ -512,12 +512,6 @@ pub(super) fn bubble_segmentation_fallback_candidates(
     let width = image_width as usize;
     let mut proposals = Vec::new();
     for bubble in bubbles {
-        if existing.iter().any(|known| {
-            bubble.rect.contains_point(known.center())
-                || known.overlap_over_smaller(bubble.rect) >= 0.10
-        }) {
-            continue;
-        }
         let bounds = bubble.rect.pixel_bounds(image_width, image_height);
         let mut maximum = 0.0_f32;
         for y in bounds.y..bounds.y + bounds.height {
@@ -991,10 +985,15 @@ mod tests {
     }
 
     #[test]
-    fn bubble_fusion_does_not_re_read_a_bubble_with_accepted_text() {
+    fn bubble_fusion_recovers_missing_siblings_without_re_reading_an_accepted_line() {
         let mut probabilities = ProbabilityMap::zeros(200, 140);
         for y in 45..58 {
             for x in 55..145 {
+                probabilities.values[y * 200 + x] = 0.12;
+            }
+        }
+        for y in 72..85 {
+            for x in 60..140 {
                 probabilities.values[y * 200 + x] = 0.12;
             }
         }
@@ -1012,7 +1011,9 @@ mod tests {
             &[accepted],
         );
 
-        assert!(candidates.is_empty());
+        assert_eq!(candidates.len(), 1);
+        assert!(candidates[0].text_rect.y0 >= 70.0);
+        assert!(candidates[0].text_rect.overlap_over_smaller(accepted) < 0.65);
     }
 
     #[test]

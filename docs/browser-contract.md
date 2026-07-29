@@ -89,18 +89,18 @@ The update union is flat and tagged by `type`:
 | Type | Meaning |
 | --- | --- |
 | `progress` | Current stage plus optional stage/overall fraction and count |
-| `regionReady` | Complete renderable region and its stored patch descriptor |
-| `regionRefined` | Replacement displayed Chinese, pinyin, and HSK status for an already published region |
+| `regionReady` | Final renderable region and its stored patch descriptor |
+| `artworkPreserved` | Readable decorative story lettering intentionally left in the source artwork |
 | `complete` | Successful terminal event |
 | `failed` | Terminal error code, message, and retryability |
 | `cancelled` | Cancelled terminal event |
 
 Stages are `queued`, `decoding`, `detecting`, `ocr`, `inpainting`,
 `translating`, `hsk-validating`, `styling`, and `packaging`. Clients must not
-infer a page-result phase from them. Accurate primary Chinese is published
-immediately even when it contains marked above-level vocabulary. The one
-permitted singular background repair may later publish `regionRefined`; it
-never restarts page-wide generation.
+infer a page-result phase from them. Accurate Chinese is published only after
+deterministic validation and the optional single terminal repair. Pending
+drafts are internal pipeline state and never cross the browser contract, so
+visible text is never revised after installation.
 
 A `regionReady` contains normalized text and optional bubble polygons, a
 normalized PNG patch rectangle and blob ID, source English, direct/base and
@@ -109,8 +109,9 @@ layout, and HSK status. Style can include ordered `colorBands` sampled from
 learned source-text lines, so an atomic region can preserve multiple foreground
 and outline colors. The status carries requested level, learning mode, strict
 validity, level-appropriate lexical coverage, above-level tokens, exact
-teaching-term character ranges, and one of `not-needed`, `pending`, `accepted`,
-or `rejected`. Each teaching term includes pinyin, local dictionary
+teaching-term character ranges, and one of `not-needed`, `accepted`, or
+`rejected`. `pending` is reserved for internal validation state and is invalid
+on `regionReady`. Each teaching term includes pinyin, local dictionary
 definitions, an optional required HSK level, and an `above-level` or
 `outside-list` reason.
 

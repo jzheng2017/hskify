@@ -2,7 +2,6 @@ import type {
   BrowserRegion,
   LookupRequest,
   LookupResult,
-  RegionRefinedJobUpdate,
 } from '../contracts/browser'
 import type { DiscoveredImage } from '../discovery/images'
 import { ExplanationController } from '../selection/popover'
@@ -718,26 +717,6 @@ export class RenderedImage {
     this.updateRegionMetadata(next)
     this.refitView(next)
     if (previous) URL.revokeObjectURL(previous.patchUrl)
-  }
-
-  refineRegion(update: RegionRefinedJobUpdate): void {
-    const view = this.regions.get(update.regionId)
-    if (this.destroyed) return
-    if (!view) {
-      throw new RendererError(
-        'REGION_REFINEMENT_BEFORE_READY',
-        'A region refinement arrived before its decoded patch was installed.',
-      )
-    }
-    view.region = {
-      ...view.region,
-      displayedChinese: update.displayedChinese,
-      pinyin: update.pinyin,
-      hsk: update.hsk,
-    }
-    view.textElement.textContent = update.displayedChinese
-    this.updateRegionMetadata(view)
-    this.refitView(view)
   }
 
   private refitView(view: RegionView): void {

@@ -1,5 +1,4 @@
 import { sha256Hex } from '../acquisition/hash'
-import { DEFAULT_IMAGE_LIMITS } from '../acquisition/image-format'
 import type {
   BrowserJobRequest,
   JobUpdateBatch,
@@ -30,6 +29,7 @@ import { ImageStatusBadge, PageHud } from '../progress/hud'
 import { visibleImageRects } from '../rendering/geometry'
 import { SelectableRenderer, type RenderedImage } from '../rendering/renderer'
 import { ChapterRunState } from './run-state'
+import { ChapterContextLedger } from './chapter-context'
 
 const PAGE_SESSION_KEY = 'hmt.pageSessionId'
 const CONTENT_BYTE_LIMIT = 25 * 1024 * 1024
@@ -273,7 +273,8 @@ export class PageTranslationController {
   private readonly processed = new Set<HTMLImageElement>()
   private readonly runState = new ChapterRunState<HTMLImageElement>()
   private readonly failures = new Map<HTMLImageElement, ImageFailureDiagnostic>()
-  private readonly context: NonNullable<BrowserJobRequest['precedingContext']> = []
+  private readonly context = new ChapterContextLedger()
+  private readonly pageIndexByImage = new Map<HTMLImageElement, number>()
   private properNameGlossary: NonNullable<BrowserJobRequest['properNameGlossary']> = []
   private readonly navigationTimer: number
   private hud: PageHud | undefined
@@ -357,10 +358,6 @@ export class PageTranslationController {
         },
         onIdle: () => this.scheduleFinish(),
       },
-      {
-        maximumConcurrent: 2,
-        maximumActiveCost: DEFAULT_IMAGE_LIMITS.maximumPixels,
-      },
     )
     this.discovery = new ImageDiscovery((event) => this.onDiscovery(event))
     this.discovery.start()
@@ -390,7 +387,7 @@ export class PageTranslationController {
     this.runState.reset()
     this.failures.clear()
     this.cancelCompletion()
-    this.context.splice(0)
+    this.context.clear()
     this.hud?.destroy()
     this.hud = new PageHud(() => this.cancel())
 
@@ -552,7 +549,8 @@ export class PageTranslationController {
     this.runState.reset()
     this.failures.clear()
     this.completionPublished = false
-    this.context.splice(0)
+    this.context.clear()
+    this.pageIndexByImage.clear()
   }
 
   private clearPrefetch(): void {
@@ -622,6 +620,7 @@ export class PageTranslationController {
     if (!this.runState.register(candidate.element)) return
     this.cancelCompletion()
     this.queueIds.set(candidate.element, id)
+    this.pageIndexByImage.set(candidate.element, candidate.domIndex)
     this.badge(candidate.element).update(
       recovered ? 'Picking up where you left off' : 'Waiting to start',
     )
@@ -633,10 +632,10 @@ export class PageTranslationController {
       },
       visible: candidate.visible,
       order: candidate.domIndex,
-      cost: candidate.element.naturalWidth * candidate.element.naturalHeight,
     })
     if (!accepted) {
       this.queueIds.delete(candidate.element)
+      this.pageIndexByImage.delete(candidate.element)
       this.runState.remove(candidate.element)
     } else {
       this.refreshPrefetch()
@@ -674,7 +673,6 @@ export class PageTranslationController {
       value: { candidate },
       visible: candidate.visible,
       order: candidate.domIndex,
-      cost: candidate.element.naturalWidth * candidate.element.naturalHeight,
     })
     if (!queued) return false
     this.badge(image).update(status)
@@ -748,6 +746,7 @@ export class PageTranslationController {
         badge.update('Opening the image')
         const inline = consumesPrefetch ? undefined : await tryContentBytes(candidate)
         this.assertCurrent(candidate, snapshot, signal)
+        const precedingContext = this.context.before(candidate.domIndex)
         const submitted = await sendBackgroundMessage({
           type: 'job:submit',
           pageSessionId: this.sessionId,
@@ -766,7 +765,7 @@ export class PageTranslationController {
             snapshot.naturalWidth,
             snapshot.naturalHeight,
           ),
-          ...(this.context.length ? { precedingContext: this.context.slice(-6) } : {}),
+          ...(precedingContext.length ? { precedingContext } : {}),
           ...(this.properNameGlossary.length
             ? { properNameGlossary: this.properNameGlossary }
             : {}),
@@ -881,8 +880,9 @@ export class PageTranslationController {
               })
               break
             }
-            case 'regionRefined':
-              rendered.refineRegion(update)
+            case 'artworkPreserved':
+              // The source pixels remain untouched by design. This update is
+              // retained for diagnostics and regression evidence.
               break
             case 'complete':
             case 'failed':
@@ -909,14 +909,7 @@ export class PageTranslationController {
       viewportReporter = undefined
       this.assertCurrent(candidate, snapshot, signal)
       this.processed.add(candidate.element)
-      for (const region of rendered.regionsInReadingOrder()) {
-        if (!region.displayedChinese || !region.sourceEnglish) continue
-        this.context.push({
-          sourceEnglish: region.sourceEnglish,
-          chinese: region.displayedChinese,
-        })
-      }
-      if (this.context.length > 12) this.context.splice(0, this.context.length - 12)
+      this.context.commitPage(candidate.domIndex, rendered.regionsInReadingOrder())
       badge.destroy()
       this.badges.delete(candidate.element)
     } catch (error) {
@@ -941,6 +934,9 @@ export class PageTranslationController {
 
   private removeTracked(image: HTMLImageElement): void {
     let tracked = false
+    const pageIndex = this.pageIndexByImage.get(image)
+    if (pageIndex !== undefined) this.context.removePage(pageIndex)
+    this.pageIndexByImage.delete(image)
     const id = this.queueIds.get(image)
     if (id) {
       this.queue.remove(id)

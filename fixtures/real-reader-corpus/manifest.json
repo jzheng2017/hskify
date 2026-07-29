@@ -9,21 +9,30 @@
   },
   "coverageRequirements": {
     "minimumProviders": 2,
-    "minimumChapters": 8,
-    "minimumCases": 22,
+    "minimumChapters": 9,
+    "minimumCases": 27,
     "requiredQualityFocus": [
       "dense-dialogue",
       "fixed-height-reader-slice",
       "irregular-bubbles",
       "mixed-color-lettering",
       "proper-names",
-      "sound-effects"
+      "sound-effects",
+      "decorative-technique-lettering",
+      "cross-image-dialogue-context"
     ]
   },
   "selections": {
     "chapter130": [
       "asura-exclusive-tower-130-page-1",
       "asura-exclusive-tower-130-page-2"
+    ],
+    "swordmaster143": [
+      "asura-swordmaster-son-143-page-2",
+      "asura-swordmaster-son-143-page-4",
+      "asura-swordmaster-son-143-page-5",
+      "asura-swordmaster-son-143-page-8",
+      "asura-swordmaster-son-143-page-12"
     ],
     "smoke": [
       "asura-shepherd-28-page-18",
@@ -463,6 +472,173 @@
         "capturedAtUtc": "2026-07-27T00:00:00Z"
       },
       "qualityFocus": ["fixed-height-reader-slice", "jpeg-source", "late-chapter"]
+    },
+    {
+      "id": "asura-swordmaster-son-143-page-2",
+      "chapterId": "asura-swordmaster-son-143",
+      "object": {
+        "path": "objects/0a550f782d732a57bd73ac2913661ba7446df3b53cf5ea86312a7b9ea515882b.webp",
+        "sha256": "0a550f782d732a57bd73ac2913661ba7446df3b53cf5ea86312a7b9ea515882b",
+        "bytes": 840372,
+        "mimeType": "image/webp",
+        "width": 800,
+        "height": 13205
+      },
+      "provenance": {
+        "provider": "asura",
+        "chapterUrl": "https://asurascans.com/comics/swordmasters-youngest-son-059befe1/chapter/143",
+        "pageIndex": 2,
+        "capturedAtUtc": "2026-07-28T17:30:00Z",
+        "captureNote": "Local page with decorative technique lettering embedded among ordinary dialogue."
+      },
+      "qualityFocus": [
+        "decorative-technique-lettering",
+        "dialogue",
+        "sound-effects",
+        "tall-page"
+      ],
+      "expectations": {
+        "exactRegionCount": 0,
+        "preservedArtworkSourceFragments": [
+          "MYUNGWANG SWORD TECHNIQUE",
+          "LIGHTNING"
+        ]
+      }
+    },
+    {
+      "id": "asura-swordmaster-son-143-page-4",
+      "chapterId": "asura-swordmaster-son-143",
+      "object": {
+        "path": "objects/9e1e00e7fd7b22d984c041a926ad28b5c0553cec85ea183b61774d61f1233b09.webp",
+        "sha256": "9e1e00e7fd7b22d984c041a926ad28b5c0553cec85ea183b61774d61f1233b09",
+        "bytes": 1153830,
+        "mimeType": "image/webp",
+        "width": 800,
+        "height": 11415
+      },
+      "provenance": {
+        "provider": "asura",
+        "chapterUrl": "https://asurascans.com/comics/swordmasters-youngest-son-059befe1/chapter/143",
+        "pageIndex": 4,
+        "capturedAtUtc": "2026-07-28T17:30:00Z",
+        "captureNote": "Local context lead-in page whose final thought continues on the following image."
+      },
+      "qualityFocus": [
+        "cross-image-dialogue-context",
+        "irregular-bubbles",
+        "narration",
+        "tall-page"
+      ],
+      "expectations": {
+        "minimumRegionCount": 2,
+        "requiredSourceFragments": [
+          "YOUR INSTINCTS",
+          "AREN'T TELLING YOU TO RUN AWAY"
+        ]
+      }
+    },
+    {
+      "id": "asura-swordmaster-son-143-page-5",
+      "chapterId": "asura-swordmaster-son-143",
+      "object": {
+        "path": "objects/b73fae2c18debabaa80efd486ec0ac9c764a2e18fb3865e80f033b516ba4ed44.webp",
+        "sha256": "b73fae2c18debabaa80efd486ec0ac9c764a2e18fb3865e80f033b516ba4ed44",
+        "bytes": 1114320,
+        "mimeType": "image/webp",
+        "width": 800,
+        "height": 13205
+      },
+      "provenance": {
+        "provider": "asura",
+        "chapterUrl": "https://asurascans.com/comics/swordmasters-youngest-son-059befe1/chapter/143",
+        "pageIndex": 5,
+        "capturedAtUtc": "2026-07-28T17:30:00Z",
+        "captureNote": "Local continuation page with narration, dialogue, and multiple decorative attack labels."
+      },
+      "qualityFocus": [
+        "cross-image-dialogue-context",
+        "decorative-technique-lettering",
+        "mixed-color-lettering",
+        "narration",
+        "tall-page"
+      ],
+      "expectations": {
+        "minimumRegionCount": 4,
+        "requiredSourceFragments": [
+          "THIS FEAR IS IMPRINTED IN MY BLOOD",
+          "THE FEAR OF DEATH"
+        ],
+        "preservedArtworkSourceFragments": ["THIRD SWORD"],
+        "protectedArtworkRects": [
+          {
+            "x": 0.08,
+            "y": 0.48,
+            "width": 0.84,
+            "height": 0.22
+          }
+        ]
+      }
+    },
+    {
+      "id": "asura-swordmaster-son-143-page-8",
+      "chapterId": "asura-swordmaster-son-143",
+      "object": {
+        "path": "objects/d87983f942c32a948393e562e8fa11ad8aee1747fde378a9bdada5b187b0193e.webp",
+        "sha256": "d87983f942c32a948393e562e8fa11ad8aee1747fde378a9bdada5b187b0193e",
+        "bytes": 1009278,
+        "mimeType": "image/webp",
+        "width": 800,
+        "height": 12515
+      },
+      "provenance": {
+        "provider": "asura",
+        "chapterUrl": "https://asurascans.com/comics/swordmasters-youngest-son-059befe1/chapter/143",
+        "pageIndex": 8,
+        "capturedAtUtc": "2026-07-28T17:30:00Z",
+        "captureNote": "Local battle page with a standalone illustrated technique label and ordinary speech."
+      },
+      "qualityFocus": [
+        "decorative-technique-lettering",
+        "dialogue",
+        "irregular-bubbles",
+        "tall-page"
+      ],
+      "expectations": {
+        "minimumRegionCount": 1,
+        "requiredSourceFragments": ["I... NEED TO TAKE RESPONSIBILITY"],
+        "preservedArtworkSourceFragments": ["MYUNGWANG SWORD AUTHORITY"]
+      }
+    },
+    {
+      "id": "asura-swordmaster-son-143-page-12",
+      "chapterId": "asura-swordmaster-son-143",
+      "object": {
+        "path": "objects/442dad48a621c2de508aa295ce7f665cccbdd77c1be2b6b621148e0c4868449d.webp",
+        "sha256": "442dad48a621c2de508aa295ce7f665cccbdd77c1be2b6b621148e0c4868449d",
+        "bytes": 873714,
+        "mimeType": "image/webp",
+        "width": 800,
+        "height": 13570
+      },
+      "provenance": {
+        "provider": "asura",
+        "chapterUrl": "https://asurascans.com/comics/swordmasters-youngest-son-059befe1/chapter/143",
+        "pageIndex": 12,
+        "capturedAtUtc": "2026-07-28T17:30:00Z",
+        "captureNote": "Local dense internal-monologue page with linked bubbles and story terminology."
+      },
+      "qualityFocus": [
+        "cross-image-dialogue-context",
+        "dense-dialogue",
+        "linked-bubbles",
+        "proper-names",
+        "tall-page"
+      ],
+      "expectations": {
+        "minimumRegionCount": 8,
+        "requiredSourceFragments": ["ICE PALACE", "LUNA", "LIGHTNING", "HYSTER"],
+        "preserveNamesWhenDetected": ["TALARIS", "LUNA", "HYSTER"]
+      }
     },
     {
       "id": "webtoon-rooftops-1-page-4",

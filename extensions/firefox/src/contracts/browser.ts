@@ -191,13 +191,18 @@ export type RegionReadyJobUpdate = {
   region: BrowserRegion
 }
 
-export type RegionRefinedJobUpdate = {
+export type PreservedArtworkRegion = {
+  id: string
+  textPolygon: Point[]
+  sourceEnglish: string
+  ocrConfidence: number
+  readingOrder: number
+}
+
+export type ArtworkPreservedJobUpdate = {
   sequence: number
-  type: 'regionRefined'
-  regionId: string
-  displayedChinese: string
-  pinyin: string
-  hsk: RegionHsk
+  type: 'artworkPreserved'
+  region: PreservedArtworkRegion
 }
 
 export type CompleteJobUpdate = {
@@ -223,7 +228,7 @@ export type CancelledJobUpdate = {
 export type JobUpdate =
   | ProgressJobUpdate
   | RegionReadyJobUpdate
-  | RegionRefinedJobUpdate
+  | ArtworkPreservedJobUpdate
   | CompleteJobUpdate
   | FailedJobUpdate
   | CancelledJobUpdate
@@ -758,6 +763,25 @@ function parseRegion(value: unknown, path: string): BrowserRegion {
   }
 }
 
+function parsePreservedArtworkRegion(
+  value: unknown,
+  path: string,
+): PreservedArtworkRegion {
+  const item = record(value, path)
+  exact(
+    item,
+    ['id', 'textPolygon', 'sourceEnglish', 'ocrConfidence', 'readingOrder'],
+    path,
+  )
+  return {
+    id: string(item.id, `${path}.id`, false, 512),
+    textPolygon: polygon(item.textPolygon, `${path}.textPolygon`),
+    sourceEnglish: string(item.sourceEnglish, `${path}.sourceEnglish`, false, 4_096),
+    ocrConfidence: unit(item.ocrConfidence, `${path}.ocrConfidence`),
+    readingOrder: integer(item.readingOrder, `${path}.readingOrder`),
+  }
+}
+
 export function parseNativeHandshakeRequest(value: unknown): NativeHandshakeRequest {
   const item = record(value, '$')
   exact(item, ['type', 'buildFingerprint', 'extensionVersion', 'extensionOrigin'], '$')
@@ -999,7 +1023,7 @@ export function parseJobUpdate(value: unknown, path = '$'): JobUpdate {
   const type = oneOf(item.type, `${path}.type`, [
     'progress',
     'regionReady',
-    'regionRefined',
+    'artworkPreserved',
     'complete',
     'failed',
     'cancelled',
@@ -1043,22 +1067,27 @@ export function parseJobUpdate(value: unknown, path = '$'): JobUpdate {
         message: string(item.message, `${path}.message`, false, 2_048),
       }
     }
-    case 'regionReady':
+    case 'regionReady': {
+      exact(item, ['sequence', 'type', 'region'], path)
+      const region = parseRegion(item.region, `${path}.region`)
+      if (region.hsk.repairState === 'pending') {
+        fail(
+          `${path}.region.hsk.repairState`,
+          'regionReady may publish only a terminal translation',
+        )
+      }
+      return {
+        sequence,
+        type,
+        region,
+      }
+    }
+    case 'artworkPreserved':
       exact(item, ['sequence', 'type', 'region'], path)
       return {
         sequence,
         type,
-        region: parseRegion(item.region, `${path}.region`),
-      }
-    case 'regionRefined':
-      exact(item, ['sequence', 'type', 'regionId', 'displayedChinese', 'pinyin', 'hsk'], path)
-      return {
-        sequence,
-        type,
-        regionId: string(item.regionId, `${path}.regionId`, false, 512),
-        displayedChinese: string(item.displayedChinese, `${path}.displayedChinese`, false, 4_096),
-        pinyin: string(item.pinyin, `${path}.pinyin`, false, 8_192),
-        hsk: parseHsk(item.hsk, `${path}.hsk`),
+        region: parsePreservedArtworkRegion(item.region, `${path}.region`),
       }
     case 'complete': {
       exact(item, ['sequence', 'type', 'message'], path)

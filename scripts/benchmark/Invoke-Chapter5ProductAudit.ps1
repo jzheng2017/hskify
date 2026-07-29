@@ -222,11 +222,6 @@ try {
                 $sequence = [Math]::Max($sequence, [long]$update.sequence)
                 if ($update.type -eq "regionReady") {
                     $regions[[string]$update.region.id] = $update.region
-                } elseif ($update.type -eq "regionRefined" -and $regions.Contains([string]$update.regionId)) {
-                    $region = $regions[[string]$update.regionId]
-                    $region.displayedChinese = $update.displayedChinese
-                    $region.pinyin = $update.pinyin
-                    $region.hsk = $update.hsk
                 } elseif ($update.type -in @("complete", "failed", "cancelled")) {
                     $terminal = $update
                 }

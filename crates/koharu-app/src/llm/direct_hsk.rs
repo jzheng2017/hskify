@@ -29,12 +29,16 @@ pub use koharu_llm::direct_hsk_protocol::{
 
 pub const HSK_TRANSLATION_MODEL: ModelId = ModelId::Qwen3_5_4b;
 pub const HSK_SEMANTIC_ANALYSIS_REVISION: &str =
-    "page-layout-function-and-opaque-name-authority-v3-2026-07-28";
+    "page-wide-role-two-stage-typed-name-adjudication-v20-2026-07-29";
 // Composite cache identity: repository@commit, filename, and exact file digest.
 pub const HSK_TRANSLATION_MODEL_REVISION: &str = "unsloth/Qwen3.5-4B-GGUF@e87f176479d0855a907a41277aca2f8ee7a09523:Qwen3.5-4B-Q4_K_M.gguf:sha256=00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4";
 pub const MAX_HSK_PRECEDING_UTTERANCES: usize = 6;
 pub const MAX_HSK_CONTEXT_TOKENS: usize = 256;
 pub const MAX_HSK_TRANSLATION_BATCH: usize = 6;
+/// Semantic roles need the complete visual section so credits, covers, and
+/// connected lettering are not misclassified after an arbitrary translation
+/// batch boundary. Translation remains deliberately smaller and independent.
+pub const MAX_HSK_SEMANTIC_PAGE_REGIONS: usize = 128;
 
 /// Stable cache fingerprint for the direct and repair prompt templates, their
 /// compact wire format, context bound, and greedy decoding policy.
@@ -129,6 +133,10 @@ pub struct HskSourceUtterance {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct HskSemanticLayout {
     pub detector_enclosed: bool,
+    pub measured_font_height_millionths: u32,
+    pub appearance_band_count: u32,
+    pub distinct_text_color_count: u32,
+    pub has_outline: bool,
     pub x0_millionths: u32,
     pub y0_millionths: u32,
     pub x1_millionths: u32,
@@ -191,6 +199,7 @@ pub enum HskTranslationDisposition {
     Translate,
     ExcludeNonStory,
     ExcludeSoundEffect,
+    PreserveArtwork,
 }
 
 impl HskTranslationOutcome {
@@ -397,19 +406,6 @@ impl DirectHskTranslator<'_> {
         translate_with(self.model, request, cancel).await
     }
 
-    /// Run a dedicated semantic NER pass with the same resident model before
-    /// keep-original translation. The compact result contains only exact
-    /// source spans, so later translation and deterministic validation can
-    /// enforce the model's entity decision rather than guessing from casing.
-    pub async fn detect_proper_names(
-        &self,
-        utterances: &[HskSourceUtterance],
-        proposed_names: &[HskProtectedName],
-        cancel: &AtomicBool,
-    ) -> Result<Vec<HskProtectedName>> {
-        detect_proper_names_with(self.model, utterances, proposed_names, cancel).await
-    }
-
     /// Classify standalone sound effects with the same semantic model used for
     /// translation. The result is advisory and contains only application IDs;
     /// callers can exclude those regions before translation when the user has
@@ -422,24 +418,15 @@ impl DirectHskTranslator<'_> {
         classify_semantic_regions_with(self.model, utterances, cancel).await
     }
 
-    /// Adjudicate a disputed OCR region before it may alter source pixels.
-    /// The model can exclude page furniture and irrecoverably corrupted OCR;
-    /// coherent or uncertain story content fails safe to story.
-    pub async fn verify_excludable_region(
+    /// Discover opaque proper-name source spans after page-role
+    /// classification. Keeping this response contract separate prevents
+    /// entity output from corrupting story/artwork decisions.
+    pub async fn detect_proper_names(
         &self,
-        target: &HskSourceUtterance,
-        page_context: &[HskSourceUtterance],
-        exclude_pure_sound_effects: bool,
+        utterances: &[HskSourceUtterance],
         cancel: &AtomicBool,
-    ) -> Result<bool> {
-        verify_excludable_region_with(
-            self.model,
-            target,
-            page_context,
-            exclude_pure_sound_effects,
-            cancel,
-        )
-        .await
+    ) -> Result<Vec<HskProtectedName>> {
+        detect_proper_names_with(self.model, utterances, cancel).await
     }
 
     /// Translate a batch while publishing each complete numbered line as soon
@@ -454,8 +441,7 @@ impl DirectHskTranslator<'_> {
         translate_with_streaming(self.model, request, cancel, on_item).await
     }
 
-    /// Perform one targeted repair attempt for a rejected bubble. The caller
-    /// owns the bounded retry policy and changes the feedback between attempts.
+    /// Perform the one terminal validation repair for a rejected bubble.
     pub async fn repair_invalid_item(
         &self,
         request: &HskTranslationRepairRequest,
@@ -479,7 +465,6 @@ impl DirectHskTranslator<'_> {
 async fn detect_proper_names_with<G>(
     generator: &G,
     utterances: &[HskSourceUtterance],
-    proposed_names: &[HskProtectedName],
     cancel: &AtomicBool,
 ) -> Result<Vec<HskProtectedName>>
 where
@@ -501,45 +486,30 @@ where
         &[],
         &[],
     )?;
-    let mut user_prompt = String::from("English lines and translator-proposed spans:\n");
+    let mut user_prompt = String::from("Numbered English OCR lines:\n");
     for (index, utterance) in utterances.iter().enumerate() {
         use std::fmt::Write as _;
-        let candidates = proposed_names
-            .iter()
-            .map(|name| name.source_english.as_str())
-            .filter(|name| source_contains_exact_span(&utterance.source_english, name))
-            .collect::<Vec<_>>();
         writeln!(
             &mut user_prompt,
-            "{}\t{}\tCandidates: {}",
+            "{}\t{}",
             index + 1,
             compact_field(&utterance.source_english),
-            candidates.join(" | "),
         )
         .expect("writing to String cannot fail");
     }
     let system_prompt = format!(
-        "Perform semantic named-entity recognition on exactly {} numbered English OCR lines. \
-        Discover every proper name in each complete English line. Evaluate every translator-proposed \
-        span explicitly; the proposals are advisory and may be incomplete or wrong. A proper name is \
-        a rigid lexicalized identifier for a particular person, place, organization, named event, or \
-        unique entity. For keep-original behavior, approve only opaque lexical identifiers whose \
-        ordinary component-word meanings are not functioning as the description. A transparent \
-        descriptive epithet or codename built from ordinary adjectives, colors, species, relationships, \
-        occupations, ranks, or titles remains translatable even when it uniquely and repeatedly refers \
-        to one character or entity. Reject a span when \
-        replacing it with another person or thing having the \
-        same role or description preserves the sentence's referent type. Therefore common relational \
-        terms, roles, occupations, ranks, titles, species, interface/game categories, ordinary noun \
-        phrases, sentence-initial capitalization, and emphasized words are not names unless the \
-        complete span is independently a rigid identifier. A work title, series title, chapter \
-        title, publisher name, site name, logo, or watermark used as page furniture is not an \
-        in-story name and must not be preserved. For each line output its position, one \
-        tab, then all verified exact source spellings separated by ` | `, or `-` when none are \
-        proper names. Preserve source casing and punctuation boundaries. Return exactly {} ordered \
-        non-empty lines and nothing else.",
+        "Find opaque proper names in exactly {} numbered English comic OCR lines. A proper name is the \
+        shortest exact source span that is a lexical identifier for one particular PERSON, PLACE, \
+        ORGANIZATION, EVENT, or unique ENTITY. Do not output a complete sentence or clause as a name. \
+        Pronouns, determiners, relationships, honorifics, occupations, roles, ranks, titles, species, \
+        interface/game categories, ordinary noun phrases, and descriptive epithets remain translatable even when \
+        capitalized or unique. A work/chapter title, publisher/site name, logo, watermark, and words \
+        functioning as decorative page furniture are not in-story names. For each source line return \
+        its position, one tab, then each name as TYPE=exact source spelling separated by ` | `, or `-` \
+        when none exist. TYPE must be PERSON, PLACE, ORGANIZATION, EVENT, or ENTITY. Preserve source \
+        casing. Return exactly {} ordered non-empty lines and nothing else.",
         utterances.len(),
-        utterances.len()
+        utterances.len(),
     );
     let raw = generator
         .generate_streaming(
@@ -547,14 +517,8 @@ where
             &user_prompt,
             &GenerateOptions::greedy(
                 16usize
-                    .saturating_add(
-                        utterances
-                            .iter()
-                            .map(|item| item.source_english.len())
-                            .sum::<usize>()
-                            / 3,
-                    )
-                    .clamp(MIN_OUTPUT_TOKENS, MAX_OUTPUT_TOKENS),
+                    .saturating_add(utterances.len().saturating_mul(8))
+                    .clamp(MIN_OUTPUT_TOKENS, 96),
             ),
             Language::ChineseSimplified,
             cancel,
@@ -563,14 +527,14 @@ where
         .await?;
     check_cancelled(cancel)?;
     trace_semantic_output("proper-name", &raw);
-    let detected = parse_detected_names(&raw, utterances)?;
-    verify_keep_original_candidates_with(generator, utterances, &detected, cancel).await
+    let candidates = parse_detected_names(&raw, utterances)?;
+    verify_proper_name_candidates_with(generator, utterances, &candidates, cancel).await
 }
 
-async fn verify_keep_original_candidates_with<G>(
+async fn verify_proper_name_candidates_with<G>(
     generator: &G,
     utterances: &[HskSourceUtterance],
-    candidates: &[HskProtectedName],
+    candidates: &[DetectedNameCandidate],
     cancel: &AtomicBool,
 ) -> Result<Vec<HskProtectedName>>
 where
@@ -581,34 +545,44 @@ where
         return Ok(Vec::new());
     }
     let system_prompt = format!(
-        "Verify exactly {} candidate English spans for a comic reader's keep-original-names setting. \
-        This is stricter than conventional named-entity recognition. Output KEEP only for an opaque \
-        lexical identifier whose component words are not functioning as a translatable description. \
-        Output TRANSLATE for a semantically transparent epithet, codename, relationship, occupation, \
-        role, rank, title, species, color-plus-noun label, interface/game category, or other descriptive \
-        phrase, even when it uniquely and repeatedly refers to one character, place, group, or entity. \
-        Judge every candidate from all supplied occurrences and sentence meaning, not capitalization. \
-        Return exactly {} ordered lines, each containing its position, one tab, and KEEP or TRANSLATE; \
-        write nothing else.",
+        "Classify exactly {} candidate English spans by lexical function for keep-original name \
+        handling. Return OPAQUE only when the span functions as an arbitrary identifier for a \
+        particular person, place, organization, named event, or unique entity in its supplied source \
+        occurrences, rather than describing what the referent is. Return DESCRIPTIVE for pronouns, \
+        determiners, ordinary words, relationships, honorifics, occupations, \
+        roles, ranks, titles, species, interface/game categories, descriptive epithets, and phrases \
+        whose component meanings function as the description. The proposed entity type is fallible: \
+        an ordinary phenomenon, action, object, or quality used with its normal lexical meaning is \
+        DESCRIPTIVE, not a named event or entity. An opaque personal or family surname remains OPAQUE when \
+        it identifies a particular family, clan, or house before the separately translatable role word. \
+        For a PERSON candidate marked `syntax=definite-article-before`, treat the syntax as strong \
+        evidence of a descriptive role, title, or epithet; return OPAQUE only when the candidate \
+        itself is demonstrably an opaque lexical identifier rather than ordinary descriptive words. \
+        Capitalization and uniqueness alone never make a name. Return exactly {} ordered lines \
+        containing position, one tab, and OPAQUE or DESCRIPTIVE; write nothing else.",
         candidates.len(),
         candidates.len(),
     );
-    let mut user_prompt = String::from("Candidate spans and their source occurrences:\n");
+    let mut user_prompt = String::from("Candidates and complete source occurrences:\n");
     for (index, candidate) in candidates.iter().enumerate() {
         use std::fmt::Write as _;
         let occurrences = utterances
             .iter()
             .filter(|utterance| {
-                source_contains_exact_span(&utterance.source_english, &candidate.source_english)
+                source_contains_exact_span(
+                    &utterance.source_english,
+                    &candidate.name.source_english,
+                )
             })
             .map(|utterance| compact_field(&utterance.source_english))
-            .take(MAX_HSK_TRANSLATION_BATCH)
             .collect::<Vec<_>>();
         writeln!(
             &mut user_prompt,
-            "{}\t{}\t{}",
+            "{}\ttype={}\tspan={}\tsyntax={}\toccurrences={}",
             index + 1,
-            compact_field(&candidate.source_english),
+            candidate.entity_type,
+            compact_field(&candidate.name.source_english),
+            candidate_syntax(utterances, &candidate.name.source_english),
             occurrences.join(" || "),
         )
         .expect("writing to String cannot fail");
@@ -618,9 +592,9 @@ where
             &system_prompt,
             &user_prompt,
             &GenerateOptions::greedy(
-                12usize
-                    .saturating_add(candidates.len().saturating_mul(3))
-                    .clamp(MIN_OUTPUT_TOKENS, MAX_OUTPUT_TOKENS),
+                32usize
+                    .saturating_add(candidates.len().saturating_mul(8))
+                    .clamp(48, 96),
             ),
             Language::ChineseSimplified,
             cancel,
@@ -638,81 +612,57 @@ where
         if position == 0 || position > candidates.len() {
             continue;
         }
-        keep[position - 1] = payload
-            .split_whitespace()
-            .next()
-            .is_some_and(|decision| decision.eq_ignore_ascii_case("KEEP"));
+        if let Some(decision) = parse_keep_original_decision(payload) {
+            keep[position - 1] = decision;
+        }
     }
     Ok(candidates
         .iter()
         .zip(keep)
-        .filter_map(|(candidate, keep)| keep.then(|| candidate.clone()))
+        .filter_map(|(candidate, keep)| keep.then(|| candidate.name.clone()))
         .collect())
 }
 
-fn parse_detected_names(
-    output: &str,
-    utterances: &[HskSourceUtterance],
-) -> Result<Vec<HskProtectedName>> {
-    let mut slots = vec![None::<Vec<String>>; utterances.len()];
-    for raw_line in output.lines().filter(|line| !line.trim().is_empty()) {
-        let Some((position, payload)) = parse_numbered_payload(raw_line) else {
-            continue;
-        };
-        if position == 0 || position > utterances.len() || slots[position - 1].is_some() {
-            continue;
-        }
-        // Small local models sometimes mirror the tab-separated source field
-        // before the requested candidate field. Treat the final column as the
-        // semantic answer while preserving the strict numbered-line boundary.
-        let payload = payload.rsplit('\t').next().unwrap_or(payload).trim();
-        let source = &utterances[position - 1].source_english;
-        let names = if payload == "-" {
-            Vec::new()
+fn parse_keep_original_decision(payload: &str) -> Option<bool> {
+    let mut decision = None;
+    for token in payload.split(|character: char| !character.is_ascii_alphabetic()) {
+        let current = if token.eq_ignore_ascii_case("OPAQUE") {
+            Some(true)
+        } else if token.eq_ignore_ascii_case("DESCRIPTIVE") {
+            Some(false)
         } else {
-            let mut names = Vec::new();
-            for candidate in payload.split('|').map(str::trim) {
-                let Some(candidate) = canonical_source_span(source, candidate) else {
-                    continue;
-                };
-                if !names.iter().any(|name| name == candidate) {
-                    names.push(candidate.to_owned());
-                }
-            }
-            names
+            None
         };
-        slots[position - 1] = Some(names);
-    }
-    let missing = slots
-        .iter()
-        .enumerate()
-        .filter_map(|(index, slot)| slot.is_none().then_some(index + 1))
-        .collect::<Vec<_>>();
-    if !missing.is_empty() {
-        bail!(
-            "proper-name detection omitted numbered lines: {}",
-            missing
-                .iter()
-                .map(usize::to_string)
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-    }
-    let mut detected = Vec::new();
-    for names in slots.into_iter().flatten() {
-        for name in names {
-            if detected.iter().any(|existing: &HskProtectedName| {
-                existing.source_english.eq_ignore_ascii_case(&name)
-            }) {
-                continue;
-            }
-            detected.push(HskProtectedName {
-                source_english: name.clone(),
-                chinese: name,
-            });
+        let Some(current) = current else {
+            continue;
+        };
+        if decision.is_some_and(|previous| previous != current) {
+            return None;
         }
+        decision = Some(current);
     }
-    Ok(detected)
+    decision
+}
+
+fn candidate_syntax(utterances: &[HskSourceUtterance], candidate: &str) -> &'static str {
+    let candidate_lower = candidate.to_ascii_lowercase();
+    let has_definite_article = utterances.iter().any(|utterance| {
+        let source_lower = utterance.source_english.to_ascii_lowercase();
+        source_lower
+            .match_indices(&candidate_lower)
+            .any(|(start, _)| {
+                utterance.source_english[..start]
+                    .split(|character: char| !character.is_ascii_alphabetic() && character != '\'')
+                    .filter(|part| !part.is_empty())
+                    .next_back()
+                    .is_some_and(|word| word.eq_ignore_ascii_case("the"))
+            })
+    });
+    if has_definite_article {
+        "definite-article-before"
+    } else {
+        "neutral"
+    }
 }
 
 async fn classify_semantic_regions_with<G>(
@@ -730,9 +680,9 @@ where
             regions: Vec::new(),
         });
     }
-    if utterances.len() > MAX_HSK_TRANSLATION_BATCH {
+    if utterances.len() > MAX_HSK_SEMANTIC_PAGE_REGIONS {
         bail!(
-            "semantic region classification batches may contain at most {MAX_HSK_TRANSLATION_BATCH} items"
+            "semantic page classification may contain at most {MAX_HSK_SEMANTIC_PAGE_REGIONS} regions"
         );
     }
     validate_common(
@@ -742,15 +692,20 @@ where
         &[],
         &[],
     )?;
-    let mut user_prompt = String::from(
-        "OCR regions from one comic page section. Layout is fallible supporting evidence:\n",
+    let page_dimensions = utterances
+        .iter()
+        .find_map(|utterance| utterance.semantic_layout.as_ref())
+        .map(|layout| format!("{}x{}", layout.page_width, layout.page_height))
+        .unwrap_or_else(|| "unknown".to_owned());
+    let mut user_prompt = format!(
+        "OCR regions from one comic page section (page={page_dimensions}). Layout is fallible supporting evidence:\n"
     );
     for (index, utterance) in utterances.iter().enumerate() {
         use std::fmt::Write as _;
         if let Some(layout) = &utterance.semantic_layout {
             writeln!(
                 &mut user_prompt,
-                "{}\ttext={}\tdetector={}\tbox={:.1}%,{:.1}%-{:.1}%,{:.1}%\tpage={}x{}",
+                "{}\ttext={}\tdetector={}\tfont-height={:.2}%\tappearance-bands={}\ttext-colors={}\toutline={}\tbox={:.1}%,{:.1}%-{:.1}%,{:.1}%",
                 index + 1,
                 compact_field(&utterance.source_english),
                 if layout.detector_enclosed {
@@ -758,12 +713,14 @@ where
                 } else {
                     "free"
                 },
+                layout.measured_font_height_millionths as f32 / 10_000.0,
+                layout.appearance_band_count,
+                layout.distinct_text_color_count,
+                if layout.has_outline { "yes" } else { "no" },
                 layout.x0_millionths as f32 / 10_000.0,
                 layout.y0_millionths as f32 / 10_000.0,
                 layout.x1_millionths as f32 / 10_000.0,
                 layout.y1_millionths as f32 / 10_000.0,
-                layout.page_width,
-                layout.page_height,
             )
             .expect("writing to String cannot fail");
         } else {
@@ -784,27 +741,48 @@ where
         regions is an all-furniture section even when the title itself is readable. Any coherent dialogue, \
         thought, narration, in-story caption, sign, or world content makes the page section STORY. Then classify each target's \
         own role independently. Layout and detector enclosure are fallible evidence, never hard rules. \
-        Output position, one tab, then SFX only for a standalone onomatopoeia, sound cue, \
+        Output position, one tab, then ARTWORK for readable in-story words whose original letterforms \
+        are intentionally part of the illustration—such as a large standalone attack, technique, spell, \
+        transformation, or dramatic title treatment outside ordinary dialogue containers—when replacing \
+        those letterforms with a standard text overlay would destroy the visual composition. A short \
+        fragment may be ARTWORK when nearby regions visibly combine into one named move or form. ARTWORK \
+        requires both illustrated visual function and the semantics of a named move, form, spell, \
+        transformation, or title. A finite clause, sentence, question, conversational statement, pronoun-led \
+        line, or ordinary verb phrase is always STORY regardless of capitalization, font size, border, \
+        enclosure, or dramatic emphasis. Ordinary dialogue, narration, captions, signs, interface labels, \
+        and plain story text remain STORY. When uncertain between ARTWORK and STORY, output STORY. \
+        Output SFX only for a standalone onomatopoeia, sound cue, \
         or nonverbal auditory effect; output FURNITURE only for an unrelated publisher/site credit, \
         watermark, advertisement, reader navigation, work/series title or logo, chapter title/card, or \
         irrecoverable OCR letter soup with no coherent language to translate; output STORY for dialogue, thoughts, \
         narration, in-story labels and titles, names, roles, and ordinary language. Judge meaning \
         in page context rather than word shape, capitalization, or any single coordinate. A prominent title \
         on a cover/card is FURNITURE even when detector-enclosed and centered; a story caption is STORY even \
-        when placed at an edge. After the PAGE line, return exactly {} ordered numbered lines and \
-        nothing else.",
+        when placed at an edge. After the PAGE line, return exactly {} ordered numbered lines, each \
+        containing only its position, one tab, and SFX, FURNITURE, ARTWORK, or STORY. Write nothing else.",
         utterances.len(),
         utterances.len(),
     );
+    let desired_output_tokens = 20usize
+        .saturating_add(utterances.len().saturating_mul(5))
+        .clamp(40, 768);
+    let minimum_output_tokens = 8usize
+        .saturating_add(utterances.len().saturating_mul(3))
+        .clamp(24, desired_output_tokens);
+    let completion_capacity = generator
+        .constrained_completion_capacity(&system_prompt, &user_prompt, Language::ChineseSimplified)
+        .await?;
+    if completion_capacity < minimum_output_tokens {
+        bail!(
+            "semantic page section with {} regions cannot fit the resident model context",
+            utterances.len()
+        );
+    }
     let raw = generator
         .generate_streaming(
             &system_prompt,
             &user_prompt,
-            &GenerateOptions::greedy(
-                16usize
-                    .saturating_add(utterances.len().saturating_mul(4))
-                    .clamp(MIN_OUTPUT_TOKENS, MAX_OUTPUT_TOKENS),
-            ),
+            &GenerateOptions::greedy(completion_capacity.min(desired_output_tokens)),
             Language::ChineseSimplified,
             cancel,
             &mut |_| Ok(()),
@@ -812,7 +790,22 @@ where
         .await?;
     check_cancelled(cancel)?;
     trace_semantic_output("exclusion", &raw);
-    Ok(parse_semantic_classification(&raw, utterances))
+    let mut classification = parse_semantic_classification(&raw, utterances);
+    if classification.page_is_furniture {
+        return Ok(classification);
+    }
+    let proposed_artwork = classification
+        .regions
+        .iter()
+        .filter(|(_, disposition)| *disposition == HskTranslationDisposition::PreserveArtwork)
+        .filter_map(|(id, _)| utterances.iter().find(|utterance| utterance.id == *id))
+        .collect::<Vec<_>>();
+    let approved_artwork =
+        verify_artwork_candidates_with(generator, &proposed_artwork, cancel).await?;
+    classification.regions.retain(|(id, disposition)| {
+        *disposition != HskTranslationDisposition::PreserveArtwork || approved_artwork.contains(id)
+    });
+    Ok(classification)
 }
 
 fn trace_semantic_output(stage: &str, output: &str) {
@@ -821,114 +814,389 @@ fn trace_semantic_output(stage: &str, output: &str) {
     }
 }
 
-async fn verify_excludable_region_with<G>(
+async fn verify_artwork_candidates_with<G>(
     generator: &G,
-    target: &HskSourceUtterance,
-    page_context: &[HskSourceUtterance],
-    exclude_pure_sound_effects: bool,
+    candidates: &[&HskSourceUtterance],
     cancel: &AtomicBool,
-) -> Result<bool>
+) -> Result<HashSet<String>>
 where
     G: Generator + ?Sized,
 {
     check_cancelled(cancel)?;
-    if target.source_english.trim().is_empty() {
-        bail!("page-furniture verification requires non-empty OCR text");
+    if candidates.is_empty() {
+        return Ok(HashSet::new());
     }
-    let sound_effect_instruction = if exclude_pure_sound_effects {
-        "Return exactly EXCLUDE for a semantically pure sound effect or onomatopoeia that conveys a \
-        noise rather than spoken dialogue, narration, thought, sign, or message."
-    } else {
-        "A semantically pure sound effect is in-story content and must return exactly STORY."
-    };
     let system_prompt = format!(
-        "Adjudicate one disputed comic OCR region using its meaning, fallible layout \
-        evidence, and nearby OCR from the same page section. First decide whether the target itself is \
-        a coherent or reasonably recoverable in-story utterance, narration, caption, sign, letter, \
-        character title, role, or other world content; if so return exactly STORY. {sound_effect_instruction} Return \
-        exactly EXCLUDE when the target is irrecoverable OCR letter soup or fragmented symbols without \
-        enough coherent language to translate. Do not reject short interjections, names, stylized \
-        fragments, ordinary OCR misspellings, or sound effects merely for being short or unusual. Also \
-        return exactly EXCLUDE when the target is a title-like or branding noun phrase that identifies \
-        the work, series, chapter, publisher, site, scan staff, advertisement, or navigation. Do not \
-        require the work or brand to be known, and tolerate merged words, misspellings, duplicated title \
-        words, or possessive title phrases from OCR. A work/series logo or chapter card remains EXCLUDE \
-        when a detector encloses its decorative contour or its words resemble a narrative title. Return \
-        exactly STORY for any remaining uncertain but linguistically interpretable case. Detector \
-        enclosure and page-edge position are fallible independent evidence, not decisive rules. \
-        Classify the target's own semantic function and OCR recoverability; \
-        never inherit the category of nearby lines. Dialogue peers support STORY only when the target \
-        itself continues that dialogue or narration. An unrelated work/series title or logo remains \
-        EXCLUDE when story dialogue appears elsewhere on the same page. A cluster of credits, watermarks, \
-        logos, or OCR-corrupted staff labels also supports EXCLUDE. Infer semantic function despite \
-        reasonable OCR corruption or duplicated tokens; do not classify from capitalization, styling, \
-        or shortness."
+        "Adjudicate exactly {} proposed comic ARTWORK regions. Return PRESERVE only when the words \
+        are visually integral illustrated lettering for a named attack, technique, form, spell, \
+        transformation, or dramatic story title and replacing their original letterforms with a \
+        standard overlay would damage the composition. Return TRANSLATE for dialogue, narration, \
+        finite clauses, quantities, rewards, item names or descriptions, missions, instructions, \
+        interface or game labels, ordinary signs, roles, titles of people, sound effects, credits, \
+        watermarks, and uncertain cases, even when large, outlined, colorful, capitalized, or \
+        detector-enclosed. Return exactly {} ordered lines containing position, one tab, and \
+        PRESERVE or TRANSLATE; write nothing else.",
+        candidates.len(),
+        candidates.len(),
     );
-    let target_layout = semantic_layout_prompt(target.semantic_layout.as_ref());
-    let mut user_prompt = format!(
-        "Target OCR source: {}\nTarget layout: {}\nOther OCR regions from the same page section:",
-        compact_field(&target.source_english),
-        target_layout,
-    );
-    let mut peer_count = 0;
-    for peer in page_context
-        .iter()
-        .filter(|peer| peer.id != target.id)
-        .take(MAX_HSK_TRANSLATION_BATCH.saturating_sub(1))
-    {
+    let mut user_prompt = String::from("Proposed illustrated-lettering regions:\n");
+    for (index, candidate) in candidates.iter().enumerate() {
         use std::fmt::Write as _;
-        write!(
+        let layout = candidate
+            .semantic_layout
+            .as_ref()
+            .expect("artwork candidates require visual evidence");
+        writeln!(
             &mut user_prompt,
-            "\n- text={} | layout={}",
-            compact_field(&peer.source_english),
-            semantic_layout_prompt(peer.semantic_layout.as_ref()),
+            "{}\ttext={}\tdetector={}\tfont-height={:.2}%\tappearance-bands={}\ttext-colors={}\toutline={}",
+            index + 1,
+            compact_field(&candidate.source_english),
+            if layout.detector_enclosed {
+                "enclosed"
+            } else {
+                "free"
+            },
+            layout.measured_font_height_millionths as f32 / 10_000.0,
+            layout.appearance_band_count,
+            layout.distinct_text_color_count,
+            if layout.has_outline { "yes" } else { "no" },
         )
         .expect("writing to String cannot fail");
-        peer_count += 1;
-    }
-    if peer_count == 0 {
-        user_prompt.push_str("\n- none");
     }
     let raw = generator
         .generate_streaming(
             &system_prompt,
             &user_prompt,
-            &GenerateOptions::greedy(12),
+            &GenerateOptions::greedy(
+                32usize
+                    .saturating_add(candidates.len().saturating_mul(8))
+                    .clamp(48, 96),
+            ),
             Language::ChineseSimplified,
             cancel,
             &mut |_| Ok(()),
         )
         .await?;
     check_cancelled(cancel)?;
-    trace_semantic_output("disputed-region-verifier", &raw);
-    Ok(raw.trim().eq_ignore_ascii_case("EXCLUDE"))
+    trace_semantic_output("artwork-verifier", &raw);
+    let mut approved = HashSet::new();
+    for raw_line in raw.lines().filter(|line| !line.trim().is_empty()) {
+        let Some((position, payload)) = parse_numbered_payload(raw_line) else {
+            continue;
+        };
+        if position == 0 || position > candidates.len() {
+            continue;
+        }
+        let mut decision = None;
+        for token in payload.split(|character: char| !character.is_ascii_alphabetic()) {
+            let current = if token.eq_ignore_ascii_case("PRESERVE") {
+                Some(true)
+            } else if token.eq_ignore_ascii_case("TRANSLATE") {
+                Some(false)
+            } else {
+                None
+            };
+            let Some(current) = current else {
+                continue;
+            };
+            if decision.is_some_and(|previous| previous != current) {
+                decision = None;
+                break;
+            }
+            decision = Some(current);
+        }
+        if decision == Some(true) {
+            approved.insert(candidates[position - 1].id.clone());
+        }
+    }
+    Ok(approved)
 }
 
-fn semantic_layout_prompt(layout: Option<&HskSemanticLayout>) -> String {
-    let Some(layout) = layout else {
-        return "unknown".to_owned();
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DetectedNameCandidate {
+    name: HskProtectedName,
+    entity_type: String,
+}
+
+fn parse_detected_names(
+    output: &str,
+    utterances: &[HskSourceUtterance],
+) -> Result<Vec<DetectedNameCandidate>> {
+    const ENTITY_TYPES: [&str; 5] = ["PERSON", "PLACE", "ORGANIZATION", "EVENT", "ENTITY"];
+    let mut slots = vec![None::<Vec<(String, String)>>; utterances.len()];
+    for raw_line in output.lines().filter(|line| !line.trim().is_empty()) {
+        let Some((position, payload)) = parse_numbered_payload(raw_line) else {
+            continue;
+        };
+        if position == 0 || position > utterances.len() || slots[position - 1].is_some() {
+            continue;
+        }
+        let source = &utterances[position - 1].source_english;
+        let mut names = Vec::<(String, String)>::new();
+        if payload.trim() != "-" {
+            for discovered_candidate in payload
+                .split(|character| matches!(character, '|' | '\t'))
+                .map(str::trim)
+            {
+                let (entity_type, candidate) =
+                    if let Some((left, right)) = discovered_candidate.split_once('=') {
+                        let left_is_type = ENTITY_TYPES
+                            .iter()
+                            .any(|allowed| left.trim().eq_ignore_ascii_case(allowed));
+                        let right_is_type = ENTITY_TYPES
+                            .iter()
+                            .any(|allowed| right.trim().eq_ignore_ascii_case(allowed));
+                        if left_is_type {
+                            (left.trim(), right.trim())
+                        } else if right_is_type {
+                            (right.trim(), left.trim())
+                        } else {
+                            continue;
+                        }
+                    } else {
+                        // Discovery proposes candidates; contextual adjudication
+                        // remains the authority. Preserve an exact untyped span
+                        // as UNKNOWN so harmless schema drift cannot erase a
+                        // valid candidate before the independent verifier sees
+                        // every source occurrence.
+                        ("UNKNOWN", discovered_candidate)
+                    };
+                let Some(candidate) = canonical_source_span(source, candidate) else {
+                    continue;
+                };
+                if !opaque_name_span_is_admissible(source, candidate) {
+                    continue;
+                }
+                if !names
+                    .iter()
+                    .any(|(name, _)| name.eq_ignore_ascii_case(candidate))
+                {
+                    names.push((candidate.to_owned(), entity_type.to_ascii_uppercase()));
+                }
+            }
+        }
+        slots[position - 1] = Some(names);
+    }
+    let mut detected = Vec::new();
+    for names in slots.into_iter().flatten() {
+        for (name, entity_type) in names {
+            if detected.iter().any(|existing: &DetectedNameCandidate| {
+                existing.name.source_english.eq_ignore_ascii_case(&name)
+            }) {
+                continue;
+            }
+            detected.push(DetectedNameCandidate {
+                name: HskProtectedName {
+                    source_english: name.clone(),
+                    chinese: name,
+                },
+                entity_type,
+            });
+        }
+    }
+    Ok(detected)
+}
+
+fn opaque_name_span_is_admissible(source: &str, candidate: &str) -> bool {
+    const CLOSED_CLASS_SINGLE_WORDS: &[&str] = &[
+        "a",
+        "an",
+        "and",
+        "are",
+        "as",
+        "at",
+        "be",
+        "been",
+        "being",
+        "but",
+        "by",
+        "can",
+        "did",
+        "do",
+        "does",
+        "for",
+        "from",
+        "had",
+        "has",
+        "have",
+        "he",
+        "her",
+        "hers",
+        "him",
+        "his",
+        "i",
+        "if",
+        "in",
+        "is",
+        "it",
+        "its",
+        "me",
+        "my",
+        "of",
+        "on",
+        "or",
+        "our",
+        "ours",
+        "she",
+        "that",
+        "the",
+        "their",
+        "theirs",
+        "them",
+        "they",
+        "us",
+        "we",
+        "you",
+        "your",
+        "yours",
+        "aren't",
+        "can't",
+        "couldn't",
+        "didn't",
+        "doesn't",
+        "don't",
+        "hadn't",
+        "hasn't",
+        "haven't",
+        "isn't",
+        "shouldn't",
+        "wasn't",
+        "weren't",
+        "won't",
+        "wouldn't",
+    ];
+    const POSSESSIVE_DETERMINERS: &[&str] = &["my", "your", "his", "her", "our", "their", "its"];
+    let trimmed = candidate.trim();
+    let word_count = trimmed.split_whitespace().count();
+    if word_count == 0
+        || (word_count == 1
+            && CLOSED_CLASS_SINGLE_WORDS
+                .iter()
+                .any(|word| trimmed.eq_ignore_ascii_case(word)))
+    {
+        return false;
+    }
+    let source_trimmed = source.trim();
+    if trimmed.eq_ignore_ascii_case(source_trimmed)
+        && (word_count > 6
+            || (word_count > 1 && source_trimmed.ends_with('.'))
+            || source_trimmed
+                .chars()
+                .any(|character| matches!(character, '!' | '?' | ';')))
+    {
+        return false;
+    }
+    let source_lower = source.to_ascii_lowercase();
+    let candidate_lower = trimmed.to_ascii_lowercase();
+    if let Some(start) = source_lower.find(&candidate_lower) {
+        let previous = source[..start]
+            .split(|character: char| !character.is_ascii_alphabetic() && character != '\'')
+            .filter(|part| !part.is_empty())
+            .next_back()
+            .unwrap_or("");
+        if POSSESSIVE_DETERMINERS
+            .iter()
+            .any(|word| previous.eq_ignore_ascii_case(word))
+        {
+            return false;
+        }
+    }
+    true
+}
+
+fn artwork_claim_is_admissible(utterance: &HskSourceUtterance) -> bool {
+    const PROMINENT_FONT_HEIGHT_MILLIONTHS: u32 = 100_000;
+    const FREEFORM_STYLED_FONT_HEIGHT_MILLIONTHS: u32 = 60_000;
+    const STORY_LEADING_WORDS: &[&str] = &[
+        "i",
+        "you",
+        "he",
+        "she",
+        "we",
+        "they",
+        "me",
+        "him",
+        "her",
+        "us",
+        "them",
+        "my",
+        "your",
+        "his",
+        "our",
+        "their",
+        "this",
+        "that",
+        "these",
+        "those",
+        "who",
+        "what",
+        "why",
+        "how",
+        "when",
+        "where",
+        "am",
+        "is",
+        "are",
+        "was",
+        "were",
+        "do",
+        "does",
+        "did",
+        "can",
+        "could",
+        "would",
+        "don't",
+        "doesn't",
+        "didn't",
+        "isn't",
+        "aren't",
+        "wasn't",
+        "weren't",
+        "can't",
+        "couldn't",
+        "won't",
+        "wouldn't",
+        "shouldn't",
+        "haven't",
+        "hasn't",
+        "hadn't",
+    ];
+    let trimmed = utterance.source_english.trim();
+    if trimmed.ends_with('?')
+        || trimmed.ends_with('.')
+        || trimmed.chars().any(|character| character.is_ascii_digit())
+        || english_word_count(trimmed) > 6
+    {
+        return false;
+    }
+    let first = trimmed
+        .split(|character: char| !character.is_ascii_alphabetic() && character != '\'')
+        .find(|part| !part.is_empty())
+        .unwrap_or("");
+    let semantics_are_admissible = !STORY_LEADING_WORDS
+        .iter()
+        .any(|word| first.eq_ignore_ascii_case(word));
+    if !semantics_are_admissible {
+        return false;
+    }
+    let Some(layout) = utterance.semantic_layout.as_ref() else {
+        return false;
     };
-    format!(
-        "detector={}; box={:.1}%,{:.1}%-{:.1}%,{:.1}%; page={}x{}",
-        if layout.detector_enclosed {
-            "enclosed"
-        } else {
-            "free"
-        },
-        layout.x0_millionths as f32 / 10_000.0,
-        layout.y0_millionths as f32 / 10_000.0,
-        layout.x1_millionths as f32 / 10_000.0,
-        layout.y1_millionths as f32 / 10_000.0,
-        layout.page_width,
-        layout.page_height,
-    )
+    let visually_prominent =
+        layout.measured_font_height_millionths >= PROMINENT_FONT_HEIGHT_MILLIONTHS;
+    let styled_freeform = !layout.detector_enclosed
+        && layout.measured_font_height_millionths >= FREEFORM_STYLED_FONT_HEIGHT_MILLIONTHS
+        && (layout.has_outline
+            || layout.distinct_text_color_count > 1
+            || layout.appearance_band_count > 1);
+    visually_prominent || styled_freeform
 }
 
 fn parse_semantic_classification(
     output: &str,
     utterances: &[HskSourceUtterance],
 ) -> HskSemanticClassification {
-    let page_is_furniture = output
+    let page_category = output
         .lines()
         .filter(|line| !line.trim().is_empty())
         .find_map(|line| {
@@ -936,10 +1204,10 @@ fn parse_semantic_classification(
             if !label.trim().eq_ignore_ascii_case("PAGE") {
                 return None;
             }
-            Some(category.trim().eq_ignore_ascii_case("FURNITURE"))
-        })
-        .unwrap_or(false);
+            Some(category.trim().to_ascii_uppercase())
+        });
     let mut decisions = vec![None::<HskTranslationDisposition>; utterances.len()];
+    let mut raw_categories = vec![None::<String>; utterances.len()];
     for raw_line in output.lines().filter(|line| !line.trim().is_empty()) {
         let Some((position, payload)) = parse_numbered_payload(raw_line) else {
             continue;
@@ -954,20 +1222,36 @@ fn parse_semantic_classification(
             .split_whitespace()
             .next()
             .unwrap_or(payload);
-        decisions[position - 1] = match category.to_ascii_uppercase().as_str() {
+        let category = category.to_ascii_uppercase();
+        raw_categories[position - 1] = Some(category.clone());
+        decisions[position - 1] = match category.as_str() {
             "SFX" => Some(HskTranslationDisposition::ExcludeSoundEffect),
             "FURNITURE" => Some(HskTranslationDisposition::ExcludeNonStory),
+            "ARTWORK" if artwork_claim_is_admissible(&utterances[position - 1]) => {
+                Some(HskTranslationDisposition::PreserveArtwork)
+            }
+            "ARTWORK" => Some(HskTranslationDisposition::Translate),
             "STORY" => Some(HskTranslationDisposition::Translate),
             _ => None,
         };
     }
+    let complete_non_story_artwork_page = page_category.as_deref() == Some("ARTWORK")
+        && raw_categories
+            .iter()
+            .any(|category| category.as_deref() == Some("FURNITURE"))
+        && raw_categories
+            .iter()
+            .all(|category| matches!(category.as_deref(), Some("SFX" | "FURNITURE" | "ARTWORK")));
+    let page_is_furniture =
+        page_category.as_deref() == Some("FURNITURE") || complete_non_story_artwork_page;
     let regions = decisions
         .into_iter()
         .enumerate()
         .filter_map(|(index, decision)| match decision {
             Some(
                 disposition @ (HskTranslationDisposition::ExcludeSoundEffect
-                | HskTranslationDisposition::ExcludeNonStory),
+                | HskTranslationDisposition::ExcludeNonStory
+                | HskTranslationDisposition::PreserveArtwork),
             ) => Some((utterances[index].id.clone(), disposition)),
             Some(HskTranslationDisposition::Translate) | None => None,
         })
@@ -1821,6 +2105,17 @@ fn parse_numbered_output_with_name_handling(
             slots[position - 1].push(parsed);
         }
     }
+    if expected.len() == 1 && slots[0].is_empty() {
+        return HskTranslationBatchResult {
+            items: vec![parse_repair_output_with_name_handling(
+                output,
+                &expected[0],
+                protected_names,
+                name_handling,
+                translate_sound_effects,
+            )],
+        };
+    }
 
     let items = expected
         .iter()
@@ -2114,6 +2409,7 @@ fn outcome_from_lines(
             .collect::<Vec<_>>();
         text = restore_approved_name_placeholders(expected.source_english, &text, &names);
     }
+    normalize_multiplier_notation(expected.source_english, &mut text);
     let (mut text, mut markup_issues) = validate_and_strip_name_markup(
         expected.source_english,
         &text,
@@ -2377,6 +2673,41 @@ fn normalize_full_width_digits(text: &mut String) {
                     .expect("full-width digit has an ASCII form")
             }
             _ => character,
+        })
+        .collect();
+}
+
+fn normalize_multiplier_notation(source_english: &str, text: &mut String) {
+    let source = source_english.as_bytes();
+    let source_has_multiplier = source.iter().enumerate().any(|(index, byte)| {
+        matches!(byte, b'x' | b'X')
+            && (index
+                .checked_sub(1)
+                .is_some_and(|previous| source[previous].is_ascii_digit())
+                || source
+                    .get(index + 1)
+                    .is_some_and(|next| next.is_ascii_digit()))
+    });
+    if !source_has_multiplier {
+        return;
+    }
+    let characters = text.chars().collect::<Vec<_>>();
+    *text = characters
+        .iter()
+        .enumerate()
+        .map(|(index, character)| {
+            if matches!(character, 'x' | 'X')
+                && (index
+                    .checked_sub(1)
+                    .is_some_and(|previous| characters[previous].is_ascii_digit())
+                    || characters
+                        .get(index + 1)
+                        .is_some_and(|next| next.is_ascii_digit()))
+            {
+                '×'
+            } else {
+                *character
+            }
         })
         .collect();
 }
@@ -2947,111 +3278,210 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn semantic_name_detection_generalizes_to_unseen_roles_and_entities() -> Result<()> {
-        let generator = FakeGenerator::new(["1\tSable\n2\tIlyan", "1\tKEEP\n2\tKEEP"]);
+    #[test]
+    fn semantic_classification_discovers_unseen_names_without_preserving_roles() -> Result<()> {
         let utterances = vec![
             source("a", "The guild quartermaster Sable opened the gate."),
             source("b", "Our regent asked cartographer Ilyan to return."),
         ];
 
-        let proposed = vec![
-            HskProtectedName {
-                source_english: "Sable".to_owned(),
-                chinese: "Sable".to_owned(),
-            },
-            HskProtectedName {
-                source_english: "Ilyan".to_owned(),
-                chinese: "Ilyan".to_owned(),
-            },
-        ];
-        let names =
-            detect_proper_names_with(&generator, &utterances, &proposed, &AtomicBool::new(false))
-                .await?;
+        let names = parse_detected_names("1\tPERSON=Sable\n2\tIlyan=PERSON", &utterances)?;
 
         assert_eq!(
-            names,
-            vec![
-                HskProtectedName {
-                    source_english: "Sable".to_owned(),
-                    chinese: "Sable".to_owned(),
-                },
-                HskProtectedName {
-                    source_english: "Ilyan".to_owned(),
-                    chinese: "Ilyan".to_owned(),
-                },
-            ]
+            names
+                .iter()
+                .map(|candidate| (
+                    candidate.name.source_english.as_str(),
+                    candidate.entity_type.as_str(),
+                ))
+                .collect::<Vec<_>>(),
+            [("Sable", "PERSON"), ("Ilyan", "PERSON")]
         );
-        let prompt = generator.system_prompts.lock().unwrap()[0].to_ascii_lowercase();
-        assert!(prompt.contains("common relational terms"));
-        assert!(prompt.contains("roles, occupations, ranks, titles"));
-        assert!(prompt.contains("rigid identifier"));
-        assert!(prompt.contains("work title"));
-        assert!(prompt.contains("page furniture"));
-        assert!(!prompt.contains("wife"));
-        assert!(!prompt.contains("academy headmaster"));
-        let verifier = generator.system_prompts.lock().unwrap()[1].to_ascii_lowercase();
-        assert!(verifier.contains("stricter than conventional named-entity recognition"));
-        assert!(verifier.contains("semantically transparent epithet"));
         Ok(())
     }
 
-    #[tokio::test]
-    async fn semantic_name_detection_discards_hallucinations_without_losing_valid_siblings()
+    #[test]
+    fn semantic_classification_discards_hallucinated_names_without_losing_valid_siblings()
     -> Result<()> {
-        let generator = FakeGenerator::new(["1\tInvented | neris\n2\t-\nmalformed", "1\tKEEP"]);
         let utterances = vec![
             source("a", "The courier Neris arrived."),
             source("b", "The headmaster opened the gate."),
         ];
 
-        let proposed = vec![HskProtectedName {
-            source_english: "Neris".to_owned(),
-            chinese: "Neris".to_owned(),
-        }];
-        let names =
-            detect_proper_names_with(&generator, &utterances, &proposed, &AtomicBool::new(false))
-                .await?;
+        let names = parse_detected_names(
+            "1\tPERSON=Invented | PERSON=neris | PERSON=The courier Neris arrived.\n2\tPERSON=The",
+            &utterances,
+        )?;
 
         assert_eq!(
-            names,
-            [HskProtectedName {
-                source_english: "Neris".to_owned(),
-                chinese: "Neris".to_owned(),
-            }]
+            names
+                .iter()
+                .map(|candidate| candidate.name.source_english.as_str())
+                .collect::<Vec<_>>(),
+            ["Neris"]
         );
         Ok(())
     }
 
-    #[tokio::test]
-    async fn transparent_unique_epithets_are_translated_not_preserved() -> Result<()> {
-        let generator = FakeGenerator::new([
-            "1\tTHE SILVER CAPTAIN\n2\tTHE SILVER CAPTAIN",
-            "1\tTRANSLATE",
-        ]);
+    #[test]
+    fn omitted_name_lines_do_not_discard_valid_sibling_candidates() -> Result<()> {
+        let utterances = vec![
+            source("a", "Sable opened the gate."),
+            source("b", "Ilyan followed her."),
+        ];
+
+        let names = parse_detected_names("1\tPERSON=Sable", &utterances)?;
+
+        assert_eq!(
+            names
+                .iter()
+                .map(|candidate| candidate.name.source_english.as_str())
+                .collect::<Vec<_>>(),
+            ["Sable"]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn untyped_exact_name_candidates_still_require_contextual_adjudication() -> Result<()> {
+        let utterances = vec![
+            source("a", "MAYSA opened the gate."),
+            source("b", "THIS WHOLE SENTENCE IS NOT A NAME."),
+        ];
+        let names = parse_detected_names(
+            "1\tMAYSA\n2\tTHIS WHOLE SENTENCE IS NOT A NAME.",
+            &utterances,
+        )?;
+
+        assert_eq!(names.len(), 1);
+        assert_eq!(names[0].name.source_english, "MAYSA");
+        assert_eq!(names[0].entity_type, "UNKNOWN");
+        Ok(())
+    }
+
+    #[test]
+    fn typed_name_candidates_accept_field_separators_and_reversed_pairs() -> Result<()> {
+        let utterances = vec![source("a", "JAMEL asked JOHAN.")];
+        let names = parse_detected_names("1\tJAMEL=PERSON\tJOHAN=PERSON", &utterances)?;
+
+        assert_eq!(
+            names
+                .iter()
+                .map(|candidate| (
+                    candidate.name.source_english.as_str(),
+                    candidate.entity_type.as_str()
+                ))
+                .collect::<Vec<_>>(),
+            [("JAMEL", "PERSON"), ("JOHAN", "PERSON")]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn transparent_unique_epithets_are_translated_not_preserved() {
         let utterances = vec![
             source("a", "THE SILVER CAPTAIN entered."),
             source("b", "We followed THE SILVER CAPTAIN."),
         ];
 
-        let names =
-            detect_proper_names_with(&generator, &utterances, &[], &AtomicBool::new(false)).await?;
+        let names = parse_detected_names("1\t-\n2\t-", &utterances).unwrap();
 
         assert!(names.is_empty());
+    }
+
+    #[test]
+    fn typed_name_candidates_apply_only_safe_local_syntax_gates() -> Result<()> {
+        let utterances = vec![
+            source("a", "YOUR INSTINCTS"),
+            source("b", "AREN'T TELLING YOU TO RUN AWAY?"),
+            source("c", "It would be TALARIS of the Ice Palace."),
+        ];
+
+        let names = parse_detected_names(
+            "1\tPERSON=YOUR | PLACE=INSTINCTS\n2\tPERSON=AREN'T | PLACE=TELLING | ORGANIZATION=YOU\n3\tPERSON=TALARIS",
+            &utterances,
+        )?;
+
+        assert_eq!(
+            names
+                .iter()
+                .map(|candidate| candidate.name.source_english.as_str())
+                .collect::<Vec<_>>(),
+            ["TELLING", "TALARIS"]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn contextual_adjudication_rejects_ordinary_predicates_without_losing_names() -> Result<()>
+    {
+        let generator = FakeGenerator::new([
+            "1\tPLACE=TELLING\n2\tPERSON=TALARIS",
+            "1\t12\tTAB\tDESCRIPTIVE\n2\t12\tTAB\tOPAQUE",
+        ]);
+        let utterances = vec![
+            source("a", "AREN'T TELLING YOU TO RUN AWAY?"),
+            source("b", "It would be TALARIS of the Ice Palace."),
+        ];
+
+        let names =
+            detect_proper_names_with(&generator, &utterances, &AtomicBool::new(false)).await?;
+
+        assert_eq!(
+            names
+                .iter()
+                .map(|name| name.source_english.as_str())
+                .collect::<Vec<_>>(),
+            ["TALARIS"]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn typed_name_analysis_uses_generic_discovery_and_batched_adjudication() -> Result<()> {
+        let generator = FakeGenerator::new([
+            "1\tPERSON=Sable\n2\tPLACE=Ilyan Keep | PERSON=Invented",
+            "1\tOPAQUE\n2\tOPAQUE",
+        ]);
+        let utterances = vec![
+            source("a", "The quartermaster Sable opened the gate."),
+            source("b", "Ilyan Keep welcomed the headmaster."),
+        ];
+
+        let names =
+            detect_proper_names_with(&generator, &utterances, &AtomicBool::new(false)).await?;
+
+        assert_eq!(
+            names
+                .iter()
+                .map(|name| name.source_english.as_str())
+                .collect::<Vec<_>>(),
+            ["Sable", "Ilyan Keep"]
+        );
+        let prompt = generator.system_prompts.lock().unwrap()[0].to_ascii_lowercase();
+        assert!(prompt.contains("shortest exact source span"));
+        assert!(prompt.contains("do not output a complete sentence or clause"));
+        assert!(prompt.contains("relationships, honorifics, occupations, roles, ranks, titles"));
+        assert!(!prompt.contains("wife"));
+        assert!(!prompt.contains("academy headmaster"));
+        let verifier = generator.system_prompts.lock().unwrap()[1].to_ascii_lowercase();
+        assert!(verifier.contains("capitalization and uniqueness alone never make a name"));
+        assert!(verifier.contains("opaque or descriptive"));
+        assert_eq!(generator.calls.load(Ordering::Relaxed), 2);
         Ok(())
     }
 
     #[test]
-    fn semantic_name_parser_accepts_a_model_echoed_source_column() -> Result<()> {
+    fn semantic_classification_parser_keeps_only_exact_source_name_spans() -> Result<()> {
         let utterances = vec![source("a", "JAMEL, WHAT DO YOU THINK HAPPENED TO JOHAN?")];
         let names = parse_detected_names(
-            "1\tJAMEL, WHAT DO YOU THINK HAPPENED TO JOHAN?\tJAMEL | JOHAN",
+            "1\tPERSON=JAMEL | PERSON=JOHAN | PERSON=INVENTED",
             &utterances,
         )?;
         assert_eq!(
             names
                 .iter()
-                .map(|name| name.source_english.as_str())
+                .map(|name| name.name.source_english.as_str())
                 .collect::<Vec<_>>(),
             ["JAMEL", "JOHAN"]
         );
@@ -3064,22 +3494,20 @@ mod tests {
             source("a", "JAMEL opened the gate."),
             source("b", "The headmaster followed him."),
         ];
-        let names = parse_detected_names("1. JAMEL\n2) -", &utterances)?;
-        assert_eq!(
-            names
-                .iter()
-                .map(|name| name.source_english.as_str())
-                .collect::<Vec<_>>(),
-            ["JAMEL"]
-        );
-        let classified = parse_semantic_classification(
-            "PAGE\tFURNITURE\n1\tSTORY\tJAMEL opened the gate.\n2、FURNITURE",
-            &utterances,
-        );
+        let names = parse_detected_names("1. PERSON=JAMEL\n2) -", &utterances)?;
+        let classified =
+            parse_semantic_classification("PAGE\tFURNITURE\n1. STORY\n2) FURNITURE", &utterances);
         assert!(classified.page_is_furniture);
         assert_eq!(
             classified.regions,
             [("b".to_owned(), HskTranslationDisposition::ExcludeNonStory)]
+        );
+        assert_eq!(
+            names
+                .iter()
+                .map(|name| name.name.source_english.as_str())
+                .collect::<Vec<_>>(),
+            ["JAMEL"]
         );
         Ok(())
     }
@@ -3087,16 +3515,34 @@ mod tests {
     #[tokio::test]
     async fn semantic_region_classification_is_model_driven_and_fail_soft() -> Result<()> {
         let generator = FakeGenerator::new([
-            "PAGE\tSTORY\n1\tSFX\n2\tSTORY\n3\tFURNITURE\n4\tUNKNOWN\n99\tSFX",
+            "PAGE\tSTORY\n1\tSFX\n2\tSTORY\n3\tFURNITURE\n4\tARTWORK\n99\tSFX",
+            "1\tPRESERVE",
         ]);
         let mut utterances = vec![
             source("a", "THUD"),
-            source("b", "I heard a thud outside."),
+            source("b", "Neris heard a thud outside."),
             source("c", "EXAMPLESCANS.COM"),
-            source("d", "Chapter 3"),
+            source("d", "Arcane Spear: Fifth Form"),
         ];
         utterances[0].semantic_layout = Some(HskSemanticLayout {
             detector_enclosed: true,
+            measured_font_height_millionths: 32_000,
+            appearance_band_count: 2,
+            distinct_text_color_count: 2,
+            has_outline: true,
+            x0_millionths: 100_000,
+            y0_millionths: 200_000,
+            x1_millionths: 400_000,
+            y1_millionths: 300_000,
+            page_width: 1200,
+            page_height: 800,
+        });
+        utterances[3].semantic_layout = Some(HskSemanticLayout {
+            detector_enclosed: true,
+            measured_font_height_millionths: 180_000,
+            appearance_band_count: 2,
+            distinct_text_color_count: 2,
+            has_outline: true,
             x0_millionths: 100_000,
             y0_millionths: 200_000,
             x1_millionths: 400_000,
@@ -3118,6 +3564,7 @@ mod tests {
                     HskTranslationDisposition::ExcludeSoundEffect
                 ),
                 ("c".to_owned(), HskTranslationDisposition::ExcludeNonStory),
+                ("d".to_owned(), HskTranslationDisposition::PreserveArtwork),
             ]
         );
         let prompt = generator.system_prompts.lock().unwrap()[0].to_ascii_lowercase();
@@ -3126,7 +3573,13 @@ mod tests {
         assert!(prompt.contains("publisher/site credit"));
         assert!(prompt.contains("work/series title or logo"));
         assert!(prompt.contains("irrecoverable ocr letter soup"));
+        assert!(prompt.contains("artwork"));
+        assert!(prompt.contains("finite clause"));
+        assert!(prompt.contains("when uncertain between artwork and story"));
         assert!(prompt.contains("entire section"));
+        let artwork_prompt = generator.system_prompts.lock().unwrap()[1].to_ascii_lowercase();
+        assert!(artwork_prompt.contains("item names or descriptions"));
+        assert!(artwork_prompt.contains("missions"));
         let user_prompt = generator.user_prompts.lock().unwrap()[0].to_ascii_lowercase();
         assert!(user_prompt.contains("detector=enclosed"));
         assert!(user_prompt.contains("box=10.0%,20.0%-40.0%,30.0%"));
@@ -3135,68 +3588,174 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn disputed_region_verification_excludes_furniture_and_unreadable_ocr() -> Result<()> {
-        let furniture = FakeGenerator::new(["EXCLUDE"]);
-        let unreadable = FakeGenerator::new(["EXCLUDE"]);
-        let story = FakeGenerator::new(["not sure"]);
-        let mut furniture_target = source("title", "Example Series Title");
-        furniture_target.semantic_layout = Some(HskSemanticLayout {
-            detector_enclosed: true,
-            x0_millionths: 200_000,
-            y0_millionths: 300_000,
-            x1_millionths: 800_000,
-            y1_millionths: 500_000,
-            page_width: 1200,
-            page_height: 800,
-        });
-        let unreadable_target = source("noise", "H A • - I I XF H , I");
-        let story_target = source("story", "The captain entered.");
+    async fn semantic_role_classification_keeps_regions_beyond_translation_boundary_together()
+    -> Result<()> {
+        let generator = FakeGenerator::new([concat!(
+            "PAGE\tFURNITURE\n",
+            "1\tARTWORK\n",
+            "2\tFURNITURE\n",
+            "3\tFURNITURE\n",
+            "4\tFURNITURE\n",
+            "5\tFURNITURE\n",
+            "6\tFURNITURE\n",
+            "7\tFURNITURE\n",
+            "8\tFURNITURE"
+        )]);
+        let utterances = (0..8)
+            .map(|index| source(&format!("credit-{index}"), &format!("Staff credit {index}")))
+            .collect::<Vec<_>>();
 
-        assert!(
-            verify_excludable_region_with(
-                &furniture,
-                &furniture_target,
-                &[source("peer", "ExampleScans.com")],
-                true,
-                &AtomicBool::new(false)
-            )
-            .await?
-        );
-        assert!(
-            verify_excludable_region_with(
-                &unreadable,
-                &unreadable_target,
-                &[source("peer", "We have to leave now.")],
-                true,
-                &AtomicBool::new(false)
-            )
-            .await?
-        );
-        assert!(
-            !verify_excludable_region_with(
-                &story,
-                &story_target,
-                &[source("peer", "We have to leave now.")],
-                true,
-                &AtomicBool::new(false)
-            )
-            .await?
-        );
-        let prompt = furniture.system_prompts.lock().unwrap()[0].to_ascii_lowercase();
-        assert!(prompt.contains("fallible independent evidence"));
-        assert!(prompt.contains("work/series logo"));
-        assert!(prompt.contains("recoverable in-story utterance"));
-        assert!(prompt.contains("duplicated title words"));
-        assert!(prompt.contains("never inherit the category of nearby lines"));
-        assert!(prompt.contains("letter soup"));
-        assert!(prompt.contains("linguistically interpretable"));
-        assert!(!prompt.contains("example series title"));
-        let user_prompt = furniture.user_prompts.lock().unwrap()[0].to_ascii_lowercase();
-        assert!(user_prompt.contains("target ocr source"));
-        assert!(user_prompt.contains("examplescans.com"));
-        assert!(user_prompt.contains("detector=enclosed"));
-        assert!(user_prompt.contains("page=1200x800"));
+        let classified =
+            classify_semantic_regions_with(&generator, &utterances, &AtomicBool::new(false))
+                .await?;
+
+        assert!(classified.page_is_furniture);
+        assert_eq!(generator.calls.load(Ordering::Relaxed), 1);
+        let prompt = &generator.user_prompts.lock().unwrap()[0];
+        assert!(prompt.contains("8\ttext=Staff credit 7"));
         Ok(())
+    }
+
+    #[test]
+    fn semantic_artwork_claims_fail_safe_for_story_syntax() {
+        let mut utterances = vec![
+            source("a", "YOUR INSTINCTS"),
+            source("b", "AREN'T TELLING YOU TO RUN AWAY?"),
+            source("c", "MYUNGWANG SWORD AUTHORITY"),
+        ];
+        utterances[2].semantic_layout = Some(HskSemanticLayout {
+            detector_enclosed: true,
+            measured_font_height_millionths: 180_000,
+            appearance_band_count: 1,
+            distinct_text_color_count: 1,
+            has_outline: false,
+            x0_millionths: 100_000,
+            y0_millionths: 200_000,
+            x1_millionths: 400_000,
+            y1_millionths: 300_000,
+            page_width: 900,
+            page_height: 16_000,
+        });
+
+        let classified = parse_semantic_classification(
+            "PAGE\tSTORY\n1\tARTWORK\n2\tARTWORK\n3\tARTWORK",
+            &utterances,
+        );
+
+        assert_eq!(
+            classified.regions,
+            [("c".to_owned(), HskTranslationDisposition::PreserveArtwork)]
+        );
+    }
+
+    #[test]
+    fn complete_non_story_artwork_sections_are_page_furniture_but_mixed_sections_are_not() {
+        let utterances = vec![
+            source("a", "MY FANTASY STORY"),
+            source("b", "EXAMPLE PUBLISHING"),
+        ];
+        let cover =
+            parse_semantic_classification("PAGE\tARTWORK\n1\tARTWORK\n2\tFURNITURE", &utterances);
+        assert!(cover.page_is_furniture);
+
+        let mixed =
+            parse_semantic_classification("PAGE\tARTWORK\n1\tARTWORK\n2\tSTORY", &utterances);
+        assert!(!mixed.page_is_furniture);
+
+        let truncated = parse_semantic_classification("PAGE\tARTWORK\n1\tARTWORK", &utterances);
+        assert!(!truncated.page_is_furniture);
+    }
+
+    #[test]
+    fn artwork_requires_independent_visual_lettering_evidence() {
+        let mut utterances = vec![
+            source("a", "THIRTY OF THEM!!! X3"),
+            source("b", "THIRD SWORD"),
+        ];
+        utterances[0].semantic_layout = Some(HskSemanticLayout {
+            detector_enclosed: true,
+            measured_font_height_millionths: 80_000,
+            appearance_band_count: 1,
+            distinct_text_color_count: 1,
+            has_outline: false,
+            x0_millionths: 100_000,
+            y0_millionths: 100_000,
+            x1_millionths: 500_000,
+            y1_millionths: 200_000,
+            page_width: 900,
+            page_height: 16_000,
+        });
+        utterances[1].semantic_layout = Some(HskSemanticLayout {
+            detector_enclosed: true,
+            measured_font_height_millionths: 180_000,
+            appearance_band_count: 1,
+            distinct_text_color_count: 1,
+            has_outline: false,
+            x0_millionths: 100_000,
+            y0_millionths: 300_000,
+            x1_millionths: 500_000,
+            y1_millionths: 500_000,
+            page_width: 900,
+            page_height: 16_000,
+        });
+
+        let classified =
+            parse_semantic_classification("PAGE\tARTWORK\n1\tARTWORK\n2\tARTWORK", &utterances);
+        assert!(!classified.page_is_furniture);
+        assert_eq!(
+            classified.regions,
+            [("b".to_owned(), HskTranslationDisposition::PreserveArtwork)]
+        );
+    }
+
+    #[tokio::test]
+    async fn proposed_artwork_requires_independent_semantic_adjudication() -> Result<()> {
+        let generator = FakeGenerator::new([
+            "PAGE\tARTWORK\n1\tARTWORK\n2\tARTWORK",
+            "1\tTRANSLATE\n2\tPRESERVE",
+        ]);
+        let mut utterances = vec![
+            source("a", "FORTY REWARD TOKENS"),
+            source("b", "CELESTIAL BLADE: THIRD FORM"),
+        ];
+        for utterance in &mut utterances {
+            utterance.semantic_layout = Some(HskSemanticLayout {
+                detector_enclosed: true,
+                measured_font_height_millionths: 180_000,
+                appearance_band_count: 2,
+                distinct_text_color_count: 2,
+                has_outline: true,
+                x0_millionths: 100_000,
+                y0_millionths: 200_000,
+                x1_millionths: 500_000,
+                y1_millionths: 400_000,
+                page_width: 900,
+                page_height: 16_000,
+            });
+        }
+
+        let classified =
+            classify_semantic_regions_with(&generator, &utterances, &AtomicBool::new(false))
+                .await?;
+        assert_eq!(
+            classified.regions,
+            [("b".to_owned(), HskTranslationDisposition::PreserveArtwork)]
+        );
+        assert_eq!(generator.calls.load(Ordering::Relaxed), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn name_adjudication_receives_generic_syntactic_attachment_evidence() {
+        let utterances = vec![
+            source("a", "We met the Crimson Captain."),
+            source("b", "Crimson Captain arrived."),
+        ];
+        assert_eq!(
+            candidate_syntax(&utterances, "Crimson Captain"),
+            "definite-article-before"
+        );
+        assert_eq!(candidate_syntax(&utterances, "arrived"), "neutral");
     }
 
     #[test]
@@ -3868,6 +4427,28 @@ mod tests {
         assert!(repaired.is_valid());
         assert_eq!(chinese_integer_below_10_000(27), "二十七");
         assert_eq!(chinese_integer_below_10_000(2_006), "二千零六");
+    }
+
+    #[test]
+    fn one_item_primary_accepts_a_single_direct_chinese_line() {
+        let expected = [ExpectedUtterance {
+            id: "item",
+            source_english: "GOLD CANDIES.",
+        }];
+        let result = parse_numbered_output("金色糖果。", &expected, &[]);
+        assert_eq!(result.items[0].text.as_deref(), Some("金色糖果。"));
+        assert!(result.items[0].issues.is_empty());
+    }
+
+    #[test]
+    fn source_multiplier_notation_is_normalized_before_latin_validation() {
+        let expected = [ExpectedUtterance {
+            id: "item",
+            source_english: "THIRTY OF THEM!!! X3",
+        }];
+        let result = parse_numbered_output("1\t他们三十个！！！X3", &expected, &[]);
+        assert_eq!(result.items[0].text.as_deref(), Some("他们三十个！！！×3"));
+        assert!(result.items[0].issues.is_empty());
     }
 
     #[tokio::test]

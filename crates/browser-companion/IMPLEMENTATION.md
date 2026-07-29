@@ -95,7 +95,8 @@ An accepted upload reserves:
 
 Every update is assigned the next sequence while holding the job-log lock.
 Sequence 0 is invalid. Overall progress may not regress. A region ID can be
-published once; refinement requires an existing region. `complete`, `failed`,
+published once. `regionReady` rejects pending validation state, so a browser
+receives exactly one terminal translation per region. `complete`, `failed`,
 and `cancelled` are terminal, and publication after terminal state is rejected.
 The maximum is 10,000 updates per job.
 
@@ -317,26 +318,32 @@ Levels 3-4 permit familiar compound sentences while simplifying dense
 embedding and formal synonyms; levels 5-6 permit natural advanced grammar.
 The job's name preference is part of generation, validation, and both cache
 keys. `keep-original` preserves the source's exact Latin name spelling and
-permits only exact source spans approved by a dedicated semantic NER pass as
-Latin HSK exceptions. Every proposed name is then independently classified as
-an opaque identifier or a transparent phrase: actual identifiers such as
-personal names are preserved, while roles, titles, descriptive epithets, and
-color-plus-noun codenames remain ordinary translation input. Page-function
-classification, name discovery, and candidate verification are separate
-generations with separate response contracts so none of those decisions can
-contaminate another. The approved spans enter opaque translation placeholders,
+permits only exact source spans approved by a two-stage semantic entity pipeline
+as Latin HSK exceptions. Page-role classification and entity discovery have
+separate bounded response contracts, so malformed name output cannot alter
+story/artwork decisions. Discovery may return only the shortest exact source
+spans typed as person, place, organization, event, or unique entity; one
+batched contextual adjudication then accepts or rejects every candidate.
+Personal and place names are preserved, while roles, titles, descriptive
+epithets, and color-plus-noun codenames remain ordinary translation input. The
+decision uses the generic opaque-identifier versus translatable-description
+distinction, without title-, series-, chapter-, or vocabulary-specific lists. Approved spans enter opaque translation placeholders,
 deterministic validation, chapter entity memory, and both cache keys. `chinese`
 uses approved glossary forms first, then established Chinese names when certain
 and otherwise consistent phonetic transliteration. Neither mode translates a
 name by its dictionary meaning.
 
-Before translation, a dedicated semantic pass receives the page dimensions,
-normalized region geometry, enclosure topology, and every OCR item in the
-ready page section. It classifies both the page section and each region as
-story text, page furniture/unreadable OCR, or a standalone sound effect.
-Unattached free text can be excluded directly; disputed detector-backed
-non-story or sound-effect decisions require a focused independent verifier
-with the target and peer layout. A surviving region is thereafter
+Before cleanup, a dedicated semantic pass receives the page dimensions once,
+compact normalized region geometry, enclosure topology, and every OCR item in
+the ready page section. Detector OCR from the final tile is held until learned
+fallback OCR completes, so an arbitrary detector/fallback boundary cannot
+split one cover, credit cluster, or connected phrase. The role response budget
+is derived from its compact fixed schema and constrained by the model's actual
+remaining context. It classifies both the page section and each region as
+story text, decorative story artwork, page furniture/unreadable OCR, or a
+standalone sound effect. One authoritative semantic decision applies to every
+region; uncertainty fails safe to story text. Decorative artwork and excluded
+regions never enter segmentation, inpainting, or patch encoding. A surviving region is thereafter
 authoritatively story content: the translation and repair stages must return
 Simplified Chinese and cannot independently remove it with `[NON-STORY]` or
 `[SFX]`. Excluded regions publish neither cleanup pixels nor replacement text,
@@ -344,8 +351,9 @@ so the source image remains untouched. Standalone numbers remain
 exact-preservation requirements; digits embedded in Latin OCR tokens do not.
 
 `hsk-control` validates each returned story item. Items that already pass are
-accepted. Rejected items alone receive at most four prompt-changing targeted
-repair attempts with their rejected Chinese and exact deterministic problems.
+accepted. Rejected items enter one terminal batched repair with their rejected
+Chinese and exact deterministic problems. Repair output is never recursively
+fed back through another strategy.
 When names must remain unchanged, malformed or omitted numbered NER analysis is
 a retryable image failure rather than permission to transliterate an undecided
 span.
@@ -353,15 +361,12 @@ Up to six rejected regions enter one logical numbered repair request. Before
 generation, the translator measures each candidate subbatch with the resident
 model's real tokenizer and chat template, chooses the largest ordered prefix
 whose prompt plus desired output fits the actual context window, and merges
-the results by application ID. Parsing, validation, avoid-lists, and
-convergence state remain isolated, so one malformed sibling cannot authorize
+the results by application ID. Parsing, validation, and avoid-lists remain
+isolated, so one malformed sibling cannot authorize
 or invalidate another and an oversized logical batch never burns retries on a
-known context overflow.
-Every distinct bounded strategy runs unless an earlier attempt succeeds; an
-unchanged answer cannot prevent the later source-first rewrite strategies.
-The deterministic validator also supplies a typed avoid-list that is refreshed
-from each rejected candidate. Strict repair must emit none of those exact terms.
-Natural repair remains governed by Natural learning on every attempt: it must
+known context overflow. The deterministic validator supplies a typed avoid-list
+from each rejected primary. Strict repair must emit none of those exact terms.
+Natural repair remains governed by Natural learning: it must
 simplify the avoid-list while retaining at most the level-specific budget of
 indispensable story terms. It never silently escalates to Strict and discards a
 core story concept merely to improve the vocabulary score.
@@ -370,7 +375,9 @@ publish, its original pixels remain untouched and the other regions still
 complete; deterministic per-region validation exhaustion is not promoted into
 a retry of the whole image.
 
-Pinyin is derived after the accepted/rejected final state by local
+Pending meaning-valid primaries can provide internal discourse context to
+later ordered batches, but they never cross the browser contract. Pinyin is
+derived after the accepted/rejected final state by local
 longest-match lookup. A progressive region carries:
 
 - source English;

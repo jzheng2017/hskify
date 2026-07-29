@@ -50,6 +50,14 @@ function validRect(rect) {
   )
 }
 
+function rectsOverlap(left, right) {
+  if (!validRect(left) || !validRect(right)) return false
+  return (
+    Math.min(left.x + left.width, right.x + right.width) > Math.max(left.x, right.x) &&
+    Math.min(left.y + left.height, right.y + right.height) > Math.max(left.y, right.y)
+  )
+}
+
 function rectOverlapsPolygon(rect, polygon) {
   if (!validRect(rect)) return false
   const bounds = polygonBounds(polygon)
@@ -65,18 +73,45 @@ function finalRegions(updates) {
     if (update.type === 'regionReady' && update.region?.id) {
       regions.set(update.region.id, structuredClone(update.region))
     }
-    if (update.type === 'regionRefined' && regions.has(update.regionId)) {
-      Object.assign(regions.get(update.regionId), {
-        displayedChinese: update.displayedChinese,
-        pinyin: update.pinyin,
-        hsk: update.hsk,
-      })
+  }
+  return [...regions.values()]
+}
+
+function preservedArtwork(updates) {
+  const regions = new Map()
+  for (const update of updates) {
+    if (update.type === 'artworkPreserved' && update.region?.id) {
+      regions.set(update.region.id, structuredClone(update.region))
     }
   }
   return [...regions.values()]
 }
 
-export function assertSemanticExpectations(item, regions) {
+function normalizedOcrText(value) {
+  return String(value ?? '').toLocaleUpperCase().replaceAll(/[^A-Z0-9]+/gu, '')
+}
+
+function orderedCharacterCoverage(expected, actual) {
+  const left = normalizedOcrText(expected)
+  const right = normalizedOcrText(actual)
+  if (!left || !right) return 0
+  if (right.includes(left)) return 1
+  if (right.length > left.length * 2) return 0
+  let previous = new Uint16Array(right.length + 1)
+  for (let leftIndex = 0; leftIndex < left.length; leftIndex += 1) {
+    const current = new Uint16Array(right.length + 1)
+    for (let rightIndex = 0; rightIndex < right.length; rightIndex += 1) {
+      current[rightIndex + 1] =
+        left[leftIndex] === right[rightIndex]
+          ? previous[rightIndex] + 1
+          : Math.max(previous[rightIndex + 1], current[rightIndex])
+    }
+    previous = current
+  }
+  return previous[right.length] / left.length
+}
+
+export function assertSemanticExpectations(item, regions, preserved = []) {
   const assertions = []
   const combinedSource = regions.map((region) => region.sourceEnglish ?? '').join('\n')
   for (const fragment of item.expectations?.requiredSourceFragments ?? []) {
@@ -101,6 +136,37 @@ export function assertSemanticExpectations(item, regions) {
         0,
         matches.length,
         'translateSoundEffects=false must keep excluded SFX out of the translation regions.',
+      ),
+    )
+  }
+  const preservedTexts = preserved.map((region) => region.sourceEnglish ?? '').filter(Boolean)
+  const translatedTexts = regions.map((region) => region.sourceEnglish ?? '').filter(Boolean)
+  const preservedSource = preservedTexts.join('\n')
+  for (const fragment of item.expectations?.preservedArtworkSourceFragments ?? []) {
+    const preservedCoverage = Math.max(
+      0,
+      ...preservedTexts.map((source) => orderedCharacterCoverage(fragment, source)),
+    )
+    const translatedCoverage = Math.max(
+      0,
+      ...translatedTexts.map((source) => orderedCharacterCoverage(fragment, source)),
+    )
+    const preservedMatches = preservedCoverage >= 0.68
+    const translatedMatches = translatedCoverage >= 0.8
+    assertions.push(
+      check(
+        `semantic.${item.id}.preserved-artwork.${fragment}`,
+        preservedMatches && !translatedMatches,
+        'preserved source artwork without a translated overlay',
+        {
+          preservedMatches,
+          translatedMatches,
+          preservedCoverage,
+          translatedCoverage,
+          preservedSource,
+          combinedSource,
+        },
+        'Illustrated technique lettering must remain source artwork instead of receiving a cleanup patch and standard-font overlay.',
       ),
     )
   }
@@ -131,6 +197,7 @@ export function assertSemanticExpectations(item, regions) {
 
 export function assertCompletedJob(item, hskLevel, terminal, updates, patchRecords) {
   const regions = finalRegions(updates)
+  const preserved = preservedArtwork(updates)
   const exactRegionCount = item.expectations?.exactRegionCount
   const expectedRegionCount =
     exactRegionCount === undefined ? `>= ${item.expectations?.minimumRegionCount ?? 1}` : exactRegionCount
@@ -185,8 +252,28 @@ export function assertCompletedJob(item, hskLevel, terminal, updates, patchRecor
       check(`${prefix}.patch-png`, patch?.validPng === true, true, patch?.validPng),
     )
   }
-  assertions.push(...assertSemanticExpectations(item, regions))
-  return { regions, assertions }
+  for (const [index, protectedRect] of (
+    item.expectations?.protectedArtworkRects ?? []
+  ).entries()) {
+    const overlapping = regions
+      .filter((region) => rectsOverlap(region.patch?.rect, protectedRect))
+      .map((region) => ({
+        id: region.id,
+        sourceEnglish: region.sourceEnglish,
+        patchRect: region.patch?.rect,
+      }))
+    assertions.push(
+      check(
+        `semantic.${item.id}.protected-artwork-rect.${index + 1}`,
+        overlapping.length === 0,
+        'no cleanup patch or translated overlay intersects the annotated source artwork',
+        overlapping,
+        'Locally annotated illustrated lettering must remain pixel-identical even when OCR can read only a fragment of its stylized glyphs.',
+      ),
+    )
+  }
+  assertions.push(...assertSemanticExpectations(item, regions, preserved))
+  return { regions, preserved, assertions }
 }
 
 function regionComparisonKey(region) {
@@ -317,7 +404,16 @@ async function ensureReady(baseUrl, token, timeoutMinutes) {
   throw new Error('Model setup timed out.')
 }
 
-async function runJob({ item, hskLevel, corpusRoot, baseUrl, session, outputDirectory, timeoutMinutes }) {
+async function runJob({
+  item,
+  hskLevel,
+  precedingContext,
+  corpusRoot,
+  baseUrl,
+  session,
+  outputDirectory,
+  timeoutMinutes,
+}) {
   const objectPath = resolve(corpusRoot, item.object.path)
   const bytes = readFileSync(objectPath)
   const request = {
@@ -342,7 +438,7 @@ async function runJob({ item, hskLevel, corpusRoot, baseUrl, session, outputDire
     visibleRects: item.expectations?.initialVisibleRects ?? [
       { x: 0, y: 0, width: 1, height: 1 },
     ],
-    precedingContext: [],
+    precedingContext,
     properNameGlossary: [],
   }
   const form = new FormData()
@@ -413,6 +509,7 @@ async function runJob({ item, hskLevel, corpusRoot, baseUrl, session, outputDire
     firstRegionReadyMs,
     updates,
     regions: evaluated.regions,
+    preservedArtwork: evaluated.preserved,
     patches: patchRecords,
     assertions: evaluated.assertions,
   }
@@ -459,6 +556,7 @@ export async function runRegression(options) {
     { windowsHide: true, stdio: ['ignore', stdout, stderr] },
   )
   const jobRuns = []
+  const chapterContext = new Map()
   const assertions = [...integrity.assertions]
   let buildFingerprint
   try {
@@ -470,9 +568,12 @@ export async function runRegression(options) {
     for (const item of cases) {
       const levels = item.id === DENSE_DIFFERENTIAL_CASE ? [2, 5] : [3]
       for (const hskLevel of levels) {
+        const contextKey = `${item.chapterId}\0${hskLevel}`
+        const precedingContext = chapterContext.get(contextKey) ?? []
         const run = await runJob({
           item,
           hskLevel,
+          precedingContext,
           corpusRoot: options.corpusRoot,
           baseUrl,
           session,
@@ -480,6 +581,21 @@ export async function runRegression(options) {
           timeoutMinutes: options.timeoutMinutes,
         })
         jobRuns.push(run)
+        const completedContext = run.regions
+          .filter((region) => region.sourceEnglish?.trim() && region.displayedChinese?.trim())
+          .sort(
+            (left, right) =>
+              (left.readingOrder ?? 0) - (right.readingOrder ?? 0) ||
+              String(left.id).localeCompare(String(right.id)),
+          )
+          .map((region) => ({
+            sourceEnglish: region.sourceEnglish,
+            chinese: region.displayedChinese,
+          }))
+        chapterContext.set(
+          contextKey,
+          [...precedingContext, ...completedContext].slice(-6),
+        )
         assertions.push(...run.assertions)
       }
     }

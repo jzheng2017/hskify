@@ -91,21 +91,20 @@ credential, or remote translation path is mounted.
    boundary. Translation batches contain up to six regions and normally flush
    once three are pending; an undersized visible tail waits no longer than
    75 ms so visibility changes do not create one-item GPU calls.
-7. Qwen3.5 4B makes one contextual semantic decision per accepted OCR region:
-   translate it directly to HSK 2.0-targeted Simplified Chinese, or return the
-   typed `[NON-STORY]` disposition for unrelated page furniture such as a
-   publisher/site credit, watermark, advertisement, or navigation label.
-   Excluded regions retain their original pixels and never enter repair. The
+7. Before cleanup, Qwen3.5 4B makes one contextual semantic decision per
+   accepted OCR region: translate story text, preserve decorative story
+   lettering as artwork, or exclude unrelated page furniture and disabled
+   sound effects. Preserved and excluded regions retain their original pixels
+   and never enter segmentation, inpainting, translation, or repair. The
    protocol forbids exclusion for story dialogue, narration, thoughts,
    captions, in-story text, names, roles, fragments, and emphasis.
    `hsk-control` validates vocabulary; the direct
    protocol validator checks protected names, standalone numbers, question
    intent, and output structure. Digits embedded in Latin OCR tokens such as
    `IDENTIT4` are not treated as semantic numbers. Only rejected items may
-   enter one targeted repair batch, whose distinct bounded strategies run
-   unless an earlier attempt succeeds. Each rejected candidate refreshes a
-   typed validator avoid-list that strict repair must remove. Natural repair
-   remains Natural across all attempts so it cannot discard an indispensable
+   enter one terminal targeted repair batch. Each rejected candidate supplies
+   a typed validator avoid-list that strict repair must remove. Natural repair
+   remains Natural so it cannot discard an indispensable
    story concept merely to achieve a strict score. Natural learning accepts a bounded number
    of indispensable advanced terms after simplification and publishes their
    exact offsets, pinyin, definitions, and required level for hover teaching;
@@ -117,11 +116,11 @@ credential, or remote translation path is mounted.
 8. For each completed region, the daemon stores the patch blob first and then
    appends `regionReady`, which carries the patch descriptor, geometry, source
    text, base/direct Chinese, displayed Chinese, pinyin, style, layout, and HSK
-   status. Ordered color bands preserve real foreground/outline changes between
+   status. The contract rejects pending state, so this is the only visible
+   version of the translation. Ordered color bands preserve real foreground/outline changes between
    source lines, and Firefox keeps that band count while fitting the translation.
 9. Firefox fetches and validates the PNG, decodes it, inserts it in the patch
-   layer, and only then inserts the selectable text. Later updates continue
-   independently.
+   layer, and only then inserts the selectable final text.
 
 Completion is a terminal event in the same log. It does not unlock a separate
 result representation.

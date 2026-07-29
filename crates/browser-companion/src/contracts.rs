@@ -680,7 +680,7 @@ pub struct ProperNameGlossaryEntry {
     pub chinese: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Point {
     pub x: f32,
@@ -1093,6 +1093,25 @@ impl Validate for ProgressiveRegion {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PreservedArtworkRegion {
+    pub id: String,
+    pub text_polygon: Vec<Point>,
+    pub source_english: String,
+    pub ocr_confidence: f32,
+    pub reading_order: u32,
+}
+
+impl PreservedArtworkRegion {
+    pub(crate) fn validate_at(&self, path: &str) -> Result<(), ContractError> {
+        require_nonempty(&format!("{path}.id"), &self.id)?;
+        require_polygon(&format!("{path}.textPolygon"), &self.text_polygon)?;
+        require_nonempty(&format!("{path}.sourceEnglish"), &self.source_english)?;
+        require_unit(&format!("{path}.ocrConfidence"), self.ocr_confidence)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(
     tag = "type",
@@ -1118,12 +1137,9 @@ pub enum JobUpdate {
         sequence: u64,
         region: Box<ProgressiveRegion>,
     },
-    RegionRefined {
+    ArtworkPreserved {
         sequence: u64,
-        region_id: String,
-        displayed_chinese: String,
-        pinyin: String,
-        hsk: ProgressiveHskStatus,
+        region: PreservedArtworkRegion,
     },
     Complete {
         sequence: u64,
@@ -1148,7 +1164,7 @@ impl JobUpdate {
         match self {
             Self::Progress { sequence, .. }
             | Self::RegionReady { sequence, .. }
-            | Self::RegionRefined { sequence, .. }
+            | Self::ArtworkPreserved { sequence, .. }
             | Self::Complete { sequence, .. }
             | Self::Failed { sequence, .. }
             | Self::Cancelled { sequence, .. } => *sequence,
@@ -1200,19 +1216,17 @@ impl Validate for JobUpdate {
                 }
                 require_nonempty("message", message)
             }
-            Self::RegionReady { region, .. } => region.validate(),
-            Self::RegionRefined {
-                region_id,
-                displayed_chinese,
-                pinyin,
-                hsk,
-                ..
-            } => {
-                require_nonempty("regionId", region_id)?;
-                require_nonempty("displayedChinese", displayed_chinese)?;
-                require_nonempty("pinyin", pinyin)?;
-                hsk.validate_at("hsk")
+            Self::RegionReady { region, .. } => {
+                region.validate()?;
+                if region.hsk.repair_state == HskRepairState::Pending {
+                    return Err(ContractError::at(
+                        "region.hsk.repairState",
+                        "regionReady may publish only a terminal translation",
+                    ));
+                }
+                Ok(())
             }
+            Self::ArtworkPreserved { region, .. } => region.validate_at("region"),
             Self::Complete { message, .. } | Self::Cancelled { message, .. } => {
                 if let Some(message) = message {
                     require_nonempty("message", message)?;
@@ -1617,6 +1631,29 @@ mod tests {
         .validate()
         .unwrap_err();
         assert!(error.to_string().contains("must overlap"));
+    }
+
+    #[test]
+    fn region_ready_rejects_a_pending_translation() {
+        let mut region = progressive_region(NormalizedRect {
+            x: 0.21,
+            y: 0.31,
+            width: 0.18,
+            height: 0.08,
+        });
+        region.hsk.repair_state = HskRepairState::Pending;
+        let update = JobUpdate::RegionReady {
+            sequence: 1,
+            region: Box::new(region),
+        };
+
+        assert!(
+            update
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("terminal translation")
+        );
     }
 
     #[test]

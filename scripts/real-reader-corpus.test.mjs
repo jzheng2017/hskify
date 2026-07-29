@@ -41,8 +41,8 @@ test('tracked manifest is deterministic, offline-only, and structurally complete
   const manifest = JSON.parse(readFileSync(DEFAULT_MANIFEST_PATH, 'utf8'))
   const failures = validateManifest(manifest).filter((item) => !item.passed)
   assert.deepEqual(failures, [])
-  assert.equal(manifest.cases.length, 22)
-  assert.equal(new Set(manifest.cases.map((item) => item.chapterId)).size, 8)
+  assert.equal(manifest.cases.length, 27)
+  assert.equal(new Set(manifest.cases.map((item) => item.chapterId)).size, 9)
   assert.equal(manifest.execution.networkPolicy, 'forbidden')
 })
 
@@ -85,6 +85,49 @@ test('semantic expectations catch missed names and forbidden SFX regions', () =>
   )
 })
 
+test('decorative artwork expectations tolerate OCR noise but reject translated overlays', () => {
+  const item = {
+    id: 'technique-page',
+    expectations: {
+      preservedArtworkSourceFragments: ['MYUNGWANG SWORD AUTHORITY'],
+    },
+  }
+  const passing = assertSemanticExpectations(
+    item,
+    [region({ sourceEnglish: 'Ordinary dialogue.' })],
+    [{ sourceEnglish: 'MyUNGWANG SHORd AUTHORITY' }],
+  )
+  assert.equal(passing.every((assertion) => assertion.passed), true)
+
+  const translated = assertSemanticExpectations(
+    item,
+    [region({ sourceEnglish: 'MYUNGWANG SWORD AUTHORITY' })],
+    [{ sourceEnglish: 'MyUNGWANG SHORd AUTHORITY' }],
+  )
+  assert.equal(translated.some((assertion) => !assertion.passed), true)
+})
+
+test('decorative artwork expectations do not match scattered letters across dialogue', () => {
+  const item = {
+    id: 'technique-page',
+    expectations: {
+      preservedArtworkSourceFragments: ['THIRD SWORD'],
+    },
+  }
+  const evaluated = assertSemanticExpectations(
+    item,
+    [
+      region({ sourceEnglish: "THIS FEAR IS IMPRINTED IN MY BLOOD." }),
+      region({
+        id: 'region-2',
+        sourceEnglish: "THERE'S NO WAY THE WHITE TIGER TRIBE WOULD KNOW THE FEAR OF DEATH.",
+      }),
+    ],
+    [{ sourceEnglish: 'THIRD SWORD' }],
+  )
+  assert.equal(evaluated.every((assertion) => assertion.passed), true)
+})
+
 test('completed job assertions require terminal repairs and real PNG patches', () => {
   const item = { id: 'page', expectations: { minimumRegionCount: 1 } }
   const ready = region()
@@ -115,6 +158,48 @@ test('completed job assertions require terminal repairs and real PNG patches', (
   )
   assert.equal(
     pending.assertions.some((item) => item.id.endsWith('.patch-png') && !item.passed),
+    true,
+  )
+})
+
+test('protected artwork rectangles reject cleanup patches even without readable OCR', () => {
+  const item = {
+    id: 'illustrated-label',
+    expectations: {
+      minimumRegionCount: 1,
+      protectedArtworkRects: [{ x: 0.1, y: 0.4, width: 0.8, height: 0.2 }],
+    },
+  }
+  const safe = assertCompletedJob(
+    item,
+    2,
+    { type: 'complete' },
+    [
+      {
+        type: 'regionReady',
+        region: region({ patch: { blobId: 'patch-1', mimeType: 'image/png', rect: { x: 0.1, y: 0.1, width: 0.2, height: 0.1 } } }),
+      },
+    ],
+    [{ blobId: 'patch-1', validPng: true }],
+  )
+  assert.equal(safe.assertions.every((assertion) => assertion.passed), true)
+
+  const damaged = assertCompletedJob(
+    item,
+    2,
+    { type: 'complete' },
+    [
+      {
+        type: 'regionReady',
+        region: region({ patch: { blobId: 'patch-1', mimeType: 'image/png', rect: { x: 0.2, y: 0.45, width: 0.2, height: 0.1 } } }),
+      },
+    ],
+    [{ blobId: 'patch-1', validPng: true }],
+  )
+  assert.equal(
+    damaged.assertions.some(
+      (assertion) => assertion.id.endsWith('protected-artwork-rect.1') && !assertion.passed,
+    ),
     true,
   )
 })

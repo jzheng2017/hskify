@@ -339,16 +339,8 @@ async function navigationTiming(page) {
 export function buildLiveTranslationProof(dom, routes) {
   for (const job of routes.jobs ?? []) {
     for (const update of job.updates ?? []) {
-      const refinement = (job.updates ?? [])
-        .filter(
-          (candidate) =>
-            candidate.type === 'regionRefined' &&
-            candidate.regionId === update.region?.id,
-        )
-        .at(-1)
-      const displayedChinese =
-        refinement?.displayedChinese ?? update.region?.displayedChinese
-      const hsk = refinement?.hsk ?? update.region?.hsk
+      const displayedChinese = update.region?.displayedChinese
+      const hsk = update.region?.hsk
       const strictlyValid = hsk?.strictlyValid === true
       const target = hsk?.requestedLevel <= 3 ? 0.9 : hsk?.requestedLevel === 4 ? 0.93 : 0.95
       const naturalAccepted =

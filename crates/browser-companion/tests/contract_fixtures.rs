@@ -63,11 +63,7 @@ fn progressive_region_payloads_use_the_compact_wire_shapes() {
     assert!(ready["region"].get("geometry").is_none());
     assert!(ready["region"].get("rotationDegrees").is_none());
 
-    let refined = &serialized["updates"][2];
-    assert_eq!(refined["type"], "regionRefined");
-    assert_eq!(refined["regionId"], "aaaaaaaa-region-0001");
-    assert!(refined.get("region").is_none());
-    assert!(refined.get("patch").is_none());
+    assert_eq!(serialized["updates"][2]["type"], "complete");
 }
 
 #[test]

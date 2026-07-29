@@ -312,6 +312,21 @@ export function validateManifest(manifest) {
                     rect.x + rect.width <= 1 &&
                     rect.y + rect.height <= 1,
                 ))) &&
+            (expectations.protectedArtworkRects === undefined ||
+              (Array.isArray(expectations.protectedArtworkRects) &&
+                expectations.protectedArtworkRects.length > 0 &&
+                expectations.protectedArtworkRects.length <= 64 &&
+                expectations.protectedArtworkRects.every(
+                  (rect) =>
+                    objectRecord(rect) &&
+                    [rect.x, rect.y, rect.width, rect.height].every(Number.isFinite) &&
+                    rect.x >= 0 &&
+                    rect.y >= 0 &&
+                    rect.width > 0 &&
+                    rect.height > 0 &&
+                    rect.x + rect.width <= 1 &&
+                    rect.y + rect.height <= 1,
+                ))) &&
             stringLists.every(
               (field) =>
                 expectations[field] === undefined ||

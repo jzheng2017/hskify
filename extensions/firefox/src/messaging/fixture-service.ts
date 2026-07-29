@@ -191,25 +191,6 @@ function fixtureTimeline(record: ActiveJobRecord): Array<{ at: number; update: J
       at: 1_000,
       update: parseJobUpdate({
         sequence: 5,
-        type: 'regionRefined',
-        regionId: first.id,
-        displayedChinese: '我们现在就走！',
-        pinyin: 'wǒ men xiàn zài jiù zǒu',
-        hsk: {
-          requestedLevel: record.hskLevel,
-          learningMode: record.submittedRequest.settings.learningMode,
-          strictlyValid: true,
-          levelCoverage: 1,
-          aboveLevelTokens: [],
-          teachingTerms: [],
-          repairState: 'accepted',
-        },
-      }),
-    },
-    {
-      at: 1_250,
-      update: parseJobUpdate({
-        sequence: 6,
         type: 'complete',
         message: 'Complete',
       }),

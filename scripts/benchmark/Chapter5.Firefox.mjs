@@ -2143,15 +2143,6 @@ function finalRegions(job) {
   const regions = new Map()
   for (const update of job.updates) {
     if (update.type === 'regionReady') regions.set(update.region.id, structuredClone(update.region))
-    if (update.type === 'regionRefined' && regions.has(update.regionId)) {
-      const previous = regions.get(update.regionId)
-      regions.set(update.regionId, {
-        ...previous,
-        displayedChinese: update.displayedChinese,
-        pinyin: update.pinyin,
-        hsk: update.hsk,
-      })
-    }
   }
   return [...regions.values()]
 }
@@ -2451,7 +2442,7 @@ export function buildQualityEvidence(routes, goldPages) {
       minimumOverlapOverSmaller: STORY_REGION_MINIMUM_OVERLAP,
       assignment:
         'bipartite spatial connected components for OCR/recall; descending-overlap one-to-one representatives only for per-patch audit',
-      acceptedOutputSource: 'final regionReady/regionRefined browser job updates',
+      acceptedOutputSource: 'final regionReady browser job updates',
       detectorOutputUsed: false,
     },
     metricDefinitions: {

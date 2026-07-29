@@ -21,8 +21,8 @@ pub use direct_hsk::{
     HskSourceUtterance, HskTranslationBatchRequest, HskTranslationBatchResult,
     HskTranslationDisposition, HskTranslationIssue, HskTranslationOutcome,
     HskTranslationRepairBatchRequest, HskTranslationRepairRequest, HskUtteranceKind,
-    MAX_HSK_CONTEXT_TOKENS, MAX_HSK_PRECEDING_UTTERANCES, MAX_HSK_TRANSLATION_BATCH,
-    direct_hsk_prompt_hash, direct_hsk_validator_hash,
+    MAX_HSK_CONTEXT_TOKENS, MAX_HSK_PRECEDING_UTTERANCES, MAX_HSK_SEMANTIC_PAGE_REGIONS,
+    MAX_HSK_TRANSLATION_BATCH, direct_hsk_prompt_hash, direct_hsk_validator_hash,
 };
 
 use std::path::PathBuf;

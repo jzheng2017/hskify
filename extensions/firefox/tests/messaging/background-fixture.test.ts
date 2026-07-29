@@ -137,7 +137,6 @@ describe('progressive background fixture adapter', () => {
     )) as { nextSequence: number; updates: Array<{ type: string }> }
     expect(finalBatch.updates.map((update) => update.type)).toEqual([
       'regionReady',
-      'regionRefined',
       'complete',
     ])
     await restarted.route(

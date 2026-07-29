@@ -35,8 +35,8 @@ use crate::contracts::{
     BUILD_FINGERPRINT, BrowserCapabilities, BrowserJobCreated, BrowserJobRequest, BrowserJobStage,
     BrowserSetupState, BrowserSetupStatus, CreateJobRequest, ErrorResponse, HealthResponse,
     HealthStatus, HskLevel, JobUpdate, JobUpdatesResponse, LookupInteraction, LookupRequest,
-    NativeReadyResponse, NativeReadyType, NormalizedRect, PatchMimeType, ProgressiveRegion,
-    RegionPatch, Validate, ViewportUpdateRequest,
+    NativeReadyResponse, NativeReadyType, NormalizedRect, PatchMimeType, PreservedArtworkRegion,
+    ProgressiveRegion, RegionPatch, Validate, ViewportUpdateRequest,
 };
 use crate::crypto::{SECRET_BYTES, decode_secret, generate_secret, secrets_equal, sha256_hex};
 use crate::decoded_cache::DecodedImageCache;
@@ -143,6 +143,7 @@ struct JobLog {
     last_overall_progress: Option<f32>,
     published_regions: HashSet<String>,
     progressive_regions: HashMap<String, ProgressiveRegion>,
+    preserved_artwork_regions: HashMap<String, PreservedArtworkRegion>,
     lookup_contexts: HashMap<String, RegionLookupContext>,
     viewport: JobViewport,
 }
@@ -178,6 +179,7 @@ impl JobRecord {
                 last_overall_progress: None,
                 published_regions: HashSet::new(),
                 progressive_regions: HashMap::new(),
+                preserved_artwork_regions: HashMap::new(),
                 lookup_contexts: HashMap::new(),
                 viewport: JobViewport {
                     revision: 1,
@@ -258,10 +260,10 @@ impl JobRecord {
             {
                 return Err(PublishError::DuplicateRegion(region.id.clone()));
             }
-            JobUpdateDraft::RegionRefined { region_id, .. }
-                if !log.published_regions.contains(region_id) =>
+            JobUpdateDraft::ArtworkPreserved { region }
+                if log.published_regions.contains(&region.id) =>
             {
-                return Err(PublishError::UnknownRegion(region_id.clone()));
+                return Err(PublishError::DuplicateRegion(region.id.clone()));
             }
             _ => {}
         }
@@ -280,18 +282,10 @@ impl JobRecord {
                 log.progressive_regions
                     .insert(region.id.clone(), region.as_ref().clone());
             }
-            JobUpdate::RegionRefined {
-                region_id,
-                displayed_chinese,
-                pinyin,
-                hsk,
-                ..
-            } => {
-                if let Some(region) = log.progressive_regions.get_mut(region_id) {
-                    region.displayed_chinese.clone_from(displayed_chinese);
-                    region.pinyin.clone_from(pinyin);
-                    region.hsk = hsk.clone();
-                }
+            JobUpdate::ArtworkPreserved { region, .. } => {
+                log.published_regions.insert(region.id.clone());
+                log.preserved_artwork_regions
+                    .insert(region.id.clone(), region.clone());
             }
             JobUpdate::Progress {
                 overall_progress: Some(value),
@@ -351,24 +345,6 @@ impl JobRecord {
             .insert(region_id, context);
     }
 
-    fn refine_lookup_context(
-        &self,
-        region_id: &str,
-        displayed_chinese: String,
-        proper_names: Vec<hsk_control::ProperName>,
-    ) {
-        if let Some(context) = self
-            .log
-            .lock()
-            .expect("job log lock poisoned")
-            .lookup_contexts
-            .get_mut(region_id)
-        {
-            context.displayed_chinese = displayed_chinese;
-            context.proper_names = proper_names;
-        }
-    }
-
     fn lookup_context(&self, region_id: &str) -> Option<RegionLookupContext> {
         self.log
             .lock()
@@ -384,6 +360,23 @@ impl JobRecord {
             .lock()
             .expect("job log lock poisoned")
             .progressive_regions
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        regions.sort_by(|left, right| {
+            left.reading_order
+                .cmp(&right.reading_order)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        regions
+    }
+
+    fn preserved_artwork_regions(&self) -> Vec<PreservedArtworkRegion> {
+        let mut regions = self
+            .log
+            .lock()
+            .expect("job log lock poisoned")
+            .preserved_artwork_regions
             .values()
             .cloned()
             .collect::<Vec<_>>();
@@ -416,11 +409,8 @@ pub enum JobUpdateDraft {
     RegionReady {
         region: Box<ProgressiveRegion>,
     },
-    RegionRefined {
-        region_id: String,
-        displayed_chinese: String,
-        pinyin: String,
-        hsk: crate::contracts::ProgressiveHskStatus,
+    ArtworkPreserved {
+        region: PreservedArtworkRegion,
     },
     Complete {
         message: Option<String>,
@@ -455,18 +445,7 @@ impl JobUpdateDraft {
                 message,
             },
             Self::RegionReady { region } => JobUpdate::RegionReady { sequence, region },
-            Self::RegionRefined {
-                region_id,
-                displayed_chinese,
-                pinyin,
-                hsk,
-            } => JobUpdate::RegionRefined {
-                sequence,
-                region_id,
-                displayed_chinese,
-                pinyin,
-                hsk,
-            },
+            Self::ArtworkPreserved { region } => JobUpdate::ArtworkPreserved { sequence, region },
             Self::Complete { message } => JobUpdate::Complete { sequence, message },
             Self::Failed {
                 code,
@@ -491,8 +470,6 @@ pub enum PublishError {
     Terminal,
     #[error("region was published more than once: {0}")]
     DuplicateRegion(String),
-    #[error("region refinement arrived before regionReady: {0}")]
-    UnknownRegion(String),
     #[error("patch blob does not belong to this job: {0}")]
     UnknownPatch(String),
     #[error("job update sequence is exhausted")]
@@ -588,16 +565,6 @@ impl JobUpdateSink {
         context: RegionLookupContext,
     ) {
         self.record.remember_lookup_context(region_id, context);
-    }
-
-    pub(crate) fn refine_region_for_lookup(
-        &self,
-        region_id: &str,
-        displayed_chinese: String,
-        proper_names: Vec<hsk_control::ProperName>,
-    ) {
-        self.record
-            .refine_lookup_context(region_id, displayed_chinese, proper_names);
     }
 }
 
@@ -1124,6 +1091,7 @@ impl BridgeState {
 
     fn completed_cache_job(&self, record: &JobRecord) -> Result<CachedJob, CleaningError> {
         let completed_regions = record.progressive_regions();
+        let preserved_artwork = record.preserved_artwork_regions();
         let storage = self.storage.read().expect("storage lock poisoned");
         let regions = completed_regions
             .into_iter()
@@ -1152,7 +1120,10 @@ impl BridgeState {
                 })
             })
             .collect::<Result<Vec<_>, CleaningError>>()?;
-        Ok(CachedJob { regions })
+        Ok(CachedJob {
+            regions,
+            preserved_artwork,
+        })
     }
 }
 
@@ -2015,6 +1986,10 @@ async fn run_cleaning_job(
 }
 
 fn replay_cached_job(sink: &JobUpdateSink, cached: CachedJob) -> Result<(), CleaningError> {
+    for region in cached.preserved_artwork {
+        sink.publish(JobUpdateDraft::ArtworkPreserved { region })
+            .map_err(|error| CleaningError::new("CACHE_REPLAY_FAILED", error.to_string()))?;
+    }
     for cached_region in cached.regions {
         if sink.is_cancelled() {
             return Err(CleaningError::cancelled());
@@ -2458,6 +2433,7 @@ mod tests {
                         region,
                         patch_png: valid_png(),
                     }],
+                    preserved_artwork: Vec::new(),
                 },
             )
             .unwrap();
@@ -2628,54 +2604,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             [1, 2]
         );
-    }
-
-    #[test]
-    fn compact_refinement_requires_a_published_region() {
-        let request: CreateJobRequest = serde_json::from_str(include_str!(
-            "../../../fixtures/contracts/job-request.valid.json"
-        ))
-        .unwrap();
-        let record = JobRecord::new(0, "job-test".to_owned(), None, request.visible_rects);
-        let updates = fixtures::updates("job-test").updates;
-        let ready = updates
-            .iter()
-            .find_map(|update| match update {
-                JobUpdate::RegionReady { region, .. } => Some(region.clone()),
-                _ => None,
-            })
-            .unwrap();
-        let refined = updates
-            .into_iter()
-            .find_map(|update| match update {
-                JobUpdate::RegionRefined {
-                    region_id,
-                    displayed_chinese,
-                    pinyin,
-                    hsk,
-                    ..
-                } => Some(JobUpdateDraft::RegionRefined {
-                    region_id,
-                    displayed_chinese,
-                    pinyin,
-                    hsk,
-                }),
-                _ => None,
-            })
-            .unwrap();
-
-        assert!(matches!(
-            record.append(refined.clone()),
-            Err(PublishError::UnknownRegion(_))
-        ));
-        assert_eq!(
-            record
-                .append(JobUpdateDraft::RegionReady { region: ready })
-                .unwrap()
-                .sequence(),
-            1
-        );
-        assert_eq!(record.append(refined).unwrap().sequence(), 2);
     }
 
     #[test]

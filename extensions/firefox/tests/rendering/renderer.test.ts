@@ -86,13 +86,14 @@ function renderer(
 async function renderAll(
   image: HTMLImageElement,
   selectedRenderer = renderer(),
+  regions = fixtureRegions(),
 ): Promise<RenderedImage> {
   const rendered = selectedRenderer.begin(candidate(image), {
     jobId: 'fixture-job',
     sourceWidth: 1200,
     sourceHeight: 1800,
   })
-  for (const region of fixtureRegions()) {
+  for (const region of regions) {
     await rendered.installRegion(region, pngHeader())
   }
   return rendered
@@ -257,69 +258,33 @@ describe('progressive selectable image renderer', () => {
     expect(document.querySelector('[data-hmt-mode-controls="true"]')).toBeNull()
   })
 
-  it('refines only selectable text, pinyin, and HSK metadata without replacing the patch', async () => {
-    const image = loadedImage()
-    document.body.append(image)
-    const rendered = await renderAll(image)
-    const shadow = shadowOf(rendered)
-    const region = fixtureRegions()[0]!
-    const patch = shadow.querySelector(`[data-patch-id="${region.patch.blobId}"]`)
-    rendered.refineRegion({
-      sequence: 9,
-      type: 'regionRefined',
-      regionId: region.id,
-      displayedChinese: '我们现在就走！',
-      pinyin: 'wǒ men xiàn zài jiù zǒu',
-      hsk: {
-        requestedLevel: 2,
-        learningMode: 'strict',
-        strictlyValid: true,
-        levelCoverage: 1,
-        aboveLevelTokens: [],
-        teachingTerms: [],
-        repairState: 'accepted',
-      },
-    })
-    const refined = shadow.querySelector<HTMLElement>(`[data-region-id="${region.id}"]`)
-    expect(refined?.textContent).toBe('我们现在就走！')
-    expect(refined?.dataset.pinyin).toBe('wǒ men xiàn zài jiù zǒu')
-    expect(refined?.dataset.hskRepairState).toBe('accepted')
-    expect(shadow.querySelector(`[data-patch-id="${region.patch.blobId}"]`)).toBe(patch)
-  })
-
   it('underlines only preserved learning terms without changing selectable text', async () => {
     const image = loadedImage()
     document.body.append(image)
-    const rendered = await renderAll(image)
-    const shadow = shadowOf(rendered)
     const region = fixtureRegions()[0]!
-
-    rendered.refineRegion({
-      sequence: 10,
-      type: 'regionRefined',
-      regionId: region.id,
-      displayedChinese: '我们现在要走！',
-      pinyin: 'wǒ men xiàn zài yào zǒu',
-      hsk: {
-        requestedLevel: 2,
-        learningMode: 'natural',
-        strictlyValid: false,
-        levelCoverage: 0.8,
-        aboveLevelTokens: ['现在'],
-        teachingTerms: [
-          {
-            text: '现在',
-            startChar: 2,
-            endChar: 4,
-            pinyin: 'xiàn zài',
-            definitions: ['now'],
-            requiredLevel: 3,
-            reason: 'above-level',
-          },
-        ],
-        repairState: 'accepted',
-      },
-    })
+    region.displayedChinese = '我们现在要走！'
+    region.pinyin = 'wǒ men xiàn zài yào zǒu'
+    region.hsk = {
+      requestedLevel: 2,
+      learningMode: 'natural',
+      strictlyValid: false,
+      levelCoverage: 0.8,
+      aboveLevelTokens: ['现在'],
+      teachingTerms: [
+        {
+          text: '现在',
+          startChar: 2,
+          endChar: 4,
+          pinyin: 'xiàn zài',
+          definitions: ['now'],
+          requiredLevel: 3,
+          reason: 'above-level',
+        },
+      ],
+      repairState: 'accepted',
+    }
+    const rendered = await renderAll(image, renderer(), [region])
+    const shadow = shadowOf(rendered)
 
     const translated = shadow.querySelector<HTMLElement>(`[data-region-id="${region.id}"]`)
     expect(translated?.textContent).toBe('我们现在要走！')

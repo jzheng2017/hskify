@@ -1,6 +1,6 @@
 {
   "jobId": "fixture-job-0001",
-  "nextSequence": 4,
+  "nextSequence": 3,
   "updates": [
     {
       "sequence": 1,
@@ -38,9 +38,9 @@
           }
         },
         "sourceEnglish": "We have to leave now!",
-        "baseChinese": "我们得马上离开！",
-        "displayedChinese": "我们得马上离开！",
-        "pinyin": "wǒ men děi mǎ shàng lí kāi",
+        "baseChinese": "我们现在要走！",
+        "displayedChinese": "我们现在要走！",
+        "pinyin": "wǒ men xiàn zài yào zǒu",
         "ocrConfidence": 0.97,
         "readingOrder": 0,
         "style": {
@@ -72,42 +72,16 @@
         "hsk": {
           "requestedLevel": 2,
           "learningMode": "strict",
-          "strictlyValid": false,
-          "levelCoverage": 0.75,
-          "aboveLevelTokens": ["马上"],
-          "teachingTerms": [
-            {
-              "text": "马上",
-              "startChar": 3,
-              "endChar": 5,
-              "pinyin": "mǎ shàng",
-              "definitions": ["immediately", "at once"],
-              "requiredLevel": 3,
-              "reason": "above-level"
-            }
-          ],
-          "repairState": "pending"
+          "strictlyValid": true,
+          "levelCoverage": 1,
+          "aboveLevelTokens": [],
+          "teachingTerms": [],
+          "repairState": "accepted"
         }
       }
     },
     {
       "sequence": 3,
-      "type": "regionRefined",
-      "regionId": "aaaaaaaa-region-0001",
-      "displayedChinese": "我们现在要走！",
-      "pinyin": "wǒ men xiàn zài yào zǒu",
-      "hsk": {
-        "requestedLevel": 2,
-        "learningMode": "strict",
-        "strictlyValid": true,
-        "levelCoverage": 1,
-        "aboveLevelTokens": [],
-        "teachingTerms": [],
-        "repairState": "accepted"
-      }
-    },
-    {
-      "sequence": 4,
       "type": "complete",
       "message": "Local cleaning and HSK translation complete"
     }

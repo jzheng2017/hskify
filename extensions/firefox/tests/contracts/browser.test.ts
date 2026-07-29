@@ -10,6 +10,7 @@ import {
   parseBrowserSetupStatus,
   parseErrorResponse,
   parseHealthResponse,
+  parseJobUpdate,
   parseJobUpdateBatch,
   parseLookupRequest,
   parseLookupResult,
@@ -84,7 +85,7 @@ describe('unversioned progressive browser contract', () => {
       parseJobUpdateBatch(sharedFixture('job-updates.success.json')).updates.map(
         (update) => update.type,
       ),
-    ).toEqual(['progress', 'regionReady', 'regionRefined', 'complete'])
+    ).toEqual(['progress', 'regionReady', 'complete'])
     expect(
       parseJobUpdateBatch(sharedFixture('job-updates.failure.json')).updates.at(-1)?.type,
     ).toBe('failed')
@@ -126,13 +127,14 @@ describe('unversioned progressive browser contract', () => {
     ).toThrow(/nameTranslation/i)
   })
 
-  it('parses monotonic progressive region, refinement, and terminal updates', () => {
+  it('parses monotonic final-region and terminal updates', () => {
     const region = createFixtureRegions({
       jobId: 'fixture-job',
       sourceSha256: 'a'.repeat(64),
       sourceWidth: 1200,
       sourceHeight: 1800,
     })[0]
+    if (!region) throw new Error('Fixture region is missing.')
     if (region) {
       region.style.colorBands = [
         { position: 0.25, foreground: '#111111' },
@@ -141,7 +143,7 @@ describe('unversioned progressive browser contract', () => {
     }
     const batch = parseJobUpdateBatch({
       jobId: 'fixture-job',
-      nextSequence: 4,
+      nextSequence: 3,
       updates: [
         {
           sequence: 1,
@@ -151,36 +153,29 @@ describe('unversioned progressive browser contract', () => {
           message: 'Reading text',
         },
         { sequence: 2, type: 'regionReady', region },
-        {
-          sequence: 3,
-          type: 'regionRefined',
-          regionId: region?.id,
-          displayedChinese: '我们现在就走！',
-          pinyin: 'wǒ men xiàn zài jiù zǒu',
-          hsk: {
-            requestedLevel: 2,
-            learningMode: 'natural',
-            strictlyValid: true,
-            levelCoverage: 1,
-            aboveLevelTokens: [],
-            teachingTerms: [],
-            repairState: 'accepted',
-          },
-        },
-        { sequence: 4, type: 'complete', message: 'Complete' },
+        { sequence: 3, type: 'complete', message: 'Complete' },
       ],
     })
     expect(batch.updates.map((update) => update.type)).toEqual([
       'progress',
       'regionReady',
-      'regionRefined',
       'complete',
     ])
-    expect(batch.nextSequence).toBe(4)
+    expect(batch.nextSequence).toBe(3)
     const readyRegion = batch.updates.find((update) => update.type === 'regionReady')
     expect(readyRegion?.type === 'regionReady' && readyRegion.region.style.colorBands).toHaveLength(
       2,
     )
+    expect(() =>
+      parseJobUpdate({
+        sequence: 1,
+        type: 'regionReady',
+        region: {
+          ...region,
+          hsk: { ...region.hsk, repairState: 'pending' },
+        },
+      }),
+    ).toThrow(/terminal translation/i)
   })
 
   it('accepts build-matched native health, setup, lookup, and errors', () => {

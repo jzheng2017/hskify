@@ -495,7 +495,7 @@ def final_product_regions(path: Path, order: int) -> list[dict[str, Any]]:
     audit = load_json(audit_path)
     latest: dict[str, dict[str, Any]] = {}
     for update in audit.get("updates", []):
-        if update.get("type") not in {"regionReady", "regionRefined"}:
+        if update.get("type") != "regionReady":
             continue
         region = update.get("region")
         if isinstance(region, dict) and isinstance(region.get("id"), str):

@@ -18,7 +18,9 @@ use koharu_app::llm::{
 use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
 
-use crate::contracts::{BUILD_FINGERPRINT, BrowserJobRequest, ProgressiveRegion, Validate};
+use crate::contracts::{
+    BUILD_FINGERPRINT, BrowserJobRequest, PreservedArtworkRegion, ProgressiveRegion, Validate,
+};
 use crate::crypto::sha256_hex;
 use crate::pipeline_adapter::RegionLookupContext;
 use crate::setup::{
@@ -28,9 +30,9 @@ use crate::setup::{
 pub(crate) const RESULT_CACHE_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const RESULT_CACHE_MAX_ENTRY_BYTES: u64 = 512 * 1024 * 1024;
 const RESULT_CACHE_MAX_DECODED_PATCH_BYTES: u64 = 256 * 1024 * 1024;
-const RESULT_CACHE_SCHEMA: &str = "hskify-progressive-result-2026-07-27-v5";
+const RESULT_CACHE_SCHEMA: &str = "hskify-progressive-result-2026-07-28-v6";
 const RESULT_CACHE_PIPELINE_REVISION: &str =
-    "direct-browser-pipeline-natural-strict-repair-convergence-v24-2026-07-28";
+    "ordered-context-artwork-and-sibling-recovery-v26-2026-07-28";
 const MODEL_RESOURCE_MANIFEST: &[u8] = include_bytes!("../../../data/model-packs/manifest.v1.json");
 
 #[derive(Debug, Clone)]
@@ -43,6 +45,7 @@ pub(crate) struct CachedRegion {
 #[derive(Debug, Clone)]
 pub(crate) struct CachedJob {
     pub regions: Vec<CachedRegion>,
+    pub preserved_artwork: Vec<PreservedArtworkRegion>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -53,6 +56,7 @@ struct StoredJob {
     pipeline_fingerprint: String,
     key: String,
     regions: Vec<StoredRegion>,
+    preserved_artwork: Vec<PreservedArtworkRegion>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -205,7 +209,15 @@ impl ResultCache {
                 patch_png,
             });
         }
-        Ok(Some(CachedJob { regions }))
+        for region in &stored.preserved_artwork {
+            region
+                .validate_at("preservedArtwork")
+                .context("validate cached preserved artwork region")?;
+        }
+        Ok(Some(CachedJob {
+            regions,
+            preserved_artwork: stored.preserved_artwork,
+        }))
     }
 
     pub(crate) fn invalidate(&self, request: &BrowserJobRequest) -> Result<()> {
@@ -263,6 +275,7 @@ impl ResultCache {
             pipeline_fingerprint,
             key: key.clone(),
             regions,
+            preserved_artwork: job.preserved_artwork.clone(),
         };
 
         let mut temporary = NamedTempFile::new_in(&self.root)
@@ -465,6 +478,21 @@ mod tests {
         vec![137, 80, 78, 71, 13, 10, 26, 10, 1, 2, 3, 4]
     }
 
+    fn preserved_artwork() -> PreservedArtworkRegion {
+        PreservedArtworkRegion {
+            id: "artwork-a".to_owned(),
+            text_polygon: vec![
+                Point { x: 0.1, y: 0.1 },
+                Point { x: 0.2, y: 0.1 },
+                Point { x: 0.2, y: 0.2 },
+                Point { x: 0.1, y: 0.2 },
+            ],
+            source_english: "MYUNGWANG SWORD TECHNIQUE".to_owned(),
+            ocr_confidence: 0.98,
+            reading_order: 1,
+        }
+    }
+
     fn lookup_context() -> RegionLookupContext {
         RegionLookupContext {
             source_english: "Hello".to_owned(),
@@ -525,6 +553,7 @@ mod tests {
                 lookup_context: lookup_context(),
                 patch_png: png(),
             }],
+            preserved_artwork: vec![preserved_artwork()],
         };
 
         cache.store(&request, &job)?;
@@ -535,6 +564,7 @@ mod tests {
         assert_eq!(loaded.regions[0].region.id, "a");
         assert_eq!(loaded.regions[0].lookup_context, lookup_context());
         assert_eq!(loaded.regions[0].patch_png, png());
+        assert_eq!(loaded.preserved_artwork, vec![preserved_artwork()]);
         Ok(())
     }
 
@@ -549,6 +579,7 @@ mod tests {
                 lookup_context: lookup_context(),
                 patch_png: png(),
             }],
+            preserved_artwork: Vec::new(),
         };
 
         assert!(cache.store(&request, &job).is_err());
@@ -568,6 +599,7 @@ mod tests {
                     lookup_context: lookup_context(),
                     patch_png: png(),
                 }],
+                preserved_artwork: Vec::new(),
             },
         )?;
         let entry_bytes = fs::metadata(cache.entry_path(&ResultCache::key(&request)?))?.len();
@@ -598,6 +630,7 @@ mod tests {
                         patch_png: png(),
                     },
                 ],
+                preserved_artwork: Vec::new(),
             },
         )?;
         let bounded =

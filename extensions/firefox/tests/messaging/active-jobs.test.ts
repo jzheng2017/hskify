@@ -78,11 +78,8 @@ describe('active-job recovery metadata', () => {
       'regionReady',
     ])
     expect(reconstructed).toMatchObject({
-      nextSequence: 6,
-      updates: [
-        { sequence: 5, type: 'regionRefined' },
-        { sequence: 6, type: 'complete' },
-      ],
+      nextSequence: 5,
+      updates: [{ sequence: 5, type: 'complete' }],
     })
   })
 
