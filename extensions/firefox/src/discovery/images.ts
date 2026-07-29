@@ -203,6 +203,29 @@ export function discoverImages(root: ParentNode = document): DiscoveredImage[] {
     .map((decision) => decision.candidate)
 }
 
+/**
+ * Recognizes the page-image geometry shared by long-strip webtoons and
+ * paginated comics without relying on a publisher, URL, class name, or title.
+ * A single ordinary article image is intentionally insufficient.
+ */
+export function looksLikeSequentialArtReader(root: ParentNode = document): boolean {
+  const pages = discoverImages(root).filter(({ element }) => {
+    const { naturalWidth: width, naturalHeight: height } = element
+    return width >= 500 && height >= 700 && width * height >= 500_000
+  })
+  if (pages.some(({ element }) => element.naturalHeight >= element.naturalWidth * 2.5)) {
+    return true
+  }
+  if (pages.length < 2) return false
+  const widths = pages.map(({ element }) => element.naturalWidth).sort((left, right) => left - right)
+  const medianWidth = widths[Math.floor(widths.length / 2)]!
+  const consistentlySized = pages.filter(({ element }) => {
+    const widthRatio = element.naturalWidth / medianWidth
+    return widthRatio >= 0.75 && widthRatio <= 1.25
+  })
+  return consistentlySized.length >= 2
+}
+
 export function visibleFirst(candidates: readonly DiscoveredImage[]): DiscoveredImage[] {
   return [...candidates].sort(
     (left, right) => Number(right.visible) - Number(left.visible) || left.domIndex - right.domIndex,

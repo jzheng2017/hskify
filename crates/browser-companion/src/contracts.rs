@@ -1349,6 +1349,7 @@ pub enum BrowserSetupState {
     MissingModels,
     Downloading,
     Verifying,
+    Warming,
     Ready,
     Failed,
 }

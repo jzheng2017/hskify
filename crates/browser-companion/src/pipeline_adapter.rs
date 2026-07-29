@@ -13,7 +13,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
@@ -53,8 +53,8 @@ use self::geometry::{
 use self::patch::{
     CleanupMask, PatchPng, bubble_component_bounds, bubble_id_for_rect, bubble_id_mask,
     compact_cleanup_mask, crop_probability_map, label_bubble_components, make_inpainted_patch,
-    merge_binary_mask, merge_cleanup_mask, merge_probability_map, region_polygons,
-    verified_text_mask_for_regions,
+    merge_binary_mask, merge_cleanup_mask, merge_probability_map,
+    merge_source_guided_glyph_probabilities, region_polygons, verified_text_mask_for_regions,
 };
 use self::ppocr_v5::{EnglishPpOcrV5, MAX_LINE_BATCH_SIZE, PpOcrAppearanceBand, PpOcrPrediction};
 use crate::contracts::{
@@ -75,6 +75,7 @@ use crate::setup::{
 };
 
 const OCR_REGION_BATCH_SIZE: usize = MAX_LINE_BATCH_SIZE;
+const FAST_VISIBLE_OCR_MIN_CONFIDENCE: f32 = 0.95;
 const TRANSLATION_BATCH_MAX: usize = 6;
 const TRANSLATION_BATCH_MIN: usize = 3;
 const TRANSLATION_MAX_FLUSH_DELAY: Duration = Duration::from_millis(75);
@@ -166,6 +167,7 @@ pub(crate) struct KoharuPipeline {
     cuda_scheduler: Arc<CudaScheduler>,
     resident: OnceCell<Arc<ResidentState>>,
     hsk_control: OnceCell<Arc<HskControl>>,
+    inference_ready: OnceCell<()>,
     translation_cache: Mutex<TranslationCache>,
     entity_memory: Mutex<ChapterEntityMemory>,
 }
@@ -177,6 +179,7 @@ impl KoharuPipeline {
             cuda_scheduler: global_cuda_scheduler(),
             resident: OnceCell::new(),
             hsk_control: OnceCell::new(),
+            inference_ready: OnceCell::new(),
             translation_cache: Mutex::new(TranslationCache::default()),
             entity_memory: Mutex::new(ChapterEntityMemory::default()),
         }
@@ -220,6 +223,22 @@ impl KoharuPipeline {
             .await
     }
 
+    async fn ready_models(&self) -> Result<(&Arc<ResidentState>, &Arc<HskControl>)> {
+        let (resident, control) = tokio::try_join!(self.resident(), self.hsk_control())?;
+        self.inference_ready
+            .get_or_try_init(|| {
+                let resident = Arc::clone(resident);
+                async move {
+                    tokio::task::spawn_blocking(move || resident.prime_inference())
+                        .await
+                        .context("join resident model inference warm-up")??;
+                    Ok::<(), anyhow::Error>(())
+                }
+            })
+            .await?;
+        Ok((resident, control))
+    }
+
     async fn run_direct(
         &self,
         input: CleaningInput,
@@ -257,8 +276,7 @@ impl KoharuPipeline {
             None,
             "Loading resident CUDA detector, OCR, and translation models",
         )?;
-        let (resident, control) = tokio::try_join!(self.resident(), self.hsk_control())
-            .map_err(CleaningError::pipeline)?;
+        let (resident, control) = self.ready_models().await.map_err(CleaningError::pipeline)?;
         let preprocessing = global_preprocessing_pool().map_err(CleaningError::pipeline)?;
         cancellation_boundary(cancel.as_ref())?;
 
@@ -358,7 +376,7 @@ impl KoharuPipeline {
                     tiles[..next_count].to_vec(),
                 ));
             }
-            let detector_priority = if admission_viewport.active
+            let batch_is_visible = admission_viewport.active
                 && tile_batch.iter().any(|tile| {
                     let tile_rect = NormalizedRect {
                         x: tile.x as f32 / image_width.max(1) as f32,
@@ -370,7 +388,8 @@ impl KoharuPipeline {
                         .visible_rects
                         .iter()
                         .any(|visible| normalized_rects_intersect(&tile_rect, visible))
-                }) {
+                });
+            let detector_priority = if batch_is_visible {
                 CudaPriority::Visible
             } else {
                 CudaPriority::Offscreen
@@ -380,6 +399,7 @@ impl KoharuPipeline {
                 .acquire(detector_priority, cancel.clone())
                 .await
                 .map_err(cuda_admission_error)?;
+            let detector_started = Instant::now();
             let detections = {
                 let detector = resident.detector.lock().map_err(|_| {
                     CleaningError::new("MODEL_STATE_FAILED", "Detector lock poisoned.")
@@ -389,24 +409,7 @@ impl KoharuPipeline {
                     .context("run true-batched CUDA comic text detection")
                     .map_err(CleaningError::pipeline)?
             };
-            {
-                let text_segmenter = resident.text_segmenter.lock().map_err(|_| {
-                    CleaningError::new("MODEL_STATE_FAILED", "Text segmenter lock poisoned.")
-                })?;
-                for (tile, tile_image) in tile_batch.iter().zip(&tile_images) {
-                    let tile_probabilities = text_segmenter
-                        .inference(tile_image)
-                        .context("segment source text glyphs")
-                        .map_err(CleaningError::pipeline)?;
-                    merge_probability_map(
-                        &mut text_probabilities,
-                        &tile_probabilities,
-                        tile.x,
-                        tile.y,
-                    );
-                }
-            }
-            drop(cuda_permit);
+            let detector_elapsed = detector_started.elapsed();
             cancellation_boundary(cancel.as_ref())?;
             if detections.len() != tile_batch.len() {
                 return Err(CleaningError::new(
@@ -449,6 +452,54 @@ impl KoharuPipeline {
             );
             let mut candidates = spatially_dedupe(candidates, &seen_text_blocks);
             candidates.retain(text_candidate_is_confirmed);
+            let mut deferred_candidates = Vec::new();
+            let targeted_visible_segmentation = batch_is_visible
+                && translation_latency_phase == TranslationLatencyPhase::AwaitingFirstVisibleRegion
+                && !tiles.is_empty()
+                && candidates.iter().any(|candidate| {
+                    candidate.text_rect.intersects_viewport(
+                        &admission_viewport.visible_rects,
+                        image_width,
+                        image_height,
+                    )
+                });
+            if targeted_visible_segmentation {
+                (candidates, deferred_candidates) = candidates.into_iter().partition(|candidate| {
+                    candidate.text_rect.intersects_viewport(
+                        &admission_viewport.visible_rects,
+                        image_width,
+                        image_height,
+                    )
+                });
+            }
+            let mask_started = Instant::now();
+            if targeted_visible_segmentation {
+                let regions = candidates
+                    .iter()
+                    .map(|candidate| candidate.text_rect)
+                    .collect::<Vec<_>>();
+                merge_source_guided_glyph_probabilities(
+                    source.as_ref(),
+                    &mut text_probabilities,
+                    &regions,
+                );
+            } else {
+                segment_tile_batch(resident, &tile_batch, &tile_images, &mut text_probabilities)?;
+            }
+            if std::env::var_os("HSKIFY_TRACE_PIPELINE_TIMING").is_some_and(|value| value == "1") {
+                eprintln!(
+                    "hskify-vision-timing detector_ms={} mask_ms={} tiles={} mask={}",
+                    detector_elapsed.as_millis(),
+                    mask_started.elapsed().as_millis(),
+                    tile_batch.len(),
+                    if targeted_visible_segmentation {
+                        "source-consensus"
+                    } else {
+                        "learned"
+                    },
+                );
+            }
+            drop(cuda_permit);
             if rejected_ocr_tracing_enabled() {
                 for candidate in &candidates {
                     eprintln!(
@@ -474,23 +525,53 @@ impl KoharuPipeline {
                     "Reading English story text in OCR batches of eight",
                 )?;
             }
-            while !candidates.is_empty() {
-                let accepted = ocr_batch(
-                    resident,
-                    source.clone(),
-                    &mut candidates,
-                    OcrProposalSource::Detector,
-                    &input.request,
-                    &sink,
-                    cancel.clone(),
-                    &self.cuda_scheduler,
-                    &preprocessing,
-                    &text_probabilities,
-                )
-                .await?;
+            if targeted_visible_segmentation {
+                let original_candidates = candidates.clone();
+                let mut masked_candidates = candidates;
+                let mut masked_lines = Vec::new();
+                while !masked_candidates.is_empty() {
+                    masked_lines.extend(
+                        ocr_batch(
+                            resident,
+                            source.clone(),
+                            &mut masked_candidates,
+                            OcrProposalSource::Detector,
+                            &input.request,
+                            &sink,
+                            cancel.clone(),
+                            &self.cuda_scheduler,
+                            &preprocessing,
+                            &text_probabilities,
+                        )
+                        .await?,
+                    );
+                }
+                let (accepted, disputed) =
+                    verified_fast_ocr_lines(original_candidates, masked_lines);
+                deferred_candidates.extend(disputed);
                 for line in accepted {
                     seen_text_blocks.push(line.candidate.text_rect);
                     recognized_lines.push(line);
+                }
+            } else {
+                while !candidates.is_empty() {
+                    let accepted = ocr_batch(
+                        resident,
+                        source.clone(),
+                        &mut candidates,
+                        OcrProposalSource::Detector,
+                        &input.request,
+                        &sink,
+                        cancel.clone(),
+                        &self.cuda_scheduler,
+                        &preprocessing,
+                        &text_probabilities,
+                    )
+                    .await?;
+                    for line in accepted {
+                        seen_text_blocks.push(line.candidate.text_rect);
+                        recognized_lines.push(line);
+                    }
                 }
             }
             processed_tiles += tile_batch.len();
@@ -537,6 +618,38 @@ impl KoharuPipeline {
                     false,
                 )
                 .await?;
+            }
+            if targeted_visible_segmentation {
+                // The visible detector-confirmed bubbles already have exact
+                // local masks and can be published. Complete the tile-level
+                // mask afterward so missed-text recovery retains full-page
+                // recall without delaying the first final translation.
+                let cuda_permit = self
+                    .cuda_scheduler
+                    .acquire(CudaPriority::Visible, cancel.clone())
+                    .await
+                    .map_err(cuda_admission_error)?;
+                segment_tile_batch(resident, &tile_batch, &tile_images, &mut text_probabilities)?;
+                drop(cuda_permit);
+                while !deferred_candidates.is_empty() {
+                    let accepted = ocr_batch(
+                        resident,
+                        source.clone(),
+                        &mut deferred_candidates,
+                        OcrProposalSource::Detector,
+                        &input.request,
+                        &sink,
+                        cancel.clone(),
+                        &self.cuda_scheduler,
+                        &preprocessing,
+                        &text_probabilities,
+                    )
+                    .await?;
+                    for line in accepted {
+                        seen_text_blocks.push(line.candidate.text_rect);
+                        recognized_lines.push(line);
+                    }
+                }
             }
             cancellation_boundary(cancel.as_ref())?;
         }
@@ -1289,7 +1402,8 @@ impl KoharuPipeline {
 #[async_trait]
 impl CleaningPipeline for KoharuPipeline {
     async fn warm_up(&self) -> std::result::Result<(), CleaningError> {
-        tokio::try_join!(self.resident(), self.hsk_control())
+        self.ready_models()
+            .await
             .map(|_| ())
             .map_err(CleaningError::pipeline)
     }
@@ -1454,6 +1568,24 @@ impl ResidentState {
             inpainter: Mutex::new(inpainter),
         })
     }
+
+    fn prime_inference(&self) -> Result<()> {
+        // Prime the actual single-visible-tile path. Model construction alone
+        // does not initialize Candle's CUDA kernels, so without this pass the
+        // first reader request pays several seconds of one-time work.
+        let sample = DynamicImage::new_rgb8(1_024, 1_024);
+        self.detector
+            .lock()
+            .map_err(|_| anyhow!("detector lock poisoned during inference warm-up"))?
+            .inference_tiles(std::slice::from_ref(&sample))
+            .context("prime comic text detector inference")?;
+        self.text_segmenter
+            .lock()
+            .map_err(|_| anyhow!("text segmenter lock poisoned during inference warm-up"))?
+            .inference(&sample)
+            .context("prime manga text segmentation inference")?;
+        Ok(())
+    }
 }
 
 fn utf8_path(path: PathBuf) -> Result<Utf8PathBuf> {
@@ -1482,6 +1614,29 @@ struct RecognizedLine {
     candidate: Candidate,
     prediction: PpOcrPrediction,
     crop_bounds: PixelBounds,
+}
+
+fn verified_fast_ocr_lines(
+    candidates: Vec<Candidate>,
+    mut lines: Vec<RecognizedLine>,
+) -> (Vec<RecognizedLine>, Vec<Candidate>) {
+    let mut accepted = Vec::new();
+    let mut disputed = Vec::new();
+    for candidate in candidates {
+        let Some(index) = lines.iter().position(|line| line.candidate == candidate) else {
+            disputed.push(candidate);
+            continue;
+        };
+        let line = lines.swap_remove(index);
+        if candidate.kind != CandidateKind::StoryText
+            || line.prediction.confidence < FAST_VISIBLE_OCR_MIN_CONFIDENCE
+        {
+            disputed.push(candidate);
+            continue;
+        }
+        accepted.push(line);
+    }
+    (accepted, disputed)
 }
 
 #[derive(Debug)]
@@ -1623,6 +1778,26 @@ impl PreprocessingPool {
 struct TileBatchTask {
     tiles: Vec<Tile>,
     receive: oneshot::Receiver<Result<Vec<DynamicImage>>>,
+}
+
+fn segment_tile_batch(
+    resident: &ResidentState,
+    tiles: &[Tile],
+    tile_images: &[DynamicImage],
+    probabilities: &mut ProbabilityMap,
+) -> std::result::Result<(), CleaningError> {
+    let text_segmenter = resident
+        .text_segmenter
+        .lock()
+        .map_err(|_| CleaningError::new("MODEL_STATE_FAILED", "Text segmenter lock poisoned."))?;
+    for (tile, tile_image) in tiles.iter().zip(tile_images) {
+        let tile_probabilities = text_segmenter
+            .inference(tile_image)
+            .context("segment source text glyphs")
+            .map_err(CleaningError::pipeline)?;
+        merge_probability_map(probabilities, &tile_probabilities, tile.x, tile.y);
+    }
+    Ok(())
 }
 
 impl TileBatchTask {
@@ -3820,6 +3995,42 @@ mod tests {
             },
             suggested_words: vec!["学生".to_owned()],
         }
+    }
+
+    #[test]
+    fn speculative_ocr_requires_high_confidence_enclosed_dialogue() {
+        let rect = PixelRect::new(10.0, 10.0, 90.0, 40.0).unwrap();
+        let candidate = |kind| Candidate {
+            kind,
+            text_rect: rect,
+            bubble_rect: rect.expand(10.0, 100, 100),
+            confirmed_bubble_rect: rect.expand(10.0, 100, 100),
+            detector_confidence: 0.99,
+            has_detector_core: true,
+        };
+        let line = |candidate, confidence| RecognizedLine {
+            candidate,
+            prediction: PpOcrPrediction {
+                text: "ordinary dialogue".to_owned(),
+                confidence,
+                text_color: [0, 0, 0],
+                stroke_color: [255, 255, 255],
+                has_stroke_color: false,
+                appearance_bands: Vec::new(),
+            },
+            crop_bounds: rect.pixel_bounds(100, 100),
+        };
+        let story = candidate(CandidateKind::StoryText);
+        let free = candidate(CandidateKind::FreeText);
+        let (accepted, disputed) =
+            verified_fast_ocr_lines(vec![story, free], vec![line(story, 0.99), line(free, 0.99)]);
+        assert_eq!(accepted.len(), 1);
+        assert_eq!(accepted[0].candidate.kind, CandidateKind::StoryText);
+        assert_eq!(disputed, vec![free]);
+
+        let (accepted, disputed) = verified_fast_ocr_lines(vec![story], vec![line(story, 0.8)]);
+        assert!(accepted.is_empty());
+        assert_eq!(disputed, vec![story]);
     }
 
     #[test]

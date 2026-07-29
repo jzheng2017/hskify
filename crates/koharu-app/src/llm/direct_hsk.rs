@@ -794,17 +794,46 @@ where
     if classification.page_is_furniture {
         return Ok(classification);
     }
-    let proposed_artwork = classification
+    let semantic_exclusions = classification
         .regions
         .iter()
-        .filter(|(_, disposition)| *disposition == HskTranslationDisposition::PreserveArtwork)
-        .filter_map(|(id, _)| utterances.iter().find(|utterance| utterance.id == *id))
+        .filter(|(_, disposition)| {
+            matches!(
+                disposition,
+                HskTranslationDisposition::ExcludeNonStory
+                    | HskTranslationDisposition::ExcludeSoundEffect
+            )
+        })
+        .map(|(id, _)| id.as_str())
+        .collect::<HashSet<_>>();
+    let proposed_artwork = utterances
+        .iter()
+        .filter(|utterance| !semantic_exclusions.contains(utterance.id.as_str()))
+        .filter(|utterance| artwork_claim_is_admissible(utterance))
         .collect::<Vec<_>>();
     let approved_artwork =
-        verify_artwork_candidates_with(generator, &proposed_artwork, cancel).await?;
-    classification.regions.retain(|(id, disposition)| {
-        *disposition != HskTranslationDisposition::PreserveArtwork || approved_artwork.contains(id)
-    });
+        verify_artwork_candidates_with(generator, utterances, &proposed_artwork, cancel).await?;
+    let existing_dispositions = classification
+        .regions
+        .drain(..)
+        .filter(|(_, disposition)| *disposition != HskTranslationDisposition::PreserveArtwork)
+        .collect::<HashMap<_, _>>();
+    classification.regions = utterances
+        .iter()
+        .filter_map(|utterance| {
+            if approved_artwork.contains(&utterance.id) {
+                Some((
+                    utterance.id.clone(),
+                    HskTranslationDisposition::PreserveArtwork,
+                ))
+            } else {
+                existing_dispositions
+                    .get(&utterance.id)
+                    .copied()
+                    .map(|disposition| (utterance.id.clone(), disposition))
+            }
+        })
+        .collect();
     Ok(classification)
 }
 
@@ -816,6 +845,7 @@ fn trace_semantic_output(stage: &str, output: &str) {
 
 async fn verify_artwork_candidates_with<G>(
     generator: &G,
+    page_context: &[HskSourceUtterance],
     candidates: &[&HskSourceUtterance],
     cancel: &AtomicBool,
 ) -> Result<HashSet<String>>
@@ -830,7 +860,12 @@ where
         "Adjudicate exactly {} proposed comic ARTWORK regions. Return PRESERVE only when the words \
         are visually integral illustrated lettering for a named attack, technique, form, spell, \
         transformation, or dramatic story title and replacing their original letterforms with a \
-        standard overlay would damage the composition. Return TRANSLATE for dialogue, narration, \
+        standard overlay would damage the composition. Use the complete ordered section context \
+        to distinguish an illustrated label from a short spoken or narrated story fragment. A \
+        candidate that can plausibly be a character's utterance or narration in that context must \
+        be TRANSLATE, including greetings, toasts, interjections, reactions, warnings, observations, \
+        and announcements. Dramatic wording or typography alone never makes such story text artwork. \
+        Return TRANSLATE for dialogue, narration, \
         finite clauses, quantities, rewards, item names or descriptions, missions, instructions, \
         interface or game labels, ordinary signs, roles, titles of people, sound effects, credits, \
         watermarks, and uncertain cases, even when large, outlined, colorful, capitalized, or \
@@ -839,17 +874,33 @@ where
         candidates.len(),
         candidates.len(),
     );
-    let mut user_prompt = String::from("Proposed illustrated-lettering regions:\n");
+    let mut user_prompt = String::from("Complete ordered section context:\n");
+    for (index, utterance) in page_context.iter().enumerate() {
+        use std::fmt::Write as _;
+        writeln!(
+            &mut user_prompt,
+            "{}\ttext={}",
+            index + 1,
+            compact_field(&utterance.source_english),
+        )
+        .expect("writing to String cannot fail");
+    }
+    user_prompt.push_str("\nProposed illustrated-lettering regions:\n");
     for (index, candidate) in candidates.iter().enumerate() {
         use std::fmt::Write as _;
         let layout = candidate
             .semantic_layout
             .as_ref()
             .expect("artwork candidates require visual evidence");
+        let page_position = page_context
+            .iter()
+            .position(|utterance| utterance.id == candidate.id)
+            .map_or(0, |position| position + 1);
         writeln!(
             &mut user_prompt,
-            "{}\ttext={}\tdetector={}\tfont-height={:.2}%\tappearance-bands={}\ttext-colors={}\toutline={}",
+            "{}\tpage-position={}\ttext={}\tdetector={}\tfont-height={:.2}%\tappearance-bands={}\ttext-colors={}\toutline={}",
             index + 1,
+            page_position,
             compact_field(&candidate.source_english),
             if layout.detector_enclosed {
                 "enclosed"
@@ -3580,10 +3631,14 @@ mod tests {
         let artwork_prompt = generator.system_prompts.lock().unwrap()[1].to_ascii_lowercase();
         assert!(artwork_prompt.contains("item names or descriptions"));
         assert!(artwork_prompt.contains("missions"));
+        assert!(artwork_prompt.contains("complete ordered section context"));
         let user_prompt = generator.user_prompts.lock().unwrap()[0].to_ascii_lowercase();
         assert!(user_prompt.contains("detector=enclosed"));
         assert!(user_prompt.contains("box=10.0%,20.0%-40.0%,30.0%"));
         assert!(user_prompt.contains("page=1200x800"));
+        let artwork_user_prompt = generator.user_prompts.lock().unwrap()[1].to_ascii_lowercase();
+        assert!(artwork_user_prompt.contains("complete ordered section context"));
+        assert!(artwork_user_prompt.contains("page-position=4"));
         Ok(())
     }
 
@@ -3709,9 +3764,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn proposed_artwork_requires_independent_semantic_adjudication() -> Result<()> {
+    async fn every_visually_admissible_region_requires_focused_artwork_adjudication() -> Result<()>
+    {
         let generator = FakeGenerator::new([
-            "PAGE\tARTWORK\n1\tARTWORK\n2\tARTWORK",
+            "PAGE\tSTORY\n1\tSTORY\n2\tSTORY",
             "1\tTRANSLATE\n2\tPRESERVE",
         ]);
         let mut utterances = vec![
@@ -3742,6 +3798,11 @@ mod tests {
             [("b".to_owned(), HskTranslationDisposition::PreserveArtwork)]
         );
         assert_eq!(generator.calls.load(Ordering::Relaxed), 2);
+        let artwork_user_prompt = &generator.user_prompts.lock().unwrap()[1];
+        assert!(artwork_user_prompt.contains("1\ttext=FORTY REWARD TOKENS"));
+        assert!(artwork_user_prompt.contains("2\ttext=CELESTIAL BLADE: THIRD FORM"));
+        assert!(artwork_user_prompt.contains("1\tpage-position=1"));
+        assert!(artwork_user_prompt.contains("2\tpage-position=2"));
         Ok(())
     }
 

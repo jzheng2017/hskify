@@ -240,7 +240,7 @@ export type JobUpdateBatch = {
 }
 
 export type BrowserSetupStatus = {
-  state: 'missing-models' | 'downloading' | 'verifying' | 'ready' | 'failed'
+  state: 'missing-models' | 'downloading' | 'verifying' | 'warming' | 'ready' | 'failed'
   modelId: string
   currentFile?: string
   completedBytes?: number
@@ -867,6 +867,7 @@ export function parseHealthResponse(value: unknown): HealthResponse {
       'missing-models',
       'downloading',
       'verifying',
+      'warming',
       'ready',
       'failed',
     ] as const),
@@ -1172,6 +1173,7 @@ export function parseBrowserSetupStatus(value: unknown): BrowserSetupStatus {
     'missing-models',
     'downloading',
     'verifying',
+    'warming',
     'ready',
     'failed',
   ] as const)

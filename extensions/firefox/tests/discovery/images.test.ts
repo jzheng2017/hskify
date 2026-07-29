@@ -5,6 +5,7 @@ import {
   discoverDeferredImages,
   discoverImages,
   evaluateImage,
+  looksLikeSequentialArtReader,
   visibleFirst,
   type DiscoveryEvent,
   type ObserverFactories,
@@ -31,6 +32,29 @@ function viewportRect(top: number, bottom: number): DOMRect {
 }
 
 describe('conservative image discovery', () => {
+  it('recognizes sequential-art geometry without publisher-specific markers', () => {
+    const articleHero = loadedImage('https://reader.test/article.jpg', 1200, 900)
+    document.body.append(articleHero)
+    expect(looksLikeSequentialArtReader()).toBe(false)
+
+    articleHero.remove()
+    const longStrip = loadedImage('https://reader.test/strip.webp', 900, 16_000, {
+      width: 720,
+      height: 12_800,
+      right: 720,
+      bottom: 12_800,
+    })
+    document.body.append(longStrip)
+    expect(looksLikeSequentialArtReader()).toBe(true)
+
+    longStrip.remove()
+    document.body.append(
+      loadedImage('https://reader.test/page-1.jpg', 800, 1200),
+      loadedImage('https://reader.test/page-2.jpg', 840, 1280),
+    )
+    expect(looksLikeSequentialArtReader()).toBe(true)
+  })
+
   it('accepts a loaded manga-sized image and preserves picture ownership', () => {
     const picture = document.createElement('picture')
     const image = loadedImage()

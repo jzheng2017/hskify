@@ -138,7 +138,9 @@ function renderSetup(status: BrowserSetupStatus): void {
       ? 'Download the files Hskify needs to translate on this computer.'
       : status.state === 'downloading'
         ? 'Getting the translation files…'
-        : status.state === 'verifying'
+        : status.state === 'warming'
+          ? 'Hskify is getting ready...'
+          : status.state === 'verifying'
           ? 'Almost ready…'
           : status.state === 'failed'
             ? 'Setup could not be completed. Please try again.'
@@ -157,7 +159,9 @@ function renderSetup(status: BrowserSetupStatus): void {
       ? 'One-time download needed'
       : status.state === 'downloading'
         ? 'Setting up Hskify'
-        : status.state === 'verifying'
+        : status.state === 'warming'
+          ? 'Getting ready'
+          : status.state === 'verifying'
           ? 'Finishing setup'
           : 'Setup needs attention'
 
@@ -172,7 +176,10 @@ function renderSetup(status: BrowserSetupStatus): void {
     status.completedBytes !== undefined &&
     status.totalBytes !== undefined &&
     status.totalBytes > 0
-  statusProgress.hidden = status.state !== 'downloading' && status.state !== 'verifying'
+  statusProgress.hidden =
+    status.state !== 'downloading' &&
+    status.state !== 'verifying' &&
+    status.state !== 'warming'
   if (!statusProgress.hidden) {
     if (hasProgress) {
       statusProgress.value = status.completedBytes! / status.totalBytes!
@@ -182,7 +189,11 @@ function renderSetup(status: BrowserSetupStatus): void {
       statusProgress.removeAttribute('value')
     }
   }
-  setBusy(status.state === 'downloading' || status.state === 'verifying')
+  setBusy(
+    status.state === 'downloading' ||
+      status.state === 'verifying' ||
+      status.state === 'warming',
+  )
 }
 
 async function finishStart(

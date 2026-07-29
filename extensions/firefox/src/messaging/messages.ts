@@ -35,6 +35,7 @@ export type PopupCancelMessage = { type: 'popup:cancel' }
 export type PopupStateMessage = { type: 'popup:state' }
 export type SetupStatusMessage = { type: 'setup:status' }
 export type SetupStartMessage = { type: 'setup:start' }
+export type EngineWarmupMessage = { type: 'engine:warmup' }
 
 export type ContentStartMessage = {
   type: 'content:start'
@@ -147,6 +148,7 @@ export type BackgroundRequest =
   | PopupStateMessage
   | SetupStatusMessage
   | SetupStartMessage
+  | EngineWarmupMessage
   | PrefetchImageMessage
   | CancelImagePrefetchMessage
   | SubmitImageMessage
@@ -229,6 +231,7 @@ export type MessageResultMap = {
   'popup:state': PopupState
   'setup:status': BrowserSetupStatus
   'setup:start': BrowserSetupStatus
+  'engine:warmup': BrowserSetupStatus
   'image:prefetch': undefined
   'image:prefetch-cancel': undefined
   'job:submit': SubmittedJob
@@ -522,6 +525,7 @@ export function parseBackgroundRequest(value: unknown): BackgroundRequest {
     case 'popup:state':
     case 'setup:status':
     case 'setup:start':
+    case 'engine:warmup':
       exact(item, ['type'])
       return { type }
     case 'popup:start':
@@ -815,6 +819,7 @@ function parseResult<T extends BackgroundRequest['type']>(
       break
     case 'setup:status':
     case 'setup:start':
+    case 'engine:warmup':
       parsed = parseBrowserSetupStatus(value)
       break
     case 'job:submit':

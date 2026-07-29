@@ -61,6 +61,10 @@ const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const DEFAULT_UPDATE_WAIT_MS: u64 = 20_000;
 const MAX_UPDATE_WAIT_MS: u64 = 20_000;
 const MAX_UPDATES_PER_JOB: usize = 10_000;
+const WARMUP_NOT_STARTED: u8 = 0;
+const WARMUP_RUNNING: u8 = 1;
+const WARMUP_READY: u8 = 2;
+const WARMUP_FAILED: u8 = 3;
 
 #[derive(Debug, Clone)]
 pub struct ServerLimits {
@@ -812,7 +816,12 @@ impl BridgeState {
         }
         if self
             .warmup_state
-            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+            .compare_exchange(
+                WARMUP_NOT_STARTED,
+                WARMUP_RUNNING,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
             .is_err()
         {
             return false;
@@ -820,14 +829,50 @@ impl BridgeState {
         let state = Arc::clone(self);
         let pipeline = Arc::clone(&self.pipeline);
         tokio::spawn(async move {
-            let next = if pipeline.warm_up().await.is_ok() {
-                2
-            } else {
-                0
+            let next = match pipeline.warm_up().await {
+                Ok(()) => WARMUP_READY,
+                Err(error) => {
+                    eprintln!("Hskify model warm-up failed: {error}");
+                    WARMUP_FAILED
+                }
             };
             state.warmup_state.store(next, Ordering::Release);
         });
         true
+    }
+
+    fn retry_pipeline_warmup(self: &Arc<Self>) -> bool {
+        let _ = self.warmup_state.compare_exchange(
+            WARMUP_FAILED,
+            WARMUP_NOT_STARTED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+        self.start_pipeline_warmup()
+    }
+
+    fn pipeline_ready(&self) -> bool {
+        self.resources_ready() && self.warmup_state.load(Ordering::Acquire) == WARMUP_READY
+    }
+
+    fn effective_setup_status(&self, mut status: BrowserSetupStatus) -> BrowserSetupStatus {
+        if status.state != BrowserSetupState::Ready {
+            return status;
+        }
+        match self.warmup_state.load(Ordering::Acquire) {
+            WARMUP_READY => status,
+            WARMUP_FAILED => {
+                status.state = BrowserSetupState::Failed;
+                status.message = "Hskify could not get ready. Please try again.".to_owned();
+                status.error_code = Some("MODEL_WARMUP_FAILED".to_owned());
+                status
+            }
+            _ => {
+                status.state = BrowserSetupState::Warming;
+                status.message = "Hskify is getting ready.".to_owned();
+                status
+            }
+        }
     }
 
     pub fn port(&self) -> u16 {
@@ -880,7 +925,7 @@ impl BridgeState {
                     HskLevel::Five,
                     HskLevel::Six,
                 ],
-                models_ready: self.resources_ready(),
+                models_ready: self.pipeline_ready(),
             },
         })
     }
@@ -1481,15 +1526,17 @@ async fn issue_internal_session(
 
 async fn health(State(state): State<Arc<BridgeState>>) -> Json<HealthResponse> {
     state.start_pipeline_warmup();
+    let setup_status = state.effective_setup_status(
+        state
+            .setup
+            .as_ref()
+            .map_or_else(|| resource_setup_status(&state), |setup| setup.status()),
+    );
     Json(HealthResponse {
         build_fingerprint: BUILD_FINGERPRINT.to_owned(),
         engine_version: env!("CARGO_PKG_VERSION").to_owned(),
         status: HealthStatus::Ready,
-        setup_state: if state.resources_ready() {
-            BrowserSetupState::Ready
-        } else {
-            BrowserSetupState::MissingModels
-        },
+        setup_state: setup_status.state,
         resource_identities: state.setup.as_ref().map_or_else(
             || fixtures::health().resource_identities,
             |setup| setup.resource_identities(),
@@ -1500,14 +1547,27 @@ async fn health(State(state): State<Arc<BridgeState>>) -> Json<HealthResponse> {
 async fn setup(State(state): State<Arc<BridgeState>>) -> Json<BrowserSetupStatus> {
     state.start_pipeline_warmup();
     Json(
-        state
-            .setup
-            .as_ref()
-            .map_or_else(|| resource_setup_status(&state), |setup| setup.status()),
+        state.effective_setup_status(
+            state
+                .setup
+                .as_ref()
+                .map_or_else(|| resource_setup_status(&state), |setup| setup.status()),
+        ),
     )
 }
 
 async fn setup_models(State(state): State<Arc<BridgeState>>) -> Json<BrowserSetupStatus> {
+    if state.resources_ready() {
+        state.retry_pipeline_warmup();
+        return Json(
+            state.effective_setup_status(
+                state
+                    .setup
+                    .as_ref()
+                    .map_or_else(|| resource_setup_status(&state), |setup| setup.status()),
+            ),
+        );
+    }
     Json(
         state
             .setup
@@ -2356,6 +2416,50 @@ mod tests {
         );
     }
 
+    #[test]
+    fn downloaded_resources_are_not_reported_ready_until_models_are_resident() {
+        let temp = tempfile::tempdir().unwrap();
+        let pipeline = Arc::new(CountingPipeline {
+            runs: AtomicUsize::new(0),
+            warmups: AtomicUsize::new(0),
+            ready: true,
+            sabotage_cache_root: None,
+        });
+        let state = BridgeState::with_pipeline_and_setup(
+            BridgeConfig::for_port(1234),
+            [7; SECRET_BYTES],
+            pipeline,
+            None,
+            temp.path().to_path_buf(),
+        );
+
+        let warming = state.effective_setup_status(resource_setup_status(&state));
+        assert_eq!(warming.state, BrowserSetupState::Warming);
+        assert!(
+            !state
+                .issue_session("moz-extension://00000000-0000-4000-8000-000000000001")
+                .unwrap()
+                .capabilities
+                .models_ready
+        );
+
+        state.warmup_state.store(WARMUP_READY, Ordering::Release);
+        let ready = state.effective_setup_status(resource_setup_status(&state));
+        assert_eq!(ready.state, BrowserSetupState::Ready);
+        assert!(
+            state
+                .issue_session("moz-extension://00000000-0000-4000-8000-000000000001")
+                .unwrap()
+                .capabilities
+                .models_ready
+        );
+
+        state.warmup_state.store(WARMUP_FAILED, Ordering::Release);
+        let failed = state.effective_setup_status(resource_setup_status(&state));
+        assert_eq!(failed.state, BrowserSetupState::Failed);
+        assert_eq!(failed.error_code.as_deref(), Some("MODEL_WARMUP_FAILED"));
+    }
+
     #[tokio::test]
     async fn ready_pipeline_warms_once_in_background() {
         let temp = tempfile::tempdir().unwrap();
@@ -2378,7 +2482,7 @@ mod tests {
         while pipeline.warmups.load(Ordering::Acquire) == 0 {
             tokio::task::yield_now().await;
         }
-        while state.warmup_state.load(Ordering::Acquire) != 2 {
+        while state.warmup_state.load(Ordering::Acquire) != WARMUP_READY {
             tokio::task::yield_now().await;
         }
 

@@ -450,6 +450,7 @@ async function runJob({
   )
   const acceptedAt = Date.now()
   const updates = []
+  const updateTimeline = []
   let sequence = 0
   let terminal
   let firstRegionReadyMs
@@ -462,6 +463,12 @@ async function runJob({
     )
     for (const update of batch.updates ?? []) {
       updates.push(update)
+      updateTimeline.push({
+        sequence: update.sequence,
+        type: update.type,
+        ...(update.stage ? { stage: update.stage } : {}),
+        receivedAfterMs: Date.now() - acceptedAt,
+      })
       sequence = Math.max(sequence, update.sequence)
       if (update.type === 'regionReady' && firstRegionReadyMs === undefined) {
         firstRegionReadyMs = Date.now() - acceptedAt
@@ -507,6 +514,7 @@ async function runJob({
     jobId: created.jobId,
     terminal,
     firstRegionReadyMs,
+    updateTimeline,
     updates,
     regions: evaluated.regions,
     preservedArtwork: evaluated.preserved,

@@ -348,6 +348,31 @@ fn source_connected_glyph_support(source: &RgbImage, bounds: PixelBounds) -> Vec
     connected_support_from_scores(&scores, bounds, seed_threshold, support_threshold)
 }
 
+pub(super) fn merge_source_guided_glyph_probabilities(
+    source: &DynamicImage,
+    probabilities: &mut ProbabilityMap,
+    regions: &[PixelRect],
+) {
+    if probabilities.width != source.width() || probabilities.height != source.height() {
+        return;
+    }
+    let source_rgb = source.to_rgb8();
+    for region in regions {
+        let bounds = region.pixel_bounds(probabilities.width, probabilities.height);
+        let area = (bounds.width as usize).saturating_mul(bounds.height as usize);
+        let support = source_connected_glyph_support(&source_rgb, bounds);
+        if support.is_empty() || support.len() >= area {
+            continue;
+        }
+        for (x, y) in support {
+            let index = y as usize * probabilities.width as usize + x as usize;
+            if let Some(value) = probabilities.values.get_mut(index) {
+                *value = value.max(1.0);
+            }
+        }
+    }
+}
+
 fn median_channel(values: &mut [u8]) -> u8 {
     if values.is_empty() {
         return 0;

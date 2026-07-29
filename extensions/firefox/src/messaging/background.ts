@@ -833,6 +833,8 @@ export class BackgroundRouter {
         return this.setupStatus()
       case 'setup:start':
         return this.startSetup()
+      case 'engine:warmup':
+        return this.setupStatus()
       case 'image:prefetch':
         return this.prefetch(message, sender)
       case 'image:prefetch-cancel':
@@ -879,6 +881,7 @@ const BACKGROUND_MESSAGE_TYPES = new Set([
   'popup:state',
   'setup:status',
   'setup:start',
+  'engine:warmup',
   'image:prefetch',
   'image:prefetch-cancel',
   'job:submit',

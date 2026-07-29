@@ -159,6 +159,9 @@ describe('strict extension runtime messages', () => {
     expect(parseBackgroundRequest({ type: 'setup:start' })).toEqual({
       type: 'setup:start',
     })
+    expect(parseBackgroundRequest({ type: 'engine:warmup' })).toEqual({
+      type: 'engine:warmup',
+    })
     expect(() =>
       parseBackgroundRequest({ type: 'setup:start', model: 'untrusted-model' }),
     ).toThrow(/not permitted/i)

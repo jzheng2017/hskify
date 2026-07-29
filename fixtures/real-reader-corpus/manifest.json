@@ -263,7 +263,7 @@
             "height": 0.05
           }
         ],
-        "maximumFirstRegionReadyMs": 45000,
+        "maximumFirstRegionReadyMs": 2500,
         "requiredSourceFragments": ["CHEERS", "JAMEL", "THE PORTAL'S OPENED"],
         "preserveNamesWhenDetected": ["JAMEL", "JOHAN"],
         "excludedSourceTexts": ["ASURASCANS.COM"]

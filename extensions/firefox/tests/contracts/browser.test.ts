@@ -103,6 +103,13 @@ describe('unversioned progressive browser contract', () => {
       state: 'ready',
       modelId: 'qwen3.5-4b',
     })
+    expect(
+      parseBrowserSetupStatus({
+        state: 'warming',
+        modelId: 'qwen3.5-4b',
+        message: 'Hskify is getting ready.',
+      }).state,
+    ).toBe('warming')
     expect(parseLookupResult(sharedFixture('lookup.valid.json')).tokens).toHaveLength(1)
     expect(parseErrorResponse(sharedFixture('error.valid.json')).code).toBe('FIXTURE_ERROR')
   })
