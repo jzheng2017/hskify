@@ -180,10 +180,10 @@ export type ImageLimits = {
 }
 
 export const DEFAULT_IMAGE_LIMITS: ImageLimits = {
-  maximumBytes: 25 * 1024 * 1024,
+  maximumBytes: 20 * 1024 * 1024,
   maximumWidth: 16_384,
-  maximumHeight: 32_768,
-  maximumPixels: 80_000_000,
+  maximumHeight: 16_384,
+  maximumPixels: 25_000_000,
 }
 
 export function validateImageBytes(

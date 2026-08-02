@@ -2417,6 +2417,14 @@ mod tests {
     }
 
     #[test]
+    fn default_image_limits_match_the_browser_contract() {
+        let limits = ServerLimits::default();
+        assert_eq!(limits.max_upload_bytes, 20 * 1024 * 1024);
+        assert_eq!(limits.max_pixels, 25_000_000);
+        assert_eq!(limits.max_dimension, 16_384);
+    }
+
+    #[test]
     fn downloaded_resources_are_not_reported_ready_until_models_are_resident() {
         let temp = tempfile::tempdir().unwrap();
         let pipeline = Arc::new(CountingPipeline {

@@ -30,8 +30,8 @@ describe('same-origin content byte fallback', () => {
       vi.fn(async () => new Response(body, { status: 200 })),
     )
     await expect(tryContentBytes(candidate)).resolves.toBeUndefined()
-    expect(produced).toBeGreaterThanOrEqual(26)
-    expect(produced).toBeLessThan(30)
+    expect(produced).toBeGreaterThanOrEqual(21)
+    expect(produced).toBeLessThan(25)
     expect(cancelled).toBe(true)
     vi.unstubAllGlobals()
   })

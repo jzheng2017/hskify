@@ -16,6 +16,7 @@ import {
   type NameTranslation,
   type NormalizedRect,
 } from '../contracts/browser'
+import { DEFAULT_IMAGE_LIMITS } from '../acquisition/image-format'
 
 const MAX_RUNTIME_BINARY_BYTES = 25 * 1024 * 1024
 const MAX_RUNTIME_FONT_BYTES = 32 * 1024 * 1024
@@ -508,8 +509,18 @@ function parseRecoveryCandidate(value: unknown, index: number): RecoveryCandidat
   exact(item, ['sourceUrl', 'naturalWidth', 'naturalHeight', 'sourceSha256'], path)
   return {
     sourceUrl: string(item.sourceUrl, `${path}.sourceUrl`, 8_192),
-    naturalWidth: integer(item.naturalWidth, `${path}.naturalWidth`, 1, 32_768),
-    naturalHeight: integer(item.naturalHeight, `${path}.naturalHeight`, 1, 32_768),
+    naturalWidth: integer(
+      item.naturalWidth,
+      `${path}.naturalWidth`,
+      1,
+      DEFAULT_IMAGE_LIMITS.maximumWidth,
+    ),
+    naturalHeight: integer(
+      item.naturalHeight,
+      `${path}.naturalHeight`,
+      1,
+      DEFAULT_IMAGE_LIMITS.maximumHeight,
+    ),
     ...(item.sourceSha256 === undefined
       ? {}
       : { sourceSha256: sha256(item.sourceSha256, `${path}.sourceSha256`) }),
@@ -553,8 +564,18 @@ export function parseBackgroundRequest(value: unknown): BackgroundRequest {
         pageIndex: integer(item.pageIndex, '$.pageIndex', 0, 100_000),
         imageUrl: string(item.imageUrl, '$.imageUrl', 8_192),
         pageUrl: string(item.pageUrl, '$.pageUrl', 8_192),
-        naturalWidth: integer(item.naturalWidth, '$.naturalWidth', 1, 32_768),
-        naturalHeight: integer(item.naturalHeight, '$.naturalHeight', 1, 32_768),
+        naturalWidth: integer(
+          item.naturalWidth,
+          '$.naturalWidth',
+          1,
+          DEFAULT_IMAGE_LIMITS.maximumWidth,
+        ),
+        naturalHeight: integer(
+          item.naturalHeight,
+          '$.naturalHeight',
+          1,
+          DEFAULT_IMAGE_LIMITS.maximumHeight,
+        ),
       }
     case 'image:prefetch-cancel':
       exact(item, ['type', 'pageSessionId', 'pageUrl'])
@@ -603,8 +624,18 @@ export function parseBackgroundRequest(value: unknown): BackgroundRequest {
         pageIndex: integer(item.pageIndex, '$.pageIndex', 0, 100_000),
         imageUrl: string(item.imageUrl, '$.imageUrl', 8_192),
         pageUrl: string(item.pageUrl, '$.pageUrl', 8_192),
-        naturalWidth: integer(item.naturalWidth, '$.naturalWidth', 1, 32_768),
-        naturalHeight: integer(item.naturalHeight, '$.naturalHeight', 1, 32_768),
+        naturalWidth: integer(
+          item.naturalWidth,
+          '$.naturalWidth',
+          1,
+          DEFAULT_IMAGE_LIMITS.maximumWidth,
+        ),
+        naturalHeight: integer(
+          item.naturalHeight,
+          '$.naturalHeight',
+          1,
+          DEFAULT_IMAGE_LIMITS.maximumHeight,
+        ),
         ...(sourceMimeType === undefined ? {} : { sourceMimeType }),
         ...(sourceBytes === undefined ? {} : { sourceBytes }),
         hskLevel: hskLevel(item.hskLevel, '$.hskLevel'),
@@ -747,8 +778,13 @@ function submittedJob(value: unknown): SubmittedJob {
     clientImageId: string(item.clientImageId, '$.clientImageId', 512),
     sourceSha256: sha256(item.sourceSha256, '$.sourceSha256'),
     sourceUrl: string(item.sourceUrl, '$.sourceUrl', 8_192),
-    sourceWidth: integer(item.sourceWidth, '$.sourceWidth', 1, 32_768),
-    sourceHeight: integer(item.sourceHeight, '$.sourceHeight', 1, 32_768),
+    sourceWidth: integer(item.sourceWidth, '$.sourceWidth', 1, DEFAULT_IMAGE_LIMITS.maximumWidth),
+    sourceHeight: integer(
+      item.sourceHeight,
+      '$.sourceHeight',
+      1,
+      DEFAULT_IMAGE_LIMITS.maximumHeight,
+    ),
     acknowledgedSequence: integer(
       item.acknowledgedSequence,
       '$.acknowledgedSequence',
@@ -784,8 +820,18 @@ function recoveredJobs(value: unknown): RecoveredJob[] {
       clientImageId: string(item.clientImageId, `$[${index}].clientImageId`, 512),
       sourceSha256: sha256(item.sourceSha256, `$[${index}].sourceSha256`),
       sourceUrl: string(item.sourceUrl, `$[${index}].sourceUrl`, 8_192),
-      sourceWidth: integer(item.sourceWidth, `$[${index}].sourceWidth`, 1, 32_768),
-      sourceHeight: integer(item.sourceHeight, `$[${index}].sourceHeight`, 1, 32_768),
+      sourceWidth: integer(
+        item.sourceWidth,
+        `$[${index}].sourceWidth`,
+        1,
+        DEFAULT_IMAGE_LIMITS.maximumWidth,
+      ),
+      sourceHeight: integer(
+        item.sourceHeight,
+        `$[${index}].sourceHeight`,
+        1,
+        DEFAULT_IMAGE_LIMITS.maximumHeight,
+      ),
       pageIndex: integer(item.pageIndex, `$[${index}].pageIndex`, 0, 100_000),
       acknowledgedSequence: integer(
         item.acknowledgedSequence,

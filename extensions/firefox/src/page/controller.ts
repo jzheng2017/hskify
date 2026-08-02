@@ -33,7 +33,6 @@ import { ChapterRunState } from './run-state'
 import { ChapterContextLedger } from './chapter-context'
 
 const PAGE_SESSION_KEY = 'hmt.pageSessionId'
-const CONTENT_BYTE_LIMIT = 25 * 1024 * 1024
 const NAVIGATION_CHECK_INTERVAL_MS = 250
 const VIEWPORT_THROTTLE_MS = 100
 const CHAPTER_PIPELINE_CONCURRENCY = 3
@@ -172,7 +171,7 @@ export async function tryContentBytes(candidate: DiscoveredImage): Promise<
       cache: 'no-store',
     })
     if (!response.ok) return undefined
-    const bytes = await readBoundedBody(response, CONTENT_BYTE_LIMIT)
+    const bytes = await readBoundedBody(response, DEFAULT_IMAGE_LIMITS.maximumBytes)
     if (!bytes) return undefined
     const mimeType =
       response.headers.get('content-type')?.split(';', 1)[0]?.trim() ||

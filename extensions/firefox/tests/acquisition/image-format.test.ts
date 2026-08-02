@@ -38,6 +38,19 @@ describe('safe image validation', () => {
     ).toThrow(/dimensions/i)
   })
 
+  it('accepts the daemon-aligned image limits and rejects values above them', () => {
+    expect(() => validateImageBytes(pngHeader(1, 1, 20 * 1024 * 1024))).not.toThrow()
+    expect(() => validateImageBytes(pngHeader(1, 1, 20 * 1024 * 1024 + 1))).toThrow(
+      /between 1 byte/i,
+    )
+
+    expect(() => validateImageBytes(pngHeader(16_384, 1))).not.toThrow()
+    expect(() => validateImageBytes(pngHeader(16_385, 1))).toThrow(/dimensions/i)
+
+    expect(() => validateImageBytes(pngHeader(5_000, 5_000))).not.toThrow()
+    expect(() => validateImageBytes(pngHeader(5_001, 5_000))).toThrow(/dimensions/i)
+  })
+
   it('rejects unsupported and malformed content', () => {
     expect(() => sniffImageMimeType(new TextEncoder().encode('<svg/>').buffer)).toThrow(
       /Only PNG/i,
