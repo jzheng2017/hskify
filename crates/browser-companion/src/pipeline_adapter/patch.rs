@@ -105,7 +105,7 @@ pub(super) fn text_mask_for_regions(
 /// pixels accepted by the learned text probability field are restored; no
 /// detector rectangle is ever converted into paint.
 pub(super) fn verified_text_mask_for_regions(
-    source: &DynamicImage,
+    source: &RgbImage,
     probabilities: &ProbabilityMap,
     bubbles: &GrayImage,
     regions: &[TextRegion],
@@ -119,7 +119,6 @@ pub(super) fn verified_text_mask_for_regions(
     {
         return None;
     }
-    let source_rgb = source.to_rgb8();
     let mut mask = text_mask_for_regions(probabilities, bubbles, regions, threshold);
     for region in regions {
         let rect = PixelRect::new(
@@ -149,7 +148,7 @@ pub(super) fn verified_text_mask_for_regions(
         let detector_support = block_support.iter().filter(|selected| **selected).count();
         if detector_support == 0 || detector_support >= block_area {
             block_support.fill(false);
-            for (x, y) in source_connected_glyph_support(&source_rgb, bounds) {
+            for (x, y) in source_connected_glyph_support(source, bounds) {
                 let local_index = (y - bounds.y) as usize * block_width + (x - bounds.x) as usize;
                 block_support[local_index] = true;
             }
@@ -349,18 +348,17 @@ fn source_connected_glyph_support(source: &RgbImage, bounds: PixelBounds) -> Vec
 }
 
 pub(super) fn merge_source_guided_glyph_probabilities(
-    source: &DynamicImage,
+    source: &RgbImage,
     probabilities: &mut ProbabilityMap,
     regions: &[PixelRect],
 ) {
     if probabilities.width != source.width() || probabilities.height != source.height() {
         return;
     }
-    let source_rgb = source.to_rgb8();
     for region in regions {
         let bounds = region.pixel_bounds(probabilities.width, probabilities.height);
         let area = (bounds.width as usize).saturating_mul(bounds.height as usize);
-        let support = source_connected_glyph_support(&source_rgb, bounds);
+        let support = source_connected_glyph_support(source, bounds);
         if support.is_empty() || support.len() >= area {
             continue;
         }
@@ -595,11 +593,10 @@ pub(super) fn compact_cleanup_mask(
 }
 
 pub(super) fn make_inpainted_patch(
-    inpainted: &DynamicImage,
+    inpainted: &RgbImage,
     erase_mask: &CleanupMask,
 ) -> Result<PatchPng> {
     let bounds = erase_mask.bounds;
-    let image = inpainted.to_rgba8();
     let mut patch = RgbaImage::new(bounds.width, bounds.height);
     let alpha = feathered_alpha(&erase_mask.mask);
     for local_y in 0..bounds.height {
@@ -610,7 +607,7 @@ pub(super) fn make_inpainted_patch(
             if opacity == 0 {
                 continue;
             }
-            let pixel = image.get_pixel(x, y);
+            let pixel = inpainted.get_pixel(x, y);
             patch.put_pixel(
                 local_x,
                 local_y,
@@ -894,8 +891,7 @@ mod tests {
     fn verified_mask_uses_ocr_geometry_when_a_touching_bubble_label_excludes_glyphs() {
         let mut probabilities = ProbabilityMap::zeros(12, 8);
         probabilities.values[3 * 12 + 7] = 0.95;
-        let source =
-            DynamicImage::ImageRgb8(RgbImage::from_pixel(12, 8, image::Rgb([255, 255, 255])));
+        let source = RgbImage::from_pixel(12, 8, image::Rgb([255, 255, 255]));
         let bubbles = GrayImage::from_fn(12, 8, |x, _| if x < 6 { Luma([1]) } else { Luma([2]) });
         let region = TextRegion {
             x: 3.0,
@@ -920,8 +916,7 @@ mod tests {
     fn verified_mask_rejects_a_group_when_any_ocr_line_has_no_semantic_glyph_support() {
         let mut probabilities = ProbabilityMap::zeros(20, 10);
         probabilities.values[3 * 20 + 4] = 0.95;
-        let source =
-            DynamicImage::ImageRgb8(RgbImage::from_pixel(20, 10, image::Rgb([255, 255, 255])));
+        let source = RgbImage::from_pixel(20, 10, image::Rgb([255, 255, 255]));
         let bubbles = GrayImage::from_pixel(20, 10, Luma([1]));
         let regions = [
             TextRegion {
@@ -955,8 +950,7 @@ mod tests {
             }
         }
         probabilities.values[4 * 12 + 5] = 0.02;
-        let source =
-            DynamicImage::ImageRgb8(RgbImage::from_pixel(12, 8, image::Rgb([255, 255, 255])));
+        let source = RgbImage::from_pixel(12, 8, image::Rgb([255, 255, 255]));
         let bubbles = GrayImage::from_pixel(12, 8, Luma([1]));
         let region = TextRegion {
             x: 2.0,
@@ -982,8 +976,7 @@ mod tests {
             height: 8,
             values: vec![0.04; 96],
         };
-        let source =
-            DynamicImage::ImageRgb8(RgbImage::from_pixel(12, 8, image::Rgb([255, 255, 255])));
+        let source = RgbImage::from_pixel(12, 8, image::Rgb([255, 255, 255]));
         let bubbles = GrayImage::from_pixel(12, 8, Luma([1]));
         let region = TextRegion {
             x: 2.0,
@@ -1014,7 +1007,6 @@ mod tests {
         for x in 5..=8 {
             source.put_pixel(x, 5, image::Rgb([24, 24, 24]));
         }
-        let source = DynamicImage::ImageRgb8(source);
         let bubbles = GrayImage::from_pixel(14, 10, Luma([1]));
         let region = TextRegion {
             x: 3.0,
@@ -1045,7 +1037,6 @@ mod tests {
         for x in 5..=8 {
             source.put_pixel(x, 5, image::Rgb([18, 18, 18]));
         }
-        let source = DynamicImage::ImageRgb8(source);
         let bubbles = GrayImage::from_pixel(14, 10, Luma([1]));
         let region = TextRegion {
             x: 3.0,
@@ -1068,8 +1059,7 @@ mod tests {
     #[test]
     fn verified_mask_rejects_flat_source_when_probability_map_is_all_zero() {
         let probabilities = ProbabilityMap::zeros(14, 10);
-        let source =
-            DynamicImage::ImageRgb8(RgbImage::from_pixel(14, 10, image::Rgb([72, 72, 72])));
+        let source = RgbImage::from_pixel(14, 10, image::Rgb([72, 72, 72]));
         let bubbles = GrayImage::from_pixel(14, 10, Luma([1]));
         let region = TextRegion {
             x: 3.0,
@@ -1180,8 +1170,7 @@ mod tests {
 
     #[test]
     fn inpainted_patch_alpha_follows_the_semantic_mask() {
-        let image =
-            DynamicImage::ImageRgba8(RgbaImage::from_pixel(12, 12, Rgba([90, 100, 110, 255])));
+        let image = RgbImage::from_pixel(12, 12, image::Rgb([90, 100, 110]));
         let mut mask = GrayImage::new(12, 12);
         for y in 4..8 {
             for x in 4..8 {
@@ -1192,6 +1181,7 @@ mod tests {
             compact_cleanup_mask(&mask, PixelRect::new(0.0, 0.0, 12.0, 12.0).unwrap()).unwrap();
         let patch = make_inpainted_patch(&image, &cleanup).unwrap();
         let decoded = image::load_from_memory(&patch.bytes).unwrap().to_rgba8();
+        assert_eq!(decoded.get_pixel(5, 5).0[..3], [90, 100, 110]);
         assert_eq!(decoded.get_pixel(0, 0).0[3], 0);
         assert!(decoded.pixels().any(|pixel| pixel.0[3] > 0));
     }

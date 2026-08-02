@@ -12,8 +12,8 @@ use tracing::instrument;
 use crate::{
     device,
     inpainting::{
-        HdStrategyConfig, InpaintForward, apply_bubble_fill, binarize_mask, extract_alpha,
-        restore_alpha_channel, run_inpaint, run_inpaint_with_windows,
+        HdStrategyConfig, InpaintForward, apply_bubble_fill, extract_alpha, restore_alpha_channel,
+        run_inpaint, run_inpaint_with_windows,
     },
     loading,
     types::TextRegion,
@@ -127,31 +127,17 @@ impl Lama {
             );
         }
 
-        let binary_mask = binarize_mask(mask);
-        let bubble_mask = bubble_mask.to_luma8();
+        let mask_gray = mask.to_luma8();
+        let bubble_mask_gray = bubble_mask.to_luma8();
         let image_rgb = image.to_rgb8();
-        let crop_windows = text_blocks
-            .filter(|blocks| !blocks.is_empty())
-            .map(|blocks| crop_windows_from_text_blocks(blocks, image.width(), image.height()))
-            .filter(|windows| !windows.is_empty());
-        let forward = LamaForward { lama: self };
-        let output_rgb = if let Some(windows) = crop_windows.as_deref() {
-            tracing::debug!(
-                text_block_count = text_blocks.map_or(0, <[TextRegion]>::len),
-                crop_window_count = windows.len(),
-                "lama text-aware crop planning"
-            );
-            run_inpaint_with_windows(
-                &forward,
-                &image_rgb,
-                &binary_mask,
-                Some(&bubble_mask),
-                cfg,
-                Some(windows),
-            )?
-        } else {
-            run_inpaint(&forward, &image_rgb, &binary_mask, Some(&bubble_mask), cfg)?
-        };
+        let binary_mask = binarize_gray_mask(&mask_gray);
+        let output_rgb = self.inference_rgb_with_binary_mask_and_blocks(
+            &image_rgb,
+            &binary_mask,
+            &bubble_mask_gray,
+            text_blocks,
+            cfg,
+        )?;
 
         if image.color().has_alpha() {
             let original_alpha = image.to_rgba8();
@@ -160,6 +146,70 @@ impl Lama {
             Ok(DynamicImage::ImageRgba8(output))
         } else {
             Ok(DynamicImage::ImageRgb8(output_rgb))
+        }
+    }
+
+    /// Run the manga-tuned default inpainting strategy without materializing
+    /// a second full-page image representation. Browser callers keep their
+    /// canonical RGB source borrowed through the complete hot path.
+    #[instrument(level = "debug", skip_all)]
+    pub fn inference_rgb_with_blocks(
+        &self,
+        image: &RgbImage,
+        mask: &GrayImage,
+        bubble_mask: &GrayImage,
+        text_blocks: &[TextRegion],
+    ) -> Result<RgbImage> {
+        let binary_mask = binarize_gray_mask(mask);
+        self.inference_rgb_with_binary_mask_and_blocks(
+            image,
+            &binary_mask,
+            bubble_mask,
+            Some(text_blocks),
+            &HdStrategyConfig::lama_default(),
+        )
+    }
+
+    fn inference_rgb_with_binary_mask_and_blocks(
+        &self,
+        image: &RgbImage,
+        binary_mask: &GrayImage,
+        bubble_mask: &GrayImage,
+        text_blocks: Option<&[TextRegion]>,
+        cfg: &HdStrategyConfig,
+    ) -> Result<RgbImage> {
+        if image.dimensions() != binary_mask.dimensions()
+            || image.dimensions() != bubble_mask.dimensions()
+        {
+            bail!(
+                "image/mask/bubble dimensions dismatch: image is {:?}, mask is {:?}, bubble is {:?}",
+                image.dimensions(),
+                binary_mask.dimensions(),
+                bubble_mask.dimensions()
+            );
+        }
+
+        let crop_windows = text_blocks
+            .filter(|blocks| !blocks.is_empty())
+            .map(|blocks| crop_windows_from_text_blocks(blocks, image.width(), image.height()))
+            .filter(|windows| !windows.is_empty());
+        let forward = LamaForward { lama: self };
+        if let Some(windows) = crop_windows.as_deref() {
+            tracing::debug!(
+                text_block_count = text_blocks.map_or(0, <[TextRegion]>::len),
+                crop_window_count = windows.len(),
+                "lama text-aware crop planning"
+            );
+            run_inpaint_with_windows(
+                &forward,
+                image,
+                &binary_mask,
+                Some(bubble_mask),
+                cfg,
+                Some(windows),
+            )
+        } else {
+            run_inpaint(&forward, image, &binary_mask, Some(bubble_mask), cfg)
         }
     }
 
@@ -209,6 +259,14 @@ impl Lama {
         RgbImage::from_raw(width as u32, height as u32, raw)
             .ok_or_else(|| anyhow::anyhow!("failed to create image buffer from model output"))
     }
+}
+
+fn binarize_gray_mask(mask: &GrayImage) -> GrayImage {
+    let mut binary = mask.clone();
+    for pixel in binary.pixels_mut() {
+        pixel.0[0] = if pixel.0[0] > 127 { 255 } else { 0 };
+    }
+    binary
 }
 
 /// [`InpaintForward`] impl used by the HD-strategy dispatcher. Applies the
@@ -356,7 +414,7 @@ mod tests {
     use crate::types::TextRegion;
     use image::{GrayImage, Luma, Rgb, RgbImage};
 
-    use super::{crop_windows_from_text_blocks, enlarge_window};
+    use super::{binarize_gray_mask, crop_windows_from_text_blocks, enlarge_window};
 
     const ALPHA_RING_RADIUS: u8 = 7;
 
@@ -418,5 +476,12 @@ mod tests {
         assert!(windows[0][1] <= 100);
         assert!(windows[0][2] >= 185);
         assert!(windows[0][3] >= 145);
+    }
+
+    #[test]
+    fn rgb_inference_path_binarizes_borrowed_gray_masks() {
+        let mask = GrayImage::from_fn(2, 1, |x, _| Luma([if x == 0 { 127 } else { 128 }]));
+
+        assert_eq!(binarize_gray_mask(&mask).as_raw(), &[0, 255]);
     }
 }

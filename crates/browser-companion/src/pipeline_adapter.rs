@@ -472,7 +472,9 @@ impl KoharuPipeline {
                 .map(|candidate| candidate.text_rect)
                 .collect::<Vec<_>>();
             merge_source_guided_glyph_probabilities(
-                source.as_ref(),
+                source
+                    .as_rgb8()
+                    .expect("browser source images are canonical RGB"),
                 &mut text_probabilities,
                 &regions,
             );
@@ -2682,13 +2684,16 @@ async fn prepare_grouped_regions(
     let source_for_cleanup = source.clone();
     let (cleaned_groups, erase_mask, text_blocks, bubble_mask, text_probabilities) = preprocessing
         .run(move || {
+            let source_rgb = source_for_cleanup
+                .as_rgb8()
+                .expect("browser source images are canonical RGB");
             let bubble_image = DynamicImage::ImageLuma8(bubble_mask.clone());
             let mut erase_mask = image::GrayImage::new(image_width, image_height);
             let mut all_text_blocks = Vec::new();
             let mut cleaned_groups = Vec::with_capacity(grouped.len());
             for group in grouped {
                 let learned_mask = verified_text_mask_for_regions(
-                    source_for_cleanup.as_ref(),
+                    source_rgb,
                     &text_probabilities,
                     &bubble_mask,
                     &group.cleanup_blocks,
@@ -2743,10 +2748,12 @@ async fn prepare_grouped_regions(
         .inpainter
         .lock()
         .map_err(|_| CleaningError::new("MODEL_STATE_FAILED", "Inpainter lock poisoned."))?
-        .inference_with_blocks(
-            source.as_ref(),
-            &DynamicImage::ImageLuma8(erase_mask.clone()),
-            &DynamicImage::ImageLuma8(bubble_mask.clone()),
+        .inference_rgb_with_blocks(
+            source
+                .as_rgb8()
+                .expect("browser source images are canonical RGB"),
+            &erase_mask,
+            &bubble_mask,
             &text_blocks,
         )
         .context("restore artwork with the manga inpainter")
