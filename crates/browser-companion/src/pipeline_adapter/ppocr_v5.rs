@@ -21,6 +21,9 @@ pub(super) const MAX_LINE_BATCH_SIZE: usize = 8;
 const MODEL_HEIGHT: usize = 48;
 const MODEL_BASE_WIDTH: usize = 320;
 const MODEL_MAX_WIDTH: usize = 3_200;
+const MODEL_WIDTH_BUCKETS: &[usize] = &[
+    320, 640, 960, 1_280, 1_600, 1_920, 2_240, 2_560, 2_880, 3_200,
+];
 const EXPECTED_CLASSES: usize = 438;
 const EXPECTED_INPUT_NAME: &str = "x";
 const EXPECTED_OUTPUT_NAME: &str = "fetch_name_0";
@@ -122,6 +125,48 @@ struct LineSample {
     region_index: usize,
     image: DynamicImage,
     bounds: CropBounds,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct LineBatchPlan {
+    width: usize,
+    indices: Vec<usize>,
+}
+
+fn raw_line_model_width(image_width: u32, image_height: u32) -> usize {
+    ((MODEL_HEIGHT as f64 * image_width as f64 / image_height.max(1) as f64) as usize)
+        .clamp(MODEL_BASE_WIDTH, MODEL_MAX_WIDTH)
+}
+
+fn line_model_width_bucket(image_width: u32, image_height: u32) -> usize {
+    let raw_width = raw_line_model_width(image_width, image_height);
+    MODEL_WIDTH_BUCKETS
+        .iter()
+        .copied()
+        .find(|bucket| raw_width <= *bucket)
+        .unwrap_or(MODEL_MAX_WIDTH)
+}
+
+fn width_bucket_line_batches(lines: &[LineSample]) -> Vec<LineBatchPlan> {
+    let mut buckets = Vec::<(usize, Vec<usize>)>::new();
+    for (index, line) in lines.iter().enumerate() {
+        let width = line_model_width_bucket(line.image.width(), line.image.height());
+        if let Some((_, indices)) = buckets.iter_mut().find(|(bucket, _)| *bucket == width) {
+            indices.push(index);
+        } else {
+            buckets.push((width, vec![index]));
+        }
+    }
+    let mut plans = Vec::new();
+    for (width, indices) in buckets {
+        for chunk in indices.chunks(MAX_LINE_BATCH_SIZE) {
+            plans.push(LineBatchPlan {
+                width,
+                indices: chunk.to_vec(),
+            });
+        }
+    }
+    plans
 }
 
 impl EnglishPpOcrV5 {
@@ -259,9 +304,23 @@ impl EnglishPpOcrV5 {
         let mut grouped = (0..block_crops.len())
             .map(|_| Vec::<(DecodeResult, CropBounds)>::new())
             .collect::<Vec<_>>();
-        for line_batch in lines.chunks(MAX_LINE_BATCH_SIZE) {
-            let decoded = self.run_line_batch(line_batch)?;
-            for (line, prediction) in line_batch.iter().zip(decoded) {
+        let mut decoded_primary = lines
+            .iter()
+            .map(|_| None::<DecodeResult>)
+            .collect::<Vec<_>>();
+        for batch in width_bucket_line_batches(&lines) {
+            let line_batch = batch
+                .indices
+                .iter()
+                .map(|&index| &lines[index])
+                .collect::<Vec<_>>();
+            let decoded = self.run_line_batch(&line_batch, batch.width)?;
+            for (index, prediction) in batch.indices.into_iter().zip(decoded) {
+                decoded_primary[index] = Some(prediction);
+            }
+        }
+        for (index, line) in lines.iter().enumerate() {
+            if let Some(prediction) = decoded_primary[index].take() {
                 grouped[line.region_index].push((prediction, line.bounds));
             }
         }
@@ -270,42 +329,56 @@ impl EnglishPpOcrV5 {
         // is only created when the primary lines leave substantial vertical
         // headroom, and its result is merged by containment so ordinary
         // dialogue never receives duplicate OCR text.
-        for line_batch in supplemental_lines.chunks(MAX_LINE_BATCH_SIZE) {
-            let decoded = self.run_line_batch(line_batch)?;
-            for (line, prediction) in line_batch.iter().zip(decoded) {
-                if prediction.confidence < 0.65 || prediction.text.trim().len() < 2 {
-                    continue;
+        let mut decoded_supplemental = supplemental_lines
+            .iter()
+            .map(|_| None::<DecodeResult>)
+            .collect::<Vec<_>>();
+        for batch in width_bucket_line_batches(&supplemental_lines) {
+            let line_batch = batch
+                .indices
+                .iter()
+                .map(|&index| &supplemental_lines[index])
+                .collect::<Vec<_>>();
+            let decoded = self.run_line_batch(&line_batch, batch.width)?;
+            for (index, prediction) in batch.indices.into_iter().zip(decoded) {
+                decoded_supplemental[index] = Some(prediction);
+            }
+        }
+        for (index, line) in supplemental_lines.iter().enumerate() {
+            let Some(prediction) = decoded_supplemental[index].take() else {
+                continue;
+            };
+            if prediction.confidence < 0.65 || prediction.text.trim().len() < 2 {
+                continue;
+            }
+            let normalized = normalized_line_text(&prediction.text);
+            if normalized.is_empty() {
+                continue;
+            }
+            let existing = &mut grouped[line.region_index];
+            let mut replaced = false;
+            for (current, current_bounds) in existing.iter_mut() {
+                let current_normalized = normalized_line_text(&current.text);
+                if crop_bounds_vertical_overlap(*current_bounds, line.bounds) >= 0.35 {
+                    // The supplemental crop deliberately overlaps the last
+                    // primary line for context. It is a recovery view, not
+                    // another line; retaining it would duplicate clipped
+                    // OCR (for example `TELL...` repeated three times).
+                    replaced = true;
+                    break;
                 }
-                let normalized = normalized_line_text(&prediction.text);
-                if normalized.is_empty() {
-                    continue;
+                if current_normalized == normalized || current_normalized.contains(&normalized) {
+                    replaced = true;
+                    break;
                 }
-                let existing = &mut grouped[line.region_index];
-                let mut replaced = false;
-                for (current, current_bounds) in existing.iter_mut() {
-                    let current_normalized = normalized_line_text(&current.text);
-                    if crop_bounds_vertical_overlap(*current_bounds, line.bounds) >= 0.35 {
-                        // The supplemental crop deliberately overlaps the last
-                        // primary line for context. It is a recovery view, not
-                        // another line; retaining it would duplicate clipped
-                        // OCR (for example `TELL...` repeated three times).
-                        replaced = true;
-                        break;
-                    }
-                    if current_normalized == normalized || current_normalized.contains(&normalized)
-                    {
-                        replaced = true;
-                        break;
-                    }
-                    if normalized.contains(&current_normalized) && current_normalized.len() >= 3 {
-                        *current = prediction.clone();
-                        replaced = true;
-                        break;
-                    }
+                if normalized.contains(&current_normalized) && current_normalized.len() >= 3 {
+                    *current = prediction.clone();
+                    replaced = true;
+                    break;
                 }
-                if !replaced {
-                    existing.push((prediction, line.bounds));
-                }
+            }
+            if !replaced {
+                existing.push((prediction, line.bounds));
             }
         }
 
@@ -385,8 +458,12 @@ impl EnglishPpOcrV5 {
             .collect())
     }
 
-    fn run_line_batch(&mut self, lines: &[LineSample]) -> Result<Vec<DecodeResult>> {
-        let target_width = preprocess_line_batch(lines, &mut self.input_buffer)?;
+    fn run_line_batch(
+        &mut self,
+        lines: &[&LineSample],
+        target_width: usize,
+    ) -> Result<Vec<DecodeResult>> {
+        let target_width = preprocess_line_batch(lines, target_width, &mut self.input_buffer)?;
         let batch = lines.len();
         let input = TensorRef::from_array_view((
             [batch, 3, MODEL_HEIGHT, target_width],
@@ -636,19 +713,23 @@ fn parse_pinned_yaml_scalar(raw: &str) -> Result<String> {
     Ok(raw.to_owned())
 }
 
-fn preprocess_line_batch(lines: &[LineSample], buffer: &mut Vec<f32>) -> Result<usize> {
+fn preprocess_line_batch(
+    lines: &[&LineSample],
+    target_width: usize,
+    buffer: &mut Vec<f32>,
+) -> Result<usize> {
     if lines.is_empty() || lines.len() > MAX_LINE_BATCH_SIZE {
         bail!("PP-OCRv5 line batch must contain 1..={MAX_LINE_BATCH_SIZE} images");
     }
-    let max_ratio = lines.iter().fold(
-        MODEL_BASE_WIDTH as f64 / MODEL_HEIGHT as f64,
-        |current, line| {
-            let (width, height) = line.image.dimensions();
-            current.max(width as f64 / height.max(1) as f64)
-        },
-    );
-    let target_width =
-        ((MODEL_HEIGHT as f64 * max_ratio) as usize).clamp(MODEL_BASE_WIDTH, MODEL_MAX_WIDTH);
+    if !MODEL_WIDTH_BUCKETS.contains(&target_width) {
+        bail!("PP-OCRv5 line batch width {target_width} is not a model bucket");
+    }
+    if lines
+        .iter()
+        .any(|line| line_model_width_bucket(line.image.width(), line.image.height()) > target_width)
+    {
+        bail!("PP-OCRv5 line batch contains a crop wider than its model bucket");
+    }
     let element_count = lines
         .len()
         .checked_mul(3)
@@ -1408,6 +1489,87 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    fn line_sample_for_test(region_index: usize, width: u32, height: u32) -> LineSample {
+        LineSample {
+            region_index,
+            image: DynamicImage::ImageRgb8(RgbImage::new(width, height)),
+            bounds: CropBounds {
+                left: 0,
+                top: 0,
+                right: width,
+                bottom: height,
+            },
+        }
+    }
+
+    #[test]
+    fn line_width_buckets_round_up_and_keep_first_seen_sample_order() {
+        assert_eq!(raw_line_model_width(319, 48), 320);
+        assert_eq!(line_model_width_bucket(319, 48), 320);
+        assert_eq!(line_model_width_bucket(320, 48), 320);
+        assert_eq!(line_model_width_bucket(640, 48), 640);
+        assert_eq!(line_model_width_bucket(641, 48), 960);
+        assert_eq!(line_model_width_bucket(3_201, 48), 3_200);
+
+        let lines = vec![
+            line_sample_for_test(7, 641, 48),
+            line_sample_for_test(8, 319, 48),
+            line_sample_for_test(9, 641, 48),
+            line_sample_for_test(10, 1_280, 48),
+        ];
+        let plans = width_bucket_line_batches(&lines);
+
+        assert_eq!(
+            plans,
+            vec![
+                LineBatchPlan {
+                    width: 960,
+                    indices: vec![0, 2],
+                },
+                LineBatchPlan {
+                    width: 320,
+                    indices: vec![1],
+                },
+                LineBatchPlan {
+                    width: 1_280,
+                    indices: vec![3],
+                },
+            ]
+        );
+        assert_eq!(
+            plans
+                .iter()
+                .map(|plan| plan
+                    .indices
+                    .iter()
+                    .map(|&index| lines[index].region_index)
+                    .collect::<Vec<_>>())
+                .collect::<Vec<_>>(),
+            vec![vec![7, 9], vec![8], vec![10]]
+        );
+    }
+
+    #[test]
+    fn width_bucket_batches_never_exceed_the_model_batch_limit() {
+        let lines = (0..17)
+            .map(|region_index| line_sample_for_test(region_index, 640, 48))
+            .collect::<Vec<_>>();
+        let plans = width_bucket_line_batches(&lines);
+
+        assert!(
+            plans
+                .iter()
+                .all(|plan| plan.indices.len() <= MAX_LINE_BATCH_SIZE)
+        );
+        assert_eq!(
+            plans
+                .iter()
+                .flat_map(|plan| plan.indices.iter().copied())
+                .collect::<Vec<_>>(),
+            (0..17).collect::<Vec<_>>()
+        );
     }
 
     #[test]
