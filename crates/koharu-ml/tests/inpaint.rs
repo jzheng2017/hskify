@@ -13,17 +13,13 @@ async fn lama_inpainting_updates_masked_region() -> anyhow::Result<()> {
 
     let runtime = support::cpu_runtime();
     let lama = Lama::load(&runtime, false).await?;
-    let base = image::open(fixtures.join("image.jpg"))?;
-    let mask = image::open(fixtures.join("mask.png"))?;
-    let bubble_mask = image::open(fixtures.join("mask.png"))?;
+    let base = image::open(fixtures.join("image.jpg"))?.to_rgb8();
+    let mask = image::open(fixtures.join("mask.png"))?.to_luma8();
+    let bubble_mask = image::open(fixtures.join("mask.png"))?.to_luma8();
 
-    let output = lama.inference(&base, &mask, &bubble_mask)?;
+    let output = lama.inference_rgb_with_blocks(&base, &mask, &bubble_mask, &[])?;
 
     assert_eq!(output.dimensions(), base.dimensions());
-
-    let mask = mask.to_luma8();
-    let base = base.to_rgb8();
-    let output = output.to_rgb8();
 
     let mut changed = false;
     for ((mask_px, base_px), out_px) in mask.pixels().zip(base.pixels()).zip(output.pixels()) {

@@ -993,7 +993,7 @@ fn feathered_alpha(mask: &GrayImage) -> GrayImage {
 
 #[cfg(test)]
 mod tests {
-    use koharu_ml::inpainting::{expand_gray_mask_for_inpainting, expand_mask_for_inpainting};
+    use koharu_ml::inpainting::expand_mask_for_inpainting;
 
     use super::*;
 
@@ -1006,11 +1006,7 @@ mod tests {
     ) -> Option<CleanupMask> {
         let verified =
             verified_text_mask_for_regions(source, probabilities, bubbles, regions, 0.1)?;
-        let expanded = expand_mask_for_inpainting(
-            &DynamicImage::ImageLuma8(verified),
-            &DynamicImage::ImageLuma8(bubbles.clone()),
-            regions,
-        );
+        let expanded = expand_mask_for_inpainting(&verified, bubbles, regions);
         compact_cleanup_mask(&expanded, support)
     }
 
@@ -1049,8 +1045,7 @@ mod tests {
                 ..region.clone()
             })
             .collect::<Vec<_>>();
-        let expanded =
-            expand_gray_mask_for_inpainting(&verified.mask, &local_bubbles, &local_regions);
+        let expanded = expand_mask_for_inpainting(&verified.mask, &local_bubbles, &local_regions);
         let local_support = PixelRect {
             x0: support.x0 - verified.bounds.x as f32,
             y0: support.y0 - verified.bounds.y as f32,

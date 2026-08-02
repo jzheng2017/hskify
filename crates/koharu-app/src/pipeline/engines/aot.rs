@@ -30,8 +30,8 @@ impl Engine for Model {
             .ok_or_else(|| anyhow!("no Segment mask on page"))?;
         let (_, bubble_ref) = find_mask_node(ctx.scene, ctx.page, MaskRole::Bubble)
             .ok_or_else(|| anyhow!("no Bubble mask on page"))?;
-        let mask = ctx.blobs.load_image(&mask_ref)?;
-        let bubble_mask = ctx.blobs.load_image(&bubble_ref)?;
+        let mask = ctx.blobs.load_image(&mask_ref)?.to_luma8();
+        let bubble_mask = ctx.blobs.load_image(&bubble_ref)?.to_luma8();
 
         let (image, mask, bubble_mask) = match ctx.options.region {
             Some(r) => {
@@ -54,11 +54,13 @@ impl Engine for Model {
             .collect();
         let expanded = expand_mask_for_inpainting(&mask, &bubble_mask, &text_blocks);
         let mask = match ctx.options.region {
-            Some(r) => clip_mask_to_region(&DynamicImage::ImageLuma8(expanded), &r),
+            Some(r) => DynamicImage::ImageLuma8(clip_mask_to_region(&expanded, &r)),
             None => DynamicImage::ImageLuma8(expanded),
         };
 
-        let result = self.0.inference(&image, &mask, &bubble_mask)?;
+        let result = self
+            .0
+            .inference(&image, &mask, &DynamicImage::ImageLuma8(bubble_mask))?;
         let (w, h) = image_dimensions(&result);
         let blob = ctx.blobs.put_webp(&result)?;
         Ok(vec![upsert_image_blob(
@@ -72,8 +74,7 @@ impl Engine for Model {
     }
 }
 
-fn clip_mask_to_region(mask: &DynamicImage, region: &Region) -> DynamicImage {
-    let src = mask.to_luma8();
+fn clip_mask_to_region(src: &GrayImage, region: &Region) -> GrayImage {
     let (w, h) = src.dimensions();
     let x0 = region.x.min(w);
     let y0 = region.y.min(h);
@@ -86,7 +87,7 @@ fn clip_mask_to_region(mask: &DynamicImage, region: &Region) -> DynamicImage {
             clipped.put_pixel(x, y, Luma([src.get_pixel(x, y).0[0]]));
         }
     }
-    DynamicImage::ImageLuma8(clipped)
+    clipped
 }
 
 inventory::submit! {

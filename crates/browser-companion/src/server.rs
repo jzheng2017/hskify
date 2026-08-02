@@ -503,16 +503,6 @@ impl JobUpdateSink {
         &self.record.job_id
     }
 
-    /// Store one PNG patch and return the descriptor to place in a region
-    /// update. Sequence assignment remains separate and atomic in `publish`.
-    pub fn store_patch_png(
-        &self,
-        rect: NormalizedRect,
-        bytes: Vec<u8>,
-    ) -> Result<RegionPatch, PublishError> {
-        self.store_generated_patch_png(rect, bytes)
-    }
-
     pub(crate) fn store_generated_patch_png(
         &self,
         rect: NormalizedRect,

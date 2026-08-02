@@ -32,7 +32,7 @@ use koharu_app::llm::{
 };
 use koharu_app::{App, AppConfig};
 use koharu_ml::comic_text_bubble_detector::{ComicTextBubbleDetector, DETECTOR_TILE_BATCH_SIZE};
-use koharu_ml::inpainting::expand_gray_mask_for_inpainting;
+use koharu_ml::inpainting::expand_mask_for_inpainting;
 use koharu_ml::lama::Lama;
 use koharu_ml::manga_text_segmentation_2025::{DEFAULT_TEXT_MASK_THRESHOLD, MangaTextSegmentation};
 use koharu_ml::probability_map::ProbabilityMap;
@@ -1706,21 +1706,20 @@ impl ResidentState {
             .recognize_regions(&[DynamicImage::ImageRgb8(ocr_pixels)], &[ocr_probabilities])
             .context("prime PP-OCRv5 CUDA inference and dynamic output allocation")?;
 
-        let inpaint_image =
-            DynamicImage::ImageRgb8(RgbImage::from_pixel(512, 512, Rgb([255, 255, 255])));
+        let inpaint_image = RgbImage::from_pixel(512, 512, Rgb([255, 255, 255]));
         let mut inpaint_mask = GrayImage::new(512, 512);
         for y in 220..292 {
             for x in 176..336 {
                 inpaint_mask.put_pixel(x, y, Luma([255]));
             }
         }
-        let inpaint_bubble = DynamicImage::ImageLuma8(GrayImage::from_pixel(512, 512, Luma([255])));
+        let inpaint_bubble = GrayImage::from_pixel(512, 512, Luma([255]));
         self.inpainter
             .lock()
             .map_err(|_| anyhow!("inpainter lock poisoned during inference warm-up"))?
-            .inference_with_blocks(
+            .inference_rgb_with_blocks(
                 &inpaint_image,
-                &DynamicImage::ImageLuma8(inpaint_mask),
+                &inpaint_mask,
                 &inpaint_bubble,
                 &[TextRegion {
                     x: 176.0,
@@ -2761,7 +2760,7 @@ async fn prepare_grouped_regions(
                                 ..block.clone()
                             })
                             .collect::<Vec<_>>();
-                        let expanded_local = expand_gray_mask_for_inpainting(
+                        let expanded_local = expand_mask_for_inpainting(
                             &learned_mask.mask,
                             &local_bubble_mask,
                             &local_blocks,

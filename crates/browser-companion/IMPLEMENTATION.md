@@ -299,7 +299,7 @@ The server validates the PNG and its normalized rectangle, enforces a 16 MiB
 per-patch limit and 256 MiB total retained source/patch budget, stores it under
 the owning job, and returns a blob descriptor.
 
-`publish_region` calls `store_patch_png` before appending `regionReady`.
+`publish_region` calls `store_generated_patch_png` before appending `regionReady`.
 Firefox then fetches and validates the patch, decodes it, inserts it into the
 patch layer, and inserts selectable text synchronously afterward. This ordering
 prevents Chinese text from appearing over uncleaned English.

@@ -34,21 +34,21 @@ impl Engine for Model {
             .ok_or_else(|| anyhow!("no Segment mask on page"))?;
         let (_, bubble_ref) = find_mask_node(ctx.scene, ctx.page, MaskRole::Bubble)
             .ok_or_else(|| anyhow!("no Bubble mask on page"))?;
-        let mask = ctx.blobs.load_image(&mask_ref)?;
-        let bubble_mask = ctx.blobs.load_image(&bubble_ref)?;
+        let mask = ctx.blobs.load_image(&mask_ref)?.to_luma8();
+        let bubble_mask = ctx.blobs.load_image(&bubble_ref)?.to_luma8();
 
         let (image, mask, bubble_mask) = match ctx.options.region {
             Some(r) => {
                 let base = match find_image_node(ctx.scene, ctx.page, ImageRole::Inpainted) {
-                    Some((_, blob)) => ctx.blobs.load_image(&blob)?,
-                    None => load_source_image(ctx.scene, ctx.page, ctx.blobs)?,
+                    Some((_, blob)) => ctx.blobs.load_image(&blob)?.to_rgb8(),
+                    None => load_source_image(ctx.scene, ctx.page, ctx.blobs)?.to_rgb8(),
                 };
                 let clipped_mask = clip_mask_to_region(&mask, &r);
                 let clipped_bubble = clip_mask_to_region(&bubble_mask, &r);
                 (base, clipped_mask, clipped_bubble)
             }
             None => {
-                let image = load_source_image(ctx.scene, ctx.page, ctx.blobs)?;
+                let image = load_source_image(ctx.scene, ctx.page, ctx.blobs)?.to_rgb8();
                 (image, mask, bubble_mask)
             }
         };
@@ -59,18 +59,15 @@ impl Engine for Model {
             .collect::<Vec<_>>();
         let expanded = expand_mask_for_inpainting(&mask, &bubble_mask, &text_blocks);
         let mask = match ctx.options.region {
-            Some(r) => clip_mask_to_region(&DynamicImage::ImageLuma8(expanded), &r),
-            None => DynamicImage::ImageLuma8(expanded),
+            Some(r) => clip_mask_to_region(&expanded, &r),
+            None => expanded,
         };
-
-        let result = if text_blocks.is_empty() {
-            self.0.inference(&image, &mask, &bubble_mask)?
-        } else {
-            self.0
-                .inference_with_blocks(&image, &mask, &bubble_mask, &text_blocks)?
-        };
-        let (w, h) = image_dimensions(&result);
-        let blob = ctx.blobs.put_webp(&result)?;
+        let result = self
+            .0
+            .inference_rgb_with_blocks(&image, &mask, &bubble_mask, &text_blocks)?;
+        let output = DynamicImage::ImageRgb8(result);
+        let (w, h) = image_dimensions(&output);
+        let blob = ctx.blobs.put_webp(&output)?;
         Ok(vec![upsert_image_blob(
             ctx.scene,
             ctx.page,
@@ -85,8 +82,7 @@ impl Engine for Model {
 /// Zero out every pixel of `mask` that falls outside `region`. The Crop
 /// strategy's `boxes_from_mask` then only finds contours inside the region,
 /// so the inpainter only touches that area.
-fn clip_mask_to_region(mask: &DynamicImage, region: &Region) -> DynamicImage {
-    let src = mask.to_luma8();
+fn clip_mask_to_region(src: &GrayImage, region: &Region) -> GrayImage {
     let (w, h) = src.dimensions();
     let x0 = region.x.min(w);
     let y0 = region.y.min(h);
@@ -99,7 +95,7 @@ fn clip_mask_to_region(mask: &DynamicImage, region: &Region) -> DynamicImage {
             clipped.put_pixel(x, y, Luma([src.get_pixel(x, y).0[0]]));
         }
     }
-    DynamicImage::ImageLuma8(clipped)
+    clipped
 }
 
 inventory::submit! {

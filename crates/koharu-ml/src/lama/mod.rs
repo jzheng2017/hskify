@@ -5,15 +5,14 @@ use std::path::Path;
 
 use anyhow::{Result, bail};
 use candle_core::{DType, Device, Tensor};
-use image::{DynamicImage, GenericImageView, GrayImage, RgbImage};
+use image::{GenericImageView, GrayImage, RgbImage};
 use koharu_runtime::RuntimeManager;
 use tracing::instrument;
 
 use crate::{
     device,
     inpainting::{
-        HdStrategyConfig, InpaintForward, apply_bubble_fill, extract_alpha, restore_alpha_channel,
-        run_inpaint, run_inpaint_with_windows,
+        HdStrategyConfig, InpaintForward, apply_bubble_fill, run_inpaint, run_inpaint_with_windows,
     },
     loading,
     types::TextRegion,
@@ -56,102 +55,9 @@ impl Lama {
         Ok(Self { model, device })
     }
 
-    /// Run inpainting with the manga-tuned default strategy (Crop, 800/128/1280).
-    #[instrument(level = "debug", skip_all)]
-    pub fn inference(
-        &self,
-        image: &DynamicImage,
-        mask: &DynamicImage,
-        bubble_mask: &DynamicImage,
-    ) -> Result<DynamicImage> {
-        self.inference_with_config_and_blocks(
-            image,
-            mask,
-            bubble_mask,
-            None,
-            &HdStrategyConfig::lama_default(),
-        )
-    }
-
-    /// Run inpainting with scene text regions as crop-planning hints. LaMa
-    /// uses these to build larger semantic windows than raw mask contours.
-    #[instrument(level = "debug", skip_all)]
-    pub fn inference_with_blocks(
-        &self,
-        image: &DynamicImage,
-        mask: &DynamicImage,
-        bubble_mask: &DynamicImage,
-        text_blocks: &[TextRegion],
-    ) -> Result<DynamicImage> {
-        self.inference_with_config_and_blocks(
-            image,
-            mask,
-            bubble_mask,
-            Some(text_blocks),
-            &HdStrategyConfig::lama_default(),
-        )
-    }
-
-    /// Run inpainting with a caller-supplied [`HdStrategyConfig`]. Use this to
-    /// pick a different strategy (Original / Resize) or tune the trigger /
-    /// margin / resize-limit for GPUs with less VRAM.
-    #[instrument(level = "debug", skip_all)]
-    pub fn inference_with_config(
-        &self,
-        image: &DynamicImage,
-        mask: &DynamicImage,
-        bubble_mask: &DynamicImage,
-        cfg: &HdStrategyConfig,
-    ) -> Result<DynamicImage> {
-        self.inference_with_config_and_blocks(image, mask, bubble_mask, None, cfg)
-    }
-
-    /// Variant of [`Self::inference_with_config`] that also accepts text
-    /// regions for crop planning.
-    #[instrument(level = "debug", skip_all)]
-    pub fn inference_with_config_and_blocks(
-        &self,
-        image: &DynamicImage,
-        mask: &DynamicImage,
-        bubble_mask: &DynamicImage,
-        text_blocks: Option<&[TextRegion]>,
-        cfg: &HdStrategyConfig,
-    ) -> Result<DynamicImage> {
-        if image.dimensions() != mask.dimensions() || image.dimensions() != bubble_mask.dimensions()
-        {
-            bail!(
-                "image/mask/bubble dimensions dismatch: image is {:?}, mask is {:?}, bubble is {:?}",
-                image.dimensions(),
-                mask.dimensions(),
-                bubble_mask.dimensions()
-            );
-        }
-
-        let mask_gray = mask.to_luma8();
-        let bubble_mask_gray = bubble_mask.to_luma8();
-        let image_rgb = image.to_rgb8();
-        let binary_mask = binarize_gray_mask(&mask_gray);
-        let output_rgb = self.inference_rgb_with_binary_mask_and_blocks(
-            &image_rgb,
-            &binary_mask,
-            &bubble_mask_gray,
-            text_blocks,
-            cfg,
-        )?;
-
-        if image.color().has_alpha() {
-            let original_alpha = image.to_rgba8();
-            let alpha = extract_alpha(&original_alpha);
-            let output = restore_alpha_channel(&output_rgb, &alpha, &binary_mask);
-            Ok(DynamicImage::ImageRgba8(output))
-        } else {
-            Ok(DynamicImage::ImageRgb8(output_rgb))
-        }
-    }
-
-    /// Run the manga-tuned default inpainting strategy without materializing
-    /// a second full-page image representation. Browser callers keep their
-    /// canonical RGB source borrowed through the complete hot path.
+    /// Run the manga-tuned default strategy on canonical RGB and grayscale
+    /// buffers. Text regions guide crop planning without creating alternate
+    /// full-page image representations.
     #[instrument(level = "debug", skip_all)]
     pub fn inference_rgb_with_blocks(
         &self,

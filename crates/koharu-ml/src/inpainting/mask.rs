@@ -1,30 +1,30 @@
 use std::collections::VecDeque;
 
-use image::{DynamicImage, GrayImage, Luma, imageops::crop_imm};
+use image::{GrayImage, Luma, imageops::crop_imm};
 use imageproc::{distance_transform::Norm, morphology::dilate};
 
 use crate::{comic_text_detector::expanded_text_block_crop_bounds, types::TextRegion};
 
-use super::{binarize_mask, strategy::boxes_from_mask};
+use super::strategy::boxes_from_mask;
 
-const LEGACY_MIN_DILATE_RADIUS: u8 = 2;
-const LEGACY_MAX_DILATE_RADIUS: u8 = 8;
-const LEGACY_BLOCK_DILATE_FONT_RATIO: f32 = 0.16;
-const LEGACY_COMPONENT_DILATE_RATIO: f32 = 0.35;
-const LEGACY_MAX_COMPONENT_DILATE_RADIUS: u8 = 6;
+const GLYPH_MIN_DILATE_RADIUS: u8 = 2;
+const GLYPH_MAX_DILATE_RADIUS: u8 = 8;
+const GLYPH_BLOCK_DILATE_FONT_RATIO: f32 = 0.16;
+const GLYPH_COMPONENT_DILATE_RATIO: f32 = 0.35;
+const GLYPH_MAX_COMPONENT_DILATE_RADIUS: u8 = 6;
 
-const MODERN_MIN_DILATE_RADIUS: u8 = 3;
-const MODERN_MAX_DILATE_RADIUS: u8 = 12;
-const MODERN_BLOCK_DILATE_FONT_RATIO: f32 = 0.22;
-const MODERN_COMPONENT_DILATE_RATIO: f32 = 0.45;
-const MODERN_MAX_COMPONENT_DILATE_RADIUS: u8 = 8;
+const REGION_MIN_DILATE_RADIUS: u8 = 3;
+const REGION_MAX_DILATE_RADIUS: u8 = 12;
+const REGION_BLOCK_DILATE_FONT_RATIO: f32 = 0.22;
+const REGION_COMPONENT_DILATE_RATIO: f32 = 0.45;
+const REGION_MAX_COMPONENT_DILATE_RADIUS: u8 = 8;
 
 type Xyxy = [u32; 4];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ExpansionMode {
-    LegacyGlyphOnly,
-    ModernRegionFill,
+    GlyphOnly,
+    RegionFill,
 }
 
 /// Expand the erase mask before inpainting using text-region geometry and the
@@ -34,61 +34,39 @@ enum ExpansionMode {
 /// bubble background, because that turns a text cleanup mask into a broad
 /// speech-bubble erase mask.
 pub fn expand_mask_for_inpainting(
-    mask: &DynamicImage,
-    bubble_mask: &DynamicImage,
-    text_blocks: &[TextRegion],
-) -> GrayImage {
-    let base = binarize_mask(mask);
-    let bubbles = bubble_mask.to_luma8();
-    expand_gray_mask_for_inpainting(&base, &bubbles, text_blocks)
-}
-
-/// Borrowed grayscale variant of [`expand_mask_for_inpainting`]. The caller
-/// owns the mask and bubble dimensions; the implementation keeps all work in
-/// those existing local buffers and preserves the legacy dilation/component
-/// rules.
-pub fn expand_gray_mask_for_inpainting(
     mask: &GrayImage,
     bubble_mask: &GrayImage,
     text_blocks: &[TextRegion],
 ) -> GrayImage {
-    let base = mask;
-    let bubbles = bubble_mask;
-    if base.pixels().all(|pixel| pixel.0[0] == 0) {
-        return base.clone();
+    if mask.pixels().all(|pixel| pixel.0[0] == 0) {
+        return mask.clone();
     }
 
-    if base.dimensions() != bubbles.dimensions() {
-        return base.clone();
+    if mask.dimensions() != bubble_mask.dimensions() {
+        return mask.clone();
     }
 
-    let (width, height) = base.dimensions();
-    let mut expanded = base.clone();
+    let (width, height) = mask.dimensions();
+    let mut expanded = mask.clone();
     let mut covered = GrayImage::new(width, height);
 
     for block in text_blocks {
         let block_support = expanded_text_block_crop_bounds(width, height, block);
-        if count_nonzero_in_rect(&base, block_support) == 0 {
+        if count_nonzero_in_rect(mask, block_support) == 0 {
             continue;
         }
 
-        let radius = legacy_block_dilate_radius(block);
+        let radius = glyph_block_dilate_radius(block);
         let support = expand_rect(block_support, width, height, u32::from(radius));
         let work = expand_rect(support, width, height, u32::from(radius));
-        let local_mask = crop_imm(
-            &base,
-            work[0],
-            work[1],
-            work[2] - work[0],
-            work[3] - work[1],
-        )
-        .to_image();
+        let local_mask =
+            crop_imm(mask, work[0], work[1], work[2] - work[0], work[3] - work[1]).to_image();
         let dilated = dilate(&local_mask, Norm::LInf, radius);
-        let bubble_id = dominant_bubble_id(&base, &bubbles, block_support);
+        let bubble_id = dominant_bubble_id(mask, bubble_mask, block_support);
         merge_expanded_region(
             &mut expanded,
             &dilated,
-            &bubbles,
+            bubble_mask,
             work,
             work, // Fix harsh cutoff by allowing dilation context
             bubble_id,
@@ -97,7 +75,7 @@ pub fn expand_gray_mask_for_inpainting(
     }
 
     let residual = GrayImage::from_fn(width, height, |x, y| {
-        if base.get_pixel(x, y).0[0] > 0 && covered.get_pixel(x, y).0[0] == 0 {
+        if mask.get_pixel(x, y).0[0] > 0 && covered.get_pixel(x, y).0[0] == 0 {
             Luma([255])
         } else {
             Luma([0])
@@ -107,8 +85,8 @@ pub fn expand_gray_mask_for_inpainting(
         expand_residual_components(
             &mut expanded,
             &residual,
-            &bubbles,
-            ExpansionMode::LegacyGlyphOnly,
+            bubble_mask,
+            ExpansionMode::GlyphOnly,
         );
     }
 
@@ -116,43 +94,41 @@ pub fn expand_gray_mask_for_inpainting(
 }
 
 /// Expand the mask to the detected text region, constrained to the dominant
-/// speech bubble when one is available. This intentionally keeps the broader
-/// 0.48.0 region-fill behavior for Flux.2, while [`expand_mask_for_inpainting`]
-/// remains glyph-only for AOT/Lama.
+/// speech bubble when one is available. This region-fill variant is used by
+/// Flux.2, while [`expand_mask_for_inpainting`] remains glyph-only for
+/// AOT/Lama.
 pub fn expand_mask_to_bubble_region_for_inpainting(
-    mask: &DynamicImage,
-    bubble_mask: &DynamicImage,
+    mask: &GrayImage,
+    bubble_mask: &GrayImage,
     text_blocks: &[TextRegion],
 ) -> GrayImage {
-    let base = binarize_mask(mask);
-    if base.pixels().all(|pixel| pixel.0[0] == 0) {
-        return base;
+    if mask.pixels().all(|pixel| pixel.0[0] == 0) {
+        return mask.clone();
     }
 
-    let bubbles = bubble_mask.to_luma8();
-    if base.dimensions() != bubbles.dimensions() {
-        return base;
+    if mask.dimensions() != bubble_mask.dimensions() {
+        return mask.clone();
     }
 
-    let (width, height) = base.dimensions();
-    let mut expanded = base.clone();
+    let (width, height) = mask.dimensions();
+    let mut expanded = mask.clone();
     let mut covered = GrayImage::new(width, height);
 
     for block in text_blocks {
         let block_support = expanded_text_block_crop_bounds(width, height, block);
-        let radius = modern_block_dilate_radius(block);
+        let radius = region_block_dilate_radius(block);
         let support = expand_rect(block_support, width, height, u32::from(radius));
 
-        if count_nonzero_in_rect(&base, support) == 0 {
+        if count_nonzero_in_rect(mask, support) == 0 {
             continue;
         }
 
-        let bubble_id = dominant_bubble_id(&base, &bubbles, support);
-        fill_text_block_region(&mut expanded, &bubbles, support, bubble_id, &mut covered);
+        let bubble_id = dominant_bubble_id(mask, bubble_mask, support);
+        fill_text_block_region(&mut expanded, bubble_mask, support, bubble_id, &mut covered);
     }
 
     let residual = GrayImage::from_fn(width, height, |x, y| {
-        if base.get_pixel(x, y).0[0] > 0 && covered.get_pixel(x, y).0[0] == 0 {
+        if mask.get_pixel(x, y).0[0] > 0 && covered.get_pixel(x, y).0[0] == 0 {
             Luma([255])
         } else {
             Luma([0])
@@ -162,8 +138,8 @@ pub fn expand_mask_to_bubble_region_for_inpainting(
         expand_residual_components(
             &mut expanded,
             &residual,
-            &bubbles,
-            ExpansionMode::ModernRegionFill,
+            bubble_mask,
+            ExpansionMode::RegionFill,
         );
     }
 
@@ -179,8 +155,8 @@ fn expand_residual_components(
     let (width, height) = residual.dimensions();
     for component in boxes_from_mask(residual) {
         let radius = match mode {
-            ExpansionMode::LegacyGlyphOnly => legacy_component_dilate_radius(component),
-            ExpansionMode::ModernRegionFill => modern_component_dilate_radius(component),
+            ExpansionMode::GlyphOnly => glyph_component_dilate_radius(component),
+            ExpansionMode::RegionFill => region_component_dilate_radius(component),
         };
         let support = expand_rect(component, width, height, u32::from(radius));
         let work = expand_rect(support, width, height, u32::from(radius));
@@ -196,10 +172,10 @@ fn expand_residual_components(
         let bubble_id = dominant_bubble_id(residual, bubbles, support);
 
         match mode {
-            ExpansionMode::LegacyGlyphOnly => {
+            ExpansionMode::GlyphOnly => {
                 merge_expanded_region(out, &dilated, bubbles, work, work, bubble_id, None);
             }
-            ExpansionMode::ModernRegionFill => {
+            ExpansionMode::RegionFill => {
                 let filled = fill_enclosed_holes(&dilated);
                 merge_expanded_region(out, &filled, bubbles, work, support, bubble_id, None);
             }
@@ -355,32 +331,32 @@ fn dominant_bubble_id(mask: &GrayImage, bubbles: &GrayImage, [x1, y1, x2, y2]: X
         .unwrap_or(0)
 }
 
-fn legacy_block_dilate_radius(block: &TextRegion) -> u8 {
+fn glyph_block_dilate_radius(block: &TextRegion) -> u8 {
     let font = block
         .detected_font_size_px
         .unwrap_or_else(|| block.width.min(block.height).max(1.0));
-    ((font * LEGACY_BLOCK_DILATE_FONT_RATIO).round() as u8)
-        .clamp(LEGACY_MIN_DILATE_RADIUS, LEGACY_MAX_DILATE_RADIUS)
+    ((font * GLYPH_BLOCK_DILATE_FONT_RATIO).round() as u8)
+        .clamp(GLYPH_MIN_DILATE_RADIUS, GLYPH_MAX_DILATE_RADIUS)
 }
 
-fn modern_block_dilate_radius(block: &TextRegion) -> u8 {
+fn region_block_dilate_radius(block: &TextRegion) -> u8 {
     let font = block
         .detected_font_size_px
         .unwrap_or_else(|| block.width.min(block.height).max(1.0));
-    ((font * MODERN_BLOCK_DILATE_FONT_RATIO).round() as u8)
-        .clamp(MODERN_MIN_DILATE_RADIUS, MODERN_MAX_DILATE_RADIUS)
+    ((font * REGION_BLOCK_DILATE_FONT_RATIO).round() as u8)
+        .clamp(REGION_MIN_DILATE_RADIUS, REGION_MAX_DILATE_RADIUS)
 }
 
-fn legacy_component_dilate_radius([x1, y1, x2, y2]: Xyxy) -> u8 {
+fn glyph_component_dilate_radius([x1, y1, x2, y2]: Xyxy) -> u8 {
     let short_side = (x2 - x1).min(y2 - y1).max(1);
-    ((short_side as f32 * LEGACY_COMPONENT_DILATE_RATIO).round() as u8)
-        .clamp(LEGACY_MIN_DILATE_RADIUS, LEGACY_MAX_COMPONENT_DILATE_RADIUS)
+    ((short_side as f32 * GLYPH_COMPONENT_DILATE_RATIO).round() as u8)
+        .clamp(GLYPH_MIN_DILATE_RADIUS, GLYPH_MAX_COMPONENT_DILATE_RADIUS)
 }
 
-fn modern_component_dilate_radius([x1, y1, x2, y2]: Xyxy) -> u8 {
+fn region_component_dilate_radius([x1, y1, x2, y2]: Xyxy) -> u8 {
     let short_side = (x2 - x1).min(y2 - y1).max(1);
-    ((short_side as f32 * MODERN_COMPONENT_DILATE_RATIO).round() as u8)
-        .clamp(MODERN_MIN_DILATE_RADIUS, MODERN_MAX_COMPONENT_DILATE_RADIUS)
+    ((short_side as f32 * REGION_COMPONENT_DILATE_RATIO).round() as u8)
+        .clamp(REGION_MIN_DILATE_RADIUS, REGION_MAX_COMPONENT_DILATE_RADIUS)
 }
 
 fn expand_rect([x1, y1, x2, y2]: Xyxy, width: u32, height: u32, pad: u32) -> Xyxy {
@@ -414,8 +390,8 @@ mod tests {
         }
 
         let expanded = expand_mask_for_inpainting(
-            &DynamicImage::ImageLuma8(mask),
-            &DynamicImage::ImageLuma8(bubbles),
+            &mask,
+            &bubbles,
             &[TextRegion {
                 x: 22.0,
                 y: 24.0,
@@ -447,8 +423,8 @@ mod tests {
         }
 
         let expanded = expand_mask_for_inpainting(
-            &DynamicImage::ImageLuma8(mask),
-            &DynamicImage::ImageLuma8(bubbles),
+            &mask,
+            &bubbles,
             &[TextRegion {
                 x: 22.0,
                 y: 24.0,
@@ -481,8 +457,8 @@ mod tests {
         }
 
         let expanded = expand_mask_for_inpainting(
-            &DynamicImage::ImageLuma8(mask),
-            &DynamicImage::ImageLuma8(bubbles),
+            &mask,
+            &bubbles,
             &[TextRegion {
                 x: 8.0,
                 y: 8.0,
@@ -514,8 +490,8 @@ mod tests {
         }
 
         let expanded = expand_mask_to_bubble_region_for_inpainting(
-            &DynamicImage::ImageLuma8(mask),
-            &DynamicImage::ImageLuma8(bubbles),
+            &mask,
+            &bubbles,
             &[TextRegion {
                 x: 22.0,
                 y: 24.0,
@@ -550,8 +526,8 @@ mod tests {
         }
 
         let expanded = expand_mask_for_inpainting(
-            &DynamicImage::ImageLuma8(mask),
-            &DynamicImage::ImageLuma8(bubbles),
+            &mask,
+            &bubbles,
             &[TextRegion {
                 x: 22.0,
                 y: 24.0,
@@ -583,12 +559,8 @@ mod tests {
             }
         }
 
-        // Test modern path via public API with empty text_blocks to trigger residual components logic
-        let expanded = expand_mask_to_bubble_region_for_inpainting(
-            &DynamicImage::ImageLuma8(mask),
-            &DynamicImage::ImageLuma8(bubbles),
-            &[],
-        );
+        // Test the region-fill path via the public API with empty text_blocks to trigger residual component logic
+        let expanded = expand_mask_to_bubble_region_for_inpainting(&mask, &bubbles, &[]);
 
         assert_eq!(expanded.get_pixel(32, 32).0[0], 255);
     }
@@ -612,8 +584,8 @@ mod tests {
         }
 
         let expanded = expand_mask_to_bubble_region_for_inpainting(
-            &DynamicImage::ImageLuma8(mask),
-            &DynamicImage::ImageLuma8(bubbles),
+            &mask,
+            &bubbles,
             &[TextRegion {
                 x: 22.0,
                 y: 24.0,
@@ -644,8 +616,8 @@ mod tests {
         }
 
         let expanded = expand_mask_for_inpainting(
-            &DynamicImage::ImageLuma8(mask),
-            &DynamicImage::ImageLuma8(bubbles),
+            &mask,
+            &bubbles,
             &[TextRegion {
                 x: 22.0,
                 y: 24.0,
@@ -671,11 +643,7 @@ mod tests {
             }
         }
 
-        let expanded = expand_mask_for_inpainting(
-            &DynamicImage::ImageLuma8(mask),
-            &DynamicImage::ImageLuma8(bubbles),
-            &[],
-        );
+        let expanded = expand_mask_for_inpainting(&mask, &bubbles, &[]);
 
         assert_eq!(expanded.get_pixel(18, 22).0[0], 255);
         assert_eq!(expanded.get_pixel(22, 18).0[0], 255);
@@ -703,11 +671,7 @@ mod tests {
             ..Default::default()
         };
 
-        let expanded = expand_mask_for_inpainting(
-            &DynamicImage::ImageLuma8(mask),
-            &DynamicImage::ImageLuma8(bubbles),
-            &[block],
-        );
+        let expanded = expand_mask_for_inpainting(&mask, &bubbles, &[block]);
 
         // Radius is (20 * 0.16) = 3.2 -> 3.
         // (29+3, 29) = (32, 29)

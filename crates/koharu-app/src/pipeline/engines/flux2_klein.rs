@@ -24,8 +24,8 @@ impl Engine for Model {
             .ok_or_else(|| anyhow!("no Segment mask on page"))?;
         let (_, bubble_ref) = find_mask_node(ctx.scene, ctx.page, MaskRole::Bubble)
             .ok_or_else(|| anyhow!("no Bubble mask on page"))?;
-        let mask = ctx.blobs.load_image(&mask_ref)?;
-        let bubble_mask = ctx.blobs.load_image(&bubble_ref)?;
+        let mask = ctx.blobs.load_image(&mask_ref)?.to_luma8();
+        let bubble_mask = ctx.blobs.load_image(&bubble_ref)?.to_luma8();
 
         let (image, mask, bubble_mask) = match ctx.options.region {
             Some(r) => {
@@ -33,8 +33,8 @@ impl Engine for Model {
                     Some((_, blob)) => ctx.blobs.load_image(&blob)?,
                     None => load_source_image(ctx.scene, ctx.page, ctx.blobs)?,
                 };
-                let clipped_mask = clip_mask_to_region(&mask, &r);
-                let clipped_bubble = clip_mask_to_region(&bubble_mask, &r);
+                let clipped_mask = clip_gray_mask_to_region(&mask, &r);
+                let clipped_bubble = clip_gray_mask_to_region(&bubble_mask, &r);
                 (base, clipped_mask, clipped_bubble)
             }
             None => {
@@ -67,10 +67,6 @@ impl Engine for Model {
             h,
         )])
     }
-}
-
-fn clip_mask_to_region(mask: &DynamicImage, region: &Region) -> DynamicImage {
-    DynamicImage::ImageLuma8(clip_gray_mask_to_region(&mask.to_luma8(), region))
 }
 
 fn clip_gray_mask_to_region(src: &GrayImage, region: &Region) -> GrayImage {

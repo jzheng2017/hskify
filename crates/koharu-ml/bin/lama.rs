@@ -40,14 +40,14 @@ async fn main() -> anyhow::Result<()> {
     runtime.prepare().await?;
 
     let model = Lama::load(&runtime, cli.cpu).await?;
-    let image = image::open(&cli.input)?;
-    let mask = image::open(&cli.mask)?;
-    let bubble_mask = image::open(&cli.bubble_mask)?;
+    let image = image::open(&cli.input)?.to_rgb8();
+    let mask = image::open(&cli.mask)?.to_luma8();
+    let bubble_mask = image::open(&cli.bubble_mask)?.to_luma8();
 
     // inferernce start time
     let start = std::time::Instant::now();
 
-    let output = model.inference(&image, &mask, &bubble_mask)?;
+    let output = model.inference_rgb_with_blocks(&image, &mask, &bubble_mask, &[])?;
 
     // measure inference speed
     let duration = start.elapsed();
