@@ -33,6 +33,14 @@ export class ChapterRunState<Key> {
     entry.phase = 'running'
   }
 
+  preempt(key: Key): void {
+    const entry = this.required(key)
+    if (entry.phase !== 'running') {
+      throw new Error(`Cannot preempt an image while it is ${entry.phase}.`)
+    }
+    entry.phase = 'queued'
+  }
+
   automaticRetries(key: Key): number {
     return this.required(key).automaticRetries
   }

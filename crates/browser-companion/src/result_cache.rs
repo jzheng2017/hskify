@@ -32,7 +32,7 @@ const RESULT_CACHE_MAX_ENTRY_BYTES: u64 = 512 * 1024 * 1024;
 const RESULT_CACHE_MAX_DECODED_PATCH_BYTES: u64 = 256 * 1024 * 1024;
 const RESULT_CACHE_SCHEMA: &str = "hskify-progressive-result-2026-07-28-v6";
 const RESULT_CACHE_PIPELINE_REVISION: &str =
-    "ordered-context-artwork-and-sibling-recovery-v26-2026-07-28";
+    "region-adjudication-and-multiscale-ocr-recovery-v28-2026-08-01";
 const MODEL_RESOURCE_MANIFEST: &[u8] = include_bytes!("../../../data/model-packs/manifest.v1.json");
 
 #[derive(Debug, Clone)]
@@ -515,25 +515,31 @@ mod tests {
     }
 
     #[test]
-    fn key_scopes_chapter_entity_memory_but_ignores_dom_and_viewport_identity() -> Result<()> {
+    fn key_scopes_chapter_context_and_page_order_but_ignores_dom_and_viewport_identity()
+    -> Result<()> {
         let first = serde_json::from_str::<crate::contracts::CreateJobRequest>(include_str!(
             "../../../fixtures/contracts/job-request.valid.json"
         ))?;
         let mut same_chapter = first.clone();
         same_chapter.client_image_id = "different-dom-image".to_owned();
-        same_chapter.page_index = same_chapter.page_index.saturating_add(7);
         same_chapter.visible_rects = vec![NormalizedRect {
             x: 0.25,
             y: 0.25,
             width: 0.5,
             height: 0.5,
         }];
-        let mut other_chapter = same_chapter.clone();
+        let mut another_page = same_chapter.clone();
+        another_page.page_index = another_page.page_index.saturating_add(7);
+        let mut other_chapter = another_page.clone();
         other_chapter.page_session_id = "different-page-session".to_owned();
 
         assert_eq!(
             ResultCache::key(&first.pipeline_request())?,
             ResultCache::key(&same_chapter.pipeline_request())?
+        );
+        assert_ne!(
+            ResultCache::key(&first.pipeline_request())?,
+            ResultCache::key(&another_page.pipeline_request())?
         );
         assert_ne!(
             ResultCache::key(&first.pipeline_request())?,

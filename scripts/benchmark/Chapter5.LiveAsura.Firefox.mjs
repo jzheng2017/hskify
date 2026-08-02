@@ -17,6 +17,7 @@ import {
 } from './Chapter5.Firefox.mjs'
 
 const EVIDENCE_FILE = 'live-asura-smoke.json'
+export const LIVE_CHAPTER_COMPLETION_BUDGET_MS = 5 * 60_000
 
 function fail(message) {
   throw new Error(message)
@@ -57,6 +58,18 @@ export function resolveExpectedImageCount(configuredCount, discoveredCount) {
     fail('expectedImageCount must be a positive integer when provided.')
   }
   return configuredCount
+}
+
+export function liveChapterCompletionGate(durationMs) {
+  if (typeof durationMs !== 'number' || !Number.isFinite(durationMs) || durationMs < 0) {
+    fail('Live chapter completion duration must be a finite non-negative number.')
+  }
+  return {
+    id: 'whole-chapter-under-five-minutes',
+    status: durationMs <= LIVE_CHAPTER_COMPLETION_BUDGET_MS ? 'pass' : 'fail',
+    actualMs: durationMs,
+    maximumMs: LIVE_CHAPTER_COMPLETION_BUDGET_MS,
+  }
 }
 
 function isLoopback(value) {
@@ -506,6 +519,7 @@ async function main() {
   const requestedChapterUrl = validateLiveChapterUrl(config.chapterUrl)
   let context
   let chapterPage
+  let extensionPage
   let network
   let identity
   let finalChapterUrl = requestedChapterUrl
@@ -518,7 +532,7 @@ async function main() {
     const launched = await launchPackagedFirefox(config)
     context = launched.context
     identity = launched.identity
-    const extensionPage = launched.extensionPage
+    extensionPage = launched.extensionPage
     network = installNetworkTimingCapture(context)
     chapterPage = await context.newPage()
     await chapterPage.setViewportSize({ width: 1280, height: 900 })
@@ -552,6 +566,10 @@ async function main() {
     )
     network.setPhase('extension-translation')
     const action = await timedContentStart(extensionPage, config.hskLevel, finalChapterUrl)
+    const completionDeadline =
+      action.issuedAtEpochMs +
+      Math.min(config.runTimeoutMs, LIVE_CHAPTER_COMPLETION_BUDGET_MS)
+    const remainingCompletionBudget = () => Math.max(1, completionDeadline - Date.now())
     const permissions = {
       installationScope: ['http://*/*', 'https://*/*'],
       granted: true,
@@ -566,15 +584,17 @@ async function main() {
       extensionPage,
       finalChapterUrl,
       config.expectedResourceIdentities,
-      config.runTimeoutMs,
+      remainingCompletionBudget(),
     )
     const stateAtProof = await extensionMessage(extensionPage, { type: 'popup:state' })
     const finalState = await waitForPageState(
       extensionPage,
       chapterPage,
       ['complete', 'failed', 'cancelled'],
-      config.runTimeoutMs,
+      remainingCompletionBudget(),
     )
+    const chapterCompletionAfterActionMs = Date.now() - action.issuedAtEpochMs
+    const completionGate = liveChapterCompletionGate(chapterCompletionAfterActionMs)
     if (finalState.state !== 'complete') {
       const diagnostics = await contentRuntimeDiagnostics(
         extensionPage,
@@ -673,6 +693,7 @@ async function main() {
             : proofPatch.epochMs - action.issuedAtEpochMs,
         proofSelectableTextAfterActionMs:
           proofText === undefined ? undefined : proofText.epochMs - action.issuedAtEpochMs,
+        chapterCompletionAfterActionMs,
         stateAtProof,
         finalState,
         note:
@@ -717,7 +738,18 @@ async function main() {
             total: expectedImageCount,
           },
         },
+        completionGate,
       ],
+    }
+    if (completionGate.status === 'fail') {
+      failure = new Error(
+        `Whole-chapter translation took ${chapterCompletionAfterActionMs} ms; the maximum is ${LIVE_CHAPTER_COMPLETION_BUDGET_MS} ms.`,
+      )
+      evidence.status = 'fail'
+      evidence.failure = {
+        message: failure.message,
+        stack: failure.stack,
+      }
     }
   } catch (error) {
     failure = error
@@ -726,6 +758,49 @@ async function main() {
     const observedUrl = chapterPage?.url()
     const failedFinalUrl =
       observedUrl && /^https?:/iu.test(observedUrl) ? observedUrl : finalChapterUrl
+    const failureDiagnostics = {}
+    if (chapterPage) {
+      failureDiagnostics.dom = await chapterDomEvidence(chapterPage).catch(
+        (diagnosticError) => ({
+          error:
+            diagnosticError instanceof Error
+              ? diagnosticError.message
+              : String(diagnosticError),
+        }),
+      )
+      await chapterPage
+        .screenshot({
+          path: join(config.outputDirectory, 'failure-viewport.png'),
+          fullPage: false,
+        })
+        .catch(() => undefined)
+    }
+    if (extensionPage && failedFinalUrl) {
+      failureDiagnostics.runtime = await contentRuntimeDiagnostics(
+        extensionPage,
+        failedFinalUrl,
+      ).catch((diagnosticError) => ({
+        error:
+          diagnosticError instanceof Error
+            ? diagnosticError.message
+            : String(diagnosticError),
+      }))
+      const records = await activeJobs(extensionPage, failedFinalUrl).catch(() => [])
+      failureDiagnostics.activeJobs = records
+      if (records.length > 0) {
+        failureDiagnostics.routes = await routeEvidence(
+          extensionPage,
+          records,
+          false,
+          config.expectedResourceIdentities,
+        ).catch((diagnosticError) => ({
+          error:
+            diagnosticError instanceof Error
+              ? diagnosticError.message
+              : String(diagnosticError),
+        }))
+      }
+    }
     evidence = {
       schemaVersion: 1,
       evidenceKind: 'live-asura-packaged-firefox-smoke',
@@ -742,6 +817,7 @@ async function main() {
         requestedChapterUrl,
         failedFinalUrl,
       ),
+      failureDiagnostics,
       failure: {
         message: error instanceof Error ? error.message : String(error),
         stack: error instanceof Error ? error.stack : '',

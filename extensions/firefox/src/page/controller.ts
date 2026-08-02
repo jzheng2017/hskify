@@ -1,4 +1,5 @@
 import { sha256Hex } from '../acquisition/hash'
+import { DEFAULT_IMAGE_LIMITS } from '../acquisition/image-format'
 import type {
   BrowserJobRequest,
   JobUpdateBatch,
@@ -35,6 +36,7 @@ const PAGE_SESSION_KEY = 'hmt.pageSessionId'
 const CONTENT_BYTE_LIMIT = 25 * 1024 * 1024
 const NAVIGATION_CHECK_INTERVAL_MS = 250
 const VIEWPORT_THROTTLE_MS = 100
+const CHAPTER_PIPELINE_CONCURRENCY = 3
 export const AUTOMATIC_IMAGE_RETRY_LIMIT = 2
 export const COMPLETION_SETTLE_MS = 300
 
@@ -317,6 +319,9 @@ export class PageTranslationController {
           this.cancelCompletion()
           this.runState.start(item.value.candidate.element)
         },
+        onPreempt: (item) => {
+          this.runState.preempt(item.value.candidate.element)
+        },
         onSuccess: (item) => {
           const image = item.value.candidate.element
           this.queueIds.delete(image)
@@ -357,6 +362,10 @@ export class PageTranslationController {
           this.scheduleFinish()
         },
         onIdle: () => this.scheduleFinish(),
+      },
+      {
+        maximumConcurrent: CHAPTER_PIPELINE_CONCURRENCY,
+        maximumActiveCost: DEFAULT_IMAGE_LIMITS.maximumPixels,
       },
     )
     this.discovery = new ImageDiscovery((event) => this.onDiscovery(event))
@@ -441,6 +450,7 @@ export class PageTranslationController {
         job,
       ]),
     )
+    this.queue.beginInteractiveStartup()
     for (const candidate of candidates) {
       this.enqueue(
         candidate,
@@ -632,6 +642,7 @@ export class PageTranslationController {
       },
       visible: candidate.visible,
       order: candidate.domIndex,
+      cost: candidate.element.naturalWidth * candidate.element.naturalHeight,
     })
     if (!accepted) {
       this.queueIds.delete(candidate.element)
@@ -673,6 +684,7 @@ export class PageTranslationController {
       value: { candidate },
       visible: candidate.visible,
       order: candidate.domIndex,
+      cost: candidate.element.naturalWidth * candidate.element.naturalHeight,
     })
     if (!queued) return false
     this.badge(image).update(status)
@@ -878,6 +890,10 @@ export class PageTranslationController {
                 signal,
                 validate: () => this.assertCurrent(candidate, snapshot, signal),
               })
+              // The first final patch is now actually visible. Throughput work
+              // may use the remaining chapter capacity without delaying the
+              // interaction the user was waiting for.
+              this.queue.enableThroughput()
               break
             }
             case 'artworkPreserved':

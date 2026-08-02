@@ -4,7 +4,7 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use image::imageops::FilterType;
+use image::imageops::{FilterType, contrast};
 use image::{DynamicImage, GenericImageView, RgbImage};
 use ort::ep::{CUDA, ExecutionProvider};
 use ort::memory::Allocator;
@@ -191,10 +191,45 @@ impl EnglishPpOcrV5 {
         }
 
         let mut lines = Vec::new();
+        let mut supplemental_lines = Vec::<LineSample>::new();
         for (region_index, (crop, probabilities)) in
             block_crops.iter().zip(text_probabilities).enumerate()
         {
             let region_lines = segment_text_line_bounds(crop, probabilities);
+            let mut supplemental_bounds = supplemental_upper_line_bounds(crop, &region_lines);
+            supplemental_bounds.extend(supplemental_lower_line_bounds(crop, &region_lines));
+            if std::env::var_os("HSKIFY_TRACE_REJECTED_OCR").is_some_and(|value| value == "1") {
+                eprintln!(
+                    "hskify-ocr-bounds region={} crop={}x{} primary={:?} supplemental={:?}",
+                    region_index,
+                    crop.width(),
+                    crop.height(),
+                    region_lines,
+                    supplemental_bounds,
+                );
+            }
+            if std::env::var_os("HSKIFY_TRACE_OCR_CROPS").is_some_and(|value| value == "1") {
+                let _ = fs::create_dir_all("runs/ocr-debug");
+                let _ = crop.save(format!(
+                    "runs/ocr-debug/region-{region_index}-{}x{}.png",
+                    crop.width(),
+                    crop.height()
+                ));
+                for (probe_index, bounds) in supplemental_bounds.iter().enumerate() {
+                    let _ = crop
+                        .crop_imm(
+                            bounds.left,
+                            bounds.top,
+                            bounds.right - bounds.left,
+                            bounds.bottom - bounds.top,
+                        )
+                        .save(format!(
+                            "runs/ocr-debug/region-{region_index}-probe-{probe_index}-{}x{}.png",
+                            bounds.right - bounds.left,
+                            bounds.bottom - bounds.top
+                        ));
+                }
+            }
             for bounds in region_lines {
                 lines.push(LineSample {
                     region_index,
@@ -207,6 +242,18 @@ impl EnglishPpOcrV5 {
                     bounds,
                 });
             }
+            for bounds in supplemental_bounds {
+                supplemental_lines.push(LineSample {
+                    region_index,
+                    image: enhance_ocr_crop(&crop.crop_imm(
+                        bounds.left,
+                        bounds.top,
+                        bounds.right - bounds.left,
+                        bounds.bottom - bounds.top,
+                    )),
+                    bounds,
+                });
+            }
         }
 
         let mut grouped = (0..block_crops.len())
@@ -216,6 +263,49 @@ impl EnglishPpOcrV5 {
             let decoded = self.run_line_batch(line_batch)?;
             for (line, prediction) in line_batch.iter().zip(decoded) {
                 grouped[line.region_index].push((prediction, line.bounds));
+            }
+        }
+        // A detector block can contain an extra stylized line whose learned
+        // glyph mask is too faint to form a component.  The lower-band probe
+        // is only created when the primary lines leave substantial vertical
+        // headroom, and its result is merged by containment so ordinary
+        // dialogue never receives duplicate OCR text.
+        for line_batch in supplemental_lines.chunks(MAX_LINE_BATCH_SIZE) {
+            let decoded = self.run_line_batch(line_batch)?;
+            for (line, prediction) in line_batch.iter().zip(decoded) {
+                if prediction.confidence < 0.65 || prediction.text.trim().len() < 2 {
+                    continue;
+                }
+                let normalized = normalized_line_text(&prediction.text);
+                if normalized.is_empty() {
+                    continue;
+                }
+                let existing = &mut grouped[line.region_index];
+                let mut replaced = false;
+                for (current, current_bounds) in existing.iter_mut() {
+                    let current_normalized = normalized_line_text(&current.text);
+                    if crop_bounds_vertical_overlap(*current_bounds, line.bounds) >= 0.35 {
+                        // The supplemental crop deliberately overlaps the last
+                        // primary line for context. It is a recovery view, not
+                        // another line; retaining it would duplicate clipped
+                        // OCR (for example `TELL...` repeated three times).
+                        replaced = true;
+                        break;
+                    }
+                    if current_normalized == normalized || current_normalized.contains(&normalized)
+                    {
+                        replaced = true;
+                        break;
+                    }
+                    if normalized.contains(&current_normalized) && current_normalized.len() >= 3 {
+                        *current = prediction.clone();
+                        replaced = true;
+                        break;
+                    }
+                }
+                if !replaced {
+                    existing.push((prediction, line.bounds));
+                }
             }
         }
 
@@ -342,6 +432,97 @@ impl EnglishPpOcrV5 {
         }
         Ok(decoded)
     }
+}
+
+fn normalized_line_text(text: &str) -> String {
+    text.chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(|character| character.to_lowercase())
+        .collect()
+}
+
+fn enhance_ocr_crop(image: &DynamicImage) -> DynamicImage {
+    let rgb = image.to_rgb8();
+    let mut grayscale = RgbImage::new(rgb.width(), rgb.height());
+    for (x, y, pixel) in rgb.enumerate_pixels() {
+        let [red, green, blue] = pixel.0;
+        let luminance = (0.299 * red as f32 + 0.587 * green as f32 + 0.114 * blue as f32)
+            .round()
+            .clamp(0.0, 255.0);
+        let value = ((luminance - 72.0) * 2.1).clamp(0.0, 255.0) as u8;
+        grayscale.put_pixel(x, y, image::Rgb([value, value, value]));
+    }
+    DynamicImage::ImageRgb8(contrast(&grayscale, 1.2))
+}
+
+fn crop_bounds_vertical_overlap(left: CropBounds, right: CropBounds) -> f32 {
+    let overlap = left.bottom.min(right.bottom) as f32 - left.top.max(right.top) as f32;
+    if overlap <= 0.0 {
+        return 0.0;
+    }
+    overlap
+        / (left.bottom - left.top)
+            .min(right.bottom - right.top)
+            .max(1) as f32
+}
+
+fn supplemental_lower_line_bounds(crop: &DynamicImage, primary: &[CropBounds]) -> Vec<CropBounds> {
+    const MIN_CROP_HEIGHT: u32 = 220;
+    const MIN_REMAINING_HEIGHT: u32 = 48;
+    let height = crop.height();
+    let width = crop.width();
+    if width <= 1 || height < MIN_CROP_HEIGHT || primary.is_empty() {
+        return Vec::new();
+    }
+    let last_bottom = primary
+        .iter()
+        .map(|bounds| bounds.bottom)
+        .max()
+        .unwrap_or(0);
+    let remaining = height.saturating_sub(last_bottom);
+    if remaining < MIN_REMAINING_HEIGHT || last_bottom * 100 >= height * 78 {
+        return Vec::new();
+    }
+    let top = last_bottom.saturating_add((height / 32).max(4));
+    if top >= height {
+        return Vec::new();
+    }
+    vec![CropBounds {
+        left: 0,
+        top,
+        right: width,
+        bottom: height,
+    }]
+}
+
+fn supplemental_upper_line_bounds(crop: &DynamicImage, primary: &[CropBounds]) -> Vec<CropBounds> {
+    const MIN_CROP_HEIGHT: u32 = 120;
+    const MIN_HEADROOM: u32 = 24;
+    let height = crop.height();
+    let width = crop.width();
+    if width <= 1 || height < MIN_CROP_HEIGHT || primary.is_empty() {
+        return Vec::new();
+    }
+    let first_top = primary.iter().map(|bounds| bounds.top).min().unwrap_or(0);
+    if first_top < MIN_HEADROOM || first_top * 100 <= height * 10 {
+        return Vec::new();
+    }
+    // The learned mask can start at the second visual line while leaving the
+    // first line entirely in the headroom above `first_top`.  Extending this
+    // probe into the first detected line made the OCR model spend its budget
+    // on a clipped duplicate (`TELL...`) and miss the missing line. Keep the
+    // recovery view disjoint: it contains the complete headroom plus a small
+    // safety row, but never a partial primary line.
+    let bottom = first_top.saturating_add(2).min(height);
+    if bottom <= MIN_HEADROOM {
+        return Vec::new();
+    }
+    vec![CropBounds {
+        left: 0,
+        top: 0,
+        right: width,
+        bottom,
+    }]
 }
 
 fn make_output_cache(
@@ -708,10 +889,62 @@ fn segment_text_line_bounds(
         }
     }
     if bounds.is_empty() {
-        vec![full_bounds(&rgb)]
-    } else {
-        bounds
+        return vec![full_bounds(&rgb)];
     }
+    let mut split_bounds = Vec::with_capacity(bounds.len());
+    for bound in bounds {
+        if let Some(split) = split_tall_single_group(bound, &row_ink) {
+            split_bounds.extend(split);
+        } else {
+            split_bounds.push(bound);
+        }
+    }
+    split_bounds
+}
+
+fn split_tall_single_group(bound: CropBounds, row_ink: &[usize]) -> Option<Vec<CropBounds>> {
+    let height = bound.bottom.saturating_sub(bound.top) as usize;
+    // A single learned component can bridge adjacent stylized lines through a
+    // glow or outline. A valley in the row projection is stronger evidence
+    // than the block aspect ratio: a long line can still contain a clipped
+    // first line above it.
+    if height < 96 {
+        return None;
+    }
+    let interior_top = bound.top as usize + height / 4;
+    let interior_bottom = bound.bottom as usize - height / 4;
+    if interior_bottom <= interior_top + 8 || interior_bottom > row_ink.len() {
+        return None;
+    }
+    let split = (interior_top..interior_bottom).min_by_key(|row| row_ink[*row])?;
+    let peak = row_ink[bound.top as usize..bound.bottom as usize]
+        .iter()
+        .copied()
+        .max()
+        .unwrap_or(0);
+    // Require a meaningful projection valley; this avoids splitting a single
+    // tall glyph merely because its middle stroke is thinner.
+    if peak < 4 || row_ink[split].saturating_mul(3) > peak.saturating_mul(2) {
+        return None;
+    }
+    let split = split as u32;
+    if split <= bound.top + 8 || split + 8 >= bound.bottom {
+        return None;
+    }
+    Some(vec![
+        CropBounds {
+            left: bound.left,
+            top: bound.top,
+            right: bound.right,
+            bottom: split,
+        },
+        CropBounds {
+            left: bound.left,
+            top: split,
+            right: bound.right,
+            bottom: bound.bottom,
+        },
+    ])
 }
 
 fn full_bounds(image: &RgbImage) -> CropBounds {

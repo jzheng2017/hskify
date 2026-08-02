@@ -428,8 +428,8 @@ fn dist2bbox(distance: &Tensor, anchor_points: &Tensor) -> Result<Tensor> {
     let chunks = distance.chunk(2, 1)?;
     let lt = &chunks[0];
     let rb = &chunks[1];
-    let x1y1 = anchor_points.sub(lt)?;
-    let x2y2 = anchor_points.add(rb)?;
+    let x1y1 = anchor_points.broadcast_sub(lt)?;
+    let x2y2 = anchor_points.broadcast_add(rb)?;
     let c_xy = ((&x1y1 + &x2y2)? * 0.5)?;
     let wh = (&x2y2 - &x1y1)?;
     Tensor::cat(&[&c_xy, &wh], 1)
@@ -692,5 +692,19 @@ impl YoloV8Seg {
         let (xs1, xs2, xs3) = self.backbone.forward(xs)?;
         let (xs1, xs2, xs3) = self.neck.forward(&xs1, &xs2, &xs3)?;
         self.head.forward(&xs1, &xs2, &xs3)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use candle_core::{Device, Tensor};
+
+    use super::dist2bbox;
+
+    #[test]
+    fn distance_decode_broadcasts_shared_anchors_across_a_batch() {
+        let distance = Tensor::zeros((2, 4, 7), candle_core::DType::F32, &Device::Cpu).unwrap();
+        let anchors = Tensor::zeros((1, 2, 7), candle_core::DType::F32, &Device::Cpu).unwrap();
+        assert_eq!(dist2bbox(&distance, &anchors).unwrap().dims(), &[2, 4, 7]);
     }
 }

@@ -48,10 +48,25 @@ describe('chapter image run state', () => {
     expect(state.phase('image')).toBe('queued')
   })
 
+  it('returns viewport-preempted work to the queue without consuming a retry', () => {
+    const state = new ChapterRunState<string>()
+    state.register('image')
+    state.start('image')
+
+    state.preempt('image')
+
+    expect(state.phase('image')).toBe('queued')
+    expect(state.automaticRetries('image')).toBe(0)
+    state.start('image')
+    state.complete('image')
+    expect(state.snapshot().allResolved).toBe(true)
+  })
+
   it('rejects contradictory lifecycle transitions instead of corrupting counters', () => {
     const state = new ChapterRunState<string>()
     state.register('image')
     expect(() => state.complete('image')).toThrow(/queued/u)
+    expect(() => state.preempt('image')).toThrow(/queued/u)
     state.start('image')
     expect(() => state.start('image')).toThrow(/running/u)
     state.complete('image')

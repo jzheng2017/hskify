@@ -3,6 +3,8 @@ import test from 'node:test'
 
 import {
   buildLiveTranslationProof,
+  liveChapterCompletionGate,
+  LIVE_CHAPTER_COMPLETION_BUDGET_MS,
   resolveExpectedImageCount,
   validateLiveChapterUrl,
 } from './Chapter5.LiveAsura.Firefox.mjs'
@@ -26,6 +28,12 @@ test('live chapter image count is reader-derived unless explicitly pinned', () =
   assert.equal(resolveExpectedImageCount(21, 21), 21)
   assert.throws(() => resolveExpectedImageCount(undefined, 0), /no translatable/u)
   assert.throws(() => resolveExpectedImageCount(1.5, 21), /positive integer/u)
+})
+
+test('whole live chapters have a hard five-minute completion gate', () => {
+  assert.equal(liveChapterCompletionGate(LIVE_CHAPTER_COMPLETION_BUDGET_MS).status, 'pass')
+  assert.equal(liveChapterCompletionGate(LIVE_CHAPTER_COMPLETION_BUDGET_MS + 1).status, 'fail')
+  assert.throws(() => liveChapterCompletionGate(Number.NaN), /finite non-negative/u)
 })
 
 test('translation proof correlates one English region with patch-before-text', () => {

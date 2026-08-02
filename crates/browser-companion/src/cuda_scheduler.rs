@@ -1,8 +1,8 @@
 //! Process-wide admission for bounded browser CUDA inference phases.
 //!
-//! A permit covers exactly one detector tile batch, OCR batch, translation
-//! batch, or translation repair batch. Releasing between those boundaries lets
-//! visible work from another job overtake queued offscreen work.
+//! Vision models and the resident language model have independent model state
+//! and can keep separate CUDA streams busy. Calls within either family remain
+//! serialized, while one vision phase may overlap one language phase.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -27,6 +27,12 @@ pub(crate) enum CudaPriority {
     Visible,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CudaWorkload {
+    Vision,
+    Language,
+}
+
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub(crate) enum CudaAdmissionError {
     #[error("CUDA inference was cancelled while queued")]
@@ -44,7 +50,8 @@ pub(crate) struct CudaScheduler {
 
 #[derive(Debug, Default)]
 struct SchedulerState {
-    active: bool,
+    vision_active: bool,
+    language_active: bool,
     next_sequence: u64,
     waiters: Vec<Waiter>,
 }
@@ -53,6 +60,7 @@ struct SchedulerState {
 struct Waiter {
     sequence: u64,
     priority: CudaPriority,
+    workload: CudaWorkload,
     cancel: Arc<AtomicBool>,
 }
 
@@ -62,9 +70,24 @@ impl SchedulerState {
             .retain(|waiter| !waiter.cancel.load(Ordering::Acquire));
     }
 
-    fn next_waiter_sequence(&self) -> Option<u64> {
+    fn is_active(&self, workload: CudaWorkload) -> bool {
+        match workload {
+            CudaWorkload::Vision => self.vision_active,
+            CudaWorkload::Language => self.language_active,
+        }
+    }
+
+    fn set_active(&mut self, workload: CudaWorkload, active: bool) {
+        match workload {
+            CudaWorkload::Vision => self.vision_active = active,
+            CudaWorkload::Language => self.language_active = active,
+        }
+    }
+
+    fn next_waiter_sequence(&self, workload: CudaWorkload) -> Option<u64> {
         self.waiters
             .iter()
+            .filter(|waiter| waiter.workload == workload)
             .max_by(|left, right| {
                 left.priority.cmp(&right.priority).then_with(|| {
                     // Earlier sequence numbers win within the same priority.
@@ -93,6 +116,7 @@ impl CudaScheduler {
 
     pub(crate) async fn acquire(
         self: &Arc<Self>,
+        workload: CudaWorkload,
         priority: CudaPriority,
         cancel: Arc<AtomicBool>,
     ) -> Result<CudaPermit, CudaAdmissionError> {
@@ -103,10 +127,16 @@ impl CudaScheduler {
         let sequence = {
             let mut state = self.state.lock().expect("CUDA scheduler lock poisoned");
             state.remove_cancelled();
-            if !state.active && state.waiters.is_empty() {
-                state.active = true;
+            if !state.is_active(workload)
+                && !state
+                    .waiters
+                    .iter()
+                    .any(|waiter| waiter.workload == workload)
+            {
+                state.set_active(workload, true);
                 return Ok(CudaPermit {
                     scheduler: self.clone(),
+                    workload,
                 });
             }
             if state.waiters.len() >= self.capacity {
@@ -119,6 +149,7 @@ impl CudaScheduler {
             state.waiters.push(Waiter {
                 sequence,
                 priority,
+                workload,
                 cancel: cancel.clone(),
             });
             sequence
@@ -136,12 +167,15 @@ impl CudaScheduler {
             {
                 let mut state = self.state.lock().expect("CUDA scheduler lock poisoned");
                 state.remove_cancelled();
-                if !state.active && state.next_waiter_sequence() == Some(sequence) {
+                if !state.is_active(workload)
+                    && state.next_waiter_sequence(workload) == Some(sequence)
+                {
                     let removed = state.remove_waiter(sequence);
                     debug_assert!(removed, "admitted CUDA waiter must still be queued");
-                    state.active = true;
+                    state.set_active(workload, true);
                     return Ok(CudaPermit {
                         scheduler: self.clone(),
+                        workload,
                     });
                 }
                 if !state
@@ -171,11 +205,14 @@ impl CudaScheduler {
         }
     }
 
-    fn release(&self) {
+    fn release(&self, workload: CudaWorkload) {
         {
             let mut state = self.state.lock().expect("CUDA scheduler lock poisoned");
-            debug_assert!(state.active, "CUDA permit released without an active phase");
-            state.active = false;
+            debug_assert!(
+                state.is_active(workload),
+                "CUDA permit released without an active workload"
+            );
+            state.set_active(workload, false);
             state.remove_cancelled();
         }
         self.changed.notify_waiters();
@@ -194,11 +231,12 @@ impl CudaScheduler {
 #[derive(Debug)]
 pub(crate) struct CudaPermit {
     scheduler: Arc<CudaScheduler>,
+    workload: CudaWorkload,
 }
 
 impl Drop for CudaPermit {
     fn drop(&mut self) {
-        self.scheduler.release();
+        self.scheduler.release(self.workload);
     }
 }
 
@@ -222,7 +260,11 @@ mod tests {
     async fn visible_waiter_overtakes_queued_offscreen_waiter() {
         let scheduler = Arc::new(CudaScheduler::new(4));
         let active = scheduler
-            .acquire(CudaPriority::Offscreen, Arc::new(AtomicBool::new(false)))
+            .acquire(
+                CudaWorkload::Vision,
+                CudaPriority::Offscreen,
+                Arc::new(AtomicBool::new(false)),
+            )
             .await
             .unwrap();
         let order = Arc::new(Mutex::new(Vec::new()));
@@ -232,7 +274,11 @@ mod tests {
             let order = order.clone();
             tokio::spawn(async move {
                 let _permit = scheduler
-                    .acquire(CudaPriority::Offscreen, Arc::new(AtomicBool::new(false)))
+                    .acquire(
+                        CudaWorkload::Vision,
+                        CudaPriority::Offscreen,
+                        Arc::new(AtomicBool::new(false)),
+                    )
                     .await
                     .unwrap();
                 order.lock().unwrap().push("offscreen");
@@ -244,7 +290,11 @@ mod tests {
             let order = order.clone();
             tokio::spawn(async move {
                 let _permit = scheduler
-                    .acquire(CudaPriority::Visible, Arc::new(AtomicBool::new(false)))
+                    .acquire(
+                        CudaWorkload::Vision,
+                        CudaPriority::Visible,
+                        Arc::new(AtomicBool::new(false)),
+                    )
                     .await
                     .unwrap();
                 order.lock().unwrap().push("visible");
@@ -262,21 +312,33 @@ mod tests {
     async fn bounded_admission_fails_clearly() {
         let scheduler = Arc::new(CudaScheduler::new(1));
         let active = scheduler
-            .acquire(CudaPriority::Offscreen, Arc::new(AtomicBool::new(false)))
+            .acquire(
+                CudaWorkload::Vision,
+                CudaPriority::Offscreen,
+                Arc::new(AtomicBool::new(false)),
+            )
             .await
             .unwrap();
         let queued = {
             let scheduler = scheduler.clone();
             tokio::spawn(async move {
                 scheduler
-                    .acquire(CudaPriority::Offscreen, Arc::new(AtomicBool::new(false)))
+                    .acquire(
+                        CudaWorkload::Vision,
+                        CudaPriority::Offscreen,
+                        Arc::new(AtomicBool::new(false)),
+                    )
                     .await
             })
         };
         wait_for_pending(&scheduler, 1).await;
 
         let error = scheduler
-            .acquire(CudaPriority::Visible, Arc::new(AtomicBool::new(false)))
+            .acquire(
+                CudaWorkload::Vision,
+                CudaPriority::Visible,
+                Arc::new(AtomicBool::new(false)),
+            )
             .await
             .unwrap_err();
         assert_eq!(error, CudaAdmissionError::QueueFull { capacity: 1 });
@@ -289,14 +351,22 @@ mod tests {
     async fn cancellation_is_observed_while_queued() {
         let scheduler = Arc::new(CudaScheduler::new(2));
         let active = scheduler
-            .acquire(CudaPriority::Offscreen, Arc::new(AtomicBool::new(false)))
+            .acquire(
+                CudaWorkload::Vision,
+                CudaPriority::Offscreen,
+                Arc::new(AtomicBool::new(false)),
+            )
             .await
             .unwrap();
         let cancel = Arc::new(AtomicBool::new(false));
         let queued = {
             let scheduler = scheduler.clone();
             let cancel = cancel.clone();
-            tokio::spawn(async move { scheduler.acquire(CudaPriority::Visible, cancel).await })
+            tokio::spawn(async move {
+                scheduler
+                    .acquire(CudaWorkload::Vision, CudaPriority::Visible, cancel)
+                    .await
+            })
         };
         wait_for_pending(&scheduler, 1).await;
         cancel.store(true, Ordering::Release);
@@ -312,18 +382,30 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn only_one_cuda_phase_is_active() {
+    async fn each_workload_is_serialized_while_language_and_vision_overlap() {
         let scheduler = Arc::new(CudaScheduler::new(16));
-        let active = Arc::new(AtomicUsize::new(0));
-        let maximum = Arc::new(AtomicUsize::new(0));
+        let vision_active = Arc::new(AtomicUsize::new(0));
+        let language_active = Arc::new(AtomicUsize::new(0));
+        let total_active = Arc::new(AtomicUsize::new(0));
+        let maximum_total = Arc::new(AtomicUsize::new(0));
+        let violated_lane = Arc::new(AtomicBool::new(false));
         let mut tasks = Vec::new();
         for index in 0..12 {
             let scheduler = scheduler.clone();
-            let active = active.clone();
-            let maximum = maximum.clone();
+            let vision_active = vision_active.clone();
+            let language_active = language_active.clone();
+            let total_active = total_active.clone();
+            let maximum_total = maximum_total.clone();
+            let violated_lane = violated_lane.clone();
             tasks.push(tokio::spawn(async move {
+                let workload = if index % 2 == 0 {
+                    CudaWorkload::Vision
+                } else {
+                    CudaWorkload::Language
+                };
                 let _permit = scheduler
                     .acquire(
+                        workload,
                         if index % 3 == 0 {
                             CudaPriority::Visible
                         } else {
@@ -333,15 +415,24 @@ mod tests {
                     )
                     .await
                     .unwrap();
-                let now = active.fetch_add(1, Ordering::AcqRel) + 1;
-                maximum.fetch_max(now, Ordering::AcqRel);
+                let lane = match workload {
+                    CudaWorkload::Vision => &vision_active,
+                    CudaWorkload::Language => &language_active,
+                };
+                if lane.fetch_add(1, Ordering::AcqRel) != 0 {
+                    violated_lane.store(true, Ordering::Release);
+                }
+                let now = total_active.fetch_add(1, Ordering::AcqRel) + 1;
+                maximum_total.fetch_max(now, Ordering::AcqRel);
                 tokio::task::yield_now().await;
-                active.fetch_sub(1, Ordering::AcqRel);
+                total_active.fetch_sub(1, Ordering::AcqRel);
+                lane.fetch_sub(1, Ordering::AcqRel);
             }));
         }
         for task in tasks {
             task.await.unwrap();
         }
-        assert_eq!(maximum.load(Ordering::Acquire), 1);
+        assert!(!violated_lane.load(Ordering::Acquire));
+        assert_eq!(maximum_total.load(Ordering::Acquire), 2);
     }
 }

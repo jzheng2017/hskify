@@ -763,7 +763,36 @@ pub(super) fn ocr_crop_rect(
     image_width: u32,
     image_height: u32,
 ) -> PixelRect {
-    candidate.text_rect.expand(3.0, image_width, image_height)
+    // Detector text boxes are line-shaped proposals, not guaranteed bounds
+    // for the complete stylized lettering block.  A proportional vertical
+    // context window lets OCR recover a clipped first/last line while keeping
+    // horizontal adjacency isolated.  The cleanup mask is still learned from
+    // glyph probabilities, so the extra pixels cannot become a painted block.
+    let line_height = candidate.text_rect.height().max(1.0);
+    let horizontal_padding = (line_height * 0.08).clamp(4.0, 24.0);
+    // Stylized blocks frequently have a complete line just outside the
+    // detector's line-shaped proposal. A near-line-height context window is
+    // still bounded, but covers the full inter-line gap instead of clipping
+    // the first/last line before PP-OCR sees it.
+    let vertical_padding = (line_height * 0.75).clamp(12.0, 128.0);
+    let mut y0 = (candidate.text_rect.y0 - vertical_padding).max(0.0);
+    let mut y1 = (candidate.text_rect.y1 + vertical_padding).min(image_height as f32);
+    // A detector-confirmed bubble is the strongest generic context boundary:
+    // it often contains a line that the text detector clipped. Use it when it
+    // is a bounded speech/effect block, while refusing page-sized regions that
+    // would turn OCR into an expensive whole-image scan.
+    let bubble_height = candidate.confirmed_bubble_rect.height();
+    let bubble_limit = (line_height * 6.0).clamp(192.0, 1_024.0);
+    if bubble_height <= bubble_limit {
+        y0 = y0.min(candidate.confirmed_bubble_rect.y0.max(0.0));
+        y1 = y1.max(candidate.confirmed_bubble_rect.y1.min(image_height as f32));
+    }
+    PixelRect {
+        x0: (candidate.text_rect.x0 - horizontal_padding).max(0.0),
+        y0,
+        x1: (candidate.text_rect.x1 + horizontal_padding).min(image_width as f32),
+        y1,
+    }
 }
 
 pub(super) fn reading_order_key(
@@ -1017,7 +1046,7 @@ mod tests {
     }
 
     #[test]
-    fn ocr_crop_uses_only_a_small_fixed_guard() {
+    fn ocr_crop_keeps_proportional_vertical_context() {
         let candidate = Candidate {
             kind: CandidateKind::StoryText,
             text_rect: PixelRect::new(100.0, 200.0, 700.0, 500.0).unwrap(),
@@ -1029,7 +1058,7 @@ mod tests {
 
         assert_eq!(
             ocr_crop_rect(&candidate, 900, 1_000),
-            PixelRect::new(97.0, 197.0, 703.0, 503.0).unwrap()
+            PixelRect::new(76.0, 180.0, 724.0, 520.0).unwrap()
         );
     }
 

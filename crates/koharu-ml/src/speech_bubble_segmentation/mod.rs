@@ -17,13 +17,20 @@ use koharu_runtime::RuntimeManager;
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
 
-use crate::{device, loading, probability_map::ProbabilityMap};
+use crate::{
+    comic_text_bubble_detector::DETECTOR_TILE_BATCH_SIZE, device, loading,
+    probability_map::ProbabilityMap,
+};
 
 use self::model::{Multiples, YoloV8Seg, YoloV8SegOutputs};
 
 const HF_REPO: &str = "mayocream/speech-bubble-segmentation";
 const CONFIG_FILENAME: &str = "config.json";
 const SAFETENSORS_FILENAME: &str = "model.safetensors";
+// Cleanup crops originate from the same six-tile reader frontier as the
+// detector. Preserve that batch through contour inference instead of
+// re-splitting one page section into repeated two-item forwards.
+const GPU_BATCH_PIXEL_BUDGET: u64 = DETECTOR_TILE_BATCH_SIZE as u64 * 640 * 640;
 
 koharu_runtime::declare_hf_model_package!(
     id: "model:speech-bubble-segmentation:config",
@@ -53,8 +60,6 @@ struct PreparedInput {
     pixel_values: Tensor,
     original_width: u32,
     original_height: u32,
-    resized_width: u32,
-    resized_height: u32,
     pad_x: u32,
     pad_y: u32,
     scale: f32,
@@ -221,39 +226,82 @@ impl SpeechBubbleSegmentation {
         confidence_threshold: f32,
         nms_threshold: f32,
     ) -> Result<SpeechBubbleSegmentationResult> {
-        let started = Instant::now();
-        let preprocess_started = Instant::now();
-        let prepared = self.preprocess(image)?;
-        let preprocess_elapsed = preprocess_started.elapsed();
-
-        let forward_started = Instant::now();
-        let outputs = self.model.forward(&prepared.pixel_values)?;
-        let forward_elapsed = forward_started.elapsed();
-
-        let postprocess_started = Instant::now();
-        let result = postprocess(
-            &outputs,
-            &prepared,
-            &self.config,
+        self.inference_batch_with_thresholds(
+            std::slice::from_ref(image),
             confidence_threshold,
             nms_threshold,
-        )?;
-        let postprocess_elapsed = postprocess_started.elapsed();
+        )?
+        .pop()
+        .context("speech bubble segmentation returned no result")
+    }
 
+    pub fn inference_batch(
+        &self,
+        images: &[DynamicImage],
+    ) -> Result<Vec<SpeechBubbleSegmentationResult>> {
+        self.inference_batch_with_thresholds(
+            images,
+            self.config.default_confidence_threshold,
+            self.config.default_nms_threshold,
+        )
+    }
+
+    pub fn inference_batch_with_thresholds(
+        &self,
+        images: &[DynamicImage],
+        confidence_threshold: f32,
+        nms_threshold: f32,
+    ) -> Result<Vec<SpeechBubbleSegmentationResult>> {
+        if images.is_empty() {
+            return Ok(Vec::new());
+        }
+        let started = Instant::now();
+        let maximum_batch = if self.device.is_cuda() {
+            usize::try_from(
+                GPU_BATCH_PIXEL_BUDGET / u64::from(self.config.input_size).pow(2).max(1),
+            )
+            .unwrap_or(1)
+            .max(1)
+        } else {
+            1
+        };
+        let mut results = Vec::with_capacity(images.len());
+        for chunk in images.chunks(maximum_batch) {
+            let preprocess_started = Instant::now();
+            let prepared = chunk
+                .iter()
+                .map(|image| self.preprocess(image))
+                .collect::<Result<Vec<_>>>()?;
+            let preprocess_elapsed = preprocess_started.elapsed();
+            let tensors = prepared
+                .iter()
+                .map(|input| &input.pixel_values)
+                .collect::<Vec<_>>();
+            let forward_started = Instant::now();
+            let outputs = self.model.forward(&Tensor::cat(&tensors, 0)?)?;
+            let forward_elapsed = forward_started.elapsed();
+            let postprocess_started = Instant::now();
+            results.extend(postprocess_batch(
+                &outputs,
+                &prepared,
+                &self.config,
+                confidence_threshold,
+                nms_threshold,
+            )?);
+            tracing::info!(
+                batch = prepared.len(),
+                preprocess_ms = preprocess_elapsed.as_millis(),
+                forward_ms = forward_elapsed.as_millis(),
+                postprocess_ms = postprocess_started.elapsed().as_millis(),
+                "batched speech bubble segmentation timings"
+            );
+        }
         tracing::info!(
-            width = image.width(),
-            height = image.height(),
-            resized_width = prepared.resized_width,
-            resized_height = prepared.resized_height,
-            detections = result.regions.len(),
-            preprocess_ms = preprocess_elapsed.as_millis(),
-            forward_ms = forward_elapsed.as_millis(),
-            postprocess_ms = postprocess_elapsed.as_millis(),
+            images = images.len(),
             total_ms = started.elapsed().as_millis(),
-            "speech bubble segmentation timings"
+            "speech bubble segmentation batch complete"
         );
-
-        Ok(result)
+        Ok(results)
     }
 
     fn preprocess(&self, image: &DynamicImage) -> Result<PreparedInput> {
@@ -300,8 +348,6 @@ impl SpeechBubbleSegmentation {
             pixel_values,
             original_width,
             original_height,
-            resized_width,
-            resized_height,
             pad_x,
             pad_y,
             scale,
@@ -334,28 +380,49 @@ fn variant_multiples(config: &SpeechBubbleSegmentationConfig) -> Result<Multiple
     }
 }
 
-fn postprocess(
+fn postprocess_batch(
     outputs: &YoloV8SegOutputs,
+    prepared: &[PreparedInput],
+    config: &SpeechBubbleSegmentationConfig,
+    confidence_threshold: f32,
+    nms_threshold: f32,
+) -> Result<Vec<SpeechBubbleSegmentationResult>> {
+    let pred = outputs.pred.to_dtype(DType::F32)?.to_device(&Device::Cpu)?;
+    let proto = outputs
+        .proto
+        .to_dtype(DType::F32)?
+        .to_device(&Device::Cpu)?;
+    if pred.dim(0)? != prepared.len() || proto.dim(0)? != prepared.len() {
+        bail!("speech bubble segmentation returned an incomplete batch");
+    }
+    prepared
+        .iter()
+        .enumerate()
+        .map(|(batch_index, input)| {
+            postprocess_image(
+                &pred.i(batch_index)?,
+                &proto.i(batch_index)?,
+                input,
+                config,
+                confidence_threshold,
+                nms_threshold,
+            )
+        })
+        .collect()
+}
+
+fn postprocess_image(
+    pred: &Tensor,
+    proto: &Tensor,
     prepared: &PreparedInput,
     config: &SpeechBubbleSegmentationConfig,
     confidence_threshold: f32,
     nms_threshold: f32,
 ) -> Result<SpeechBubbleSegmentationResult> {
-    let pred = outputs
-        .pred
-        .to_dtype(DType::F32)?
-        .to_device(&Device::Cpu)?
-        .i(0)?;
-    let proto = outputs
-        .proto
-        .to_dtype(DType::F32)?
-        .to_device(&Device::Cpu)?
-        .i(0)?;
-    let raw_regions =
-        extract_regions(&pred, prepared, config, confidence_threshold, nms_threshold)?;
+    let raw_regions = extract_regions(pred, prepared, config, confidence_threshold, nms_threshold)?;
     let mut probability_map =
         ProbabilityMap::zeros(prepared.original_width, prepared.original_height);
-    let mask_probabilities = build_mask_probabilities(&proto, prepared, config, &raw_regions)?;
+    let mask_probabilities = build_mask_probabilities(proto, prepared, config, &raw_regions)?;
 
     let mut regions = Vec::with_capacity(raw_regions.len());
     for (region, mask) in raw_regions.iter().zip(mask_probabilities.iter()) {
@@ -620,8 +687,6 @@ mod tests {
                 .expect("tensor"),
             original_width: 1000,
             original_height: 500,
-            resized_width: 640,
-            resized_height: 320,
             pad_x: 0,
             pad_y: 160,
             scale: 0.64,
