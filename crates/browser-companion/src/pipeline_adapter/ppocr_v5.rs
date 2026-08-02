@@ -40,6 +40,7 @@ pub(super) struct PpOcrPrediction {
     pub(super) stroke_color: [u8; 3],
     pub(super) has_stroke_color: bool,
     pub(super) appearance_bands: Vec<PpOcrAppearanceBand>,
+    pub(super) ocr_lines: Vec<PpOcrLine>,
 }
 
 #[derive(Debug, Clone)]
@@ -49,6 +50,17 @@ pub(super) struct PpOcrAppearanceBand {
     pub(super) text_color: [u8; 3],
     pub(super) stroke_color: [u8; 3],
     pub(super) has_stroke_color: bool,
+}
+
+/// One decoded OCR line together with the crop coordinates used to obtain it.
+/// Keeping this provenance lets the page pipeline discard a decorative line
+/// that was accidentally included in a detector crop without guessing from
+/// the final concatenated string.
+#[derive(Debug, Clone)]
+pub(super) struct PpOcrLine {
+    pub(super) text: String,
+    pub(super) confidence: f32,
+    pub(super) bounds: CropBounds,
 }
 
 pub(super) struct EnglishPpOcrV5 {
@@ -382,6 +394,19 @@ impl EnglishPpOcrV5 {
             }
         }
 
+        // Supplemental probes deliberately recover clipped upper/lower lines,
+        // so they are appended after the primary pass.  Restore visual reading
+        // order before assembling the region prediction; otherwise a recovered
+        // first line can appear at the end of the translated sentence.
+        for region in &mut grouped {
+            region.sort_by(|(_, left_bounds), (_, right_bounds)| {
+                left_bounds
+                    .top
+                    .cmp(&right_bounds.top)
+                    .then_with(|| left_bounds.left.cmp(&right_bounds.left))
+            });
+        }
+
         Ok(grouped
             .into_iter()
             .zip(block_crops.iter().zip(text_probabilities))
@@ -425,6 +450,14 @@ impl EnglishPpOcrV5 {
                         }
                     })
                     .collect::<Vec<_>>();
+                let ocr_lines = predictions
+                    .iter()
+                    .map(|(prediction, bounds)| PpOcrLine {
+                        text: prediction.text.clone(),
+                        confidence: prediction.confidence,
+                        bounds: *bounds,
+                    })
+                    .collect::<Vec<_>>();
                 let primary_appearance = predictions
                     .iter()
                     .enumerate()
@@ -453,6 +486,7 @@ impl EnglishPpOcrV5 {
                     stroke_color: primary_appearance.stroke_color,
                     has_stroke_color: primary_appearance.has_stroke_color,
                     appearance_bands,
+                    ocr_lines,
                 }
             })
             .collect())

@@ -777,15 +777,18 @@ pub(super) fn ocr_crop_rect(
     let vertical_padding = (line_height * 0.75).clamp(12.0, 128.0);
     let mut y0 = (candidate.text_rect.y0 - vertical_padding).max(0.0);
     let mut y1 = (candidate.text_rect.y1 + vertical_padding).min(image_height as f32);
-    // A detector-confirmed bubble is the strongest generic context boundary:
-    // it often contains a line that the text detector clipped. Use it when it
-    // is a bounded speech/effect block, while refusing page-sized regions that
-    // would turn OCR into an expensive whole-image scan.
+    // A detector-confirmed bubble is the strongest generic ownership boundary:
+    // it contains the dialogue/effect lettering that belongs to this region.
+    // Keep the bounded context inside that boundary.  Expanding a crop to the
+    // union of the detector line and the bubble admits nearby decorative SFX
+    // (for example a colored "Yap" printed just outside a balloon), which
+    // makes one OCR result contain unrelated text and later produces a bad
+    // cleanup patch. Refuse page-sized regions so this remains a local crop.
     let bubble_height = candidate.confirmed_bubble_rect.height();
     let bubble_limit = (line_height * 6.0).clamp(192.0, 1_024.0);
     if bubble_height <= bubble_limit {
-        y0 = y0.min(candidate.confirmed_bubble_rect.y0.max(0.0));
-        y1 = y1.max(candidate.confirmed_bubble_rect.y1.min(image_height as f32));
+        y0 = y0.max(candidate.confirmed_bubble_rect.y0.max(0.0));
+        y1 = y1.min(candidate.confirmed_bubble_rect.y1.min(image_height as f32));
     }
     PixelRect {
         x0: (candidate.text_rect.x0 - horizontal_padding).max(0.0),

@@ -35,7 +35,9 @@ import { ChapterContextLedger } from './chapter-context'
 const PAGE_SESSION_KEY = 'hmt.pageSessionId'
 const NAVIGATION_CHECK_INTERVAL_MS = 250
 const VIEWPORT_THROTTLE_MS = 100
-const CHAPTER_PIPELINE_CONCURRENCY = 3
+const CHAPTER_PIPELINE_CONCURRENCY = 2
+const CHAPTER_PIPELINE_PIXEL_BUDGET =
+  DEFAULT_IMAGE_LIMITS.maximumPixels * CHAPTER_PIPELINE_CONCURRENCY
 export const AUTOMATIC_IMAGE_RETRY_LIMIT = 2
 export const COMPLETION_SETTLE_MS = 300
 
@@ -323,6 +325,12 @@ export class PageTranslationController {
         },
         onSuccess: (item) => {
           const image = item.value.candidate.element
+          // Interactive startup reserves one slot until the first final
+          // region is committed. A legitimate cover/credit image can finish
+          // with no translatable regions, however, which otherwise leaves
+          // every later image serialized behind an empty result. Completion
+          // is the authoritative startup boundary for both outcomes.
+          this.queue.enableThroughput()
           this.queueIds.delete(image)
           this.failures.delete(image)
           this.runState.complete(image)
@@ -339,10 +347,14 @@ export class PageTranslationController {
                 `Trying again automatically (${retryNumber}/${AUTOMATIC_IMAGE_RETRY_LIMIT})`,
               )
             ) {
+              // A failed first image must not hold the chapter in startup
+              // serialization while its bounded retry is queued.
+              this.queue.enableThroughput()
               return
             }
             this.runState.start(image)
           }
+          this.queue.enableThroughput()
           this.runState.fail(image)
           this.failures.set(image, {
             sourceUrl: item.value.candidate.sourceUrl,
@@ -364,7 +376,7 @@ export class PageTranslationController {
       },
       {
         maximumConcurrent: CHAPTER_PIPELINE_CONCURRENCY,
-        maximumActiveCost: DEFAULT_IMAGE_LIMITS.maximumPixels,
+        maximumActiveCost: CHAPTER_PIPELINE_PIXEL_BUDGET,
       },
     )
     this.discovery = new ImageDiscovery((event) => this.onDiscovery(event))

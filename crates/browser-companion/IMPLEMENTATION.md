@@ -241,8 +241,11 @@ The explicit overrides are `HSK_MANGA_RESOURCES_DIR`,
    tile-ownership cell that could contain another line in that bubble is gone.
    Segment its local contour, group every accepted line by bubble identity,
    inpaint, translate, and publish it immediately while the remaining page
-   tiles continue. This removes the whole-image publication barrier without
-   splitting a balloon at an overlap boundary.
+   tiles continue. Non-visible finalized lines are accumulated into one page
+   tail pass, while the active viewport keeps the immediate path for newly
+   finalized lines. This removes the whole-image publication barrier without
+   re-running the page-tail analysis at every detector frontier or splitting a
+   balloon at an overlap boundary.
 7. Fuse detector-confirmed bubbles without accepted OCR with the independent
    glyph-probability field. A bubble-local adaptive threshold proposes tight
    faint or stylized text bands, while the unchanged OCR confidence and Latin
@@ -252,16 +255,24 @@ The explicit overrides are `HSK_MANGA_RESOURCES_DIR`,
    restore the masked artwork with the manga-trained LaMa model. Bubble
    segmentation and inpainting operate on tiles intersecting the finalized
    region supports, not an unconditional second pass over the entire image.
-9. Queue accepted regions for translation and reprioritize visible work at
+9. Run learned missed-text recovery only when detector evidence leaves an
+   unresolved candidate, bubble, or an entirely unverified page. Recovery is
+   restricted to tiles touching that evidence; a page whose detector lines
+   already cover every bubble does not pay for a second full-page segmentation
+   pass. Recovery and bubble-contour inference are admitted in bounded tile
+   batches so visible work can overtake offscreen recovery between model calls.
+   This keeps fallback coverage generic while removing redundant model work
+   from ordinary pages.
+10. Queue accepted regions for translation and reprioritize visible work at
    every OCR or detector boundary. Ready batches begin at three pending
    regions, contain at most six, and an undersized tail becomes eligible when
    its hard 75 ms batching deadline expires (or at the final forced drain).
    Boundary checks never sleep, and no page-wide translation call exists.
-10. The Firefox chapter coordinator may keep two visible image jobs in flight
-    when their combined decoded source-pixel cost remains below the normal
-    single-image admission limit. This lets a short cover/title image and the
-    following visible story strip share the daemon pipeline without allowing
-    an unbounded set of long pages to occupy memory.
+11. The Firefox chapter coordinator may keep two visible image jobs in flight
+    within a bounded two-image decoded source-pixel budget. This lets the
+    following visible story strip share the daemon pipeline while the first
+    page is finishing, without allowing an unbounded set of long pages to
+    occupy memory.
 
 Low-confidence, undecodable, and non-Latin OCR are excluded before translation.
 Content is not rejected by hard-coded story, credit, role, or sound-effect word

@@ -29,7 +29,7 @@ pub use koharu_llm::direct_hsk_protocol::{
 
 pub const HSK_TRANSLATION_MODEL: ModelId = ModelId::Qwen3_5_4b;
 pub const HSK_SEMANTIC_ANALYSIS_REVISION: &str =
-    "capacity-planned-page-role-and-typed-name-analysis-v24-2026-08-01";
+    "capacity-planned-page-role-and-typed-name-analysis-v25-2026-08-02";
 // Composite cache identity: repository@commit, filename, and exact file digest.
 pub const HSK_TRANSLATION_MODEL_REVISION: &str = "unsloth/Qwen3.5-4B-GGUF@e87f176479d0855a907a41277aca2f8ee7a09523:Qwen3.5-4B-Q4_K_M.gguf:sha256=00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4";
 pub const MAX_HSK_PRECEDING_UTTERANCES: usize = 6;
@@ -248,6 +248,12 @@ pub enum HskTranslationIssue {
         source_english: String,
         chinese: String,
     },
+    ProtectedNameOccurrenceMismatch {
+        source_english: String,
+        chinese: String,
+        expected: usize,
+        actual: usize,
+    },
     QuestionIntentMissing,
     ExcessiveExpansion {
         source_words: usize,
@@ -273,6 +279,14 @@ impl HskTranslationIssue {
                 source_english,
                 chinese,
             } => format!("translate protected name `{source_english}` exactly as `{chinese}`"),
+            Self::ProtectedNameOccurrenceMismatch {
+                source_english,
+                chinese,
+                expected,
+                actual,
+            } => format!(
+                "preserve protected name `{source_english}` as `{chinese}` once per source occurrence: expected {expected}, got {actual}"
+            ),
             Self::QuestionIntentMissing => "preserve the source question intent".to_owned(),
             Self::ExcessiveExpansion {
                 source_words,
@@ -493,18 +507,36 @@ where
         .find_map(|utterance| utterance.semantic_layout.as_ref())
         .map(|layout| format!("{}x{}", layout.page_width, layout.page_height))
         .unwrap_or_else(|| "unknown".to_owned());
+    let mut repeat_counts = HashMap::<String, usize>::new();
+    for utterance in utterances {
+        let key = utterance
+            .source_english
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_ascii_uppercase();
+        *repeat_counts.entry(key).or_default() += 1;
+    }
     let mut user_prompt = format!(
         "Ordered OCR regions from one comic page section (page={page_dimensions}). \
 Layout is fallible supporting evidence:\n"
     );
     for (index, utterance) in utterances.iter().enumerate() {
         use std::fmt::Write as _;
+        let repeat_key = utterance
+            .source_english
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_ascii_uppercase();
+        let repeat_count = repeat_counts.get(&repeat_key).copied().unwrap_or(1);
         if let Some(layout) = &utterance.semantic_layout {
             writeln!(
                 &mut user_prompt,
-                "{}\ttext={}\tdetector={}\tfont-height={:.2}%\tappearance-bands={}\ttext-colors={}\toutline={}\tbox={:.1}%,{:.1}%-{:.1}%,{:.1}%",
+                "{}\ttext={}\trepeat-count={}\tdetector={}\tfont-height={:.2}%\tappearance-bands={}\ttext-colors={}\toutline={}\tbox={:.1}%,{:.1}%-{:.1}%,{:.1}%",
                 index + 1,
                 compact_field(&utterance.source_english),
+                repeat_count,
                 if layout.detector_enclosed {
                     "enclosed"
                 } else {
@@ -523,9 +555,10 @@ Layout is fallible supporting evidence:\n"
         } else {
             writeln!(
                 &mut user_prompt,
-                "{}\ttext={}",
+                "{}\ttext={}\trepeat-count={}",
                 index + 1,
                 compact_field(&utterance.source_english),
+                repeat_count,
             )
             .expect("writing to String cannot fail");
         }
@@ -541,7 +574,10 @@ cover title into STORY merely because it is readable. Any coherent dialogue, tho
 in-story caption, sign, or world content makes the section STORY. Then classify each region as \
 STORY, SFX, FURNITURE, or ARTWORK. STORY includes dialogue, narration, captions, signs, interface \
 labels, names, roles, and ordinary language. SFX is only standalone onomatopoeia or a nonverbal \
-auditory effect. FURNITURE is only unrelated publisher/site credit, watermark, advertisement, reader \
+auditory effect. When the same short non-sentence token appears in multiple separate OCR regions, \
+the supplied repeat-count is the number of separate OCR regions with the same normalized text; \
+that repetition is strong SFX evidence (for example repeated ringing, impact, or motion sounds) \
+unless the surrounding text clearly makes it a spoken or named label. FURNITURE is only unrelated publisher/site credit, watermark, advertisement, reader \
 navigation, work/series title or logo, chapter card, or irrecoverable OCR. ARTWORK is only readable \
 in-story lettering that is visually integral to the illustration and semantically names an attack, \
 technique, form, spell, transformation, or dramatic story title, where replacing its original \
@@ -712,22 +748,33 @@ where
         an ordinary phenomenon, action, object, or quality used with its normal lexical meaning is \
         DESCRIPTIVE, not a named event or entity. An opaque personal or family surname remains OPAQUE when \
         it identifies a particular family, clan, or house before the separately translatable role word. \
+        The same applies to a candidate immediately followed by a translatable group or kinship noun such as twins, \
+        brothers, sisters, family, clan, or house: keep only the candidate opaque and translate that following noun. \
+        A multi-token PERSON candidate that is followed by a rank, title, or role remains OPAQUE for the candidate \
+        itself; do not downgrade the name merely because the occurrence continues with words such as seventh flagbearer. \
         Apply a translation test: if a fluent translator can translate the span's ordinary component \
         meanings without losing an arbitrary identity, return DESCRIPTIVE. Color-plus-role, \
         adjective-plus-occupation, species-plus-title, relationship words, and institutional job \
         titles therefore remain DESCRIPTIVE even when the story uses them for one particular character. \
         OPAQUE is reserved for lexical identifiers whose identity would be changed by dictionary-meaning \
         translation, such as an arbitrary personal name, surname, coined place, or coined organization. \
-        A one-token or multi-token span with no ordinary English dictionary meaning is an opaque identifier \
-        even when it appears inside a sentence; unknown transliterated-looking strings are not descriptive. \
+        OCR-like strings that are a plausible spelling error of another word in the supplied page context, \
+        or that occur as an adjective/predicate inside an ordinary clause, are DESCRIPTIVE and must be \
+        translated; do not protect them merely because they are capitalized or unknown. A one-token or \
+        multi-token span with no ordinary English dictionary meaning is an opaque identifier only when its \
+        context supports an arbitrary identifier rather than an OCR error. \
         When a PERSON candidate is the lexical head immediately before `family`, `clan`, `house`, `dynasty`, \
         or a comparable kinship/institution noun, treat that candidate as the family or house identifier, \
         not as the ordinary noun phrase around it. Do not skip opaque surnames in those constructions. \
         For a PERSON candidate marked `syntax=definite-article-before`, treat the syntax as strong \
         evidence of a descriptive role, title, or epithet; return OPAQUE only when the candidate \
         itself is demonstrably an opaque lexical identifier rather than ordinary descriptive words. \
-        Capitalization and uniqueness alone never make a name. Return exactly {} ordered lines \
-        containing position, one tab, and OPAQUE or DESCRIPTIVE; write nothing else.",
+        If a proposed span mixes a translatable relationship, role, title, or descriptor with an opaque \
+        identifier, return OPAQUE=<shortest exact opaque subspan> so the surrounding words remain \
+        translatable. The subspan must occur exactly in the supplied source occurrence; return DESCRIPTIVE \
+        when no opaque subspan remains. Capitalization and uniqueness alone never make a name. Return \
+        exactly {} ordered lines containing position, one tab, and either OPAQUE, OPAQUE=<exact source \
+        subspan>, or DESCRIPTIVE; write nothing else.",
         candidates.len(),
         candidates.len(),
     );
@@ -772,7 +819,7 @@ where
     check_cancelled(cancel)?;
     trace_semantic_output("proper-name-verifier", &raw);
 
-    let mut keep = vec![false; candidates.len()];
+    let mut decisions = vec![None::<NameVerification>; candidates.len()];
     let normalized_raw = normalize_semantic_wire_output(&raw);
     for raw_line in normalized_raw
         .lines()
@@ -784,27 +831,67 @@ where
         if position == 0 || position > candidates.len() {
             continue;
         }
-        if let Some(decision) = parse_keep_original_decision(payload) {
-            keep[position - 1] = decision;
+        if let Some(decision) = parse_name_verification(payload) {
+            decisions[position - 1] = Some(decision);
         }
     }
     Ok(candidates
         .iter()
-        .zip(keep)
-        .filter_map(|(candidate, keep)| {
-            // The verifier remains the authority for arbitrary identifiers,
-            // but a model can still overprotect an ordinary role phrase when
-            // it is capitalized by OCR (for example `RED WITCH` or
-            // `ACADEMY HEADMASTER`).  This lexical-function postcondition is
-            // deliberately narrow: it only vetoes a short, compositional
-            // phrase whose final word is an ordinary role and whose modifiers
-            // are ordinary descriptors.  It never invents a name or rewrites
-            // an opaque token.
-            ((keep || contextual_opaque_name_candidate(candidate, utterances))
-                && !intrinsically_descriptive_role_span(&candidate.name.source_english))
-            .then(|| candidate.name.clone())
+        .zip(decisions)
+        .filter_map(|(candidate, decision)| {
+            let selected = match decision {
+                Some(NameVerification::Opaque(None)) => candidate.name.source_english.clone(),
+                Some(NameVerification::Opaque(Some(span))) => span,
+                Some(NameVerification::Descriptive) => return None,
+                None if contextual_opaque_name_candidate(candidate, utterances) => {
+                    candidate.name.source_english.clone()
+                }
+                None => return None,
+            };
+            let selected = canonical_source_span_for_occurrences(utterances, &selected)?;
+            let selected_candidate = DetectedNameCandidate {
+                name: HskProtectedName {
+                    source_english: selected.to_owned(),
+                    chinese: selected.to_owned(),
+                },
+                entity_type: candidate.entity_type.clone(),
+            };
+            if candidate_is_contextual_ocr_variant(&selected_candidate, utterances)
+                || !utterances.iter().any(|utterance| {
+                    opaque_name_span_is_admissible(&utterance.source_english, selected)
+                })
+            {
+                return None;
+            }
+            Some(selected_candidate.name)
         })
         .collect())
+}
+
+fn candidate_is_contextual_ocr_variant(
+    candidate: &DetectedNameCandidate,
+    utterances: &[HskSourceUtterance],
+) -> bool {
+    let span = candidate.name.source_english.trim();
+    if span.split_whitespace().count() != 1
+        || !span
+            .chars()
+            .all(|character| character.is_ascii_alphabetic() && character.is_ascii_uppercase())
+        || span.len() < 5
+    {
+        return false;
+    }
+    let span_lower = span.to_ascii_lowercase();
+    utterances
+        .iter()
+        .flat_map(|utterance| source_word_spans(&utterance.source_english))
+        .map(|word| word.text)
+        .filter(|word| word.len() >= 5 && !word.eq_ignore_ascii_case(span))
+        .any(|word| {
+            let word_lower = word.to_ascii_lowercase();
+            word_lower.len().abs_diff(span_lower.len()) <= 1
+                && ascii_edit_distance_at_most(&span_lower, &word_lower, 1)
+        })
 }
 
 fn contextual_opaque_name_candidate(
@@ -815,107 +902,89 @@ fn contextual_opaque_name_candidate(
         && candidate_syntax(utterances, &candidate.name.source_english) == "family-head"
 }
 
-fn parse_keep_original_decision(payload: &str) -> Option<bool> {
-    let mut decision = None;
-    for token in payload.split(|character: char| !character.is_ascii_alphabetic()) {
-        let current = if token.eq_ignore_ascii_case("OPAQUE") {
-            Some(true)
-        } else if token.eq_ignore_ascii_case("DESCRIPTIVE") {
-            Some(false)
-        } else {
-            None
-        };
-        let Some(current) = current else {
-            continue;
-        };
-        if decision.is_some_and(|previous| previous != current) {
-            return None;
-        }
-        decision = Some(current);
-    }
-    decision
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NameVerification {
+    Opaque(Option<String>),
+    Descriptive,
 }
 
-fn intrinsically_descriptive_role_span(source: &str) -> bool {
-    const SAFE_SINGLE_ROLE_HEADS: &[&str] = &[
-        "agent",
-        "brother",
-        "daughter",
-        "father",
-        "headmaster",
-        "headmistress",
-        "husband",
-        "mother",
-        "servant",
-        "sister",
-        "son",
-        "student",
-        "teacher",
-        "wife",
-    ];
-    const ROLE_HEADS: &[&str] = &[
-        "agent",
-        "assassin",
-        "captain",
-        "chairman",
-        "chief",
-        "commander",
-        "detective",
-        "doctor",
-        "duke",
-        "duchess",
-        "general",
-        "guard",
-        "headmaster",
-        "headmistress",
-        "hero",
-        "king",
-        "knight",
-        "lady",
-        "leader",
-        "lord",
-        "mage",
-        "maid",
-        "manager",
-        "master",
-        "officer",
-        "priest",
-        "prince",
-        "princess",
-        "professor",
-        "queen",
-        "servant",
-        "soldier",
-        "student",
-        "teacher",
-        "thief",
-        "tutor",
-        "vicecaptain",
-        "wife",
-        "witch",
-        "wizard",
-    ];
-    const DESCRIPTOR_WORDS: &[&str] = &[
-        "academy", "ancient", "black", "blue", "chief", "dark", "former", "gold", "golden",
-        "great", "high", "iron", "junior", "last", "old", "red", "royal", "school", "senior",
-        "silver", "the", "young", "white",
-    ];
-    let words = source
-        .split(|character: char| !character.is_ascii_alphabetic())
-        .filter(|word| !word.is_empty())
-        .map(|word| word.to_ascii_lowercase())
+fn parse_name_verification(payload: &str) -> Option<NameVerification> {
+    let payload = payload.trim();
+    // The wire contract asks for `OPAQUE` or `DESCRIPTIVE`, but small local
+    // models sometimes echo a confidence/index and candidate span as extra
+    // tab-separated columns (for example `12\tMAYSA\tOPAQUE`).  Interpret the
+    // decision token wherever it occurs while keeping any adjacent nonnumeric
+    // field as an optional exact opaque subspan.
+    let fields = payload
+        .split('\t')
+        .map(str::trim)
+        .filter(|field| !field.is_empty())
         .collect::<Vec<_>>();
-    if words.is_empty() || words.len() > 3 {
-        return false;
+    let first_non_numeric = fields
+        .iter()
+        .position(|field| !field.bytes().all(|byte| byte.is_ascii_digit()))
+        .unwrap_or(fields.len());
+    if first_non_numeric > 0 {
+        let remainder = fields[first_non_numeric..].join("\t");
+        return parse_name_verification(&remainder);
     }
-    let last = words.last().expect("non-empty role span");
-    if words.len() == 1 {
-        return SAFE_SINGLE_ROLE_HEADS.contains(&last.as_str());
-    }
-    ROLE_HEADS.contains(&last.as_str())
-        && words[..words.len() - 1]
+    if fields.len() > 1 {
+        if fields
             .iter()
-            .all(|word| DESCRIPTOR_WORDS.contains(&word.as_str()))
+            .any(|field| field.eq_ignore_ascii_case("DESCRIPTIVE"))
+        {
+            return Some(NameVerification::Descriptive);
+        }
+        if let Some(index) = fields
+            .iter()
+            .position(|field| field.eq_ignore_ascii_case("OPAQUE"))
+        {
+            let subspan = fields
+                .get(index + 1)
+                .copied()
+                .filter(|field| {
+                    !field.bytes().all(|byte| byte.is_ascii_digit())
+                        && !field.eq_ignore_ascii_case("DESCRIPTIVE")
+                        && !field.eq_ignore_ascii_case("OPAQUE")
+                })
+                .or_else(|| {
+                    index.checked_sub(1).and_then(|previous| {
+                        let field = fields[previous];
+                        (!field.bytes().all(|byte| byte.is_ascii_digit())
+                            && !field.eq_ignore_ascii_case("DESCRIPTIVE")
+                            && !field.eq_ignore_ascii_case("OPAQUE"))
+                        .then_some(field)
+                    })
+                });
+            return Some(NameVerification::Opaque(subspan.map(str::to_owned)));
+        }
+    }
+    if payload.eq_ignore_ascii_case("DESCRIPTIVE") {
+        return Some(NameVerification::Descriptive);
+    }
+    let opaque = payload
+        .strip_prefix("OPAQUE")
+        .or_else(|| payload.strip_prefix("opaque"))?
+        .trim();
+    if opaque.is_empty() {
+        return Some(NameVerification::Opaque(None));
+    }
+    let span = opaque
+        .strip_prefix('=')
+        .or_else(|| opaque.strip_prefix(':'))
+        .map(str::trim)
+        .filter(|span| !span.is_empty())?
+        .to_owned();
+    Some(NameVerification::Opaque(Some(span)))
+}
+
+fn canonical_source_span_for_occurrences<'a>(
+    utterances: &'a [HskSourceUtterance],
+    candidate: &str,
+) -> Option<&'a str> {
+    utterances
+        .iter()
+        .find_map(|utterance| canonical_source_span(&utterance.source_english, candidate))
 }
 
 fn candidate_syntax(utterances: &[HskSourceUtterance], candidate: &str) -> &'static str {
@@ -1436,6 +1505,47 @@ fn augment_name_candidates_with_context(
                 entity_type: "UNKNOWN".to_owned(),
             });
         }
+
+        // OCR commonly normalizes comic lettering to uppercase, erasing the
+        // casing signal that normally helps NER find a name.  Offer a trailing
+        // uppercase identifier run to the same contextual verifier instead of
+        // deciding locally.  The verifier remains authoritative and can reject
+        // ordinary words, roles, titles, and publisher text.
+        let mut trailing = words
+            .iter()
+            .rev()
+            .take_while(|word| {
+                word.text.len() >= 3
+                    && word
+                        .text
+                        .chars()
+                        .all(|character| character.is_ascii_uppercase())
+            })
+            .collect::<Vec<_>>();
+        if trailing.is_empty() {
+            continue;
+        }
+        trailing.reverse();
+        let Some(span) = utterance
+            .source_english
+            .get(trailing[0].start..trailing.last().expect("non-empty run").end)
+            .and_then(|span| canonical_source_span(&utterance.source_english, span))
+        else {
+            continue;
+        };
+        if opaque_name_span_is_admissible(&utterance.source_english, span)
+            && !candidates
+                .iter()
+                .any(|candidate| candidate.name.source_english.eq_ignore_ascii_case(span))
+        {
+            candidates.push(DetectedNameCandidate {
+                name: HskProtectedName {
+                    source_english: span.to_owned(),
+                    chinese: span.to_owned(),
+                },
+                entity_type: "UNKNOWN".to_owned(),
+            });
+        }
     }
     candidates
 }
@@ -1633,10 +1743,25 @@ fn artwork_claim_is_admissible(utterance: &HskSourceUtterance) -> bool {
         "haven't",
         "hasn't",
         "hadn't",
+        "yeah",
+        "yes",
+        "no",
+        "hey",
+        "hello",
+        "hi",
+        "okay",
+        "ok",
+        "well",
+        "please",
+        "thank",
+        "thanks",
+        "let's",
     ];
     let trimmed = utterance.source_english.trim();
-    if trimmed.ends_with('?')
-        || trimmed.ends_with('.')
+    if trimmed
+        .chars()
+        .last()
+        .is_some_and(|character| matches!(character, '?' | '.' | '!' | ':' | ';'))
         || trimmed.chars().any(|character| character.is_ascii_digit())
         || english_word_count(trimmed) > 6
     {
@@ -1857,6 +1982,16 @@ fn parse_semantic_classification(
                 }
             };
     }
+    // OCR often emits one sound-effect glyph run as several overlapping
+    // short regions.  Treat a repeated, punctuation-free all-caps token as a
+    // typed SFX only when the repetition is strong (three or more regions).
+    // This is page evidence, not a vocabulary or chapter exception, and it
+    // prevents a model that conservatively labels every region STORY from
+    // translating obvious repeated effects when sound effects are disabled.
+    for index in repeated_short_sfx_indices(utterances) {
+        decisions[index] = Some(HskTranslationDisposition::ExcludeSoundEffect);
+        raw_categories[index] = Some("SFX".to_owned());
+    }
     let complete_non_story_artwork_page = page_category.as_deref() == Some("ARTWORK")
         && raw_categories
             .iter()
@@ -1916,6 +2051,42 @@ fn parse_semantic_classification(
         page_is_furniture,
         regions,
     }
+}
+
+fn repeated_short_sfx_indices(utterances: &[HskSourceUtterance]) -> Vec<usize> {
+    let mut counts = HashMap::<String, usize>::new();
+    for utterance in utterances {
+        let key = utterance
+            .source_english
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_ascii_uppercase();
+        *counts.entry(key).or_default() += 1;
+    }
+    utterances
+        .iter()
+        .enumerate()
+        .filter_map(|(index, utterance)| {
+            let source = utterance.source_english.trim();
+            let words = source.split_whitespace().collect::<Vec<_>>();
+            let key = words.join(" ").to_ascii_uppercase();
+            let is_all_caps = source
+                .chars()
+                .filter(|character| character.is_ascii_alphabetic())
+                .next()
+                .is_some_and(|_| {
+                    source.chars().all(|character| {
+                        character.is_ascii_uppercase() || character.is_ascii_whitespace()
+                    })
+                });
+            let is_short_token = (1..=2).contains(&words.len())
+                && words.iter().all(|word| word.len() >= 2)
+                && source.len() <= 20;
+            (counts.get(&key).copied().unwrap_or(0) >= 3 && is_all_caps && is_short_token)
+                .then_some(index)
+        })
+        .collect()
 }
 
 fn normalize_semantic_wire_output(output: &str) -> String {
@@ -2006,7 +2177,27 @@ fn credit_cluster_is_furniture(utterances: &[HskSourceUtterance]) -> bool {
         })
         .count();
     let has_numeric_credit_cluster = numeric_label_count > 0 && opaque_label_count >= 2;
-    if utterances.len() < 3 || (!has_network && !has_numeric_credit_cluster) {
+    let credit_prefix_count = utterances
+        .iter()
+        .filter(|utterance| {
+            utterance
+                .source_english
+                .split_whitespace()
+                .next()
+                .is_some_and(|word| {
+                    matches!(
+                        word.trim_matches(|character: char| !character.is_ascii_alphabetic())
+                            .to_ascii_uppercase()
+                            .as_str(),
+                        "PR" | "TL" | "CL" | "RD" | "TS" | "QC"
+                    )
+                })
+        })
+        .count();
+    let has_credit_prefix_cluster = credit_prefix_count >= 2;
+    if utterances.len() < 3
+        || (!has_network && !has_numeric_credit_cluster && !has_credit_prefix_cluster)
+    {
         return false;
     }
 
@@ -2102,7 +2293,9 @@ fn credit_cluster_is_furniture(utterances: &[HskSourceUtterance]) -> bool {
             return false;
         }
         let title_like = standalone_title_like(utterance);
-        let brand_label = has_numeric_credit_cluster && words <= 2 && !story_leader;
+        let brand_label = (has_numeric_credit_cluster || has_credit_prefix_cluster)
+            && words <= 2
+            && !story_leader;
         let label =
             (all_caps || network || credit_prefix || numeric_label || brand_label || title_like)
                 && (!story_leader || title_like);
@@ -3485,12 +3678,22 @@ fn preservation_issues(
 
     let source_lower = source_english.to_ascii_lowercase();
     for name in protected_names {
-        if source_lower.contains(&name.source_english.to_ascii_lowercase())
-            && !chinese.contains(&name.chinese)
-        {
+        let expected = source_exact_occurrence_count(source_english, &name.source_english);
+        if expected == 0 {
+            continue;
+        }
+        let actual = output_exact_occurrence_count(chinese, &name.chinese);
+        if actual == 0 {
             issues.push(HskTranslationIssue::ProtectedNameMissing {
                 source_english: name.source_english.clone(),
                 chinese: name.chinese.clone(),
+            });
+        } else if actual != expected {
+            issues.push(HskTranslationIssue::ProtectedNameOccurrenceMismatch {
+                source_english: name.source_english.clone(),
+                chinese: name.chinese.clone(),
+                expected,
+                actual,
             });
         }
     }
@@ -3508,6 +3711,44 @@ fn preservation_issues(
         });
     }
     issues
+}
+
+fn source_exact_occurrence_count(source: &str, candidate: &str) -> usize {
+    let candidate = candidate.trim();
+    if candidate.is_empty() {
+        return 0;
+    }
+    source
+        .char_indices()
+        .filter_map(|(start, _)| {
+            let end = start.checked_add(candidate.len())?;
+            let actual = source.get(start..end)?;
+            let starts_at_boundary =
+                start == 0 || !source.as_bytes()[start - 1].is_ascii_alphanumeric();
+            let ends_at_boundary =
+                end == source.len() || !source.as_bytes()[end].is_ascii_alphanumeric();
+            (starts_at_boundary && ends_at_boundary && actual.eq_ignore_ascii_case(candidate))
+                .then_some(end)
+        })
+        .count()
+}
+
+fn output_exact_occurrence_count(output: &str, candidate: &str) -> usize {
+    let candidate = candidate.trim();
+    if candidate.is_empty() {
+        return 0;
+    }
+    if candidate.is_ascii() && output.is_ascii() {
+        return output
+            .char_indices()
+            .filter_map(|(start, _)| {
+                let end = start.checked_add(candidate.len())?;
+                let actual = output.get(start..end)?;
+                actual.eq_ignore_ascii_case(candidate).then_some(end)
+            })
+            .count();
+    }
+    output.match_indices(candidate).count()
 }
 
 fn english_word_count(text: &str) -> usize {
@@ -4164,6 +4405,34 @@ mod tests {
     }
 
     #[test]
+    fn uppercase_ocr_name_runs_are_offered_to_the_contextual_verifier() {
+        let utterances = vec![
+            source("a", "You brought in a stranger at a time like this, MAYSA."),
+            source(
+                "b",
+                "Vice-captain of the Arabion Subjugation Force KADRAM ARABION",
+            ),
+            source("c", "Please don't worry about me."),
+        ];
+        let candidates = augment_name_candidates_with_context(Vec::new(), &utterances);
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| candidate.name.source_english == "MAYSA")
+        );
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| candidate.name.source_english == "KADRAM ARABION")
+        );
+        assert!(
+            !candidates
+                .iter()
+                .any(|candidate| candidate.name.source_english == "PLEASE")
+        );
+    }
+
+    #[test]
     fn semantic_classification_discards_hallucinated_names_without_losing_valid_siblings()
     -> Result<()> {
         let utterances = vec![
@@ -4184,6 +4453,23 @@ mod tests {
             ["Neris"]
         );
         Ok(())
+    }
+
+    #[test]
+    fn contextual_ocr_variants_are_not_protected_as_names() {
+        let utterances = vec![
+            source("a", "You suddenly became SERIOLS."),
+            source("b", "Since you're SERIOUS, I will continue."),
+        ];
+        let candidate = DetectedNameCandidate {
+            name: HskProtectedName {
+                source_english: "SERIOLS".to_owned(),
+                chinese: "SERIOLS".to_owned(),
+            },
+            entity_type: "PERSON".to_owned(),
+        };
+
+        assert!(candidate_is_contextual_ocr_variant(&candidate, &utterances));
     }
 
     #[test]
@@ -4428,6 +4714,25 @@ mod tests {
     }
 
     #[test]
+    fn credit_prefix_clusters_are_excluded_without_a_detected_network_label() {
+        let utterances = vec![
+            source("title", "SWORDMASTER'S YOUNGEST SON"),
+            source("translator", "TL CLARA"),
+            source("cleaner", "CL EUWEN"),
+            source("redrawer", "RD EUWEN"),
+            source("typesetter", "TS EUWEN"),
+            source("quality", "QC EUWEN"),
+        ];
+        let classified = parse_semantic_classification(
+            "PAGE\tSTORY\n1\tSTORY\n2\tSTORY\n3\tSTORY\n4\tSTORY\n5\tSTORY\n6\tSTORY",
+            &utterances,
+        );
+        assert!(classified.page_is_furniture);
+        assert!(classified.regions.is_empty());
+        assert!(credit_cluster_is_furniture(&utterances));
+    }
+
+    #[test]
     fn mixed_cover_title_and_watermark_credit_clusters_remain_furniture() {
         let utterances = vec![
             source("ocr-1", "RDKAISER"),
@@ -4484,24 +4789,35 @@ mod tests {
     }
 
     #[test]
-    fn compositional_role_spans_are_not_protected_as_names() {
-        for source_text in [
-            "WIFE",
-            "RED WITCH",
-            "ACADEMY HEADMASTER",
-            "THE FORMER THIEF",
-        ] {
-            assert!(
-                intrinsically_descriptive_role_span(source_text),
-                "{source_text}"
-            );
-        }
-        for source_text in ["MAYSA", "KADRAM ARABION", "HOUSE BERG", "CAPTAIN NERIS"] {
-            assert!(
-                !intrinsically_descriptive_role_span(source_text),
-                "{source_text}"
-            );
-        }
+    fn name_verification_accepts_model_selected_opaque_subspans() {
+        assert_eq!(
+            parse_name_verification("OPAQUE=MARY"),
+            Some(NameVerification::Opaque(Some("MARY".to_owned())))
+        );
+        assert_eq!(
+            parse_name_verification("DESCRIPTIVE"),
+            Some(NameVerification::Descriptive)
+        );
+        assert_eq!(
+            parse_name_verification("OPAQUE"),
+            Some(NameVerification::Opaque(None))
+        );
+        assert_eq!(
+            parse_name_verification("12\tDESCRIPTIVE"),
+            Some(NameVerification::Descriptive)
+        );
+        assert_eq!(
+            parse_name_verification("12\tOPAQUE=MARY"),
+            Some(NameVerification::Opaque(Some("MARY".to_owned())))
+        );
+        assert_eq!(
+            parse_name_verification("12\tMARY\tOPAQUE"),
+            Some(NameVerification::Opaque(Some("MARY".to_owned())))
+        );
+        assert_eq!(
+            parse_name_verification("12\t12\tKADRAM ARABION\tOPAQUE"),
+            Some(NameVerification::Opaque(Some("KADRAM ARABION".to_owned())))
+        );
     }
 
     #[test]
@@ -4553,6 +4869,37 @@ mod tests {
         );
         assert_eq!(generator.inner.user_prompts.lock().unwrap().len(), 2);
         Ok(())
+    }
+
+    #[test]
+    fn repeated_short_uppercase_regions_are_typed_as_sfx() {
+        let utterances = vec![
+            source("a", "DING"),
+            source("b", "DING"),
+            source("c", "DING"),
+            source("d", "Thanks."),
+        ];
+        let classification = parse_semantic_classification(
+            "PAGE\tSTORY\n1\tSTORY\n2\tSTORY\n3\tSTORY\n4\tSTORY",
+            &utterances,
+        );
+        assert_eq!(
+            classification.regions,
+            [
+                (
+                    "a".to_owned(),
+                    HskTranslationDisposition::ExcludeSoundEffect
+                ),
+                (
+                    "b".to_owned(),
+                    HskTranslationDisposition::ExcludeSoundEffect
+                ),
+                (
+                    "c".to_owned(),
+                    HskTranslationDisposition::ExcludeSoundEffect
+                ),
+            ]
+        );
     }
 
     #[tokio::test]
@@ -4876,6 +5223,22 @@ mod tests {
             source_english: source_english.to_owned(),
             semantic_layout: None,
         }
+    }
+
+    #[test]
+    fn artwork_admission_rejects_exclamatory_dialogue_and_conversational_openers() {
+        assert!(!artwork_claim_is_admissible(&source(
+            "yeah",
+            "YEAH, THAT'S WHAT I MEAN!",
+        )));
+        assert!(!artwork_claim_is_admissible(&source(
+            "thanks",
+            "THANK YOU TOO!"
+        )));
+        assert!(!artwork_claim_is_admissible(&source(
+            "question",
+            "WHY ARE YOU LAUGHING?"
+        )));
     }
 
     fn request() -> HskTranslationBatchRequest {
@@ -5403,6 +5766,24 @@ mod tests {
                 .iter()
                 .any(|issue| matches!(issue, HskTranslationIssue::NumberMismatch { .. }))
         );
+    }
+
+    #[test]
+    fn deterministic_validator_rejects_missing_or_duplicated_name_occurrences() {
+        let names = [HskProtectedName {
+            source_english: "Alice".to_owned(),
+            chinese: "Alice".to_owned(),
+        }];
+        let missing = preservation_issues("Alice, Alice!", "Alice！", &names, true);
+        assert!(missing.iter().any(|issue| matches!(
+            issue,
+            HskTranslationIssue::ProtectedNameOccurrenceMismatch {
+                expected: 2,
+                actual: 1,
+                ..
+            }
+        )));
+        assert!(preservation_issues("Alice, Alice!", "Alice，Alice！", &names, true).is_empty());
     }
 
     #[test]

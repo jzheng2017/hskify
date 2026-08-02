@@ -56,7 +56,9 @@ use self::patch::{
     merge_binary_mask, merge_cleanup_mask, merge_probability_map,
     merge_source_guided_glyph_probabilities, region_polygons, verified_text_mask_for_regions_local,
 };
-use self::ppocr_v5::{EnglishPpOcrV5, MAX_LINE_BATCH_SIZE, PpOcrAppearanceBand, PpOcrPrediction};
+use self::ppocr_v5::{
+    EnglishPpOcrV5, MAX_LINE_BATCH_SIZE, PpOcrAppearanceBand, PpOcrLine, PpOcrPrediction,
+};
 use crate::contracts::{
     BrowserJobRequest, BrowserJobStage, BrowserTextColorBand, BrowserTextLayout, BrowserTextStyle,
     FontCategory, HskLevel, HskRepairState, LearningMode, LookupRegion, LookupResult, LookupToken,
@@ -75,12 +77,17 @@ use crate::setup::{
 };
 
 const OCR_REGION_BATCH_SIZE: usize = MAX_LINE_BATCH_SIZE;
+// Keep recovery inference batched without holding the vision permit for an
+// entire page. This matches the detector's bounded CUDA batch size, so a
+// visible detector/OCR phase can run between recovery batches.
+const FALLBACK_BUBBLE_BATCH_SIZE: usize = DETECTOR_TILE_BATCH_SIZE;
 const FAST_VISIBLE_OCR_MIN_CONFIDENCE: f32 = 0.95;
 const TRANSLATION_BATCH_MAX: usize = 6;
 const TRANSLATION_BATCH_MIN: usize = 3;
 const TRANSLATION_MAX_FLUSH_DELAY: Duration = Duration::from_millis(75);
 const BROWSER_QWEN_INFERENCE_THREADS: i32 = 6;
 const MIN_OCR_CONFIDENCE: f32 = 0.45;
+const MAX_HSK_REPAIR_ATTEMPTS: u8 = 2;
 const TRANSLATION_CACHE_SCHEMA: &str = "hskify-direct-hsk-region-cache-v29";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -301,8 +308,15 @@ impl KoharuPipeline {
         let mut dialogue_context = translation_context(&input.request);
         let mut prepared_next_tiles: Option<TileBatchTask> = None;
         let mut segmentation_tiles = Vec::<Tile>::with_capacity(total_tiles);
+        let mut fallback_segmentation_task = None;
         let mut deferred_detector_candidates = Vec::<Candidate>::new();
         let mut deferred_detector_lines = Vec::<RecognizedLine>::new();
+        // A tall reader page often yields several detector frontiers. Keep
+        // non-visible lines together so semantic classification, name
+        // adjudication, and inpainting run once for the page tail instead of
+        // once per frontier. The currently visible frontier still takes the
+        // fast path below.
+        let mut deferred_page_lines = Vec::<RecognizedLine>::new();
         let mut bubble_masks = BubbleMaskCache::new(image_width, image_height);
 
         while !tiles.is_empty() {
@@ -450,7 +464,6 @@ impl KoharuPipeline {
                 false,
             )
             .await?;
-
             let candidates = detections
                 .iter()
                 .zip(&tile_batch)
@@ -546,10 +559,32 @@ impl KoharuPipeline {
                 if finalized_lines.is_empty() {
                     continue;
                 }
+                let viewport = sink.viewport();
+                let mut immediate_lines = Vec::new();
+                for line in finalized_lines {
+                    let immediate = viewport.active
+                        && line.candidate.bubble_rect.intersects_viewport(
+                            &viewport.visible_rects,
+                            image_width,
+                            image_height,
+                        );
+                    if immediate {
+                        immediate_lines.push(line);
+                    } else {
+                        deferred_page_lines.push(line);
+                    }
+                }
+                // Without an active viewport (for example, a background
+                // import), defer everything and perform one page-level pass
+                // after detection. Interactive readers always have a visible
+                // frontier and therefore retain the low-latency path.
+                if immediate_lines.is_empty() {
+                    continue;
+                }
                 let (prepared_regions, probabilities) = prepare_grouped_regions(
                     Arc::clone(resident),
                     source.clone(),
-                    finalized_lines,
+                    immediate_lines,
                     &input.request,
                     &sink,
                     cancel.clone(),
@@ -587,9 +622,10 @@ impl KoharuPipeline {
             cancellation_boundary(cancel.as_ref())?;
         }
 
+        recognized_lines.extend(deferred_page_lines);
         if !recognized_lines.is_empty() {
             let finalized_lines = std::mem::take(&mut recognized_lines);
-            let (prepared_regions, _source_guided_probabilities) = prepare_grouped_regions(
+            let (prepared_regions, source_guided_probabilities) = prepare_grouped_regions(
                 Arc::clone(resident),
                 source.clone(),
                 finalized_lines,
@@ -603,7 +639,45 @@ impl KoharuPipeline {
                 0.78,
             )
             .await?;
+            text_probabilities = source_guided_probabilities;
             pending_translation.extend(prepared_regions);
+        }
+
+        // Start missed-text recovery only when the detector evidence leaves a
+        // genuine gap. A learned full-page segmentation pass is expensive and
+        // adds no information after every detector candidate and bubble has a
+        // verified OCR line. When recovery is needed, restrict it to tiles
+        // touching an unresolved candidate/bubble; pages with no accepted
+        // detector text still use the complete tile plan so missed lettering
+        // remains recoverable without a page-specific rule.
+        let fallback_tiles = fallback_tiles_for_evidence(
+            &segmentation_tiles,
+            &detected_bubbles,
+            &seen_text_blocks,
+            &deferred_detector_candidates,
+            image_width,
+            image_height,
+        );
+        if !fallback_tiles.is_empty() {
+            let fallback_resident = Arc::clone(resident);
+            let fallback_source = source.clone();
+            let fallback_cancel = cancel.clone();
+            let fallback_scheduler = Arc::clone(&self.cuda_scheduler);
+            let fallback_preprocessing = Arc::clone(&preprocessing);
+            fallback_segmentation_task = Some(tokio::spawn(async move {
+                segment_fallback_page(
+                    &fallback_resident,
+                    fallback_source,
+                    fallback_tiles,
+                    fallback_cancel,
+                    &fallback_scheduler,
+                    &fallback_preprocessing,
+                    image_width,
+                    image_height,
+                    Some(CudaPriority::Offscreen),
+                )
+                .await
+            }));
         }
 
         self.flush_translation_queue(
@@ -641,17 +715,16 @@ impl KoharuPipeline {
             false,
         )
         .await?;
-        let text_probabilities = segment_fallback_page(
-            resident,
-            source.clone(),
-            segmentation_tiles,
-            cancel.clone(),
-            &self.cuda_scheduler,
-            &preprocessing,
-            image_width,
-            image_height,
-        )
-        .await?;
+        let text_probabilities = match fallback_segmentation_task.take() {
+            Some(task) => {
+                let result = task
+                    .await
+                    .context("join learned page text segmentation")
+                    .map_err(CleaningError::pipeline)?;
+                result?
+            }
+            None => text_probabilities,
+        };
 
         while !deferred_detector_candidates.is_empty() {
             let accepted = ocr_batch(
@@ -671,7 +744,25 @@ impl KoharuPipeline {
                 merge_best_recognized_line(&mut deferred_detector_lines, line);
             }
         }
-        recognized_lines.extend(deferred_detector_lines);
+        // Deferred detector OCR is deliberately held until the detector
+        // frontier is complete, but it still belongs to the same page-wide
+        // text identity set as the fast visible lines.  Previously these
+        // lines were appended blindly.  A low-confidence detector proposal
+        // could therefore be published again after its higher-confidence
+        // counterpart had already been finalized, and the same block would
+        // then be rediscovered by the learned fallback pass.  Keep one
+        // spatial identity for the whole page instead of trying to clean up
+        // duplicate patches after rendering.
+        for line in deferred_detector_lines {
+            if seen_text_blocks
+                .iter()
+                .any(|known| text_rects_represent_same_block(line.candidate.text_rect, *known))
+            {
+                continue;
+            }
+            seen_text_blocks.push(line.candidate.text_rect);
+            recognized_lines.push(line);
+        }
 
         let fallback_probes = segmentation_fallback_candidates(
             &text_probabilities,
@@ -723,6 +814,12 @@ impl KoharuPipeline {
             )
             .await?;
             for line in accepted {
+                let duplicate = seen_text_blocks
+                    .iter()
+                    .any(|known| fallback_line_overlaps_seen_block(&line, *known));
+                if duplicate {
+                    continue;
+                }
                 seen_text_blocks.push(line.candidate.text_rect);
                 recognized_lines.push(line);
             }
@@ -760,6 +857,12 @@ impl KoharuPipeline {
             )
             .await?;
             for line in accepted {
+                let duplicate = seen_text_blocks
+                    .iter()
+                    .any(|known| fallback_line_overlaps_seen_block(&line, *known));
+                if duplicate {
+                    continue;
+                }
                 seen_text_blocks.push(line.candidate.text_rect);
                 recognized_lines.push(line);
             }
@@ -1323,6 +1426,7 @@ impl KoharuPipeline {
                 utterance,
                 protected_names: protected_names.clone(),
                 state,
+                attempts: 0,
             });
         }
         Ok(published_visible)
@@ -1390,9 +1494,10 @@ impl KoharuPipeline {
                 merge_protected_names(&mut batch_names, repair_names_for_job(job));
                 utterances.push(job.utterance.clone());
             }
-            // A repair is one terminal validation pass over the rejected primary
-            // batch. The browser never receives the rejected draft, and the
-            // pipeline does not recursively rewrite model output.
+            let mut retry_indices = HashSet::new();
+            // Repairs are bounded transactions. The browser never receives a
+            // rejected draft; a failed transaction is requeued with its exact
+            // validator evidence until the small retry budget is exhausted.
             let cuda_permit = self
                 .cuda_scheduler
                 .acquire(
@@ -1435,12 +1540,16 @@ impl KoharuPipeline {
                             .remove(&job.region.id)
                             .unwrap_or_else(|| missing_translation_outcome(&job.region.id));
                         let repair_names = repair_names_for_job(job);
-                        job.state.apply_repair(
+                        let accepted = job.state.apply_repair(
                             outcome,
                             control,
                             control_level,
                             &control_proper_names(&repair_names),
                         );
+                        if should_retry_repair(job, accepted) {
+                            prepare_repair_retry(job);
+                            retry_indices.insert(index);
+                        }
                     }
                 }
                 Err(_) if cancel.load(Ordering::Acquire) || sink.is_cancelled() => {
@@ -1453,11 +1562,19 @@ impl KoharuPipeline {
                     );
                     for index in active_indices {
                         jobs[index].state.reject_failed_repair();
+                        if should_retry_repair(&jobs[index], false) {
+                            prepare_repair_retry(&mut jobs[index]);
+                            retry_indices.insert(index);
+                        }
                     }
                 }
             }
             cancellation_boundary(cancel.as_ref())?;
-            for job in jobs {
+            for (index, job) in jobs.into_iter().enumerate() {
+                if retry_indices.contains(&index) {
+                    repair_queue.requeue(job);
+                    continue;
+                }
                 let rejected_chinese = job.state.base_chinese.clone();
                 let rejection_problems = job.state.problems.clone();
                 let mut result = match job.state.finish() {
@@ -1671,20 +1788,22 @@ impl ResidentState {
     fn prime_non_language_inference(&self) -> Result<()> {
         // Prime every non-language model on the actual interactive shapes.
         // Loading weights does not initialize Candle/ORT CUDA kernels or the
-        // dynamic OCR output allocator. The page-wide missed-text segmenter is
-        // intentionally excluded below because it is not on the first-visible
-        // path and its graph warm-up is several seconds on the target GPU.
+        // dynamic OCR output allocator.  The recovery segmenter is included
+        // here as well: its graph is used for every page and warming it once
+        // before the first request prevents a hidden multi-second stall in
+        // the middle of the chapter pipeline.
         let sample = DynamicImage::new_rgb8(1_024, 1_024);
         self.detector
             .lock()
             .map_err(|_| anyhow!("detector lock poisoned during inference warm-up"))?
             .inference_tiles(std::slice::from_ref(&sample))
             .context("prime comic text detector inference")?;
-        // Manga text segmentation is a page-wide missed-text recovery pass,
-        // never part of the first visible-region path. Keep its CUDA graph
-        // lazy so daemon readiness and the first detector/OCR translation do
-        // not pay a second multi-second warm-up for work that runs only after
-        // detector-backed regions have already been published.
+        let segmentation_sample = DynamicImage::new_rgb8(2_048, 2_048);
+        self.text_segmenter
+            .lock()
+            .map_err(|_| anyhow!("text segmenter lock poisoned during inference warm-up"))?
+            .inference_batch(std::slice::from_ref(&segmentation_sample))
+            .context("prime manga text segmentation inference")?;
 
         self.bubble_segmenter
             .lock()
@@ -1757,6 +1876,21 @@ impl ResidentState {
                 .detect_proper_names(&sample, &cancel)
                 .await
                 .context("prime constrained proper-name inference")?;
+            translator
+                .translate_batch(
+                    &HskTranslationBatchRequest {
+                        requested_level: 3,
+                        learning_mode: HskLearningMode::Natural,
+                        name_handling: HskNameHandling::Chinese,
+                        translate_sound_effects: true,
+                        utterances: sample.to_vec(),
+                        preceding_utterances: Vec::new(),
+                        protected_names: Vec::new(),
+                    },
+                    &cancel,
+                )
+                .await
+                .context("prime direct HSK translation inference")?;
             Ok::<(), anyhow::Error>(())
         })?;
         Ok(())
@@ -1798,6 +1932,11 @@ struct RecognizedLine {
 struct BubbleMaskCache {
     completed_tiles: HashSet<usize>,
     union: image::GrayImage,
+    /// Labels are derived from the accumulated union. Progressive pages can
+    /// invoke preparation repeatedly without changing that union, so retain
+    /// the full-page connected-component result until new tiles are merged.
+    labels: Option<Arc<image::GrayImage>>,
+    component_bounds: Option<Arc<BTreeMap<u8, PixelRect>>>,
 }
 
 impl BubbleMaskCache {
@@ -1805,7 +1944,35 @@ impl BubbleMaskCache {
         Self {
             completed_tiles: HashSet::new(),
             union: image::GrayImage::new(image_width, image_height),
+            labels: None,
+            component_bounds: None,
         }
+    }
+
+    fn invalidate_labels(&mut self) {
+        self.labels = None;
+        self.component_bounds = None;
+    }
+
+    fn labels(&mut self) -> Arc<image::GrayImage> {
+        if self.labels.is_none() {
+            self.labels = Some(Arc::new(label_bubble_components(&self.union)));
+        }
+        self.labels
+            .as_ref()
+            .expect("bubble labels initialized above")
+            .clone()
+    }
+
+    fn component_bounds(&mut self) -> Arc<BTreeMap<u8, PixelRect>> {
+        if self.component_bounds.is_none() {
+            let labels = self.labels();
+            self.component_bounds = Some(Arc::new(bubble_component_bounds(labels.as_ref())));
+        }
+        self.component_bounds
+            .as_ref()
+            .expect("bubble component bounds initialized above")
+            .clone()
     }
 }
 
@@ -1852,6 +2019,22 @@ fn merge_best_recognized_line(lines: &mut Vec<RecognizedLine>, candidate: Recogn
     if recognized_line_quality(&candidate) > recognized_line_quality(existing) {
         *existing = candidate;
     }
+}
+
+fn text_rects_represent_same_block(left: PixelRect, right: PixelRect) -> bool {
+    left.iou(right) >= 0.35 || left.overlap_over_smaller(right) >= 0.60
+}
+
+fn fallback_line_overlaps_seen_block(line: &RecognizedLine, known: PixelRect) -> bool {
+    if line.candidate.has_detector_core {
+        return text_rects_represent_same_block(line.candidate.text_rect, known);
+    }
+    // Fallback crops are intentionally broader than their glyph line so they
+    // can recover faint text.  Use a lower containment threshold for them;
+    // otherwise a broad crop that repeats an already accepted bubble survives
+    // as a second semantic region after its OCR extent is recovered.
+    line.candidate.text_rect.iou(known) >= 0.25
+        || line.candidate.text_rect.overlap_over_smaller(known) >= 0.40
 }
 
 fn recognized_line_quality(line: &RecognizedLine) -> (usize, usize, u32, u32) {
@@ -1912,10 +2095,95 @@ struct PendingRepair {
     utterance: HskRepairUtterance,
     protected_names: Vec<HskProtectedName>,
     state: TranslationState,
+    attempts: u8,
 }
 
 fn repair_names_for_job(job: &PendingRepair) -> Vec<HskProtectedName> {
     job.protected_names.clone()
+}
+
+fn should_retry_repair(job: &PendingRepair, accepted: bool) -> bool {
+    !accepted && !job.state.can_publish() && job.attempts + 1 < MAX_HSK_REPAIR_ATTEMPTS
+}
+
+fn prepare_repair_retry(job: &mut PendingRepair) {
+    job.attempts = job.attempts.saturating_add(1);
+    let rejected = job
+        .state
+        .latest_rejected_chinese
+        .clone()
+        .or_else(|| job.state.base_chinese.clone());
+    let mut problems = job.state.problems.clone();
+    if problems.is_empty() {
+        problems.push(
+            "return a complete Simplified Chinese translation for this story region".to_owned(),
+        );
+    }
+    for name in &job.protected_names {
+        let chinese = name.chinese.trim();
+        if chinese.is_empty()
+            || rejected
+                .as_deref()
+                .is_some_and(|text| text.contains(chinese))
+        {
+            continue;
+        }
+        append_repair_problem(
+            &mut problems,
+            format!("copy protected name `{chinese}` exactly; do not omit it"),
+        );
+    }
+    if let Some(rejected) = rejected.as_deref() {
+        for token in unapproved_latin_tokens(rejected, &job.protected_names) {
+            append_repair_problem(
+                &mut problems,
+                format!(
+                    "translate unapproved Latin token `{token}`; do not leave it in the answer"
+                ),
+            );
+        }
+    }
+    job.utterance.rejected_chinese = rejected;
+    job.utterance.avoid_chinese = job.state.avoid_chinese();
+    job.utterance.problems = problems;
+}
+
+fn append_repair_problem(problems: &mut Vec<String>, problem: String) {
+    if !problems.iter().any(|existing| existing == &problem) {
+        problems.push(problem);
+    }
+}
+
+fn unapproved_latin_tokens(text: &str, protected_names: &[HskProtectedName]) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let flush = |current: &mut String, tokens: &mut Vec<String>| {
+        let token = current.trim_matches(|character: char| !character.is_ascii_alphabetic());
+        if token.len() >= 2
+            && !matches!(token, "I" | "A")
+            && !protected_names.iter().any(|name| {
+                name.source_english
+                    .split(|character: char| !character.is_ascii_alphabetic())
+                    .any(|part| part.eq_ignore_ascii_case(token))
+                    || name.chinese.eq_ignore_ascii_case(token)
+            })
+            && !tokens
+                .iter()
+                .any(|existing| existing.eq_ignore_ascii_case(token))
+        {
+            tokens.push(token.to_owned());
+        }
+        current.clear();
+    };
+    for character in text.chars() {
+        if character.is_ascii_alphabetic() || character == '\'' || character == '-' {
+            current.push(character);
+        } else {
+            flush(&mut current, &mut tokens);
+        }
+    }
+    flush(&mut current, &mut tokens);
+    tokens
 }
 
 #[derive(Default)]
@@ -1930,6 +2198,11 @@ impl RepairQueue {
         if self.region_ids.insert(job.region.id.clone()) {
             self.jobs.push_back(job);
         }
+    }
+
+    fn requeue(&mut self, job: PendingRepair) {
+        debug_assert!(self.region_ids.contains(&job.region.id));
+        self.jobs.push_back(job);
     }
 
     fn finish_primary_phase(&mut self) {
@@ -2045,6 +2318,51 @@ fn segment_tile_batch(
     Ok(())
 }
 
+fn fallback_tiles_for_evidence(
+    tiles: &[Tile],
+    detected_bubbles: &[DetectedBubble],
+    seen_text_blocks: &[PixelRect],
+    deferred_detector_candidates: &[Candidate],
+    image_width: u32,
+    image_height: u32,
+) -> Vec<Tile> {
+    if tiles.is_empty() {
+        return Vec::new();
+    }
+    // With no verified detector text there is no safe locality assumption:
+    // the learned pass must inspect the whole page so a detector miss remains
+    // recoverable.
+    if seen_text_blocks.is_empty() {
+        return tiles.to_vec();
+    }
+
+    let mut unresolved_supports = deferred_detector_candidates
+        .iter()
+        .map(|candidate| candidate.text_rect.expand(96.0, image_width, image_height))
+        .collect::<Vec<_>>();
+    for bubble in detected_bubbles {
+        let covered = seen_text_blocks.iter().any(|text_rect| {
+            bubble.rect.overlap_over_smaller(*text_rect) >= 0.50
+                || bubble.rect.contains_point(text_rect.center())
+        });
+        if !covered {
+            unresolved_supports.push(bubble.rect.expand(96.0, image_width, image_height));
+        }
+    }
+    if unresolved_supports.is_empty() {
+        return Vec::new();
+    }
+    tiles
+        .iter()
+        .copied()
+        .filter(|tile| {
+            unresolved_supports
+                .iter()
+                .any(|support| tile.rect().intersection(*support).is_some())
+        })
+        .collect()
+}
+
 async fn segment_fallback_page(
     resident: &ResidentState,
     source: Arc<DynamicImage>,
@@ -2054,6 +2372,7 @@ async fn segment_fallback_page(
     preprocessing: &PreprocessingPool,
     image_width: u32,
     image_height: u32,
+    priority_override: Option<CudaPriority>,
 ) -> std::result::Result<ProbabilityMap, CleaningError> {
     if tiles.is_empty() {
         return Ok(ProbabilityMap::zeros(image_width, image_height));
@@ -2064,17 +2383,28 @@ async fn segment_fallback_page(
         .await
         .context("prepare missed-text recovery tiles")
         .map_err(CleaningError::pipeline)?;
-    let _vision_permit = cuda_scheduler
-        .acquire(
-            CudaWorkload::Vision,
-            CudaPriority::Offscreen,
-            cancel.clone(),
-        )
-        .await
-        .map_err(cuda_admission_error)?;
-    cancellation_boundary(cancel.as_ref())?;
     let mut probabilities = ProbabilityMap::zeros(image_width, image_height);
-    segment_tile_batch(resident, &tiles, &tile_images, &mut probabilities)?;
+    // Recovery is deliberately lower priority than the detector, but it must
+    // still yield between bounded model batches. Holding the Vision permit
+    // across a full-page fallback inference can otherwise block the next
+    // visible page for many seconds, turning two-page chapter concurrency into
+    // effectively serial processing.
+    for (tile_batch, image_batch) in tiles
+        .chunks(DETECTOR_TILE_BATCH_SIZE)
+        .zip(tile_images.chunks(DETECTOR_TILE_BATCH_SIZE))
+    {
+        cancellation_boundary(cancel.as_ref())?;
+        let vision_permit = cuda_scheduler
+            .acquire(
+                CudaWorkload::Vision,
+                priority_override.unwrap_or(CudaPriority::Offscreen),
+                cancel.clone(),
+            )
+            .await
+            .map_err(cuda_admission_error)?;
+        segment_tile_batch(resident, tile_batch, image_batch, &mut probabilities)?;
+        drop(vision_permit);
+    }
     Ok(probabilities)
 }
 
@@ -2257,12 +2587,173 @@ async fn ocr_batch(
             }
             accepted
         })
-        .map(|((candidate, prediction), crop_bounds)| RecognizedLine {
+        .flat_map(|((candidate, prediction), crop_bounds)| {
+            split_ocr_prediction_lines(candidate, prediction, crop_bounds)
+        })
+        .collect())
+}
+
+fn split_ocr_prediction_lines(
+    candidate: Candidate,
+    prediction: PpOcrPrediction,
+    crop_bounds: PixelBounds,
+) -> Vec<RecognizedLine> {
+    if prediction.ocr_lines.len() < 2 {
+        return vec![RecognizedLine {
             candidate: candidate_with_ocr_extent(candidate, &prediction, crop_bounds),
             prediction,
             crop_bounds,
+        }];
+    }
+
+    let eligible_indices = prediction
+        .ocr_lines
+        .iter()
+        .enumerate()
+        .filter_map(|(index, line)| {
+            accept_english_ocr_line(line.confidence, &line.text, OcrProposalSource::Detector)
+                .then_some(index)
         })
-        .collect())
+        .collect::<Vec<_>>();
+    if eligible_indices.is_empty() {
+        return Vec::new();
+    }
+    if eligible_indices.len() == 1 {
+        let prediction = prediction_for_line_indices(&prediction, &eligible_indices);
+        return vec![RecognizedLine {
+            candidate: candidate_with_ocr_extent(candidate, &prediction, crop_bounds),
+            prediction,
+            crop_bounds,
+        }];
+    }
+
+    let mut groups = vec![vec![eligible_indices[0]]];
+    for index in eligible_indices.into_iter().skip(1) {
+        let previous_index = *groups
+            .last()
+            .and_then(|group| group.last())
+            .expect("OCR line groups always contain the previous line");
+        let previous = &prediction.ocr_lines[previous_index];
+        let current = &prediction.ocr_lines[index];
+        let previous_height = previous
+            .bounds
+            .bottom
+            .saturating_sub(previous.bounds.top)
+            .max(1);
+        let vertical_gap = current.bounds.top.saturating_sub(previous.bounds.bottom);
+        let sentence_boundary = ocr_line_ends_sentence(&previous.text)
+            && current
+                .text
+                .chars()
+                .find(|character| character.is_ascii_alphabetic())
+                .is_some_and(|character| character.is_ascii_uppercase());
+        if sentence_boundary && (vertical_gap as f32) > previous_height as f32 * 0.50 {
+            groups.push(vec![index]);
+        } else {
+            groups
+                .last_mut()
+                .expect("OCR line groups always contain a current group")
+                .push(index);
+        }
+    }
+    if groups.len() == 1 {
+        let prediction = prediction_for_line_indices(&prediction, &groups[0]);
+        return vec![RecognizedLine {
+            candidate: candidate_with_ocr_extent(candidate, &prediction, crop_bounds),
+            prediction,
+            crop_bounds,
+        }];
+    }
+
+    groups
+        .into_iter()
+        .map(|indices| {
+            let mut group_candidate = candidate.clone();
+            let mut group_rect = None::<PixelRect>;
+            for index in &indices {
+                let line = &prediction.ocr_lines[*index];
+                let Some(rect) = PixelRect::new(
+                    (crop_bounds.x + line.bounds.left) as f32,
+                    (crop_bounds.y + line.bounds.top) as f32,
+                    (crop_bounds.x + line.bounds.right) as f32,
+                    (crop_bounds.y + line.bounds.bottom) as f32,
+                ) else {
+                    continue;
+                };
+                group_rect = Some(group_rect.map_or(rect, |current| current.union(rect)));
+            }
+            if let Some(rect) = group_rect {
+                group_candidate.text_rect = rect;
+                group_candidate.bubble_rect = group_candidate.bubble_rect.union(rect);
+            }
+            let group_prediction = prediction_for_line_indices(&prediction, &indices);
+            RecognizedLine {
+                candidate: candidate_with_ocr_extent(
+                    group_candidate,
+                    &group_prediction,
+                    crop_bounds,
+                ),
+                prediction: group_prediction,
+                crop_bounds,
+            }
+        })
+        .collect()
+}
+
+fn prediction_for_line_indices(prediction: &PpOcrPrediction, indices: &[usize]) -> PpOcrPrediction {
+    let ocr_lines = indices
+        .iter()
+        .filter_map(|index| prediction.ocr_lines.get(*index).cloned())
+        .collect::<Vec<_>>();
+    let appearance_bands = indices
+        .iter()
+        .filter_map(|index| prediction.appearance_bands.get(*index).cloned())
+        .collect::<Vec<_>>();
+    let text = ocr_lines
+        .iter()
+        .map(|line| line.text.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let confidence = if ocr_lines.is_empty() {
+        0.0
+    } else {
+        ocr_lines.iter().map(|line| line.confidence).sum::<f32>() / ocr_lines.len() as f32
+    };
+    let primary_appearance = appearance_bands
+        .iter()
+        .enumerate()
+        .max_by_key(|(index, _)| {
+            ocr_lines
+                .get(*index)
+                .map(|line| line.text.chars().count())
+                .unwrap_or_default()
+        })
+        .map(|(_, band)| band.clone());
+    PpOcrPrediction {
+        text,
+        confidence,
+        text_color: primary_appearance
+            .as_ref()
+            .map(|band| band.text_color)
+            .unwrap_or(prediction.text_color),
+        stroke_color: primary_appearance
+            .as_ref()
+            .map(|band| band.stroke_color)
+            .unwrap_or(prediction.stroke_color),
+        has_stroke_color: primary_appearance
+            .as_ref()
+            .map(|band| band.has_stroke_color)
+            .unwrap_or(prediction.has_stroke_color),
+        appearance_bands,
+        ocr_lines,
+    }
+}
+
+fn ocr_line_ends_sentence(text: &str) -> bool {
+    text.trim_end()
+        .chars()
+        .last()
+        .is_some_and(|character| matches!(character, '.' | '?' | '!' | ':' | ';'))
 }
 
 fn candidate_with_ocr_extent(
@@ -2278,12 +2769,31 @@ fn candidate_with_ocr_extent(
     let recovered_top = prediction
         .appearance_bands
         .iter()
-        .map(|band| crop_top + band.top_ratio.clamp(0.0, 1.0) * crop_height)
+        .enumerate()
+        .filter(|(index, band)| {
+            !ocr_subline_is_decorative(&candidate, prediction, crop_bounds, *index)
+                && appearance_band_is_owned_by_candidate(
+                    &candidate,
+                    crop_bounds,
+                    Some(band),
+                    prediction.ocr_lines.get(*index),
+                )
+        })
+        .map(|(_, band)| crop_top + band.top_ratio.clamp(0.0, 1.0) * crop_height)
         .fold(candidate.text_rect.y0, f32::min);
     let recovered_bottom = prediction
         .appearance_bands
         .iter()
-        .map(|band| crop_top + band.bottom_ratio.clamp(0.0, 1.0) * crop_height)
+        .enumerate()
+        .filter(|(index, band)| {
+            appearance_band_is_owned_by_candidate(
+                &candidate,
+                crop_bounds,
+                Some(band),
+                prediction.ocr_lines.get(*index),
+            )
+        })
+        .map(|(_, band)| crop_top + band.bottom_ratio.clamp(0.0, 1.0) * crop_height)
         .fold(candidate.text_rect.y1, f32::max);
     if recovered_top < candidate.text_rect.y0 || recovered_bottom > candidate.text_rect.y1 {
         candidate.text_rect.y0 = recovered_top.min(candidate.text_rect.y0);
@@ -2335,8 +2845,15 @@ async fn segment_bubbles_around_fallback_text(
         .context("prepare learned bubble fallback tiles")
         .map_err(CleaningError::pipeline)?;
     cancellation_boundary(cancel.as_ref())?;
+    if crops.len() != tiles.len() {
+        return Err(CleaningError::new(
+            "BUBBLE_SEGMENTATION_FAILED",
+            "Speech bubble recovery prepared an incomplete tile batch.",
+        ));
+    }
+    let mut bubble_union = image::GrayImage::new(image_width, image_height);
     let viewport = sink.viewport();
-    let priority = if viewport.active
+    let default_priority = if viewport.active
         && supports.iter().any(|support| {
             support.intersects_viewport(&viewport.visible_rects, image_width, image_height)
         }) {
@@ -2344,24 +2861,38 @@ async fn segment_bubbles_around_fallback_text(
     } else {
         CudaPriority::Offscreen
     };
-    let permit = cuda_scheduler
-        .acquire(CudaWorkload::Vision, priority, cancel.clone())
-        .await
-        .map_err(cuda_admission_error)?;
-    let mut bubble_union = image::GrayImage::new(image_width, image_height);
+    // Acquire one permit per bounded batch so visible detector/OCR/inpainting
+    // work can overtake low-priority recovery without giving up batched model
+    // inference. The model preserves input order in its batch result.
+    for (tile_batch, crop_batch) in tiles
+        .chunks(FALLBACK_BUBBLE_BATCH_SIZE)
+        .zip(crops.chunks(FALLBACK_BUBBLE_BATCH_SIZE))
     {
-        let bubble_segmenter = resident.bubble_segmenter.lock().map_err(|_| {
-            CleaningError::new("MODEL_STATE_FAILED", "Bubble segmenter lock poisoned.")
-        })?;
-        for (tile, crop) in tiles.iter().zip(&crops) {
-            let result = bubble_segmenter
-                .inference(crop)
-                .context("segment bubbles around detector-missed text")
-                .map_err(CleaningError::pipeline)?;
+        cancellation_boundary(cancel.as_ref())?;
+        let permit = cuda_scheduler
+            .acquire(CudaWorkload::Vision, default_priority, cancel.clone())
+            .await
+            .map_err(cuda_admission_error)?;
+        let results = {
+            let bubble_segmenter = resident.bubble_segmenter.lock().map_err(|_| {
+                CleaningError::new("MODEL_STATE_FAILED", "Bubble segmenter lock poisoned.")
+            })?;
+            bubble_segmenter
+                .inference_batch(crop_batch)
+                .context("batch-segment bubbles around detector-missed text")
+                .map_err(CleaningError::pipeline)?
+        };
+        drop(permit);
+        if results.len() != tile_batch.len() {
+            return Err(CleaningError::new(
+                "BUBBLE_SEGMENTATION_FAILED",
+                "Speech bubble recovery returned an incomplete tile batch.",
+            ));
+        }
+        for (tile, result) in tile_batch.iter().zip(results) {
             merge_binary_mask(&mut bubble_union, &bubble_id_mask(&result), tile.x, tile.y);
         }
     }
-    drop(permit);
     cancellation_boundary(cancel.as_ref())?;
     let labels = label_bubble_components(&bubble_union);
     Ok(fallback_bubbles_from_labels(&labels, probes))
@@ -2493,44 +3024,70 @@ async fn prepare_grouped_regions(
     };
     let bubble_started = Instant::now();
     if !cleanup_tiles.is_empty() {
-        let bubble_permit = cuda_scheduler
-            .acquire(CudaWorkload::Vision, bubble_priority, cancel.clone())
-            .await
-            .map_err(cuda_admission_error)?;
-        let bubble_segmenter = resident.bubble_segmenter.lock().map_err(|_| {
-            CleaningError::new("MODEL_STATE_FAILED", "Bubble segmenter lock poisoned.")
-        })?;
-        let results = bubble_segmenter
-            .inference_batch(&cleanup_crops)
-            .context("batch-segment speech bubble contours")
-            .map_err(CleaningError::pipeline)?;
-        if results.len() != cleanup_tiles.len() {
+        if cleanup_crops.len() != cleanup_tiles.len() {
             return Err(CleaningError::new(
                 "BUBBLE_SEGMENTATION_FAILED",
-                "Speech bubble segmentation returned an incomplete tile batch.",
+                "Speech bubble cleanup prepared an incomplete tile batch.",
             ));
         }
-        for (tile, result) in cleanup_tiles.iter().zip(results) {
-            merge_binary_mask(
-                &mut bubble_masks.union,
-                &bubble_id_mask(&result),
-                tile.x,
-                tile.y,
-            );
-            bubble_masks.completed_tiles.insert(tile.id);
+        // Keep progressive cleanup admission bounded just like detector and
+        // missed-text recovery. A large tail can require many contour tiles;
+        // holding Vision for the entire batch would prevent visible work from
+        // overtaking it until every offscreen contour is decoded.
+        for (tile_batch, crop_batch) in cleanup_tiles
+            .chunks(DETECTOR_TILE_BATCH_SIZE)
+            .zip(cleanup_crops.chunks(DETECTOR_TILE_BATCH_SIZE))
+        {
+            cancellation_boundary(cancel.as_ref())?;
+            let bubble_permit = cuda_scheduler
+                .acquire(CudaWorkload::Vision, bubble_priority, cancel.clone())
+                .await
+                .map_err(cuda_admission_error)?;
+            let results = {
+                let bubble_segmenter = resident.bubble_segmenter.lock().map_err(|_| {
+                    CleaningError::new("MODEL_STATE_FAILED", "Bubble segmenter lock poisoned.")
+                })?;
+                bubble_segmenter
+                    .inference_batch(crop_batch)
+                    .context("batch-segment speech bubble contours")
+                    .map_err(CleaningError::pipeline)?
+            };
+            drop(bubble_permit);
+            if results.len() != tile_batch.len() {
+                return Err(CleaningError::new(
+                    "BUBBLE_SEGMENTATION_FAILED",
+                    "Speech bubble segmentation returned an incomplete tile batch.",
+                ));
+            }
+            for (tile, result) in tile_batch.iter().zip(results) {
+                merge_binary_mask(
+                    &mut bubble_masks.union,
+                    &bubble_id_mask(&result),
+                    tile.x,
+                    tile.y,
+                );
+                bubble_masks.completed_tiles.insert(tile.id);
+            }
         }
-        drop(bubble_segmenter);
-        drop(bubble_permit);
+        bubble_masks.invalidate_labels();
     }
-    let bubble_mask = label_bubble_components(&bubble_masks.union);
+    let bubble_mask = bubble_masks.labels();
+    let bubble_components = bubble_masks.component_bounds();
     let bubble_elapsed = bubble_started.elapsed();
-    let groups = group_recognized_lines(lines, &bubble_mask);
+    let groups = group_recognized_lines(lines, bubble_mask.as_ref());
     let mut grouped = preprocessing
         .run(move || {
             Ok(groups
                 .into_iter()
-                .map(|group| {
+                .filter_map(|group| {
+                    let group = retain_semantic_group_lines(group);
+                    if group.is_empty() {
+                        return None;
+                    }
                     let source_english = grouped_source_english(&group);
+                    if source_english.is_empty() {
+                        return None;
+                    }
                     let candidate = merge_group_candidate(&group, image_width, image_height);
                     let appearance_bands = grouped_appearance_bands(&group, candidate.text_rect);
                     let cleanup_blocks = cleanup_blocks_for_group(&group);
@@ -2558,7 +3115,7 @@ async fn prepare_grouped_regions(
                         .fold(1.0_f32, f32::max);
                     prediction.text.clone_from(&source_english);
                     prediction.confidence = ocr_confidence;
-                    GroupedRegion {
+                    Some(GroupedRegion {
                         candidate,
                         source_english,
                         ocr_confidence,
@@ -2566,7 +3123,7 @@ async fn prepare_grouped_regions(
                         appearance_bands,
                         measured_font_height,
                         cleanup_blocks,
-                    }
+                    })
                 })
                 .collect::<Vec<_>>())
         })
@@ -2732,7 +3289,7 @@ async fn prepare_grouped_regions(
                         let learned_mask = verified_text_mask_for_regions_local(
                             source_rgb,
                             &text_probabilities,
-                            &bubble_mask,
+                            bubble_mask.as_ref(),
                             &group.cleanup_blocks,
                             support,
                             DEFAULT_TEXT_MASK_THRESHOLD,
@@ -2744,7 +3301,7 @@ async fn prepare_grouped_regions(
                             )
                         })?;
                         let local_bubble_mask = crop_imm(
-                            &bubble_mask,
+                            bubble_mask.as_ref(),
                             learned_mask.bounds.x,
                             learned_mask.bounds.y,
                             learned_mask.bounds.width,
@@ -2814,7 +3371,7 @@ async fn prepare_grouped_regions(
                     .as_rgb8()
                     .expect("browser source images are canonical RGB"),
                 &erase_mask,
-                &bubble_mask,
+                bubble_mask.as_ref(),
                 &text_blocks,
             )
             .context("restore artwork with the manga inpainter")
@@ -2824,15 +3381,14 @@ async fn prepare_grouped_regions(
 
         let prepared_groups = preprocessing
             .run(move || {
-                let bubble_components = bubble_component_bounds(&bubble_mask);
                 cleaned_groups
                     .into_iter()
                     .map(|cleaned| {
                         let group = cleaned.group;
                         let patch = make_inpainted_patch(&inpainted, &cleaned.cleanup_mask)?;
                         let (bubble_polygon, layout_polygon) = region_polygons(
-                            &bubble_mask,
-                            &bubble_components,
+                            bubble_mask.as_ref(),
+                            bubble_components.as_ref(),
                             group.candidate.text_rect,
                             group.candidate.confirmed_bubble_rect,
                             group.measured_font_height,
@@ -2999,14 +3555,9 @@ fn group_recognized_lines(
 fn dedupe_recognized_line_group(mut lines: Vec<RecognizedLine>) -> Vec<RecognizedLine> {
     let mut deduped = Vec::<RecognizedLine>::with_capacity(lines.len());
     for line in lines.drain(..) {
-        let duplicate = deduped.iter().position(|existing| {
-            existing
-                .candidate
-                .text_rect
-                .overlap_over_smaller(line.candidate.text_rect)
-                >= 0.45
-                && ocr_texts_are_equivalent(&existing.prediction.text, &line.prediction.text)
-        });
+        let duplicate = deduped
+            .iter()
+            .position(|existing| recognized_lines_are_duplicate(existing, &line));
         if let Some(index) = duplicate {
             if recognized_line_quality(&line) > recognized_line_quality(&deduped[index]) {
                 deduped[index] = line;
@@ -3028,6 +3579,27 @@ fn dedupe_recognized_line_group(mut lines: Vec<RecognizedLine>) -> Vec<Recognize
             })
     });
     deduped
+}
+
+fn recognized_lines_are_duplicate(left: &RecognizedLine, right: &RecognizedLine) -> bool {
+    if left.candidate.kind != right.candidate.kind {
+        return false;
+    }
+    let left_text = recognized_line_source_english(left);
+    let right_text = recognized_line_source_english(right);
+    if !ocr_texts_are_equivalent(&left_text, &right_text) {
+        return false;
+    }
+    let left_rect = left.candidate.text_rect;
+    let right_rect = right.candidate.text_rect;
+    if left_rect.overlap_over_smaller(right_rect) >= 0.30 {
+        return true;
+    }
+    let shorter_chars = left_text.chars().count().min(right_text.chars().count());
+    if shorter_chars > 12 || !detector_bubble_cores_are_equivalent(left, right) {
+        return false;
+    }
+    detector_text_lines_are_locally_adjacent(left, right)
 }
 
 fn ocr_texts_are_equivalent(left: &str, right: &str) -> bool {
@@ -3082,6 +3654,12 @@ fn detector_bubble_cores_are_equivalent(left: &RecognizedLine, right: &Recognize
     if left.candidate.kind != right.candidate.kind {
         return false;
     }
+    if recognized_lines_have_sentence_boundary(left, right) {
+        // A detector component can cover a speech balloon and a nearby
+        // caption/effect.  Keep independently completed sentences in their
+        // own regions even when the learned contour is shared.
+        return false;
+    }
     match (
         left.candidate.has_detector_core,
         right.candidate.has_detector_core,
@@ -3099,6 +3677,13 @@ fn detector_bubble_cores_are_equivalent(left: &RecognizedLine, right: &Recognize
         (false, false) => return detector_free_lines_are_compatible(left, right),
         (true, true) => {}
     }
+    // OCR can split one speech bubble into several line proposals. When the
+    // detector supplied the exact same confirmed bubble core, that identity
+    // is stronger than the gap between individual line boxes; keep the whole
+    // bubble as one semantic region while still separating neighbouring cores.
+    if left.candidate.confirmed_bubble_rect == right.candidate.confirmed_bubble_rect {
+        return true;
+    }
     if !detector_text_lines_are_locally_adjacent(left, right) {
         return false;
     }
@@ -3109,6 +3694,29 @@ fn detector_bubble_cores_are_equivalent(left: &RecognizedLine, right: &Recognize
         && right_core.contains_point(left_core.center())
         && left_core.contains_point(right.candidate.text_rect.center())
         && right_core.contains_point(left.candidate.text_rect.center())
+}
+
+fn recognized_lines_have_sentence_boundary(left: &RecognizedLine, right: &RecognizedLine) -> bool {
+    let (upper, lower) = if left.candidate.text_rect.y0 <= right.candidate.text_rect.y0 {
+        (left, right)
+    } else {
+        (right, left)
+    };
+    let gap = (lower.candidate.text_rect.y0 - upper.candidate.text_rect.y1).max(0.0);
+    let smaller_height = upper
+        .candidate
+        .text_rect
+        .height()
+        .min(lower.candidate.text_rect.height())
+        .max(1.0);
+    gap > smaller_height * 0.40
+        && ocr_line_ends_sentence(&upper.prediction.text)
+        && lower
+            .prediction
+            .text
+            .chars()
+            .find(|character| character.is_ascii_alphabetic())
+            .is_some_and(|character| character.is_ascii_uppercase())
 }
 
 fn detector_core_contains_fallback_text(detector: &Candidate, fallback: &Candidate) -> bool {
@@ -3207,17 +3815,255 @@ fn detector_free_lines_are_compatible(left: &RecognizedLine, right: &RecognizedL
 }
 
 fn grouped_source_english(group: &[RecognizedLine]) -> String {
+    let dominant_line = group
+        .iter()
+        .max_by_key(|line| line.prediction.text.chars().count());
+    let dominant_color = dominant_line
+        .map(|line| line.prediction.text_color)
+        .unwrap_or([0, 0, 0]);
+    let dominant_chars = dominant_line
+        .map(|line| {
+            line.prediction
+                .text
+                .chars()
+                .filter(|character| character.is_ascii_alphabetic())
+                .count()
+        })
+        .unwrap_or(0);
     let joined = group
         .iter()
-        .map(|line| compact_ocr_text(&line.prediction.text))
+        .filter(|line| !recognized_group_line_is_decorative(line, dominant_chars, dominant_color))
+        .map(recognized_line_source_english)
         .filter(|text| !text.is_empty())
         .collect::<Vec<_>>()
         .join(" ");
     compact_ocr_text(&joined)
 }
 
+fn recognized_group_line_is_decorative(
+    line: &RecognizedLine,
+    dominant_chars: usize,
+    dominant_color: [u8; 3],
+) -> bool {
+    if line.prediction.text.chars().count() == 0 {
+        return true;
+    }
+    let line_chars = line
+        .prediction
+        .text
+        .chars()
+        .filter(|character| character.is_ascii_alphabetic())
+        .count();
+    if line_chars > (dominant_chars / 5).max(3) {
+        return false;
+    }
+    let color_is_distinct = rgb_distance(line.prediction.text_color, dominant_color) >= 48;
+    let outside_confirmed_bubble = if line.candidate.has_detector_core {
+        line.candidate
+            .text_rect
+            .overlap_over_smaller(line.candidate.confirmed_bubble_rect)
+            < 0.50
+            && !line
+                .candidate
+                .confirmed_bubble_rect
+                .contains_point(line.candidate.text_rect.center())
+    } else {
+        false
+    };
+    color_is_distinct || outside_confirmed_bubble
+}
+
+fn retain_semantic_group_lines(mut group: Vec<RecognizedLine>) -> Vec<RecognizedLine> {
+    let dominant_line = group
+        .iter()
+        .max_by_key(|line| line.prediction.text.chars().count());
+    let dominant_color = dominant_line
+        .map(|line| line.prediction.text_color)
+        .unwrap_or([0, 0, 0]);
+    let dominant_chars = dominant_line
+        .map(|line| {
+            line.prediction
+                .text
+                .chars()
+                .filter(|character| character.is_ascii_alphabetic())
+                .count()
+        })
+        .unwrap_or(0);
+    group.retain(|line| !recognized_group_line_is_decorative(line, dominant_chars, dominant_color));
+    group
+}
+
+fn recognized_line_source_english(line: &RecognizedLine) -> String {
+    let prediction = &line.prediction;
+    if prediction.ocr_lines.is_empty() {
+        return compact_ocr_text(&prediction.text);
+    }
+    let owned = prediction
+        .ocr_lines
+        .iter()
+        .enumerate()
+        .filter(|(index, ocr_line)| {
+            !ocr_subline_is_decorative(&line.candidate, prediction, line.crop_bounds, *index)
+                && appearance_band_is_owned_by_candidate(
+                    &line.candidate,
+                    line.crop_bounds,
+                    prediction.appearance_bands.get(*index),
+                    Some(ocr_line),
+                )
+        })
+        .map(|(_, ocr_line)| compact_ocr_text(&ocr_line.text))
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>();
+    if owned.is_empty() {
+        compact_ocr_text(&prediction.text)
+    } else {
+        owned.join(" ")
+    }
+}
+
+fn ocr_subline_is_decorative(
+    candidate: &Candidate,
+    prediction: &PpOcrPrediction,
+    crop_bounds: PixelBounds,
+    index: usize,
+) -> bool {
+    let Some(ocr_line) = prediction.ocr_lines.get(index) else {
+        return false;
+    };
+    let Some(line_rect) = PixelRect::new(
+        (crop_bounds.x + ocr_line.bounds.left) as f32,
+        (crop_bounds.y + ocr_line.bounds.top) as f32,
+        (crop_bounds.x + ocr_line.bounds.right) as f32,
+        (crop_bounds.y + ocr_line.bounds.bottom) as f32,
+    ) else {
+        return false;
+    };
+    let dominant_line_chars = prediction
+        .ocr_lines
+        .iter()
+        .map(|line| {
+            line.text
+                .chars()
+                .filter(|character| character.is_ascii_alphabetic())
+                .count()
+        })
+        .max()
+        .unwrap_or(0);
+    let line_chars = ocr_line
+        .text
+        .chars()
+        .filter(|character| character.is_ascii_alphabetic())
+        .count();
+    if line_chars == 1 {
+        let core = ocr_line
+            .text
+            .trim_matches(|character: char| !character.is_ascii_alphabetic());
+        return !matches!(core, "I" | "A");
+    }
+    let short_line = line_chars <= (dominant_line_chars / 5).max(3);
+    let dominant_color = prediction
+        .ocr_lines
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, line)| line.text.chars().count())
+        .and_then(|(dominant_index, _)| prediction.appearance_bands.get(dominant_index))
+        .map(|band| band.text_color)
+        .unwrap_or(prediction.text_color);
+    let line_color = prediction
+        .appearance_bands
+        .get(index)
+        .map(|band| band.text_color)
+        .unwrap_or(prediction.text_color);
+    let color_is_distinct = rgb_distance(line_color, dominant_color) >= 48;
+    if !candidate.has_detector_core {
+        // A learned fallback crop has no authoritative bubble contour.  It
+        // can still contain a nearby decorative effect, so only discard a
+        // short, differently colored fragment when it is not sentence-like.
+        // This keeps short dialogue such as "I SEE." while removing the
+        // common colored SFX fragments that leak into a fallback crop.
+        let sentence_like = ocr_line
+            .text
+            .trim_end()
+            .chars()
+            .last()
+            .is_some_and(|character| matches!(character, '.' | '?' | '!' | ':' | ';'));
+        return short_line && color_is_distinct && !sentence_like;
+    }
+    let outside_confirmed_bubble = candidate
+        .confirmed_bubble_rect
+        .overlap_over_smaller(line_rect)
+        < 0.50
+        && !candidate
+            .confirmed_bubble_rect
+            .contains_point(line_rect.center());
+    short_line && (color_is_distinct || outside_confirmed_bubble)
+}
+
+fn rgb_distance(left: [u8; 3], right: [u8; 3]) -> u32 {
+    left.into_iter()
+        .zip(right)
+        .map(|(left, right)| u32::from(left.abs_diff(right)))
+        .sum()
+}
+
+fn appearance_band_is_owned_by_candidate(
+    candidate: &Candidate,
+    crop_bounds: PixelBounds,
+    appearance_band: Option<&PpOcrAppearanceBand>,
+    ocr_bounds: Option<&PpOcrLine>,
+) -> bool {
+    if !candidate.has_detector_core {
+        return true;
+    }
+    let bubble = candidate.confirmed_bubble_rect;
+    let line_rect = ocr_bounds
+        .and_then(|line| {
+            PixelRect::new(
+                (crop_bounds.x + line.bounds.left) as f32,
+                (crop_bounds.y + line.bounds.top) as f32,
+                (crop_bounds.x + line.bounds.right) as f32,
+                (crop_bounds.y + line.bounds.bottom) as f32,
+            )
+        })
+        .or_else(|| {
+            appearance_band.and_then(|band| {
+                PixelRect::new(
+                    crop_bounds.x as f32,
+                    crop_bounds.y as f32
+                        + band.top_ratio.clamp(0.0, 1.0) * crop_bounds.height as f32,
+                    (crop_bounds.x + crop_bounds.width) as f32,
+                    crop_bounds.y as f32
+                        + band.bottom_ratio.clamp(0.0, 1.0) * crop_bounds.height as f32,
+                )
+            })
+        });
+    let Some(line_rect) = line_rect else {
+        return true;
+    };
+    line_rect.overlap_over_smaller(bubble) >= 0.50 || bubble.contains_point(line_rect.center())
+}
+
 fn cleanup_blocks_for_group(group: &[RecognizedLine]) -> Vec<TextRegion> {
-    group.iter().flat_map(cleanup_blocks_for_line).collect()
+    let dominant_line = group
+        .iter()
+        .max_by_key(|line| line.prediction.text.chars().count());
+    let dominant_color = dominant_line
+        .map(|line| line.prediction.text_color)
+        .unwrap_or([0, 0, 0]);
+    let dominant_chars = dominant_line
+        .map(|line| {
+            line.prediction
+                .text
+                .chars()
+                .filter(|character| character.is_ascii_alphabetic())
+                .count()
+        })
+        .unwrap_or(0);
+    group
+        .iter()
+        .filter(|line| !recognized_group_line_is_decorative(line, dominant_chars, dominant_color))
+        .flat_map(cleanup_blocks_for_line)
+        .collect()
 }
 
 fn cleanup_blocks_for_line(line: &RecognizedLine) -> Vec<TextRegion> {
@@ -3241,7 +4087,20 @@ fn cleanup_blocks_for_line(line: &RecognizedLine) -> Vec<TextRegion> {
         .prediction
         .appearance_bands
         .iter()
-        .filter_map(|band| {
+        .enumerate()
+        .filter_map(|(index, band)| {
+            if ocr_subline_is_decorative(&line.candidate, &line.prediction, line.crop_bounds, index)
+            {
+                return None;
+            }
+            if !appearance_band_is_owned_by_candidate(
+                &line.candidate,
+                line.crop_bounds,
+                Some(band),
+                line.prediction.ocr_lines.get(index),
+            ) {
+                return None;
+            }
             PixelRect::new(
                 candidate.text_rect.x0,
                 (crop_top + band.top_ratio.clamp(0.0, 1.0) * crop_height)
@@ -3264,13 +4123,45 @@ fn grouped_appearance_bands(
     group: &[RecognizedLine],
     group_text_rect: PixelRect,
 ) -> Vec<SourceAppearanceBand> {
+    let dominant_line = group
+        .iter()
+        .max_by_key(|line| line.prediction.text.chars().count());
+    let dominant_color = dominant_line
+        .map(|line| line.prediction.text_color)
+        .unwrap_or([0, 0, 0]);
+    let dominant_chars = dominant_line
+        .map(|line| {
+            line.prediction
+                .text
+                .chars()
+                .filter(|character| character.is_ascii_alphabetic())
+                .count()
+        })
+        .unwrap_or(0);
     let mut bands = group
         .iter()
+        .filter(|line| !recognized_group_line_is_decorative(line, dominant_chars, dominant_color))
         .flat_map(|line| {
             line.prediction
                 .appearance_bands
                 .iter()
-                .map(move |band| source_appearance_band(line.crop_bounds, band, group_text_rect))
+                .enumerate()
+                .filter(move |(index, band)| {
+                    !ocr_subline_is_decorative(
+                        &line.candidate,
+                        &line.prediction,
+                        line.crop_bounds,
+                        *index,
+                    ) && appearance_band_is_owned_by_candidate(
+                        &line.candidate,
+                        line.crop_bounds,
+                        Some(band),
+                        line.prediction.ocr_lines.get(*index),
+                    )
+                })
+                .map(move |(_, band)| {
+                    source_appearance_band(line.crop_bounds, band, group_text_rect)
+                })
         })
         .collect::<Vec<_>>();
     bands.sort_by_key(|band| band.position_millionths);
@@ -3490,6 +4381,22 @@ fn accept_english_ocr_line(
         OcrProposalSource::Detector => 1,
         OcrProposalSource::SegmentationFallback => 2,
     };
+    if alphabetic.len() == 1 {
+        let core = text.trim_matches(|character: char| !character.is_ascii_alphabetic());
+        if !matches!(core, "I" | "A") {
+            return false;
+        }
+    }
+    // A single mixed-case alphanumeric token is a common OCR hallucination
+    // from decorative cover lettering (for example `m2y.`).  Keep valid
+    // uppercase notation such as `X3` available to surrounding sentences,
+    // while rejecting this noise before it can become a semantic region.
+    if text.split_whitespace().count() == 1
+        && text.chars().any(|character| character.is_ascii_digit())
+        && text.chars().any(|character| character.is_ascii_lowercase())
+    {
+        return false;
+    }
     alphabetic.len() >= minimum_alphabetic
         && alphabetic
             .iter()
@@ -4899,6 +5806,7 @@ mod tests {
                 stroke_color: [255, 255, 255],
                 has_stroke_color: false,
                 appearance_bands: Vec::new(),
+                ocr_lines: Vec::new(),
             },
             crop_bounds: rect.pixel_bounds(100, 100),
         };
@@ -4919,6 +5827,42 @@ mod tests {
         assert!(accepted.is_empty());
         assert_eq!(deferred.len(), 1);
         assert_eq!(disputed, vec![story]);
+    }
+
+    #[test]
+    fn learned_fallback_is_full_page_only_without_verified_detector_evidence() {
+        let tiles = overlapping_tiles(900, 6_000);
+        assert_eq!(
+            fallback_tiles_for_evidence(&tiles, &[], &[], &[], 900, 6_000),
+            tiles
+        );
+
+        let bubble = DetectedBubble {
+            rect: PixelRect::new(120.0, 300.0, 780.0, 900.0).unwrap(),
+            confidence: 0.9,
+        };
+        let covered = [PixelRect::new(240.0, 480.0, 620.0, 660.0).unwrap()];
+        assert!(
+            fallback_tiles_for_evidence(&tiles, &[bubble], &covered, &[], 900, 6_000).is_empty()
+        );
+    }
+
+    #[test]
+    fn learned_fallback_restricts_recovery_to_unresolved_support_tiles() {
+        let tiles = overlapping_tiles(900, 6_000);
+        let bubble = DetectedBubble {
+            rect: PixelRect::new(120.0, 4_500.0, 780.0, 5_200.0).unwrap(),
+            confidence: 0.9,
+        };
+        let covered = [PixelRect::new(240.0, 480.0, 620.0, 660.0).unwrap()];
+        let selected = fallback_tiles_for_evidence(&tiles, &[bubble], &covered, &[], 900, 6_000);
+        assert!(!selected.is_empty());
+        assert!(selected.len() < tiles.len());
+        assert!(selected.iter().all(|tile| {
+            tile.rect()
+                .intersection(bubble.rect.expand(96.0, 900, 6_000))
+                .is_some()
+        }));
     }
 
     #[test]
@@ -5004,6 +5948,7 @@ mod tests {
                     stroke_color: [255, 255, 255],
                     has_stroke_color: false,
                     appearance_bands: Vec::new(),
+                    ocr_lines: Vec::new(),
                 },
                 appearance_bands: Vec::new(),
                 measured_font_height: rect.height(),
@@ -5032,6 +5977,7 @@ mod tests {
             },
             protected_names: Vec::new(),
             state: usable_pending_state(),
+            attempts: 0,
         }
     }
 
@@ -5058,6 +6004,16 @@ mod tests {
             "R2D2",
             OcrProposalSource::Detector
         ));
+        assert!(!accept_english_ocr_line(
+            0.99,
+            "m2y.",
+            OcrProposalSource::Detector
+        ));
+        assert!(accept_english_ocr_line(
+            0.99,
+            "X3",
+            OcrProposalSource::Detector
+        ));
         assert!(accept_english_ocr_line(
             0.99,
             "Ahem.!..",
@@ -5081,6 +6037,21 @@ mod tests {
         assert!(accept_english_ocr_line(
             0.99,
             "I",
+            OcrProposalSource::Detector
+        ));
+        assert!(accept_english_ocr_line(
+            0.99,
+            "A.",
+            OcrProposalSource::Detector
+        ));
+        assert!(!accept_english_ocr_line(
+            0.99,
+            "a",
+            OcrProposalSource::Detector
+        ));
+        assert!(!accept_english_ocr_line(
+            0.99,
+            "h.",
             OcrProposalSource::Detector
         ));
         assert!(!accept_english_ocr_line(
@@ -5168,6 +6139,7 @@ mod tests {
             stroke_color: [255, 255, 255],
             has_stroke_color: false,
             appearance_bands: Vec::new(),
+            ocr_lines: Vec::new(),
         };
         let lines = vec![
             RecognizedLine {
@@ -5232,6 +6204,7 @@ mod tests {
             stroke_color: [255, 255, 255],
             has_stroke_color: false,
             appearance_bands: Vec::new(),
+            ocr_lines: Vec::new(),
         };
         let make_line = |text_rect, core, crop_x| RecognizedLine {
             candidate: Candidate {
@@ -5273,6 +6246,55 @@ mod tests {
     }
 
     #[test]
+    fn grouping_drops_partial_ocr_duplicate_inside_the_same_bubble() {
+        let bubble = PixelRect::new(20.0, 20.0, 360.0, 220.0).unwrap();
+        let candidate = |text_rect| Candidate {
+            kind: CandidateKind::StoryText,
+            text_rect,
+            bubble_rect: bubble,
+            confirmed_bubble_rect: bubble,
+            detector_confidence: 0.95,
+            has_detector_core: true,
+        };
+        let prediction = |text: &str| PpOcrPrediction {
+            text: text.to_owned(),
+            confidence: 0.95,
+            text_color: [0, 0, 0],
+            stroke_color: [255, 255, 255],
+            has_stroke_color: false,
+            appearance_bands: Vec::new(),
+            ocr_lines: Vec::new(),
+        };
+        let lines = vec![
+            RecognizedLine {
+                candidate: candidate(PixelRect::new(80.0, 80.0, 230.0, 116.0).unwrap()),
+                prediction: prediction("YEAH, THAT'S WHAT I MEAN!"),
+                crop_bounds: PixelBounds {
+                    x: 80,
+                    y: 80,
+                    width: 150,
+                    height: 36,
+                },
+            },
+            RecognizedLine {
+                candidate: candidate(PixelRect::new(90.0, 84.0, 160.0, 112.0).unwrap()),
+                prediction: prediction("YEAH,"),
+                crop_bounds: PixelBounds {
+                    x: 90,
+                    y: 84,
+                    width: 70,
+                    height: 28,
+                },
+            },
+        ];
+        let groups = group_recognized_lines(lines, &image::GrayImage::new(400, 260));
+
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].len(), 1);
+        assert_eq!(groups[0][0].prediction.text, "YEAH, THAT'S WHAT I MEAN!");
+    }
+
+    #[test]
     fn grouping_keeps_detector_free_lines_local_and_scale_consistent() {
         let prediction = || PpOcrPrediction {
             text: "line".to_owned(),
@@ -5281,6 +6303,7 @@ mod tests {
             stroke_color: [255, 255, 255],
             has_stroke_color: false,
             appearance_bands: Vec::new(),
+            ocr_lines: Vec::new(),
         };
         let make_line = |text_rect| RecognizedLine {
             candidate: Candidate {
@@ -5331,6 +6354,7 @@ mod tests {
                 stroke_color: [255, 255, 255],
                 has_stroke_color: false,
                 appearance_bands: Vec::new(),
+                ocr_lines: Vec::new(),
             },
             crop_bounds: PixelBounds {
                 x: 40,
@@ -5361,6 +6385,7 @@ mod tests {
             stroke_color: [255, 255, 255],
             has_stroke_color: false,
             appearance_bands: Vec::new(),
+            ocr_lines: Vec::new(),
         };
         let make_line = |text_rect, has_detector_core| RecognizedLine {
             candidate: Candidate {
@@ -5431,6 +6456,7 @@ mod tests {
                         has_stroke_color: false,
                     },
                 ],
+                ocr_lines: Vec::new(),
             },
             crop_bounds: PixelBounds {
                 x: 17,
@@ -5464,6 +6490,7 @@ mod tests {
             stroke_color: [255, 255, 255],
             has_stroke_color: false,
             appearance_bands: Vec::new(),
+            ocr_lines: Vec::new(),
         };
         let lines = vec![
             RecognizedLine {
@@ -5521,6 +6548,7 @@ mod tests {
                 stroke_color,
                 has_stroke_color: true,
             }],
+            ocr_lines: Vec::new(),
         };
         let lines = vec![
             RecognizedLine {
@@ -6286,6 +7314,19 @@ mod tests {
         assert_eq!(cached.displayed_chinese, "研究生");
         assert_eq!(cached.repair_state, HskRepairState::Pending);
         assert!(!translation_is_final(&cached));
+    }
+
+    #[test]
+    fn repair_retry_is_reserved_for_an_unpublishable_primary() {
+        let usable = pending_repair("usable");
+        assert!(!should_retry_repair(&usable, false));
+
+        let mut unsafe_job = pending_repair("unsafe");
+        unsafe_job.state.meaning_valid = false;
+        assert!(should_retry_repair(&unsafe_job, false));
+        unsafe_job.attempts = MAX_HSK_REPAIR_ATTEMPTS - 1;
+        assert!(!should_retry_repair(&unsafe_job, false));
+        assert!(!should_retry_repair(&unsafe_job, true));
     }
 
     #[test]
