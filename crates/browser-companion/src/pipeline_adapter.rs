@@ -1005,7 +1005,7 @@ impl KoharuPipeline {
         *context = merge_translation_context(request, shared_context);
         let translator = resident.app.llm.direct_hsk_translator();
         let batch_context = context.clone();
-        let mut protected_names = translation_glossary(request);
+        let mut all_protected_names = translation_glossary(request);
         if request.settings.name_translation == NameTranslation::KeepOriginal {
             let remembered = self
                 .entity_memory
@@ -1014,13 +1014,15 @@ impl KoharuPipeline {
                     CleaningError::new("ENTITY_MEMORY_FAILED", "Entity memory lock poisoned.")
                 })?
                 .names_for(&request.page_session_id);
-            merge_protected_names(&mut protected_names, remembered);
+            merge_protected_names(&mut all_protected_names, remembered);
         }
         if request.settings.name_translation == NameTranslation::KeepOriginal {
             for region in &regions {
-                merge_protected_names(&mut protected_names, region.proper_names.clone());
+                merge_protected_names(&mut all_protected_names, region.proper_names.clone());
             }
         }
+        let protected_names =
+            relevant_protected_names(&regions, &batch_context, &all_protected_names);
         if rejected_ocr_tracing_enabled() {
             eprintln!(
                 "hskify-translation-batch-names sources={:?} names={:?}",
@@ -3585,6 +3587,25 @@ fn source_contains_name_span(source: &str, name: &str) -> bool {
     })
 }
 
+fn relevant_protected_names(
+    regions: &[PreparedRegion],
+    context: &[HskPrecedingUtterance],
+    names: &[HskProtectedName],
+) -> Vec<HskProtectedName> {
+    let mut seen = HashSet::new();
+    names
+        .iter()
+        .filter(|name| {
+            (regions.iter().any(|region| {
+                source_contains_name_span(&region.source_english, &name.source_english)
+            }) || context.iter().any(|utterance| {
+                source_contains_name_span(&utterance.source_english, &name.source_english)
+            })) && seen.insert(name.source_english.to_ascii_uppercase())
+        })
+        .cloned()
+        .collect()
+}
+
 fn publish_preserved_group(
     sink: &JobUpdateSink,
     group: &GroupedRegion,
@@ -5015,6 +5036,12 @@ mod tests {
         }
     }
 
+    fn prepared_region_with_source(source: &str) -> PreparedRegion {
+        let mut region = pending_repair("relevance").region;
+        region.source_english = source.to_owned();
+        region
+    }
+
     #[test]
     fn ocr_acceptance_checks_model_confidence_and_decodable_latin_text_only() {
         assert!(accept_english_ocr_line(
@@ -5812,7 +5839,7 @@ mod tests {
                 "Leave now",
                 &context,
                 &[HskProtectedName {
-                    source_english: "Alice".to_owned(),
+                    source_english: "Leave now".to_owned(),
                     chinese: "爱丽丝".to_owned(),
                 }],
                 2,
@@ -5854,6 +5881,83 @@ mod tests {
                 "control-r1",
             )
         );
+    }
+
+    #[test]
+    fn relevant_protected_names_keep_only_contextual_names_in_input_order() {
+        let regions = vec![prepared_region_with_source("Alice met Bob")];
+        let context = vec![HskPrecedingUtterance {
+            source_english: "Carol spoke to Alice".to_owned(),
+            chinese: "Carol".to_owned(),
+        }];
+        let names = vec![
+            HskProtectedName {
+                source_english: "Unrelated".to_owned(),
+                chinese: "Unrelated".to_owned(),
+            },
+            HskProtectedName {
+                source_english: "alice".to_owned(),
+                chinese: "Alice first".to_owned(),
+            },
+            HskProtectedName {
+                source_english: "CAROL".to_owned(),
+                chinese: "Carol".to_owned(),
+            },
+            HskProtectedName {
+                source_english: "lice".to_owned(),
+                chinese: "Partial".to_owned(),
+            },
+            HskProtectedName {
+                source_english: "ALICE".to_owned(),
+                chinese: "Alice duplicate".to_owned(),
+            },
+            HskProtectedName {
+                source_english: "BOB".to_owned(),
+                chinese: "Bob".to_owned(),
+            },
+        ];
+        let filtered = relevant_protected_names(&regions, &context, &names);
+
+        assert_eq!(
+            filtered
+                .iter()
+                .map(|name| name.source_english.as_str())
+                .collect::<Vec<_>>(),
+            ["alice", "CAROL", "BOB"]
+        );
+        assert_eq!(filtered[0].chinese, "Alice first");
+        assert_eq!(
+            control_proper_names(&filtered)[0].text.as_str(),
+            "Alice first"
+        );
+
+        let key = |protected_names: &[HskProtectedName]| {
+            translation_cache_key(
+                "Alice met Bob",
+                HskUtteranceKind::Dialogue,
+                &context,
+                protected_names,
+                NameTranslation::KeepOriginal,
+                LearningMode::Natural,
+                2,
+                "qwen",
+                "model-r1",
+                "prompt-r1",
+                "validator-r1",
+                "control-r1",
+            )
+        };
+        let unrelated = relevant_protected_names(
+            &regions,
+            &context,
+            &[HskProtectedName {
+                source_english: "Unrelated".to_owned(),
+                chinese: "Unrelated".to_owned(),
+            }],
+        );
+        assert!(unrelated.is_empty());
+        assert_eq!(key(&[]), key(&unrelated));
+        assert_ne!(key(&[]), key(&filtered));
     }
 
     #[test]
