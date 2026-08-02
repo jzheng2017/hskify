@@ -1,121 +1,69 @@
 # Hskify
 
-Hskify is a local Firefox reading companion optimized for one production
-target: Windows with an NVIDIA GeForce RTX 4080 SUPER 16 GB (compute capability
-8.9). The performance build is CUDA-only. CPU, Vulkan, Metal, remote-provider,
-desktop-project, and compatibility-mode operation are outside this product
-shape.
+> Read English manga in Chinese — locally in Firefox.
 
-The current build translates eligible English story text directly into HSK
-2.0-targeted Simplified Chinese. This includes dialogue, thought balloons, and
-story narration while excluding sound effects, credits, branding, promotion,
-and non-English text. It does not create a full-page translated image.
-Instead, the daemon progressively publishes small transparent cleanup patches
-and selectable Chinese text for each accepted region.
+Hskify is a Firefox reading companion for learning Mandarin with manga and
+comic pages. It finds English dialogue, thoughts, and narration, translates
+them into selectable Simplified Chinese, and restores the artwork behind the
+original lettering.
 
-## Current architecture
+The page updates progressively, starting with the regions currently visible
+in the browser. Hskify also supports pinyin, original/Chinese comparison,
+dictionary lookup, and local Mandarin speech.
 
-1. Firefox discovers reader images after an explicit user action and sends the
-   selected image to a native companion on the same machine.
-2. A one-shot native host validates the installed Firefox identity, starts or
-   discovers the loopback daemon, and returns a short-lived authenticated
-   session.
-3. The daemon decodes the source once, schedules overlapping detector tiles
-   with visible tiles first, groups lines by learned balloon identity, builds
-   a learned text mask, and restores the original artwork with manga LaMa.
-   Cleanup patches are transparent outside that semantic mask.
-4. Qwen3.5 4B makes one contextual decision for each OCR region: translate
-   story text directly to the requested HSK level, or return the typed
-   non-story disposition for unrelated page furniture. Excluded regions keep
-   their original pixels. Natural learning simplifies first but may preserve a
-   small number of useful story terms and explains them on hover; Strict HSK
-   requires level-valid non-name vocabulary. Vocabulary and meaning validation
-   accepts each translation or sends only the rejected item through one
-   targeted repair.
-5. The browser fetches and decodes each PNG patch, installs it before the
-   corresponding selectable text, and can continue rendering while later
-   regions are still running.
+## How it works
 
-There is no versioned browser API, job-result endpoint, full cleaned-page
-payload, project/history store, page-wide translation pass, or retranslation
-route. The extension, native host, daemon, and contract fixtures instead share
-the exact build fingerprint `hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-07-28-r7`; a mismatch is a
-hard failure, not a negotiation opportunity.
+1. Firefox sends a selected page image to the local Hskify companion.
+2. Local vision models find text and identify which regions are story text.
+3. A local language model translates the accepted regions to the requested
+   HSK 2.0 level.
+4. Hskify cleans only the original text areas and places the Chinese text over
+   the page as it becomes ready.
 
-Pinyin, longest-match local dictionary lookup, original/Chinese comparison,
-and local Mandarin speech through Firefox remain part of the reader
-experience.
+Sound effects, credits, branding, promotion, artwork, and non-English text are
+left alone.
 
-## Performance target
+## Supported setup
 
-The supported performance build is intentionally hardware-specific:
+This is an intentionally focused Windows performance build, not a
+cross-platform release. The supported target is:
 
-- NVIDIA GeForce RTX 4080 SUPER;
-- exactly 16,376 MiB reported GPU memory on device 0;
-- CUDA compute capability 8.9;
-- NVIDIA driver API 13.1, CUDA toolkit 13.1, ORT CUDA 13, and `sm_89`;
-- Qwen3.5 4B Q4_K_M plus the pinned detector, OCR, HSK 2.0, dictionary, and
-  font resources.
+- Windows x86-64;
+- an NVIDIA GeForce RTX 4080 SUPER with 16 GB of VRAM;
+- the CUDA 13.1 toolchain and a compatible NVIDIA driver.
 
-`scripts/Invoke-PerformanceBuild.ps1` rejects a different GPU before building.
-The browser-companion crate enables CUDA by default, and the resident runtime
-uses GPU-preferred model loading. This repository does not claim a supported
-fallback tier.
+CPU-only, macOS, Linux, Vulkan, Metal, and remote-provider operation are
+outside the current product scope. Model and production resource files are
+not included in this repository.
 
 ## Build
 
-From a Windows PowerShell prompt with the Rust MSVC toolchain, Visual Studio
-C++ tools, Python, and a compatible NVIDIA driver:
+From a Windows PowerShell prompt with the Rust MSVC toolchain, Visual Studio C++
+tools, Python, and the supported NVIDIA setup:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\Invoke-PerformanceBuild.ps1
 ```
 
-The script verifies the exact target GPU and driver API, provisions pinned
-portable CMake and CUDA compiler components under `.cache`, and builds only the
-Windows x86_64 MSVC release binaries with the required `cuda` feature. After a
-successful build it writes the ignored
-`target\release\hskify-performance-build-attestation.json`.
-That attestation freezes the complete tracked/untracked source-tree identity,
-tool versions, CUDA/llama.cpp configuration, exact hardware identity, and both
-binary hashes. A failed build never produces a new attestation.
+The build script checks the hardware and provisions the pinned build tools. See
+[the companion implementation guide](crates/browser-companion/IMPLEMENTATION.md)
+for model resources and environment configuration.
 
-Production language/model resources are local files. See
-[the companion implementation](crates/browser-companion/IMPLEMENTATION.md) for
-the exact paths and environment overrides.
+## Project status
 
-## Verification status
-
-The documentation in this branch records architecture and test methodology,
-not completed performance evidence. The sole canonical fixture is *30 Years
-Since the Prologue* chapter 5: 36 hash-pinned images covering varied balloon,
-lettering, background, and narration styles. All 36 pages now have reviewed
-region geometry and complete translation gold: 218 story regions, 214
-translation targets, reviewed Chinese and pinyin, and deterministic token-level
-HSK annotations. Release evidence still requires the isolated exact-product
-install to complete the cold, warm-up, 20-or-more warm, cache-replay, and
-cancellation sequence.
-
-Do not quote latency, throughput, memory, GPU utilization, quality, or
-installed-Firefox results for this build until raw evidence is captured by the
-method in [Chapter 5 benchmark and evidence](docs/chapter-5-benchmark.md).
-The workload is a diverse regression corpus, not a chapter-specific tuning
-target: production logic may not key on its text, names, URLs, colors,
-coordinates, or hashes.
+Hskify is an experimental, hardware-specific performance build. The repository
+contains the browser extension, native companion, local inference pipeline, HSK
+validation, and benchmark harness, but it does not ship a ready-made model
+bundle or claim published latency and quality results.
 
 ## Repository map
 
-| Path | Purpose |
-| --- | --- |
-| `extensions/firefox` | Discovery, progressive update consumption, patch-first rendering, comparison, lookup, and speech |
-| `crates/browser-companion` | Native launcher, authenticated loopback daemon, flat job log, direct progressive pipeline |
-| `crates/hsk-control` | Deterministic HSK 2.0 validation, pinyin, and dictionary lookup |
-| `crates/koharu-ml`, `crates/koharu-app`, `crates/koharu-runtime` | Reused local-model and CUDA runtime primitives |
-| `fixtures/contracts` | Shared exact-build contract fixtures |
-| `fixtures/benchmarks/30-years-since-the-prologue-chapter-5` | Sole canonical 36-image benchmark manifest, annotations, and local reader replica |
-| `scripts/Invoke-PerformanceBuild.ps1` | RTX 4080 SUPER/CUDA-only build gate |
-| `scripts/Benchmark-Chapter5.ps1` | Packaged-Firefox release E2E benchmark and raw evidence harness |
+- `extensions/firefox` — Firefox page discovery and progressive rendering
+- `crates/browser-companion` — local daemon and translation pipeline
+- `crates/hsk-control` — HSK validation, pinyin, and dictionary tools
+- `crates/koharu-ml`, `crates/koharu-app`, `crates/koharu-runtime` — local ML and CUDA runtime code
+- `scripts` — build and benchmark tooling
 
-Start with [the documentation index](docs/README.md), [the architecture
-overview](docs/architecture.md), and [the unversioned browser
-contract](docs/browser-contract.md).
+For the deeper technical material, start with the [documentation index](docs/README.md),
+then see the [architecture overview](docs/architecture.md) and
+[benchmark guide](docs/chapter-5-benchmark.md).
