@@ -547,7 +547,7 @@ impl KoharuPipeline {
                     continue;
                 }
                 let (prepared_regions, probabilities) = prepare_grouped_regions(
-                    resident,
+                    Arc::clone(resident),
                     source.clone(),
                     finalized_lines,
                     &input.request,
@@ -590,7 +590,7 @@ impl KoharuPipeline {
         if !recognized_lines.is_empty() {
             let finalized_lines = std::mem::take(&mut recognized_lines);
             let (prepared_regions, _source_guided_probabilities) = prepare_grouped_regions(
-                resident,
+                Arc::clone(resident),
                 source.clone(),
                 finalized_lines,
                 &input.request,
@@ -766,7 +766,7 @@ impl KoharuPipeline {
         }
 
         let (prepared_regions, _text_probabilities) = prepare_grouped_regions(
-            resident,
+            Arc::clone(resident),
             source.clone(),
             recognized_lines,
             &input.request,
@@ -2387,8 +2387,45 @@ fn fallback_bubbles_from_labels(
         .collect()
 }
 
+async fn detect_names_for_story_sources(
+    resident: Arc<ResidentState>,
+    sources: Vec<HskSourceUtterance>,
+    priority: CudaPriority,
+    cancel: Arc<AtomicBool>,
+    scheduler: Arc<CudaScheduler>,
+) -> Result<Vec<HskProtectedName>, CleaningError> {
+    let mut names = Vec::new();
+    for source_batch in sources.chunks(TRANSLATION_BATCH_MAX) {
+        cancellation_boundary(cancel.as_ref())?;
+        let detected = {
+            let permit = scheduler
+                .acquire(CudaWorkload::Language, priority, cancel.clone())
+                .await
+                .map_err(cuda_admission_error)?;
+            let result = tokio::task::block_in_place(|| {
+                let translator = resident.app.llm.direct_hsk_translator();
+                tokio::runtime::Handle::current()
+                    .block_on(translator.detect_proper_names(source_batch, cancel.as_ref()))
+            });
+            drop(permit);
+            result
+        };
+        let detected = match detected {
+            Ok(detected) => detected,
+            Err(_) if cancel.load(Ordering::Acquire) => return Err(CleaningError::cancelled()),
+            Err(error) => {
+                return Err(CleaningError::pipeline(
+                    error.context("recognize proper names before translation"),
+                ));
+            }
+        };
+        merge_protected_names(&mut names, detected);
+    }
+    Ok(names)
+}
+
 async fn prepare_grouped_regions(
-    resident: &ResidentState,
+    resident: Arc<ResidentState>,
     source: Arc<DynamicImage>,
     lines: Vec<RecognizedLine>,
     request: &BrowserJobRequest,
@@ -2555,15 +2592,9 @@ async fn prepare_grouped_regions(
         .collect::<Vec<_>>();
     let translator = resident.app.llm.direct_hsk_translator();
     let semantic_started = Instant::now();
-    let semantic_permit = cuda_scheduler
-        .acquire(CudaWorkload::Language, priority, cancel.clone())
-        .await
-        .map_err(cuda_admission_error)?;
     let mut excluded_ids = HashSet::<String>::new();
     let mut preserved_artwork_ids = HashSet::<String>::new();
-    let mut semantic_names = Vec::<HskProtectedName>::new();
     let mut role_elapsed = Duration::ZERO;
-    let mut name_elapsed = Duration::ZERO;
     // Page-role classification and entity recognition share the same OCR
     // section, but they have different output invariants. Keep their typed
     // contracts separate so layout fields cannot be mistaken for names and
@@ -2590,10 +2621,19 @@ async fn prepare_grouped_regions(
             );
         }
         let role_started = Instant::now();
-        let classification = match tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current()
-                .block_on(translator.classify_semantic_regions(semantic_batch, cancel.as_ref()))
-        }) {
+        let classification_result = {
+            let semantic_permit = cuda_scheduler
+                .acquire(CudaWorkload::Language, priority, cancel.clone())
+                .await
+                .map_err(cuda_admission_error)?;
+            let result = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current()
+                    .block_on(translator.classify_semantic_regions(semantic_batch, cancel.as_ref()))
+            });
+            drop(semantic_permit);
+            result
+        };
+        let classification = match classification_result {
             Ok(classification) => classification,
             Err(_) if cancel.load(Ordering::Acquire) || sink.is_cancelled() => {
                 return Err(CleaningError::cancelled());
@@ -2620,38 +2660,8 @@ async fn prepare_grouped_regions(
                 SemanticExclusionAction::Translate => {}
             }
         }
-        if request.settings.name_translation == NameTranslation::KeepOriginal {
-            let story_batch = semantic_batch
-                .iter()
-                .filter(|source| {
-                    !excluded_ids.contains(&source.id)
-                        && !preserved_artwork_ids.contains(&source.id)
-                })
-                .cloned()
-                .collect::<Vec<_>>();
-            for name_batch in story_batch.chunks(TRANSLATION_BATCH_MAX) {
-                cancellation_boundary(cancel.as_ref())?;
-                let name_started = Instant::now();
-                let names = match tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current()
-                        .block_on(translator.detect_proper_names(name_batch, cancel.as_ref()))
-                }) {
-                    Ok(names) => names,
-                    Err(_) if cancel.load(Ordering::Acquire) || sink.is_cancelled() => {
-                        return Err(CleaningError::cancelled());
-                    }
-                    Err(error) => {
-                        return Err(CleaningError::pipeline(
-                            error.context("recognize proper names before translation"),
-                        ));
-                    }
-                };
-                name_elapsed += name_started.elapsed();
-                merge_protected_names(&mut semantic_names, names);
-            }
-        }
     }
-    drop(semantic_permit);
+    drop(translator);
     let semantic_elapsed = semantic_started.elapsed();
     for group in grouped.iter().filter(|group| {
         preserved_artwork_ids.contains(&stable_region_id(
@@ -2669,155 +2679,205 @@ async fn prepare_grouped_regions(
         return Ok((Vec::new(), text_probabilities));
     }
 
-    publish_progress(
-        sink,
-        BrowserJobStage::Inpainting,
-        None,
-        Some(overall_progress),
-        None,
-        None,
-        "Restoring the artwork behind the original text",
-    )?;
-    let cleanup_started = Instant::now();
-    drop(cleanup_crops);
-    drop(cleanup_tiles);
-    let source_for_cleanup = source.clone();
-    let (cleaned_groups, erase_mask, text_blocks, bubble_mask, text_probabilities) = preprocessing
-        .run(move || {
-            let source_rgb = source_for_cleanup
-                .as_rgb8()
-                .expect("browser source images are canonical RGB");
-            let mut erase_mask = image::GrayImage::new(image_width, image_height);
-            let mut all_text_blocks = Vec::new();
-            let mut cleaned_groups = Vec::with_capacity(grouped.len());
-            for group in grouped {
-                let support = group
-                    .candidate
-                    .confirmed_bubble_rect
-                    .union(group.candidate.text_rect);
-                let learned_mask = verified_text_mask_for_regions_local(
-                    source_rgb,
-                    &text_probabilities,
-                    &bubble_mask,
-                    &group.cleanup_blocks,
-                    support,
-                    DEFAULT_TEXT_MASK_THRESHOLD,
-                )
-                .with_context(|| {
-                    format!(
-                        "learned text mask did not cover every OCR line in {:?}",
-                        group.source_english
-                    )
-                })?;
-                let local_bubble_mask = crop_imm(
-                    &bubble_mask,
-                    learned_mask.bounds.x,
-                    learned_mask.bounds.y,
-                    learned_mask.bounds.width,
-                    learned_mask.bounds.height,
-                )
-                .to_image();
-                let local_blocks = group
-                    .cleanup_blocks
-                    .iter()
-                    .map(|block| TextRegion {
-                        x: block.x - learned_mask.bounds.x as f32,
-                        y: block.y - learned_mask.bounds.y as f32,
-                        ..block.clone()
-                    })
-                    .collect::<Vec<_>>();
-                let expanded_local = expand_gray_mask_for_inpainting(
-                    &learned_mask.mask,
-                    &local_bubble_mask,
-                    &local_blocks,
-                );
-                let local_support = PixelRect {
-                    x0: support.x0 - learned_mask.bounds.x as f32,
-                    y0: support.y0 - learned_mask.bounds.y as f32,
-                    x1: support.x1 - learned_mask.bounds.x as f32,
-                    y1: support.y1 - learned_mask.bounds.y as f32,
-                };
-                let mut cleanup_mask = compact_cleanup_mask(&expanded_local, local_support)
-                    .with_context(|| {
-                        format!(
-                            "expanded cleanup mask was empty for OCR-confirmed dialogue {:?}",
-                            group.source_english
-                        )
-                    })?;
-                cleanup_mask.bounds.x = cleanup_mask.bounds.x.saturating_add(learned_mask.bounds.x);
-                cleanup_mask.bounds.y = cleanup_mask.bounds.y.saturating_add(learned_mask.bounds.y);
-                merge_cleanup_mask(&mut erase_mask, &cleanup_mask);
-                all_text_blocks.extend(group.cleanup_blocks.iter().cloned());
-                cleaned_groups.push(CleanedGroupedRegion {
-                    group,
-                    cleanup_mask,
-                });
-            }
-            Ok((
-                cleaned_groups,
-                erase_mask,
-                all_text_blocks,
-                bubble_mask,
-                text_probabilities,
-            ))
+    let story_sources = if request.settings.name_translation == NameTranslation::KeepOriginal {
+        semantic_sources
+            .into_iter()
+            .filter(|source| {
+                !excluded_ids.contains(&source.id) && !preserved_artwork_ids.contains(&source.id)
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let name_started = Instant::now();
+    let name_task = (!story_sources.is_empty()).then(|| {
+        let resident = Arc::clone(&resident);
+        let cancel = cancel.clone();
+        let scheduler = Arc::clone(cuda_scheduler);
+        tokio::spawn(async move {
+            detect_names_for_story_sources(resident, story_sources, priority, cancel, scheduler)
+                .await
         })
-        .await
-        .context("verify and isolate learned cleanup masks by bubble")
-        .map_err(CleaningError::pipeline)?;
-    cancellation_boundary(cancel.as_ref())?;
-    let cuda_permit = cuda_scheduler
-        .acquire(CudaWorkload::Vision, priority, cancel.clone())
-        .await
-        .map_err(cuda_admission_error)?;
-    let inpainted = resident
-        .inpainter
-        .lock()
-        .map_err(|_| CleaningError::new("MODEL_STATE_FAILED", "Inpainter lock poisoned."))?
-        .inference_rgb_with_blocks(
-            source
-                .as_rgb8()
-                .expect("browser source images are canonical RGB"),
-            &erase_mask,
-            &bubble_mask,
-            &text_blocks,
-        )
-        .context("restore artwork with the manga inpainter")
-        .map_err(CleaningError::pipeline)?;
-    drop(cuda_permit);
-    cancellation_boundary(cancel.as_ref())?;
+    });
 
-    let prepared_groups = preprocessing
-        .run(move || {
-            let bubble_components = bubble_component_bounds(&bubble_mask);
-            cleaned_groups
-                .into_iter()
-                .map(|cleaned| {
-                    let group = cleaned.group;
-                    let patch = make_inpainted_patch(&inpainted, &cleaned.cleanup_mask)?;
-                    let (bubble_polygon, layout_polygon) = region_polygons(
-                        &bubble_mask,
-                        &bubble_components,
-                        group.candidate.text_rect,
-                        group.candidate.confirmed_bubble_rect,
-                        group.measured_font_height,
-                    );
+    let cleanup_started = Instant::now();
+    let cleanup_result = async {
+        publish_progress(
+            sink,
+            BrowserJobStage::Inpainting,
+            None,
+            Some(overall_progress),
+            None,
+            None,
+            "Restoring the artwork behind the original text",
+        )?;
+        drop(cleanup_crops);
+        drop(cleanup_tiles);
+        let source_for_cleanup = source.clone();
+        let (cleaned_groups, erase_mask, text_blocks, bubble_mask, text_probabilities) =
+            preprocessing
+                .run(move || {
+                    let source_rgb = source_for_cleanup
+                        .as_rgb8()
+                        .expect("browser source images are canonical RGB");
+                    let mut erase_mask = image::GrayImage::new(image_width, image_height);
+                    let mut all_text_blocks = Vec::new();
+                    let mut cleaned_groups = Vec::with_capacity(grouped.len());
+                    for group in grouped {
+                        let support = group
+                            .candidate
+                            .confirmed_bubble_rect
+                            .union(group.candidate.text_rect);
+                        let learned_mask = verified_text_mask_for_regions_local(
+                            source_rgb,
+                            &text_probabilities,
+                            &bubble_mask,
+                            &group.cleanup_blocks,
+                            support,
+                            DEFAULT_TEXT_MASK_THRESHOLD,
+                        )
+                        .with_context(|| {
+                            format!(
+                                "learned text mask did not cover every OCR line in {:?}",
+                                group.source_english
+                            )
+                        })?;
+                        let local_bubble_mask = crop_imm(
+                            &bubble_mask,
+                            learned_mask.bounds.x,
+                            learned_mask.bounds.y,
+                            learned_mask.bounds.width,
+                            learned_mask.bounds.height,
+                        )
+                        .to_image();
+                        let local_blocks = group
+                            .cleanup_blocks
+                            .iter()
+                            .map(|block| TextRegion {
+                                x: block.x - learned_mask.bounds.x as f32,
+                                y: block.y - learned_mask.bounds.y as f32,
+                                ..block.clone()
+                            })
+                            .collect::<Vec<_>>();
+                        let expanded_local = expand_gray_mask_for_inpainting(
+                            &learned_mask.mask,
+                            &local_bubble_mask,
+                            &local_blocks,
+                        );
+                        let local_support = PixelRect {
+                            x0: support.x0 - learned_mask.bounds.x as f32,
+                            y0: support.y0 - learned_mask.bounds.y as f32,
+                            x1: support.x1 - learned_mask.bounds.x as f32,
+                            y1: support.y1 - learned_mask.bounds.y as f32,
+                        };
+                        let mut cleanup_mask = compact_cleanup_mask(&expanded_local, local_support)
+                            .with_context(|| {
+                                format!(
+                                    "expanded cleanup mask was empty for OCR-confirmed dialogue {:?}",
+                                    group.source_english
+                                )
+                            })?;
+                        cleanup_mask.bounds.x =
+                            cleanup_mask.bounds.x.saturating_add(learned_mask.bounds.x);
+                        cleanup_mask.bounds.y =
+                            cleanup_mask.bounds.y.saturating_add(learned_mask.bounds.y);
+                        merge_cleanup_mask(&mut erase_mask, &cleanup_mask);
+                        all_text_blocks.extend(group.cleanup_blocks.iter().cloned());
+                        cleaned_groups.push(CleanedGroupedRegion {
+                            group,
+                            cleanup_mask,
+                        });
+                    }
                     Ok((
-                        group.candidate,
-                        group.source_english,
-                        group.ocr_confidence,
-                        group.prediction,
-                        group.appearance_bands,
-                        group.measured_font_height,
-                        patch,
-                        bubble_polygon,
-                        layout_polygon,
+                        cleaned_groups,
+                        erase_mask,
+                        all_text_blocks,
+                        bubble_mask,
+                        text_probabilities,
                     ))
                 })
-                .collect::<Result<Vec<_>>>()
-        })
-        .await
-        .context("encode model-inpainted cleanup patches")
-        .map_err(CleaningError::pipeline)?;
+                .await
+                .context("verify and isolate learned cleanup masks by bubble")
+                .map_err(CleaningError::pipeline)?;
+        cancellation_boundary(cancel.as_ref())?;
+        let cuda_permit = cuda_scheduler
+            .acquire(CudaWorkload::Vision, priority, cancel.clone())
+            .await
+            .map_err(cuda_admission_error)?;
+        let inpainted = resident
+            .inpainter
+            .lock()
+            .map_err(|_| CleaningError::new("MODEL_STATE_FAILED", "Inpainter lock poisoned."))?
+            .inference_rgb_with_blocks(
+                source
+                    .as_rgb8()
+                    .expect("browser source images are canonical RGB"),
+                &erase_mask,
+                &bubble_mask,
+                &text_blocks,
+            )
+            .context("restore artwork with the manga inpainter")
+            .map_err(CleaningError::pipeline)?;
+        drop(cuda_permit);
+        cancellation_boundary(cancel.as_ref())?;
+
+        let prepared_groups = preprocessing
+            .run(move || {
+                let bubble_components = bubble_component_bounds(&bubble_mask);
+                cleaned_groups
+                    .into_iter()
+                    .map(|cleaned| {
+                        let group = cleaned.group;
+                        let patch = make_inpainted_patch(&inpainted, &cleaned.cleanup_mask)?;
+                        let (bubble_polygon, layout_polygon) = region_polygons(
+                            &bubble_mask,
+                            &bubble_components,
+                            group.candidate.text_rect,
+                            group.candidate.confirmed_bubble_rect,
+                            group.measured_font_height,
+                        );
+                        Ok((
+                            group.candidate,
+                            group.source_english,
+                            group.ocr_confidence,
+                            group.prediction,
+                            group.appearance_bands,
+                            group.measured_font_height,
+                            patch,
+                            bubble_polygon,
+                            layout_polygon,
+                        ))
+                    })
+                    .collect::<Result<Vec<_>>>()
+            })
+            .await
+            .context("encode model-inpainted cleanup patches")
+            .map_err(CleaningError::pipeline)?;
+        Ok::<_, CleaningError>((prepared_groups, text_probabilities))
+    }
+    .await;
+    let (prepared_groups, text_probabilities) = match cleanup_result {
+        Ok(result) => result,
+        Err(error) => {
+            if let Some(task) = name_task {
+                task.abort();
+                let _ = task.await;
+            }
+            return Err(error);
+        }
+    };
+    let mut name_elapsed = Duration::ZERO;
+    let semantic_names = match name_task {
+        Some(task) => {
+            let detected = task.await.map_err(|error| {
+                CleaningError::pipeline(anyhow!("proper-name detection task failed: {error}"))
+            })??;
+            name_elapsed = name_started.elapsed();
+            detected
+        }
+        None => Vec::new(),
+    };
+    cancellation_boundary(cancel.as_ref())?;
     let latest_viewport = sink.viewport();
     let translation_queued_at = tokio::time::Instant::now();
     if std::env::var_os("HSKIFY_TRACE_PIPELINE_TIMING").is_some_and(|value| value == "1") {
