@@ -510,6 +510,29 @@ impl JobUpdateSink {
         rect: NormalizedRect,
         bytes: Vec<u8>,
     ) -> Result<RegionPatch, PublishError> {
+        self.store_generated_patch_png(rect, bytes)
+    }
+
+    pub(crate) fn store_generated_patch_png(
+        &self,
+        rect: NormalizedRect,
+        bytes: Vec<u8>,
+    ) -> Result<RegionPatch, PublishError> {
+        self.validate_patch_storage_request(&rect)?;
+        self.state
+            .store_generated_patch_png(&self.record, rect, bytes)
+    }
+
+    pub(crate) fn store_cached_patch_png(
+        &self,
+        rect: NormalizedRect,
+        bytes: Arc<[u8]>,
+    ) -> Result<RegionPatch, PublishError> {
+        self.validate_patch_storage_request(&rect)?;
+        self.state.store_cached_patch_png(&self.record, rect, bytes)
+    }
+
+    fn validate_patch_storage_request(&self, rect: &NormalizedRect) -> Result<(), PublishError> {
         if self.record.cancel.load(Ordering::Acquire) {
             return Err(PublishError::Cancelled);
         }
@@ -517,8 +540,7 @@ impl JobUpdateSink {
             return Err(PublishError::Terminal);
         }
         rect.validate_at("patch.rect")
-            .map_err(PublishError::Contract)?;
-        self.state.store_patch(&self.record, rect, bytes)
+            .map_err(PublishError::Contract)
     }
 
     /// Append one replayable update. The sink assigns the next sequence and
@@ -1073,28 +1095,34 @@ impl BridgeState {
         Ok((job_id, record, sink))
     }
 
-    fn store_patch(
+    fn store_generated_patch_png(
         &self,
         record: &JobRecord,
         rect: NormalizedRect,
         bytes: Vec<u8>,
     ) -> Result<RegionPatch, PublishError> {
+        validate_generated_patch_png(&bytes, &self.config.limits)?;
+        self.store_patch_bytes(record, rect, bytes.into())
+    }
+
+    fn store_cached_patch_png(
+        &self,
+        record: &JobRecord,
+        rect: NormalizedRect,
+        bytes: Arc<[u8]>,
+    ) -> Result<RegionPatch, PublishError> {
         if bytes.len() > self.config.limits.max_patch_blob_bytes {
             return Err(PublishError::PatchTooLarge);
         }
-        if image::guess_format(&bytes).ok() != Some(ImageFormat::Png) {
-            return Err(PublishError::InvalidPatch);
-        }
-        let mut limits = Limits::default();
-        limits.max_image_width = Some(self.config.limits.max_dimension);
-        limits.max_image_height = Some(self.config.limits.max_dimension);
-        limits.max_alloc = Some(self.config.limits.max_decoded_bytes);
-        let mut reader = ImageReader::new(Cursor::new(bytes.as_slice()));
-        reader.set_format(ImageFormat::Png);
-        reader.limits(limits);
-        if reader.decode().is_err() {
-            return Err(PublishError::InvalidPatch);
-        }
+        self.store_patch_bytes(record, rect, bytes)
+    }
+
+    fn store_patch_bytes(
+        &self,
+        record: &JobRecord,
+        rect: NormalizedRect,
+        bytes: Arc<[u8]>,
+    ) -> Result<RegionPatch, PublishError> {
         let mut storage = self.storage.write().expect("storage lock poisoned");
         if !storage.jobs.contains_key(&record.job_id) {
             return Err(PublishError::Terminal);
@@ -1111,7 +1139,7 @@ impl BridgeState {
         storage.blobs.insert(
             blob_id.clone(),
             StoredBlob {
-                bytes: bytes.into(),
+                bytes,
                 content_type: "image/png",
                 owner_job_id: record.job_id.clone(),
             },
@@ -1145,7 +1173,7 @@ impl BridgeState {
                     .blobs
                     .get(&region.patch.blob_id)
                     .filter(|blob| blob.owner_job_id == record.job_id)
-                    .map(|blob| blob.bytes.as_ref().to_vec())
+                    .map(|blob| blob.bytes.clone())
                     .ok_or_else(|| {
                         CleaningError::new(
                             "CACHE_FAILED",
@@ -1170,6 +1198,24 @@ impl BridgeState {
             preserved_artwork,
         })
     }
+}
+
+fn validate_generated_patch_png(bytes: &[u8], limits: &ServerLimits) -> Result<(), PublishError> {
+    if bytes.len() > limits.max_patch_blob_bytes {
+        return Err(PublishError::PatchTooLarge);
+    }
+    if bytes.len() < 8 || bytes[..8] != [137, 80, 78, 71, 13, 10, 26, 10] {
+        return Err(PublishError::InvalidPatch);
+    }
+    if bytes.len() < 24 || &bytes[12..16] != b"IHDR" {
+        return Err(PublishError::InvalidPatch);
+    }
+    let width = u32::from_be_bytes(bytes[16..20].try_into().expect("PNG width header"));
+    let height = u32::from_be_bytes(bytes[20..24].try_into().expect("PNG height header"));
+    if width == 0 || height == 0 || width > limits.max_dimension || height > limits.max_dimension {
+        return Err(PublishError::InvalidPatch);
+    }
+    Ok(())
 }
 
 fn capacity_api_error(kind: CapacityKind) -> ApiError {
@@ -2056,7 +2102,7 @@ fn replay_cached_job(sink: &JobUpdateSink, cached: CachedJob) -> Result<(), Clea
         }
         let mut region = cached_region.region;
         region.patch = sink
-            .store_patch_png(region.patch.rect.clone(), cached_region.patch_png)
+            .store_cached_patch_png(region.patch.rect.clone(), cached_region.patch_png)
             .map_err(|error| CleaningError::new("CACHE_REPLAY_FAILED", error.to_string()))?;
         sink.remember_region_for_lookup(region.id.clone(), cached_region.lookup_context);
         sink.publish(JobUpdateDraft::RegionReady {
@@ -2408,6 +2454,26 @@ mod tests {
         cursor.into_inner()
     }
 
+    fn cached_fixture_region() -> ProgressiveRegion {
+        fixtures::updates("cached-job")
+            .updates
+            .into_iter()
+            .find_map(|update| match update {
+                JobUpdate::RegionReady { region, .. } => Some(*region),
+                _ => None,
+            })
+            .expect("cached fixture region")
+    }
+
+    fn lookup_context_for(region: &ProgressiveRegion) -> RegionLookupContext {
+        RegionLookupContext {
+            source_english: region.source_english.clone(),
+            base_chinese: region.base_chinese.clone(),
+            displayed_chinese: region.displayed_chinese.clone(),
+            proper_names: Vec::new(),
+        }
+    }
+
     #[test]
     fn default_idle_timeout_is_thirty_minutes() {
         assert_eq!(
@@ -2422,6 +2488,141 @@ mod tests {
         assert_eq!(limits.max_upload_bytes, 20 * 1024 * 1024);
         assert_eq!(limits.max_pixels, 25_000_000);
         assert_eq!(limits.max_dimension, 16_384);
+    }
+
+    #[test]
+    fn generated_patch_validation_checks_png_header_without_decoding() {
+        let temp = tempfile::tempdir().unwrap();
+        let pipeline = Arc::new(CountingPipeline {
+            runs: AtomicUsize::new(0),
+            warmups: AtomicUsize::new(0),
+            ready: true,
+            sabotage_cache_root: None,
+        });
+        let state = BridgeState::with_pipeline_and_setup(
+            BridgeConfig::for_port(1234),
+            [7; SECRET_BYTES],
+            pipeline,
+            None,
+            temp.path().to_path_buf(),
+        );
+        let request: CreateJobRequest = serde_json::from_str(include_str!(
+            "../../../fixtures/contracts/job-request.valid.json"
+        ))
+        .unwrap();
+        let (_, _record, sink) = state
+            .reserve_uploaded_job(None, request.visible_rects)
+            .unwrap();
+        let rect = NormalizedRect {
+            x: 0.1,
+            y: 0.1,
+            width: 0.2,
+            height: 0.2,
+        };
+
+        let mut invalid_signature = valid_png();
+        invalid_signature[0] = 0;
+        assert!(matches!(
+            sink.store_generated_patch_png(rect, invalid_signature),
+            Err(PublishError::InvalidPatch)
+        ));
+
+        let mut invalid_ihdr = valid_png();
+        invalid_ihdr[12] = b'X';
+        assert!(matches!(
+            sink.store_generated_patch_png(rect, invalid_ihdr),
+            Err(PublishError::InvalidPatch)
+        ));
+
+        let mut zero_width = valid_png();
+        zero_width[16..20].copy_from_slice(&0_u32.to_be_bytes());
+        assert!(matches!(
+            sink.store_generated_patch_png(rect, zero_width),
+            Err(PublishError::InvalidPatch)
+        ));
+
+        let mut oversized = valid_png();
+        oversized[16..20].copy_from_slice(&16_385_u32.to_be_bytes());
+        assert!(matches!(
+            sink.store_generated_patch_png(rect, oversized),
+            Err(PublishError::InvalidPatch)
+        ));
+
+        assert!(sink.store_generated_patch_png(rect, valid_png()).is_ok());
+    }
+
+    #[test]
+    fn cached_and_completed_patch_paths_share_arc_storage() {
+        let temp = tempfile::tempdir().unwrap();
+        let pipeline = Arc::new(CountingPipeline {
+            runs: AtomicUsize::new(0),
+            warmups: AtomicUsize::new(0),
+            ready: true,
+            sabotage_cache_root: None,
+        });
+        let state = BridgeState::with_pipeline_and_setup(
+            BridgeConfig::for_port(1234),
+            [7; SECRET_BYTES],
+            pipeline,
+            None,
+            temp.path().to_path_buf(),
+        );
+        let request: CreateJobRequest = serde_json::from_str(include_str!(
+            "../../../fixtures/contracts/job-request.valid.json"
+        ))
+        .unwrap();
+        let (_, _record, sink) = state
+            .reserve_uploaded_job(None, request.visible_rects.clone())
+            .unwrap();
+        let cached_bytes: Arc<[u8]> = Arc::from(valid_png());
+        let region = cached_fixture_region();
+        replay_cached_job(
+            &sink,
+            CachedJob {
+                regions: vec![CachedRegion {
+                    lookup_context: lookup_context_for(&region),
+                    region: region.clone(),
+                    patch_png: cached_bytes.clone(),
+                }],
+                preserved_artwork: Vec::new(),
+            },
+        )
+        .unwrap();
+        let replayed_blob = state
+            .storage
+            .read()
+            .unwrap()
+            .blobs
+            .values()
+            .find(|blob| blob.owner_job_id == sink.job_id())
+            .expect("replayed cached patch")
+            .bytes
+            .clone();
+        assert!(Arc::ptr_eq(&replayed_blob, &cached_bytes));
+
+        let record = Arc::new(JobRecord::new(
+            1,
+            "job-completed-cache".to_owned(),
+            None,
+            request.visible_rects,
+        ));
+        {
+            let mut log = record.log.lock().unwrap();
+            log.progressive_regions
+                .insert(region.id.clone(), region.clone());
+            log.lookup_contexts
+                .insert(region.id.clone(), lookup_context_for(&region));
+        }
+        state.storage.write().unwrap().blobs.insert(
+            region.patch.blob_id.clone(),
+            StoredBlob {
+                bytes: cached_bytes.clone(),
+                content_type: "image/png",
+                owner_job_id: record.job_id.clone(),
+            },
+        );
+        let completed = state.completed_cache_job(&record).unwrap();
+        assert!(Arc::ptr_eq(&completed.regions[0].patch_png, &cached_bytes));
     }
 
     #[test]
@@ -2543,7 +2744,7 @@ mod tests {
                             }],
                         },
                         region,
-                        patch_png: valid_png(),
+                        patch_png: Arc::from(valid_png()),
                     }],
                     preserved_artwork: Vec::new(),
                 },

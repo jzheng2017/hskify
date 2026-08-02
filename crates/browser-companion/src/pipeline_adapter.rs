@@ -4405,7 +4405,7 @@ fn publish_region(
     );
     let patch_rect = region.patch.bounds.normalized(image_width, image_height);
     let patch = sink
-        .store_patch_png(patch_rect, region.patch.bytes.clone())
+        .store_generated_patch_png(patch_rect, region.patch.bytes.clone())
         .map_err(|error| publish_error(error, sink))?;
     let above_level_tokens = above_level_tokens(&translation.report);
     let teaching_terms = teaching_terms(control, &translation.report);

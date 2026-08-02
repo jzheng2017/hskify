@@ -1,6 +1,7 @@
 use std::fs::{self, File};
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::{BufReader, BufWriter, Cursor, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use anyhow::{Context, Result, bail};
@@ -11,6 +12,7 @@ use hsk_control::{
     SEGMENTATION_REVISION, UNICODE_NORMALIZATION_CRATE_VERSION,
     UNICODE_NORMALIZATION_TABLES_SHA256,
 };
+use image::{ImageFormat, ImageReader, Limits};
 use koharu_app::llm::{
     HSK_SEMANTIC_ANALYSIS_REVISION, HSK_TRANSLATION_MODEL_REVISION, HSK_TRANSLATION_PROMPT_HASH,
     HSK_TRANSLATION_VALIDATOR_HASH,
@@ -39,7 +41,7 @@ const MODEL_RESOURCE_MANIFEST: &[u8] = include_bytes!("../../../data/model-packs
 pub(crate) struct CachedRegion {
     pub region: ProgressiveRegion,
     pub lookup_context: RegionLookupContext,
-    pub patch_png: Vec<u8>,
+    pub patch_png: Arc<[u8]>,
 }
 
 #[derive(Debug, Clone)]
@@ -202,11 +204,11 @@ impl ResultCache {
                     self.max_decoded_patch_bytes
                 );
             }
-            validate_png(&patch_png)?;
+            validate_cached_png(&patch_png, self.max_decoded_patch_bytes)?;
             regions.push(CachedRegion {
                 region: stored_region.region,
                 lookup_context: stored_region.lookup_context,
-                patch_png,
+                patch_png: Arc::from(patch_png),
             });
         }
         for region in &stored.preserved_artwork {
@@ -265,7 +267,7 @@ impl ResultCache {
                 Ok(StoredRegion {
                     region: cached.region.clone(),
                     lookup_context: cached.lookup_context.clone(),
-                    patch_png_base64: BASE64.encode(&cached.patch_png),
+                    patch_png_base64: BASE64.encode(cached.patch_png.as_ref()),
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -404,6 +406,20 @@ fn validate_png(bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
+fn validate_cached_png(bytes: &[u8], max_decoded_bytes: u64) -> Result<()> {
+    let mut limits = Limits::default();
+    limits.max_image_width = Some(16_384);
+    limits.max_image_height = Some(16_384);
+    limits.max_alloc = Some(max_decoded_bytes);
+    let mut reader = ImageReader::new(Cursor::new(bytes));
+    reader.set_format(ImageFormat::Png);
+    reader.limits(limits);
+    reader
+        .decode()
+        .context("decode cached PNG patch within safe limits")?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -413,6 +429,7 @@ mod tests {
         WritingMode,
     };
     use hsk_control::{ProperName, ProperNameReason};
+    use image::{DynamicImage, ImageFormat};
 
     fn region(id: &str) -> ProgressiveRegion {
         let polygon = vec![
@@ -474,8 +491,12 @@ mod tests {
         }
     }
 
-    fn png() -> Vec<u8> {
-        vec![137, 80, 78, 71, 13, 10, 26, 10, 1, 2, 3, 4]
+    fn png() -> Arc<[u8]> {
+        let mut cursor = Cursor::new(Vec::new());
+        DynamicImage::new_rgba8(2, 2)
+            .write_to(&mut cursor, ImageFormat::Png)
+            .unwrap();
+        Arc::from(cursor.into_inner())
     }
 
     fn preserved_artwork() -> PreservedArtworkRegion {
@@ -569,7 +590,7 @@ mod tests {
         assert_eq!(loaded.regions.len(), 1);
         assert_eq!(loaded.regions[0].region.id, "a");
         assert_eq!(loaded.regions[0].lookup_context, lookup_context());
-        assert_eq!(loaded.regions[0].patch_png, png());
+        assert_eq!(loaded.regions[0].patch_png.as_ref(), png().as_ref());
         assert_eq!(loaded.preserved_artwork, vec![preserved_artwork()]);
         Ok(())
     }
@@ -643,6 +664,29 @@ mod tests {
             ResultCache::with_load_limits(directory.path().to_path_buf(), 1024 * 1024, 12);
 
         assert!(bounded.load(&request).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn load_rejects_corrupt_compressed_png_data() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let request = request()?;
+        let cache = ResultCache::new(directory.path().to_path_buf());
+        let mut corrupt = vec![137, 80, 78, 71, 13, 10, 26, 10];
+        corrupt.extend_from_slice(b"corrupt compressed data");
+        cache.store(
+            &request,
+            &CachedJob {
+                regions: vec![CachedRegion {
+                    region: region("a"),
+                    lookup_context: lookup_context(),
+                    patch_png: Arc::from(corrupt),
+                }],
+                preserved_artwork: Vec::new(),
+            },
+        )?;
+
+        assert!(cache.load(&request).is_err());
         Ok(())
     }
 
