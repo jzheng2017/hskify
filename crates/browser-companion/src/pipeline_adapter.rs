@@ -22,7 +22,7 @@ use hsk_control::{
     HskControl, HskLevel as ControlHskLevel, LookupRegionContext as ControlLookupRegion,
     ProperName, ProperNameReason, ValidationReport, ViolationReason,
 };
-use image::{DynamicImage, GenericImageView, GrayImage, Luma, Rgb, RgbImage};
+use image::{DynamicImage, GenericImageView, GrayImage, Luma, Rgb, RgbImage, imageops::crop_imm};
 use koharu_app::llm::{
     HSK_TRANSLATION_MODEL, HskLearningMode, HskNameHandling, HskPrecedingUtterance,
     HskProtectedName, HskRepairUtterance, HskSemanticLayout, HskSourceUtterance,
@@ -32,7 +32,7 @@ use koharu_app::llm::{
 };
 use koharu_app::{App, AppConfig};
 use koharu_ml::comic_text_bubble_detector::{ComicTextBubbleDetector, DETECTOR_TILE_BATCH_SIZE};
-use koharu_ml::inpainting::expand_mask_for_inpainting;
+use koharu_ml::inpainting::expand_gray_mask_for_inpainting;
 use koharu_ml::lama::Lama;
 use koharu_ml::manga_text_segmentation_2025::{DEFAULT_TEXT_MASK_THRESHOLD, MangaTextSegmentation};
 use koharu_ml::probability_map::ProbabilityMap;
@@ -54,7 +54,7 @@ use self::patch::{
     CleanupMask, PatchPng, bubble_component_bounds, bubble_id_for_rect, bubble_id_mask,
     compact_cleanup_mask, crop_probability_map, label_bubble_components, make_inpainted_patch,
     merge_binary_mask, merge_cleanup_mask, merge_probability_map,
-    merge_source_guided_glyph_probabilities, region_polygons, verified_text_mask_for_regions,
+    merge_source_guided_glyph_probabilities, region_polygons, verified_text_mask_for_regions_local,
 };
 use self::ppocr_v5::{EnglishPpOcrV5, MAX_LINE_BATCH_SIZE, PpOcrAppearanceBand, PpOcrPrediction};
 use crate::contracts::{
@@ -2687,16 +2687,20 @@ async fn prepare_grouped_regions(
             let source_rgb = source_for_cleanup
                 .as_rgb8()
                 .expect("browser source images are canonical RGB");
-            let bubble_image = DynamicImage::ImageLuma8(bubble_mask.clone());
             let mut erase_mask = image::GrayImage::new(image_width, image_height);
             let mut all_text_blocks = Vec::new();
             let mut cleaned_groups = Vec::with_capacity(grouped.len());
             for group in grouped {
-                let learned_mask = verified_text_mask_for_regions(
+                let support = group
+                    .candidate
+                    .confirmed_bubble_rect
+                    .union(group.candidate.text_rect);
+                let learned_mask = verified_text_mask_for_regions_local(
                     source_rgb,
                     &text_probabilities,
                     &bubble_mask,
                     &group.cleanup_blocks,
+                    support,
                     DEFAULT_TEXT_MASK_THRESHOLD,
                 )
                 .with_context(|| {
@@ -2705,22 +2709,43 @@ async fn prepare_grouped_regions(
                         group.source_english
                     )
                 })?;
-                let group_erase_mask = expand_mask_for_inpainting(
-                    &DynamicImage::ImageLuma8(learned_mask),
-                    &bubble_image,
-                    &group.cleanup_blocks,
+                let local_bubble_mask = crop_imm(
+                    &bubble_mask,
+                    learned_mask.bounds.x,
+                    learned_mask.bounds.y,
+                    learned_mask.bounds.width,
+                    learned_mask.bounds.height,
+                )
+                .to_image();
+                let local_blocks = group
+                    .cleanup_blocks
+                    .iter()
+                    .map(|block| TextRegion {
+                        x: block.x - learned_mask.bounds.x as f32,
+                        y: block.y - learned_mask.bounds.y as f32,
+                        ..block.clone()
+                    })
+                    .collect::<Vec<_>>();
+                let expanded_local = expand_gray_mask_for_inpainting(
+                    &learned_mask.mask,
+                    &local_bubble_mask,
+                    &local_blocks,
                 );
-                let support = group
-                    .candidate
-                    .confirmed_bubble_rect
-                    .union(group.candidate.text_rect);
-                let cleanup_mask =
-                    compact_cleanup_mask(&group_erase_mask, support).with_context(|| {
+                let local_support = PixelRect {
+                    x0: support.x0 - learned_mask.bounds.x as f32,
+                    y0: support.y0 - learned_mask.bounds.y as f32,
+                    x1: support.x1 - learned_mask.bounds.x as f32,
+                    y1: support.y1 - learned_mask.bounds.y as f32,
+                };
+                let mut cleanup_mask = compact_cleanup_mask(&expanded_local, local_support)
+                    .with_context(|| {
                         format!(
                             "expanded cleanup mask was empty for OCR-confirmed dialogue {:?}",
                             group.source_english
                         )
                     })?;
+                cleanup_mask.bounds.x = cleanup_mask.bounds.x.saturating_add(learned_mask.bounds.x);
+                cleanup_mask.bounds.y = cleanup_mask.bounds.y.saturating_add(learned_mask.bounds.y);
                 merge_cleanup_mask(&mut erase_mask, &cleanup_mask);
                 all_text_blocks.extend(group.cleanup_blocks.iter().cloned());
                 cleaned_groups.push(CleanedGroupedRegion {

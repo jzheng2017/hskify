@@ -39,13 +39,27 @@ pub fn expand_mask_for_inpainting(
     text_blocks: &[TextRegion],
 ) -> GrayImage {
     let base = binarize_mask(mask);
+    let bubbles = bubble_mask.to_luma8();
+    expand_gray_mask_for_inpainting(&base, &bubbles, text_blocks)
+}
+
+/// Borrowed grayscale variant of [`expand_mask_for_inpainting`]. The caller
+/// owns the mask and bubble dimensions; the implementation keeps all work in
+/// those existing local buffers and preserves the legacy dilation/component
+/// rules.
+pub fn expand_gray_mask_for_inpainting(
+    mask: &GrayImage,
+    bubble_mask: &GrayImage,
+    text_blocks: &[TextRegion],
+) -> GrayImage {
+    let base = mask;
+    let bubbles = bubble_mask;
     if base.pixels().all(|pixel| pixel.0[0] == 0) {
-        return base;
+        return base.clone();
     }
 
-    let bubbles = bubble_mask.to_luma8();
     if base.dimensions() != bubbles.dimensions() {
-        return base;
+        return base.clone();
     }
 
     let (width, height) = base.dimensions();

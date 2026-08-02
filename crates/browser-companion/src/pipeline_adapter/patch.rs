@@ -170,6 +170,141 @@ pub(super) fn verified_text_mask_for_regions(
     Some(mask)
 }
 
+/// Build the verified text mask in the smallest safe work rectangle around a
+/// grouped region. All coordinates read from the page-sized probability and
+/// bubble maps remain global; only the returned mask storage is local.
+pub(super) fn verified_text_mask_for_regions_local(
+    source: &RgbImage,
+    probabilities: &ProbabilityMap,
+    bubbles: &GrayImage,
+    regions: &[TextRegion],
+    support: PixelRect,
+    threshold: f32,
+) -> Option<CleanupMask> {
+    if regions.is_empty()
+        || probabilities.width != bubbles.width()
+        || probabilities.height != bubbles.height()
+        || probabilities.width != source.width()
+        || probabilities.height != source.height()
+    {
+        return None;
+    }
+
+    let max_guard = regions
+        .iter()
+        .map(|region| {
+            region
+                .detected_font_size_px
+                .unwrap_or(region.height)
+                .max(1.0)
+        })
+        .fold(0.0_f32, f32::max);
+    let work = support
+        .expand(max_guard.ceil() + 16.0, source.width(), source.height())
+        .pixel_bounds(source.width(), source.height());
+    if work.width == 0 || work.height == 0 {
+        return None;
+    }
+
+    let mut mask = GrayImage::new(work.width, work.height);
+    let mut put_global = |x: u32, y: u32| {
+        let local_x = x.saturating_sub(work.x);
+        let local_y = y.saturating_sub(work.y);
+        if local_x < work.width && local_y < work.height {
+            mask.put_pixel(local_x, local_y, Luma([255]));
+        }
+    };
+
+    for region in regions {
+        // Detector boxes commonly stop at the last full glyph and can omit
+        // detached punctuation. Give the learned mask one measured glyph of
+        // semantic support, then constrain it to the same segmented balloon.
+        let guard = region
+            .detected_font_size_px
+            .unwrap_or(region.height)
+            .max(1.0);
+        let text_rect = PixelRect {
+            x0: region.x,
+            y0: region.y,
+            x1: region.x + region.width,
+            y1: region.y + region.height,
+        };
+        let bubble_id = dominant_bubble_id(bubbles, text_rect);
+        let x0 = (region.x - guard)
+            .floor()
+            .max(0.0)
+            .min(probabilities.width as f32) as u32;
+        let y0 = (region.y - guard)
+            .floor()
+            .max(0.0)
+            .min(probabilities.height as f32) as u32;
+        let x1 = (region.x + region.width + guard)
+            .ceil()
+            .clamp(x0 as f32, probabilities.width as f32) as u32;
+        let y1 = (region.y + region.height + guard)
+            .ceil()
+            .clamp(y0 as f32, probabilities.height as f32) as u32;
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let index = y as usize * probabilities.width as usize + x as usize;
+                if bubble_id.is_none_or(|id| bubbles.get_pixel(x, y).0[0] == id)
+                    && probabilities.values.get(index).copied().unwrap_or_default() >= threshold
+                {
+                    put_global(x, y);
+                }
+            }
+        }
+
+        let rect = PixelRect::new(
+            region.x,
+            region.y,
+            region.x + region.width,
+            region.y + region.height,
+        )?;
+        let bounds = rect.pixel_bounds(probabilities.width, probabilities.height);
+        let block_width = bounds.width as usize;
+        let block_area = block_width * bounds.height as usize;
+        let mut block_support = vec![false; block_area];
+        for y in bounds.y..bounds.y.saturating_add(bounds.height) {
+            for x in bounds.x..bounds.x.saturating_add(bounds.width) {
+                let index = y as usize * probabilities.width as usize + x as usize;
+                if probabilities.values.get(index).copied().unwrap_or_default() >= threshold {
+                    let local_index =
+                        (y - bounds.y) as usize * block_width + (x - bounds.x) as usize;
+                    block_support[local_index] = true;
+                }
+            }
+        }
+        for (x, y) in adaptive_connected_semantic_support(probabilities, bounds) {
+            let local_index = (y - bounds.y) as usize * block_width + (x - bounds.x) as usize;
+            block_support[local_index] = true;
+        }
+        let detector_support = block_support.iter().filter(|selected| **selected).count();
+        if detector_support == 0 || detector_support >= block_area {
+            block_support.fill(false);
+            for (x, y) in source_connected_glyph_support(source, bounds) {
+                let local_index = (y - bounds.y) as usize * block_width + (x - bounds.x) as usize;
+                block_support[local_index] = true;
+            }
+        }
+        let semantic_pixels = block_support.iter().filter(|selected| **selected).count();
+        if semantic_pixels == 0 || semantic_pixels >= block_area {
+            return None;
+        }
+        for (local_index, selected) in block_support.into_iter().enumerate() {
+            if selected {
+                put_global(
+                    bounds.x + (local_index % block_width) as u32,
+                    bounds.y + (local_index / block_width) as u32,
+                );
+            }
+        }
+    }
+
+    drop(put_global);
+    Some(CleanupMask { bounds: work, mask })
+}
+
 /// Recover low-confidence glyph strokes with a model-relative hysteresis
 /// estimator. High-probability quartile/maxima seed the mask, and only
 /// connected lower-probability pixels may grow from those seeds. Uniform
@@ -858,7 +993,93 @@ fn feathered_alpha(mask: &GrayImage) -> GrayImage {
 
 #[cfg(test)]
 mod tests {
+    use koharu_ml::inpainting::{expand_gray_mask_for_inpainting, expand_mask_for_inpainting};
+
     use super::*;
+
+    fn reference_group_cleanup(
+        source: &RgbImage,
+        probabilities: &ProbabilityMap,
+        bubbles: &GrayImage,
+        regions: &[TextRegion],
+        support: PixelRect,
+    ) -> Option<CleanupMask> {
+        let verified =
+            verified_text_mask_for_regions(source, probabilities, bubbles, regions, 0.1)?;
+        let expanded = expand_mask_for_inpainting(
+            &DynamicImage::ImageLuma8(verified),
+            &DynamicImage::ImageLuma8(bubbles.clone()),
+            regions,
+        );
+        compact_cleanup_mask(&expanded, support)
+    }
+
+    fn local_group_cleanup(
+        source: &RgbImage,
+        probabilities: &ProbabilityMap,
+        bubbles: &GrayImage,
+        regions: &[TextRegion],
+        support: PixelRect,
+    ) -> Option<CleanupMask> {
+        let verified = verified_text_mask_for_regions_local(
+            source,
+            probabilities,
+            bubbles,
+            regions,
+            support,
+            0.1,
+        )?;
+        assert_eq!(
+            verified.mask.dimensions(),
+            (verified.bounds.width, verified.bounds.height)
+        );
+        let local_bubbles = crop_imm(
+            bubbles,
+            verified.bounds.x,
+            verified.bounds.y,
+            verified.bounds.width,
+            verified.bounds.height,
+        )
+        .to_image();
+        let local_regions = regions
+            .iter()
+            .map(|region| TextRegion {
+                x: region.x - verified.bounds.x as f32,
+                y: region.y - verified.bounds.y as f32,
+                ..region.clone()
+            })
+            .collect::<Vec<_>>();
+        let expanded =
+            expand_gray_mask_for_inpainting(&verified.mask, &local_bubbles, &local_regions);
+        let local_support = PixelRect {
+            x0: support.x0 - verified.bounds.x as f32,
+            y0: support.y0 - verified.bounds.y as f32,
+            x1: support.x1 - verified.bounds.x as f32,
+            y1: support.y1 - verified.bounds.y as f32,
+        };
+        let mut cleanup = compact_cleanup_mask(&expanded, local_support)?;
+        cleanup.bounds.x += verified.bounds.x;
+        cleanup.bounds.y += verified.bounds.y;
+        Some(cleanup)
+    }
+
+    fn assert_group_matches_reference(
+        source: &RgbImage,
+        probabilities: &ProbabilityMap,
+        bubbles: &GrayImage,
+        regions: &[TextRegion],
+        support: PixelRect,
+    ) {
+        let reference = reference_group_cleanup(source, probabilities, bubbles, regions, support)
+            .expect("reference cleanup mask");
+        let local = local_group_cleanup(source, probabilities, bubbles, regions, support)
+            .expect("local cleanup mask");
+        let mut reference_page = GrayImage::new(source.width(), source.height());
+        let mut local_page = GrayImage::new(source.width(), source.height());
+        merge_cleanup_mask(&mut reference_page, &reference);
+        merge_cleanup_mask(&mut local_page, &local);
+        assert_eq!(local_page, reference_page);
+    }
 
     #[test]
     fn learned_mask_uses_measured_punctuation_support_inside_the_same_bubble() {
@@ -1184,5 +1405,235 @@ mod tests {
         assert_eq!(decoded.get_pixel(5, 5).0[..3], [90, 100, 110]);
         assert_eq!(decoded.get_pixel(0, 0).0[3], 0);
         assert!(decoded.pixels().any(|pixel| pixel.0[3] > 0));
+    }
+
+    #[test]
+    fn local_cleanup_matches_reference_for_normal_bubble_and_touching_labels() {
+        let source = RgbImage::from_pixel(40, 30, image::Rgb([255, 255, 255]));
+        let mut bubbles = GrayImage::new(40, 30);
+        for y in 5..22 {
+            for x in 5..35 {
+                bubbles.put_pixel(x, y, Luma([1]));
+            }
+        }
+        let mut probabilities = ProbabilityMap::zeros(40, 30);
+        for y in 11..14 {
+            for x in 11..15 {
+                probabilities.values[y * 40 + x] = 0.9;
+            }
+        }
+        assert_group_matches_reference(
+            &source,
+            &probabilities,
+            &bubbles,
+            &[TextRegion {
+                x: 9.0,
+                y: 9.0,
+                width: 10.0,
+                height: 7.0,
+                detected_font_size_px: Some(4.0),
+                ..TextRegion::default()
+            }],
+            PixelRect::new(5.0, 5.0, 35.0, 22.0).unwrap(),
+        );
+
+        for y in 5..22 {
+            for x in 20..35 {
+                bubbles.put_pixel(x, y, Luma([2]));
+            }
+        }
+        for y in 11..14 {
+            for x in 23..27 {
+                probabilities.values[y * 40 + x] = 0.85;
+            }
+        }
+        assert_group_matches_reference(
+            &source,
+            &probabilities,
+            &bubbles,
+            &[
+                TextRegion {
+                    x: 9.0,
+                    y: 9.0,
+                    width: 10.0,
+                    height: 7.0,
+                    detected_font_size_px: Some(4.0),
+                    ..TextRegion::default()
+                },
+                TextRegion {
+                    x: 21.0,
+                    y: 9.0,
+                    width: 10.0,
+                    height: 7.0,
+                    detected_font_size_px: Some(4.0),
+                    ..TextRegion::default()
+                },
+            ],
+            PixelRect::new(5.0, 5.0, 35.0, 22.0).unwrap(),
+        );
+    }
+
+    #[test]
+    fn local_cleanup_matches_reference_for_source_guided_recovery_and_edges() {
+        let mut source = RgbImage::from_pixel(24, 20, image::Rgb([238, 238, 238]));
+        for y in 3..8 {
+            source.put_pixel(4, y, image::Rgb([24, 24, 24]));
+            source.put_pixel(7, y, image::Rgb([24, 24, 24]));
+        }
+        for x in 4..=7 {
+            source.put_pixel(x, 5, image::Rgb([24, 24, 24]));
+        }
+        let bubbles = GrayImage::from_pixel(24, 20, Luma([1]));
+        assert_group_matches_reference(
+            &source,
+            &ProbabilityMap::zeros(24, 20),
+            &bubbles,
+            &[TextRegion {
+                x: 2.0,
+                y: 2.0,
+                width: 8.0,
+                height: 8.0,
+                ..TextRegion::default()
+            }],
+            PixelRect::new(0.0, 0.0, 12.0, 12.0).unwrap(),
+        );
+
+        let source = RgbImage::from_pixel(24, 20, image::Rgb([255, 255, 255]));
+        let mut probabilities = ProbabilityMap::zeros(24, 20);
+        for y in 1..4 {
+            for x in 1..5 {
+                probabilities.values[y * 24 + x] = 0.9;
+            }
+        }
+        let bubbles = GrayImage::from_pixel(24, 20, Luma([1]));
+        assert_group_matches_reference(
+            &source,
+            &probabilities,
+            &bubbles,
+            &[TextRegion {
+                x: 0.0,
+                y: 0.0,
+                width: 7.0,
+                height: 6.0,
+                detected_font_size_px: Some(3.0),
+                ..TextRegion::default()
+            }],
+            PixelRect::new(0.0, 0.0, 8.0, 8.0).unwrap(),
+        );
+
+        for y in 15..19 {
+            for x in 18..23 {
+                probabilities.values[y * 24 + x] = 0.9;
+            }
+        }
+        assert_group_matches_reference(
+            &source,
+            &probabilities,
+            &bubbles,
+            &[TextRegion {
+                x: 17.0,
+                y: 14.0,
+                width: 7.0,
+                height: 6.0,
+                detected_font_size_px: Some(3.0),
+                ..TextRegion::default()
+            }],
+            PixelRect::new(16.0, 13.0, 24.0, 20.0).unwrap(),
+        );
+    }
+
+    #[test]
+    fn local_cleanup_matches_reference_for_overlapping_groups_and_multiple_lines() {
+        let source = RgbImage::from_pixel(48, 28, image::Rgb([255, 255, 255]));
+        let bubbles = GrayImage::from_pixel(48, 28, Luma([1]));
+        let mut probabilities = ProbabilityMap::zeros(48, 28);
+        for y in 8..11 {
+            for x in 8..13 {
+                probabilities.values[y * 48 + x] = 0.9;
+            }
+        }
+        for y in 13..16 {
+            for x in 9..14 {
+                probabilities.values[y * 48 + x] = 0.9;
+            }
+        }
+        let regions = [
+            TextRegion {
+                x: 6.0,
+                y: 6.0,
+                width: 10.0,
+                height: 7.0,
+                detected_font_size_px: Some(4.0),
+                ..TextRegion::default()
+            },
+            TextRegion {
+                x: 7.0,
+                y: 11.0,
+                width: 10.0,
+                height: 7.0,
+                detected_font_size_px: Some(4.0),
+                ..TextRegion::default()
+            },
+        ];
+        assert_group_matches_reference(
+            &source,
+            &probabilities,
+            &bubbles,
+            &regions,
+            PixelRect::new(5.0, 5.0, 20.0, 20.0).unwrap(),
+        );
+
+        let second_regions = [TextRegion {
+            x: 18.0,
+            y: 7.0,
+            width: 9.0,
+            height: 7.0,
+            detected_font_size_px: Some(4.0),
+            ..TextRegion::default()
+        }];
+        for y in 9..12 {
+            for x in 20..24 {
+                probabilities.values[y * 48 + x] = 0.9;
+            }
+        }
+        let mut reference_page = GrayImage::new(48, 28);
+        let mut local_page = GrayImage::new(48, 28);
+        let first_reference = reference_group_cleanup(
+            &source,
+            &probabilities,
+            &bubbles,
+            &regions,
+            PixelRect::new(5.0, 5.0, 20.0, 20.0).unwrap(),
+        )
+        .unwrap();
+        let first_local = local_group_cleanup(
+            &source,
+            &probabilities,
+            &bubbles,
+            &regions,
+            PixelRect::new(5.0, 5.0, 20.0, 20.0).unwrap(),
+        )
+        .unwrap();
+        let second_reference = reference_group_cleanup(
+            &source,
+            &probabilities,
+            &bubbles,
+            &second_regions,
+            PixelRect::new(17.0, 6.0, 28.0, 16.0).unwrap(),
+        )
+        .unwrap();
+        let second_local = local_group_cleanup(
+            &source,
+            &probabilities,
+            &bubbles,
+            &second_regions,
+            PixelRect::new(17.0, 6.0, 28.0, 16.0).unwrap(),
+        )
+        .unwrap();
+        merge_cleanup_mask(&mut reference_page, &first_reference);
+        merge_cleanup_mask(&mut reference_page, &second_reference);
+        merge_cleanup_mask(&mut local_page, &first_local);
+        merge_cleanup_mask(&mut local_page, &second_local);
+        assert_eq!(local_page, reference_page);
     }
 }
