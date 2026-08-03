@@ -65,5 +65,5 @@ bundle or claim published latency and quality results.
 - `scripts` — build and benchmark tooling
 
 For the deeper technical material, start with the [documentation index](docs/README.md),
-then see the [architecture overview](docs/architecture.md) and
-[benchmark guide](docs/chapter-5-benchmark.md).
+then see the [architecture overview](docs/architecture.md) and the
+[real-reader-v2 release corpus guide](docs/real-reader-v2.md).

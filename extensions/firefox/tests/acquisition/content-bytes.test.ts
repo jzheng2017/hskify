@@ -8,9 +8,13 @@ describe('same-origin content byte fallback', () => {
   it('stops streaming at the byte cap before building an ArrayBuffer', async () => {
     const image = loadedImage('data:image/png;base64,fixture')
     const candidate: DiscoveredImage = {
+      id: 'image:0:data:image/png;base64,fixture',
+      kind: 'image',
       element: image,
       owner: image,
       sourceUrl: image.currentSrc,
+      sourceWidth: image.naturalWidth,
+      sourceHeight: image.naturalHeight,
       domIndex: 0,
       visible: true,
     }

@@ -1,8 +1,0 @@
-version = 1
-
-[[asset]]
-path = "gate0-source.png"
-generator = "generate-gate0.ps1"
-source = "synthetic; created for this repository"
-license = "GPL-3.0-only"
-notes = "Contains only geometric primitives and original English fixture text."

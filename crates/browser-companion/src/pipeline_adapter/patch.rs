@@ -8,7 +8,7 @@ use image::{
 use imageproc::{
     contours::{BorderType, find_contours},
     distance_transform::Norm,
-    morphology::erode,
+    morphology::{dilate, erode},
 };
 use koharu_ml::{
     probability_map::ProbabilityMap, speech_bubble_segmentation::SpeechBubbleSegmentationResult,
@@ -30,18 +30,27 @@ const SOURCE_SEED_QUANTILE_DENOMINATOR: usize = 4;
 const SOURCE_SEED_MAXIMUM_RATIO: f32 = 0.55;
 const SOURCE_CONNECTED_SUPPORT_RATIO: f32 = 0.18;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(super) struct PatchPng {
     pub bounds: PixelBounds,
     pub bytes: Vec<u8>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(super) struct CleanupMask {
     pub bounds: PixelBounds,
     pub mask: GrayImage,
 }
 
+/// Produce the bounded second-stage cleanup evidence.  It is deliberately a
+/// one-pixel dilation of the verified glyph mask, not a re-run of OCR or a
+/// rectangle fill: a failed first inpaint gets one genuinely different halo
+/// hypothesis while the protected-pixel and boundary gates remain unchanged.
+pub(super) fn broaden_cleanup_mask(mask: &GrayImage) -> GrayImage {
+    dilate(mask, Norm::LInf, 1)
+}
+
+#[cfg(test)]
 pub(super) fn text_mask_for_regions(
     probabilities: &ProbabilityMap,
     bubbles: &GrayImage,
@@ -104,6 +113,7 @@ pub(super) fn text_mask_for_regions(
 /// The exact OCR rectangles therefore act as semantic fallback seeds. Only
 /// pixels accepted by the learned text probability field are restored; no
 /// detector rectangle is ever converted into paint.
+#[cfg(test)]
 pub(super) fn verified_text_mask_for_regions(
     source: &RgbImage,
     probabilities: &ProbabilityMap,
@@ -760,6 +770,254 @@ pub(super) fn make_inpainted_patch(
     })
 }
 
+/// Evidence recorded for a cleanup candidate before it is allowed to reach
+/// the browser.  A mask is not proof that inpainting succeeded: models can
+/// leave source glyphs behind, damage bubble outlines, or alter pixels well
+/// outside the requested text.  Keep the decision at the pixel boundary so
+/// every reader and every artwork style follows the same fail-closed rule.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct CleanupQuality {
+    pub mask_ratio: f32,
+    pub changed_ratio: f32,
+    pub residual_edge_ratio: f32,
+    /// Remaining glyph-like edge energy inside the erase mask, normalized to
+    /// the source evidence. This is an explicit residual-text gate rather
+    /// than assuming that a model-produced patch is clean.
+    pub residual_text_ratio: f32,
+    pub boundary_error: f32,
+    pub protected_delta_ratio: f32,
+}
+
+impl CleanupQuality {
+    pub(super) fn passes(self) -> bool {
+        self.mask_ratio > 0.0
+            && self.mask_ratio <= 0.65
+            && self.changed_ratio >= 0.01
+            && self.residual_edge_ratio <= 1.05
+            && self.residual_text_ratio <= 0.95
+            && self.boundary_error <= 0.45
+            && self.protected_delta_ratio <= f32::EPSILON
+    }
+
+    /// Collapse the independent pixel checks into one diagnostic score for
+    /// the terminal region evidence.  Publication still uses [`passes`]
+    /// (every hard invariant remains mandatory); this score is deliberately
+    /// not a second acceptance threshold and is useful to release gates and
+    /// hover diagnostics when comparing restoration candidates.
+    pub(super) fn score(self) -> f32 {
+        let residual_edge = (1.0 - self.residual_edge_ratio.min(1.0)).clamp(0.0, 1.0);
+        let residual_text = (1.0 - self.residual_text_ratio.min(1.0)).clamp(0.0, 1.0);
+        let boundary = (1.0 - (self.boundary_error / 0.45)).clamp(0.0, 1.0);
+        let changed = self.changed_ratio.clamp(0.0, 1.0);
+        let protected = (1.0 - self.protected_delta_ratio).clamp(0.0, 1.0);
+        (residual_edge * residual_text * boundary * changed * protected)
+            .cbrt()
+            .clamp(0.0, 1.0)
+    }
+}
+
+fn luminance(pixel: [u8; 3]) -> f32 {
+    0.2126 * f32::from(pixel[0]) + 0.7152 * f32::from(pixel[1]) + 0.0722 * f32::from(pixel[2])
+}
+
+fn colour_distance(left: [u8; 3], right: [u8; 3]) -> f32 {
+    ((f32::from(left[0]) - f32::from(right[0])).abs()
+        + (f32::from(left[1]) - f32::from(right[1])).abs()
+        + (f32::from(left[2]) - f32::from(right[2])).abs())
+        / (3.0 * 255.0)
+}
+
+/// Score a full-image inpaint against the original and the measured glyph
+/// mask.  Pixels outside the mask are protected artwork and must be byte
+/// identical; a candidate that violates that invariant is rejected outright.
+#[cfg(test)]
+pub(super) fn score_cleanup_candidate(
+    source: &RgbImage,
+    candidate: &RgbImage,
+    cleanup: &CleanupMask,
+) -> Option<CleanupQuality> {
+    score_cleanup_candidate_impl(source, candidate, cleanup, true)
+}
+
+/// Score one region after the caller has already verified the candidate's
+/// protected pixels once for the complete page.  Cleanup batches can contain
+/// dozens of regions; repeating a full-page scan for every region made tall
+/// chapters needlessly quadratic in the number of bubbles.
+pub(super) fn score_cleanup_candidate_local(
+    source: &RgbImage,
+    candidate: &RgbImage,
+    cleanup: &CleanupMask,
+) -> Option<CleanupQuality> {
+    score_cleanup_candidate_impl(source, candidate, cleanup, false)
+}
+
+fn score_cleanup_candidate_impl(
+    source: &RgbImage,
+    candidate: &RgbImage,
+    cleanup: &CleanupMask,
+    verify_protected_pixels: bool,
+) -> Option<CleanupQuality> {
+    if source.dimensions() != candidate.dimensions()
+        || cleanup.bounds.x.saturating_add(cleanup.bounds.width) > source.width()
+        || cleanup.bounds.y.saturating_add(cleanup.bounds.height) > source.height()
+        || cleanup.mask.dimensions() != (cleanup.bounds.width, cleanup.bounds.height)
+    {
+        return None;
+    }
+    let mut selected = 0_u64;
+    let mut changed = 0_u64;
+    let mut protected_delta = 0_u64;
+    let total = u64::from(cleanup.bounds.width) * u64::from(cleanup.bounds.height);
+    let mut source_edge = 0.0_f32;
+    let mut candidate_edge = 0.0_f32;
+    let mut source_boundary_text = 0.0_f32;
+    let mut candidate_boundary_text = 0.0_f32;
+    let mut text_boundary_samples = 0_u64;
+    let mut boundary_error = 0.0_f32;
+    let mut boundary_samples = 0_u64;
+
+    let y_start = if verify_protected_pixels {
+        0
+    } else {
+        cleanup.bounds.y
+    };
+    let y_end = if verify_protected_pixels {
+        source.height()
+    } else {
+        cleanup
+            .bounds
+            .y
+            .saturating_add(cleanup.bounds.height)
+            .min(source.height())
+    };
+    let x_start = if verify_protected_pixels {
+        0
+    } else {
+        cleanup.bounds.x
+    };
+    let x_end = if verify_protected_pixels {
+        source.width()
+    } else {
+        cleanup
+            .bounds
+            .x
+            .saturating_add(cleanup.bounds.width)
+            .min(source.width())
+    };
+    for y in y_start..y_end {
+        for x in x_start..x_end {
+            let inside = x >= cleanup.bounds.x
+                && y >= cleanup.bounds.y
+                && x < cleanup.bounds.x + cleanup.bounds.width
+                && y < cleanup.bounds.y + cleanup.bounds.height;
+            let selected_here = inside
+                && cleanup
+                    .mask
+                    .get_pixel(x - cleanup.bounds.x, y - cleanup.bounds.y)
+                    .0[0]
+                    > 0;
+            let source_pixel = source.get_pixel(x, y).0;
+            let candidate_pixel = candidate.get_pixel(x, y).0;
+            if !selected_here {
+                if source_pixel != candidate_pixel {
+                    protected_delta = protected_delta.saturating_add(1);
+                }
+                continue;
+            }
+            selected = selected.saturating_add(1);
+            if colour_distance(source_pixel, candidate_pixel) >= 0.01 {
+                changed = changed.saturating_add(1);
+            }
+            let source_luma = luminance(source_pixel);
+            let candidate_luma = luminance(candidate_pixel);
+            for (dx, dy) in [(1_i32, 0_i32), (0, 1)] {
+                let nx = x as i32 + dx;
+                let ny = y as i32 + dy;
+                if nx < 0 || ny < 0 || nx >= source.width() as i32 || ny >= source.height() as i32 {
+                    continue;
+                }
+                let neighbour_selected = {
+                    let nx = nx as u32;
+                    let ny = ny as u32;
+                    nx >= cleanup.bounds.x
+                        && ny >= cleanup.bounds.y
+                        && nx < cleanup.bounds.x + cleanup.bounds.width
+                        && ny < cleanup.bounds.y + cleanup.bounds.height
+                        && cleanup
+                            .mask
+                            .get_pixel(nx - cleanup.bounds.x, ny - cleanup.bounds.y)
+                            .0[0]
+                            > 0
+                };
+                let source_neighbour = source.get_pixel(nx as u32, ny as u32).0;
+                let candidate_neighbour = candidate.get_pixel(nx as u32, ny as u32).0;
+                source_edge += (source_luma - luminance(source_neighbour)).abs();
+                candidate_edge += (candidate_luma - luminance(candidate_neighbour)).abs();
+                if !neighbour_selected {
+                    boundary_error += colour_distance(candidate_pixel, source_neighbour);
+                    boundary_samples = boundary_samples.saturating_add(1);
+                    // A residual glyph is visible at the edge of the erase
+                    // mask even when the inpainted interior has a smooth
+                    // gradient. Compare the source and candidate contrast
+                    // against the same protected neighbour; this is a
+                    // separate text-residue signal from the interior edge
+                    // energy above.
+                    source_boundary_text += (source_luma - luminance(source_neighbour)).abs();
+                    candidate_boundary_text +=
+                        (candidate_luma - luminance(candidate_neighbour)).abs();
+                    text_boundary_samples = text_boundary_samples.saturating_add(1);
+                }
+            }
+        }
+    }
+    if selected == 0 || total == 0 {
+        return None;
+    }
+    Some(CleanupQuality {
+        mask_ratio: selected as f32 / total as f32,
+        changed_ratio: changed as f32 / selected as f32,
+        residual_edge_ratio: if source_edge <= f32::EPSILON {
+            0.0
+        } else {
+            candidate_edge / source_edge
+        },
+        residual_text_ratio: if source_boundary_text <= f32::EPSILON || text_boundary_samples == 0 {
+            0.0
+        } else {
+            (candidate_boundary_text / source_boundary_text).max(0.0)
+        },
+        boundary_error: if boundary_samples == 0 {
+            0.0
+        } else {
+            boundary_error / boundary_samples as f32
+        },
+        protected_delta_ratio: protected_delta as f32
+            / (u64::from(source.width()) * u64::from(source.height())) as f32,
+    })
+}
+
+/// Validate the protected-pixel invariant once for a complete inpaint
+/// candidate. The inpainting strategy normally enforces this invariant, but
+/// keeping the check at the page boundary makes an unexpected model or
+/// strategy implementation fail closed without multiplying the scan by the
+/// number of translated regions.
+pub(super) fn protected_pixels_match(
+    source: &RgbImage,
+    candidate: &RgbImage,
+    changed_mask: &GrayImage,
+) -> bool {
+    if source.dimensions() != candidate.dimensions()
+        || source.dimensions() != changed_mask.dimensions()
+    {
+        return false;
+    }
+    source
+        .pixels()
+        .zip(candidate.pixels())
+        .zip(changed_mask.pixels())
+        .all(|((source, candidate), mask)| mask.0[0] > 0 || source == candidate)
+}
+
 pub(super) fn region_polygons(
     bubbles: &GrayImage,
     bubble_components: &BTreeMap<u8, PixelRect>,
@@ -771,10 +1029,7 @@ pub(super) fn region_polygons(
         .or_else(|| dominant_bubble_id(bubbles, fallback_bubble_rect));
     let Some(bubble_id) = bubble_id else {
         let fallback = fallback_bubble_rect.polygon(bubbles.width(), bubbles.height());
-        return (
-            fallback.clone(),
-            text_rect.polygon(bubbles.width(), bubbles.height()),
-        );
+        return (fallback.clone(), fallback);
     };
     let support_rect = bubble_components
         .get(&bubble_id)
@@ -826,7 +1081,11 @@ pub(super) fn region_polygons(
         bubbles.height(),
     )
     .filter(|polygon| !polygon.is_empty())
-    .unwrap_or_else(|| text_rect.polygon(bubbles.width(), bubbles.height()));
+    // A failed distance-field contour must never collapse the safe area back
+    // to the OCR rectangle.  The segmented bubble hull is the conservative
+    // structural fallback; publication still requires the renderer's
+    // readable-fit gate and keeps source pixels when that hull is unusable.
+    .unwrap_or_else(|| bubble_polygon.clone());
     (bubble_polygon, safe_polygon)
 }
 
@@ -1630,5 +1889,36 @@ mod tests {
         merge_cleanup_mask(&mut local_page, &first_local);
         merge_cleanup_mask(&mut local_page, &second_local);
         assert_eq!(local_page, reference_page);
+    }
+
+    #[test]
+    fn cleanup_quality_rejects_opaque_or_protected_changes() {
+        let mut source = RgbImage::from_pixel(12, 12, image::Rgb([240, 240, 240]));
+        for y in 4..8 {
+            source.put_pixel(4, y, image::Rgb([20, 20, 20]));
+            source.put_pixel(7, y, image::Rgb([20, 20, 20]));
+        }
+        let mut mask = GrayImage::new(12, 12);
+        for y in 4..8 {
+            mask.put_pixel(4, y, Luma([255]));
+            mask.put_pixel(7, y, Luma([255]));
+        }
+        let cleanup =
+            compact_cleanup_mask(&mask, PixelRect::new(0.0, 0.0, 12.0, 12.0).unwrap()).unwrap();
+        let mut candidate = source.clone();
+        for y in 4..8 {
+            candidate.put_pixel(4, y, image::Rgb([240, 240, 240]));
+            candidate.put_pixel(7, y, image::Rgb([240, 240, 240]));
+        }
+        assert!(
+            score_cleanup_candidate(&source, &candidate, &cleanup)
+                .unwrap()
+                .passes()
+        );
+
+        candidate.put_pixel(0, 0, image::Rgb([0, 0, 0]));
+        let quality = score_cleanup_candidate(&source, &candidate, &cleanup).unwrap();
+        assert!(quality.protected_delta_ratio > 0.0);
+        assert!(!quality.passes());
     }
 }

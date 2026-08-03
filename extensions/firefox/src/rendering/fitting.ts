@@ -5,7 +5,8 @@ const CLOSING_PUNCTUATION = new Set([...'，。！？；：、）》】」』”
 const OPENING_PUNCTUATION = new Set([...'（《【「『“‘'])
 const FIT_CONTENT_RATIO = 0.88
 const MINIMUM_FONT_TO_IMAGE_WIDTH = 0.006
-const ABSOLUTE_MINIMUM_FONT_PX = 1
+const ABSOLUTE_MINIMUM_FONT_PX = 8
+const SOURCE_SIZE_RETENTION = 0.72
 const BINARY_SEARCH_STEPS = 20
 
 export type TextFit = {
@@ -165,25 +166,13 @@ export function horizontalPolygonSpan(points: readonly Point[], y: number): numb
   )
 }
 
-function samePolygon(left: readonly Point[], right: readonly Point[]): boolean {
-  return (
-    left.length === right.length &&
-    left.every(
-      (point, index) =>
-        Math.abs(point.x - (right[index]?.x ?? Number.NaN)) < 1e-6 &&
-        Math.abs(point.y - (right[index]?.y ?? Number.NaN)) < 1e-6,
-    )
-  )
-}
-
 export function fitPolygonForRegion(region: BrowserRegion): readonly Point[] {
   const safe = region.layout.safePolygon
-  const bubble = region.bubblePolygon
-  // The current production companion may use the complete bubble hull as its
-  // "safe" polygon. That includes outlines and tails, so keep translated text
-  // in the original OCR text area until a genuinely inset polygon is supplied.
-  if (safe && (!bubble || !samePolygon(safe, bubble))) return safe
-  return region.textPolygon
+  // Safe polygons are part of the terminal region contract.  They are
+  // generated from the bubble distance field on the daemon and never fall
+  // back to a tight OCR rectangle, which is what caused overflow and tiny
+  // text on irregular bubbles.
+  return safe
 }
 
 function regionBox(region: BrowserRegion, imageWidth: number, imageHeight: number): FitBox {
@@ -260,6 +249,25 @@ export function minimumFontSizeForImage(imageWidth: number): number {
   )
 }
 
+/**
+ * A translation that only fits after shrinking below this threshold is not a
+ * usable translation. Keeping the source artwork and exposing it through the
+ * dictionary is safer than presenting unreadably small Chinese text.
+ */
+export function minimumReadableFontSize(
+  region: BrowserRegion,
+  imageWidth: number,
+): number {
+  const sourceSize = Math.max(
+    ABSOLUTE_MINIMUM_FONT_PX,
+    region.layout.fontSizeToImageWidth * imageWidth,
+  )
+  return Math.max(
+    minimumFontSizeForImage(imageWidth),
+    sourceSize * SOURCE_SIZE_RETENTION,
+  )
+}
+
 function chooseFit(
   region: BrowserRegion,
   imageWidth: number,
@@ -278,6 +286,7 @@ function chooseFit(
   )
   const preferredFontSize =
     sourceFontSize * sourceDensityScale(region.sourceEnglish, text)
+  const minimumFontSize = minimumReadableFontSize(region, imageWidth)
   let best: TextFit | undefined
   for (const lines of candidates) {
     const fits = (fontSize: number): boolean =>
@@ -297,21 +306,31 @@ function chooseFit(
     }
     // Stay fractionally inside the mathematical boundary so subpixel
     // rounding cannot create a one-pixel scroll overflow.
-    const fontSize =
+    const rawFontSize =
       low === preferredFontSize ? preferredFontSize : low * 0.997
+    const fontSize = Math.max(minimumFontSize, rawFontSize)
     const candidate = {
       fontSize,
       lines,
-      degraded: fontSize + Number.EPSILON < minimumFontSizeForImage(imageWidth),
+      // The final readable floor may be larger than the source estimate for
+      // a very small displayed image. That is acceptable when the text still
+      // fits; only an actual overflow makes this region a preservation case.
+      degraded: !fits(fontSize),
       usedPolygon: usePolygon,
     }
-    if (!best || candidate.fontSize > best.fontSize) {
+    if (
+      !best ||
+      candidate.fontSize > best.fontSize ||
+      (candidate.fontSize === best.fontSize && best.degraded && !candidate.degraded)
+    ) {
       best = candidate
     }
   }
   return (
     best ?? {
-      fontSize: 0,
+      // Return the readable floor as a diagnostic value. The renderer treats
+      // `degraded` as a preservation decision and does not install a patch.
+      fontSize: minimumFontSize,
       lines: candidates[0] ?? [text],
       degraded: true,
       usedPolygon: usePolygon,

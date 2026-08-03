@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 
 import type { BrowserRegion } from '../../src/contracts/browser'
-import { createFixtureRegions } from '../../src/messaging/fixture-service'
+import { createFixtureRegions } from '../support/fixture-service'
 import { FontLoader } from '../../src/rendering/font-loader'
 import {
   applyRegionColorBands,
@@ -65,7 +65,7 @@ describe('validated browser typography', () => {
       },
     }
     const content = document.createElement('span')
-    for (const text of ['ä¸Š', 'ä¸‹']) {
+    for (const text of ['上', '下']) {
       const line = document.createElement('span')
       line.className = 'hmt-region-line'
       line.textContent = text

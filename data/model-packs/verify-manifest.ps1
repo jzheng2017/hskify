@@ -38,9 +38,16 @@ $requiredResourceIds = @(
     'comic-text-bubble-detector-config',
     'comic-text-bubble-detector-preprocessor-config',
     'comic-text-bubble-detector-weights',
-    'pp-ocr-v5-english-recognizer-config',
-    'pp-ocr-v5-english-recognizer-model',
-    'translation-model'
+    'lama-manga-inpainter-weights',
+    'manga-text-segmentation-weights',
+    'pp-ocr-v6-small-detector-config',
+    'pp-ocr-v6-small-detector-model',
+    'pp-ocr-v6-small-recognizer-config',
+    'pp-ocr-v6-small-recognizer-model',
+    'speech-bubble-segmentation-config',
+    'speech-bubble-segmentation-weights',
+    'translation-model',
+    'translation-model-projector'
 )
 $resourceIdentities = @($manifest.resourceIdentities)
 if ($resourceIdentities.Count -ne $requiredResourceIds.Count) {
@@ -55,7 +62,7 @@ for ($index = 0; $index -lt $resourceIdentities.Count; $index++) {
         throw "resource identity has unexpected fields: $($identity.id)"
     }
     if ([string] $identity.id -cne $expectedId) {
-        throw "resourceIdentities must contain the six required identities in ordinal id order; expected $expectedId"
+        throw "resourceIdentities must contain the required identities in ordinal id order; expected $expectedId"
     }
     if (
         ([string] $identity.repository).Length -gt 256 -or
@@ -87,9 +94,14 @@ for ($index = 0; $index -lt $resourceIdentities.Count; $index++) {
     }
 }
 
-$translationIdentity = $resourceIdentities[-1]
+$translationIdentity = $resourceIdentities | Where-Object { $_.id -eq 'translation-model' }
 if ([string] $translationIdentity.filename -cne 'Qwen3.5-4B-Q4_K_M.gguf') {
     throw 'translation-model must be the pinned Qwen3.5-4B Q4_K_M artifact'
+}
+
+$projectorIdentity = $resourceIdentities | Where-Object { $_.id -eq 'translation-model-projector' }
+if ([string] $projectorIdentity.filename -cne 'mmproj-BF16.gguf') {
+    throw 'translation-model-projector must be the pinned Qwen3.5-4B projector artifact'
 }
 
 Write-Output "verified qwen3.5-4b and exactly $($resourceIdentities.Count) pinned resident resource identities"

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { fakeBrowser } from 'wxt/testing'
 
 import { BackgroundRouter } from '../../src/messaging/background'
-import { FixtureService } from '../../src/messaging/fixture-service'
+import { FixtureService } from '../support/fixture-service'
 
 const pageUrl = 'https://reader.test/chapter'
 
@@ -53,6 +53,8 @@ describe('background acquisition prefetch handoff', () => {
       {
         type: 'job:submit',
         ...source(),
+        chapterPageOrder: [0],
+        surfaceKind: 'image',
         hskLevel: 5,
         learningMode: 'natural',
         nameTranslation: 'keep-original',
@@ -84,6 +86,8 @@ describe('background acquisition prefetch handoff', () => {
       {
         type: 'job:submit',
         ...source(),
+        chapterPageOrder: [0],
+        surfaceKind: 'image',
         hskLevel: 5,
         learningMode: 'natural',
         nameTranslation: 'keep-original',

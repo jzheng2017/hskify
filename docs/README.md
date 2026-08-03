@@ -11,11 +11,11 @@ It must not be used as Hskify documentation.
 - [Architecture](architecture.md): components, data flow, scheduling, caches,
   security, and the RTX 4080 SUPER/CUDA-only boundary.
 - [Browser contract](browser-contract.md): exact unversioned routes, flat
-  progressive events, strict build fingerprint, and patch-first rendering.
+  chapter events, strict build fingerprint, and patch-first rendering.
 - [Browser companion implementation](../crates/browser-companion/IMPLEMENTATION.md):
   code-level daemon and pipeline behavior.
-- [Chapter 5 benchmark and evidence](chapter-5-benchmark.md): sole canonical
-  36-image gold corpus and measurement method.
+- [Real-reader v2 corpus and evidence](real-reader-v2.md): the local,
+  content-addressed chapter contract and packaged Firefox release gate.
 - [Model benchmark](model-benchmark.md): the locked translation model and
   quality-evaluation requirements.
 - [External component evaluation](component-evaluation.md): established work
@@ -29,7 +29,7 @@ It must not be used as Hskify documentation.
 
 ## Accepted decisions
 
-- [Progressive story-region processing](architecture-decisions/0004-progressive-story-regions.md)
+- [Historical story-region processing decision](architecture-decisions/0004-progressive-story-regions.md)
 - [Local Mandarin voice selection](architecture-decisions/0005-mandarin-pronunciation-voice-selection.md)
 
 Historical gate notes and inherited desktop documentation were removed because

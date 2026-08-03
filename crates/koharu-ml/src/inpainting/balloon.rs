@@ -12,6 +12,12 @@ use image::{GrayImage, Luma, Rgb, RgbImage};
 const SIMPLE_BG_THRESHOLD_LOW_VARIANCE: f64 = 10.0;
 const SIMPLE_BG_THRESHOLD_HIGH_VARIANCE: f64 = 7.0;
 const SIMPLE_BG_CHANNEL_STD_SWITCH: f64 = 1.0;
+// A low global standard deviation is not sufficient for a smooth gradient:
+// replacing a gradient with one median colour creates the visible rectangular
+// patch users see around cleaned lettering.  Require the spatial bins of the
+// measured bubble interior to agree as well; gradients and line-art bubbles
+// stay on the edge-aware/model restoration path.
+const SIMPLE_BG_SPATIAL_RANGE_MAX: f64 = 3.0;
 
 #[derive(Debug, Clone)]
 pub struct BubbleFillResult {
@@ -68,7 +74,9 @@ pub fn apply_bubble_fill(
             SIMPLE_BG_THRESHOLD_LOW_VARIANCE
         };
         let std_max = std_rgb.into_iter().fold(0.0, f64::max);
-        if std_max >= inpaint_thresh {
+        if std_max >= inpaint_thresh
+            || spatial_background_range(image, &background_mask) > SIMPLE_BG_SPATIAL_RANGE_MAX
+        {
             continue;
         }
 
@@ -199,6 +207,75 @@ fn stddev3(values: [f64; 3]) -> f64 {
     variance.sqrt()
 }
 
+/// Compare the colour means of a small spatial grid over the bubble interior.
+/// Global variance alone cannot distinguish a flat fill from a low-frequency
+/// gradient, while this bounded grid catches the latter without treating
+/// normal pixel noise as texture.  The result is the largest per-channel
+/// difference between populated cells.
+fn spatial_background_range(image: &RgbImage, mask: &GrayImage) -> f64 {
+    const GRID: usize = 3;
+    let mut sums = [[[0.0; 3]; GRID]; GRID];
+    let mut counts = [[0u32; GRID]; GRID];
+    let mut min_x = image.width();
+    let mut min_y = image.height();
+    let mut max_x = 0;
+    let mut max_y = 0;
+    let mut has_pixels = false;
+    for y in 0..image.height() {
+        for x in 0..image.width() {
+            if mask.get_pixel(x, y).0[0] == 0 {
+                continue;
+            }
+            has_pixels = true;
+            min_x = min_x.min(x);
+            min_y = min_y.min(y);
+            max_x = max_x.max(x);
+            max_y = max_y.max(y);
+        }
+    }
+    if !has_pixels {
+        return 0.0;
+    }
+    let width = (max_x - min_x + 1).max(1) as usize;
+    let height = (max_y - min_y + 1).max(1) as usize;
+    for y in 0..image.height() {
+        for x in 0..image.width() {
+            if mask.get_pixel(x, y).0[0] == 0 {
+                continue;
+            }
+            let column = (((x - min_x) as usize * GRID) / width).min(GRID - 1);
+            let row = (((y - min_y) as usize * GRID) / height).min(GRID - 1);
+            let pixel = image.get_pixel(x, y).0;
+            for (channel, value) in pixel.into_iter().enumerate() {
+                sums[row][column][channel] += f64::from(value);
+            }
+            counts[row][column] += 1;
+        }
+    }
+    let mut minimum = [f64::INFINITY; 3];
+    let mut maximum = [f64::NEG_INFINITY; 3];
+    for row in 0..GRID {
+        for column in 0..GRID {
+            let count = f64::from(counts[row][column]);
+            if count == 0.0 {
+                continue;
+            }
+            for channel in 0..3 {
+                let mean = sums[row][column][channel] / count;
+                minimum[channel] = minimum[channel].min(mean);
+                maximum[channel] = maximum[channel].max(mean);
+            }
+        }
+    }
+    if minimum.iter().any(|value| !value.is_finite()) {
+        0.0
+    } else {
+        (0..3)
+            .map(|channel| maximum[channel] - minimum[channel])
+            .fold(0.0, f64::max)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -254,6 +331,31 @@ mod tests {
         assert_eq!(filled.filled_pixels, 0);
         assert_eq!(count_nonzero(&filled.remaining_mask), 28 * 12);
         assert_eq!(filled.image.get_pixel(20, 20).0, [0, 0, 0]);
+    }
+
+    #[test]
+    fn bubble_fill_skips_smooth_gradient_interiors() {
+        let mut image = RgbImage::new(64, 64);
+        let mut mask = GrayImage::new(64, 64);
+        let mut bubble_mask = GrayImage::new(64, 64);
+        for y in 8..56 {
+            for x in 8..56 {
+                let value = 210 + ((x - 8) * 25 / 48) as u8;
+                image.put_pixel(x, y, Rgb([value, value, value]));
+                bubble_mask.put_pixel(x, y, Luma([9]));
+            }
+        }
+        for y in 24..40 {
+            for x in 24..40 {
+                mask.put_pixel(x, y, Luma([255]));
+                image.put_pixel(x, y, Rgb([0, 0, 0]));
+            }
+        }
+
+        let filled = apply_bubble_fill(&image, &mask, &bubble_mask);
+
+        assert_eq!(filled.filled_pixels, 0);
+        assert_eq!(count_nonzero(&filled.remaining_mask), 16 * 16);
     }
 
     #[test]

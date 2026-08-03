@@ -1,744 +1,85 @@
 {
-  "schemaVersion": 1,
-  "corpusId": "real-reader-v1",
-  "description": "Content-addressed, local-only regression pages captured from real Asura and WEBTOON readers. Image bytes are intentionally not distributed by this repository.",
+  "schemaVersion": 2,
+  "corpusId": "real-reader-v2",
+  "description": "Release corpus contract for complete content-addressed local chapters. Provenance URLs are discovery metadata only; the browser runner never downloads them.",
+  "completeness": {
+    "state": "capture-required",
+    "chapterCount": 13,
+    "pageCount": 0,
+    "annotationCount": 0
+  },
   "execution": {
     "networkPolicy": "forbidden",
-    "defaultCorpusRoot": "local-corpus/real-reader-v1",
-    "selectionPolicy": "Manifest order and named selections are canonical; runners must not sample randomly."
+    "defaultCorpusRoot": "local-corpus/real-reader-v2",
+    "selectionPolicy": "Canonical chapter order; a release run is invalid until every page and annotation is local."
   },
   "coverageRequirements": {
-    "minimumProviders": 2,
-    "minimumChapters": 9,
-    "minimumCases": 27,
-    "requiredQualityFocus": [
-      "dense-dialogue",
-      "fixed-height-reader-slice",
-      "irregular-bubbles",
-      "mixed-color-lettering",
-      "proper-names",
-      "sound-effects",
-      "decorative-technique-lettering",
-      "cross-image-dialogue-context"
-    ]
+    "coreChapterIds": [
+      "webtoon-batman-wayne-family-adventures-1",
+      "webtoon-lore-olympus-1",
+      "webtoon-cursed-princess-club-1",
+      "webtoon-school-bus-graveyard-1",
+      "webtoon-omniscient-reader-2",
+      "webtoon-how-to-be-a-mind-reaver-363",
+      "tapas-free2play-1",
+      "manga-plus-spy-family-1001834",
+      "globalcomix-bloodshot-1",
+      "asura-return-of-the-unrivaled-spear-knight-208"
+    ],
+    "stressChapterIds": [
+      "asura-only-i-have-an-ex-grade-summon-33",
+      "asura-absolute-regression-110",
+      "asura-the-demon-god-40"
+    ],
+    "readerKinds": ["continuous-image", "paged-image", "iframe-image", "background", "canvas", "webgl"]
   },
   "selections": {
-    "chapter130": [
-      "asura-exclusive-tower-130-page-1",
-      "asura-exclusive-tower-130-page-2"
+    "core": [
+      "webtoon-batman-wayne-family-adventures-1",
+      "webtoon-lore-olympus-1",
+      "webtoon-cursed-princess-club-1",
+      "webtoon-school-bus-graveyard-1",
+      "webtoon-omniscient-reader-2",
+      "webtoon-how-to-be-a-mind-reaver-363",
+      "tapas-free2play-1",
+      "manga-plus-spy-family-1001834",
+      "globalcomix-bloodshot-1",
+      "asura-return-of-the-unrivaled-spear-knight-208"
     ],
-    "swordmaster143": [
-      "asura-swordmaster-son-143-page-2",
-      "asura-swordmaster-son-143-page-4",
-      "asura-swordmaster-son-143-page-5",
-      "asura-swordmaster-son-143-page-8",
-      "asura-swordmaster-son-143-page-12"
+    "stress": [
+      "asura-only-i-have-an-ex-grade-summon-33",
+      "asura-absolute-regression-110",
+      "asura-the-demon-god-40"
     ],
-    "smoke": [
-      "asura-shepherd-28-page-18",
-      "asura-status-window-31-page-14",
-      "asura-mercenary-98-page-6",
-      "asura-sword-hound-171-page-1",
-      "asura-sword-hound-171-page-2",
-      "asura-exclusive-tower-130-page-1",
-      "asura-exclusive-tower-130-page-2",
-      "webtoon-vigilante-1-page-20",
-      "webtoon-thirty-minutes-1-page-50",
-      "webtoon-rooftops-1-page-20"
-    ],
-    "quality": [
-      "asura-shepherd-28-page-18",
-      "asura-status-window-31-page-14",
-      "asura-mercenary-98-page-6",
-      "asura-sword-hound-171-page-1",
-      "asura-sword-hound-171-page-2",
-      "asura-exclusive-tower-130-page-1",
-      "asura-exclusive-tower-130-page-2",
-      "webtoon-vigilante-1-page-20",
-      "webtoon-thirty-minutes-1-page-50",
-      "webtoon-rooftops-1-page-20"
+    "all": [
+      "webtoon-batman-wayne-family-adventures-1",
+      "webtoon-lore-olympus-1",
+      "webtoon-cursed-princess-club-1",
+      "webtoon-school-bus-graveyard-1",
+      "webtoon-omniscient-reader-2",
+      "webtoon-how-to-be-a-mind-reaver-363",
+      "tapas-free2play-1",
+      "manga-plus-spy-family-1001834",
+      "globalcomix-bloodshot-1",
+      "asura-return-of-the-unrivaled-spear-knight-208",
+      "asura-only-i-have-an-ex-grade-summon-33",
+      "asura-absolute-regression-110",
+      "asura-the-demon-god-40"
     ]
   },
-  "cases": [
-    {
-      "id": "asura-shepherd-28-page-18",
-      "chapterId": "asura-shepherd-28",
-      "object": {
-        "path": "objects/c316bf99346367546dc7bd2a75f7435fc51eb3f42e5495ea7225dda91e0cb46f.webp",
-        "sha256": "c316bf99346367546dc7bd2a75f7435fc51eb3f42e5495ea7225dda91e0cb46f",
-        "bytes": 936910,
-        "mimeType": "image/webp",
-        "width": 900,
-        "height": 16000
-      },
-      "provenance": {
-        "provider": "asura",
-        "chapterUrl": "https://asurascans.com/comics/the-shepherd-wizard-059befe1/chapter/28",
-        "pageIndex": 18,
-        "capturedAtUtc": "2026-07-27T00:00:00Z",
-        "captureNote": "Selected locally from a 34-image chapter audit."
-      },
-      "qualityFocus": [
-        "irregular-bubbles",
-        "linked-bubbles",
-        "proper-names",
-        "role-titles"
-      ],
-      "expectations": {
-        "minimumRegionCount": 1,
-        "requiredSourceFragments": ["Maysa", "Kadram Arabion"],
-        "preserveNamesWhenDetected": ["Maysa", "Kadram Arabion"]
-      }
-    },
-    {
-      "id": "asura-status-window-31-page-14",
-      "chapterId": "asura-status-window-31",
-      "object": {
-        "path": "objects/2db73f6b8bf17d3aca16b57e3fded76bbd46e073c589f94eba07ab9c368037dd.webp",
-        "sha256": "2db73f6b8bf17d3aca16b57e3fded76bbd46e073c589f94eba07ab9c368037dd",
-        "bytes": 781582,
-        "mimeType": "image/webp",
-        "width": 900,
-        "height": 16000
-      },
-      "provenance": {
-        "provider": "asura",
-        "chapterUrl": "https://asurascans.com/comics/to-hell-with-the-status-window-059befe1/chapter/31",
-        "pageIndex": 14,
-        "capturedAtUtc": "2026-07-27T00:00:00Z",
-        "captureNote": "Selected locally from a 26-image chapter audit."
-      },
-      "qualityFocus": [
-        "dense-dialogue",
-        "multi-sentence-bubbles",
-        "proper-names",
-        "terminology"
-      ]
-    },
-    {
-      "id": "asura-mercenary-98-page-6",
-      "chapterId": "asura-mercenary-98",
-      "object": {
-        "path": "objects/895b5672532585133840b0850f0164203a027306e977b5db280a2360401961f5.webp",
-        "sha256": "895b5672532585133840b0850f0164203a027306e977b5db280a2360401961f5",
-        "bytes": 1339572,
-        "mimeType": "image/webp",
-        "width": 900,
-        "height": 16000
-      },
-      "provenance": {
-        "provider": "asura",
-        "chapterUrl": "https://asurascans.com/comics/the-regressed-mercenarys-machinations-059befe1/chapter/98",
-        "pageIndex": 6,
-        "capturedAtUtc": "2026-07-27T00:00:00Z",
-        "captureNote": "Selected locally from a complete 21-image chapter capture."
-      },
-      "qualityFocus": [
-        "dense-dialogue",
-        "irregular-bubbles",
-        "mixed-color-lettering",
-        "narration",
-        "proper-names"
-      ]
-    },
-    {
-      "id": "asura-sword-hound-171-page-1",
-      "chapterId": "asura-sword-hound-171",
-      "object": {
-        "path": "objects/9a38143b07f58687d4464531762f3f776fd65913fc1816e0ddc7fa221dd480a0.webp",
-        "sha256": "9a38143b07f58687d4464531762f3f776fd65913fc1816e0ddc7fa221dd480a0",
-        "bytes": 180184,
-        "mimeType": "image/webp",
-        "width": 1200,
-        "height": 800
-      },
-      "provenance": {
-        "provider": "asura",
-        "chapterUrl": "https://asurascans.com/comics/revenge-of-the-iron-blooded-sword-hound-059befe1/chapter/171",
-        "pageIndex": 1,
-        "capturedAtUtc": "2026-07-27T21:15:00Z",
-        "captureNote": "Local regression object for a scan-credit splash that previously entered whole-image automatic retries."
-      },
-      "qualityFocus": [
-        "credit-splash",
-        "false-positive-control",
-        "non-story-furniture",
-        "wide-page"
-      ],
-      "expectations": {
-        "exactRegionCount": 0
-      }
-    },
-    {
-      "id": "asura-sword-hound-171-page-2",
-      "chapterId": "asura-sword-hound-171",
-      "object": {
-        "path": "objects/3c9f3aae389abb5efb2141a9e5bca0b11ac370c4970ca772b9068fbaa6251e2d.webp",
-        "sha256": "3c9f3aae389abb5efb2141a9e5bca0b11ac370c4970ca772b9068fbaa6251e2d",
-        "bytes": 1332224,
-        "mimeType": "image/webp",
-        "width": 900,
-        "height": 16000
-      },
-      "provenance": {
-        "provider": "asura",
-        "chapterUrl": "https://asurascans.com/comics/revenge-of-the-iron-blooded-sword-hound-059befe1/chapter/171",
-        "pageIndex": 2,
-        "capturedAtUtc": "2026-07-27T21:15:00Z",
-        "captureNote": "Local regression object for an ultra-tall story strip containing multiplier notation."
-      },
-      "qualityFocus": [
-        "dense-dialogue",
-        "multiplier-notation",
-        "numeric-preservation",
-        "ultra-tall-strip"
-      ],
-      "expectations": {
-        "minimumRegionCount": 10,
-        "requiredSourceFragments": ["THIRTY OF THEM", "X3"]
-      }
-    },
-    {
-      "id": "asura-exclusive-tower-130-page-1",
-      "chapterId": "asura-exclusive-tower-130",
-      "object": {
-        "path": "objects/75a72a63685800aecac7b8a7fdf1b6d1e5717eb6e1be935607f63dca99cbcb42.webp",
-        "sha256": "75a72a63685800aecac7b8a7fdf1b6d1e5717eb6e1be935607f63dca99cbcb42",
-        "bytes": 193622,
-        "mimeType": "image/webp",
-        "width": 1200,
-        "height": 800
-      },
-      "provenance": {
-        "provider": "asura",
-        "chapterUrl": "https://asurascans.com/comics/my-exclusive-tower-guide-059befe1/chapter/130",
-        "pageIndex": 1,
-        "capturedAtUtc": "2026-07-28T12:34:30Z",
-        "captureNote": "Local cover-page regression captured from the packaged Firefox end-to-end audit."
-      },
-      "qualityFocus": [
-        "page-furniture",
-        "series-title",
-        "untranslated-latin"
-      ],
-      "expectations": {
-        "exactRegionCount": 0,
-        "excludedSourceTexts": [
-          "MY EXCLUSIVE TOWER GUIDE"
-        ]
-      }
-    },
-    {
-      "id": "asura-exclusive-tower-130-page-2",
-      "chapterId": "asura-exclusive-tower-130",
-      "object": {
-        "path": "objects/77e93b3040d8a8a159d74f88d659f530a553f795af317d1d147be035890fa272.webp",
-        "sha256": "77e93b3040d8a8a159d74f88d659f530a553f795af317d1d147be035890fa272",
-        "bytes": 1284324,
-        "mimeType": "image/webp",
-        "width": 900,
-        "height": 16000
-      },
-      "provenance": {
-        "provider": "asura",
-        "chapterUrl": "https://asurascans.com/comics/my-exclusive-tower-guide-059befe1/chapter/130",
-        "pageIndex": 2,
-        "capturedAtUtc": "2026-07-28T07:21:39Z",
-        "captureNote": "Local regression object for faint stylized text inside a detector-confirmed speech bubble."
-      },
-      "qualityFocus": [
-        "dense-dialogue",
-        "faint-lettering",
-        "irregular-bubbles",
-        "missed-text-recovery",
-        "ultra-tall-strip"
-      ],
-      "expectations": {
-        "minimumRegionCount": 11,
-        "initialVisibleRects": [
-          {
-            "x": 0,
-            "y": 0.15,
-            "width": 1,
-            "height": 0.05
-          }
-        ],
-        "maximumFirstRegionReadyMs": 2500,
-        "requiredSourceFragments": ["CHEERS", "JAMEL", "THE PORTAL'S OPENED"],
-        "preserveNamesWhenDetected": ["JAMEL", "JOHAN"],
-        "excludedSourceTexts": ["ASURASCANS.COM"]
-      }
-    },
-    {
-      "id": "webtoon-vigilante-1-page-5",
-      "chapterId": "webtoon-vigilante-1",
-      "object": {
-        "path": "objects/1ae3fd2c9a3ca885cb53fc4e1de881532db4e9efcfa4d51f9051086011aa3931.jpg",
-        "sha256": "1ae3fd2c9a3ca885cb53fc4e1de881532db4e9efcfa4d51f9051086011aa3931",
-        "bytes": 48887,
-        "mimeType": "image/jpeg",
-        "width": 700,
-        "height": 1280
-      },
-      "provenance": {
-        "provider": "webtoon",
-        "chapterUrl": "https://www.webtoons.com/en/action/vigilante/episode-1-/viewer?episode_no=1&title_no=5555",
-        "pageIndex": 5,
-        "capturedAtUtc": "2026-07-27T00:00:00Z"
-      },
-      "qualityFocus": ["early-chapter", "fixed-height-reader-slice", "jpeg-source"]
-    },
-    {
-      "id": "webtoon-vigilante-1-page-12",
-      "chapterId": "webtoon-vigilante-1",
-      "object": {
-        "path": "objects/ea29fa2b3e17503ea2df549271f50c98a2d8491a18cc7fdcf0f19f55e38be216.jpg",
-        "sha256": "ea29fa2b3e17503ea2df549271f50c98a2d8491a18cc7fdcf0f19f55e38be216",
-        "bytes": 67514,
-        "mimeType": "image/jpeg",
-        "width": 700,
-        "height": 1280
-      },
-      "provenance": {
-        "provider": "webtoon",
-        "chapterUrl": "https://www.webtoons.com/en/action/vigilante/episode-1-/viewer?episode_no=1&title_no=5555",
-        "pageIndex": 12,
-        "capturedAtUtc": "2026-07-27T00:00:00Z"
-      },
-      "qualityFocus": ["fixed-height-reader-slice", "jpeg-source", "mid-chapter"]
-    },
-    {
-      "id": "webtoon-vigilante-1-page-20",
-      "chapterId": "webtoon-vigilante-1",
-      "object": {
-        "path": "objects/e278e36ed24ad2f5a7ea7acaf4bbb92291d79dc26e5ff2d8ea85ffebee581ca7.jpg",
-        "sha256": "e278e36ed24ad2f5a7ea7acaf4bbb92291d79dc26e5ff2d8ea85ffebee581ca7",
-        "bytes": 79780,
-        "mimeType": "image/jpeg",
-        "width": 700,
-        "height": 1280
-      },
-      "provenance": {
-        "provider": "webtoon",
-        "chapterUrl": "https://www.webtoons.com/en/action/vigilante/episode-1-/viewer?episode_no=1&title_no=5555",
-        "pageIndex": 20,
-        "capturedAtUtc": "2026-07-27T00:00:00Z"
-      },
-      "qualityFocus": ["dialogue", "fixed-height-reader-slice", "jpeg-source"],
-      "expectations": {
-        "minimumRegionCount": 3
-      }
-    },
-    {
-      "id": "webtoon-vigilante-1-page-30",
-      "chapterId": "webtoon-vigilante-1",
-      "object": {
-        "path": "objects/d677cc63967f8a07a3f61a7045f161d48a380ea78d748361a053cd897f4bcad2.jpg",
-        "sha256": "d677cc63967f8a07a3f61a7045f161d48a380ea78d748361a053cd897f4bcad2",
-        "bytes": 130766,
-        "mimeType": "image/jpeg",
-        "width": 700,
-        "height": 1280
-      },
-      "provenance": {
-        "provider": "webtoon",
-        "chapterUrl": "https://www.webtoons.com/en/action/vigilante/episode-1-/viewer?episode_no=1&title_no=5555",
-        "pageIndex": 30,
-        "capturedAtUtc": "2026-07-27T00:00:00Z"
-      },
-      "qualityFocus": ["fixed-height-reader-slice", "jpeg-source", "late-chapter"]
-    },
-    {
-      "id": "webtoon-vigilante-1-page-40",
-      "chapterId": "webtoon-vigilante-1",
-      "object": {
-        "path": "objects/f2b2e11a5fb76e3a4f42f5d7c41da27d3b8b890c925bf48e11e43b46c6804b5d.jpg",
-        "sha256": "f2b2e11a5fb76e3a4f42f5d7c41da27d3b8b890c925bf48e11e43b46c6804b5d",
-        "bytes": 92747,
-        "mimeType": "image/jpeg",
-        "width": 700,
-        "height": 1280
-      },
-      "provenance": {
-        "provider": "webtoon",
-        "chapterUrl": "https://www.webtoons.com/en/action/vigilante/episode-1-/viewer?episode_no=1&title_no=5555",
-        "pageIndex": 40,
-        "capturedAtUtc": "2026-07-27T00:00:00Z"
-      },
-      "qualityFocus": ["fixed-height-reader-slice", "jpeg-source", "late-chapter"]
-    },
-    {
-      "id": "webtoon-thirty-minutes-1-page-5",
-      "chapterId": "webtoon-thirty-minutes-1",
-      "object": {
-        "path": "objects/316399c1a20e905ee3749b61f8d807123856f557518175b904f36f6783fd106a.jpg",
-        "sha256": "316399c1a20e905ee3749b61f8d807123856f557518175b904f36f6783fd106a",
-        "bytes": 53097,
-        "mimeType": "image/jpeg",
-        "width": 800,
-        "height": 1280
-      },
-      "provenance": {
-        "provider": "webtoon",
-        "chapterUrl": "https://www.webtoons.com/en/romance/30-minutes-with-you/ep-1-lucky-moon/viewer?episode_no=1&title_no=5231",
-        "pageIndex": 5,
-        "capturedAtUtc": "2026-07-27T00:00:00Z"
-      },
-      "qualityFocus": ["early-chapter", "fixed-height-reader-slice", "jpeg-source"]
-    },
-    {
-      "id": "webtoon-thirty-minutes-1-page-15",
-      "chapterId": "webtoon-thirty-minutes-1",
-      "object": {
-        "path": "objects/c421c7ea6f418a6f382e3ea0dad1463312cf1438a6e170030568a13660201896.jpg",
-        "sha256": "c421c7ea6f418a6f382e3ea0dad1463312cf1438a6e170030568a13660201896",
-        "bytes": 76708,
-        "mimeType": "image/jpeg",
-        "width": 800,
-        "height": 1280
-      },
-      "provenance": {
-        "provider": "webtoon",
-        "chapterUrl": "https://www.webtoons.com/en/romance/30-minutes-with-you/ep-1-lucky-moon/viewer?episode_no=1&title_no=5231",
-        "pageIndex": 15,
-        "capturedAtUtc": "2026-07-27T00:00:00Z"
-      },
-      "qualityFocus": ["fixed-height-reader-slice", "jpeg-source", "mid-chapter"]
-    },
-    {
-      "id": "webtoon-thirty-minutes-1-page-30",
-      "chapterId": "webtoon-thirty-minutes-1",
-      "object": {
-        "path": "objects/ab64c8f3137456393c549cdb0f48e9d733ea30f63edc0ff793d41247802ba97e.jpg",
-        "sha256": "ab64c8f3137456393c549cdb0f48e9d733ea30f63edc0ff793d41247802ba97e",
-        "bytes": 83513,
-        "mimeType": "image/jpeg",
-        "width": 800,
-        "height": 1280
-      },
-      "provenance": {
-        "provider": "webtoon",
-        "chapterUrl": "https://www.webtoons.com/en/romance/30-minutes-with-you/ep-1-lucky-moon/viewer?episode_no=1&title_no=5231",
-        "pageIndex": 30,
-        "capturedAtUtc": "2026-07-27T00:00:00Z"
-      },
-      "qualityFocus": ["fixed-height-reader-slice", "jpeg-source", "mid-chapter"]
-    },
-    {
-      "id": "webtoon-thirty-minutes-1-page-50",
-      "chapterId": "webtoon-thirty-minutes-1",
-      "object": {
-        "path": "objects/66b48146cde283fc3a85edfaa447af7694fed9e6c7e5d3549003895f37226aba.jpg",
-        "sha256": "66b48146cde283fc3a85edfaa447af7694fed9e6c7e5d3549003895f37226aba",
-        "bytes": 108825,
-        "mimeType": "image/jpeg",
-        "width": 800,
-        "height": 1280
-      },
-      "provenance": {
-        "provider": "webtoon",
-        "chapterUrl": "https://www.webtoons.com/en/romance/30-minutes-with-you/ep-1-lucky-moon/viewer?episode_no=1&title_no=5231",
-        "pageIndex": 50,
-        "capturedAtUtc": "2026-07-27T00:00:00Z"
-      },
-      "qualityFocus": [
-        "dense-dialogue",
-        "fixed-height-reader-slice",
-        "proper-names",
-        "sound-effects"
-      ],
-      "expectations": {
-        "minimumRegionCount": 5,
-        "excludedSourceTexts": ["DING"],
-        "requiredSourceFragments": ["Seongeun"],
-        "preserveNamesWhenDetected": ["Seongeun"]
-      }
-    },
-    {
-      "id": "webtoon-thirty-minutes-1-page-75",
-      "chapterId": "webtoon-thirty-minutes-1",
-      "object": {
-        "path": "objects/263f9a141b2d1cc9dadf8f55aec6e401aedd335b6edf5e63948bff5c6083f737.jpg",
-        "sha256": "263f9a141b2d1cc9dadf8f55aec6e401aedd335b6edf5e63948bff5c6083f737",
-        "bytes": 69180,
-        "mimeType": "image/jpeg",
-        "width": 800,
-        "height": 1280
-      },
-      "provenance": {
-        "provider": "webtoon",
-        "chapterUrl": "https://www.webtoons.com/en/romance/30-minutes-with-you/ep-1-lucky-moon/viewer?episode_no=1&title_no=5231",
-        "pageIndex": 75,
-        "capturedAtUtc": "2026-07-27T00:00:00Z"
-      },
-      "qualityFocus": ["fixed-height-reader-slice", "jpeg-source", "late-chapter"]
-    },
-    {
-      "id": "asura-swordmaster-son-143-page-2",
-      "chapterId": "asura-swordmaster-son-143",
-      "object": {
-        "path": "objects/0a550f782d732a57bd73ac2913661ba7446df3b53cf5ea86312a7b9ea515882b.webp",
-        "sha256": "0a550f782d732a57bd73ac2913661ba7446df3b53cf5ea86312a7b9ea515882b",
-        "bytes": 840372,
-        "mimeType": "image/webp",
-        "width": 800,
-        "height": 13205
-      },
-      "provenance": {
-        "provider": "asura",
-        "chapterUrl": "https://asurascans.com/comics/swordmasters-youngest-son-059befe1/chapter/143",
-        "pageIndex": 2,
-        "capturedAtUtc": "2026-07-28T17:30:00Z",
-        "captureNote": "Local page with decorative technique lettering embedded among ordinary dialogue."
-      },
-      "qualityFocus": [
-        "decorative-technique-lettering",
-        "dialogue",
-        "sound-effects",
-        "tall-page"
-      ],
-      "expectations": {
-        "exactRegionCount": 0,
-        "preservedArtworkSourceFragments": [
-          "MYUNGWANG SWORD TECHNIQUE",
-          "LIGHTNING"
-        ]
-      }
-    },
-    {
-      "id": "asura-swordmaster-son-143-page-4",
-      "chapterId": "asura-swordmaster-son-143",
-      "object": {
-        "path": "objects/9e1e00e7fd7b22d984c041a926ad28b5c0553cec85ea183b61774d61f1233b09.webp",
-        "sha256": "9e1e00e7fd7b22d984c041a926ad28b5c0553cec85ea183b61774d61f1233b09",
-        "bytes": 1153830,
-        "mimeType": "image/webp",
-        "width": 800,
-        "height": 11415
-      },
-      "provenance": {
-        "provider": "asura",
-        "chapterUrl": "https://asurascans.com/comics/swordmasters-youngest-son-059befe1/chapter/143",
-        "pageIndex": 4,
-        "capturedAtUtc": "2026-07-28T17:30:00Z",
-        "captureNote": "Local context lead-in page whose final thought continues on the following image."
-      },
-      "qualityFocus": [
-        "cross-image-dialogue-context",
-        "irregular-bubbles",
-        "narration",
-        "tall-page"
-      ],
-      "expectations": {
-        "minimumRegionCount": 2,
-        "requiredSourceFragments": [
-          "YOUR INSTINCTS",
-          "AREN'T TELLING YOU TO RUN AWAY"
-        ]
-      }
-    },
-    {
-      "id": "asura-swordmaster-son-143-page-5",
-      "chapterId": "asura-swordmaster-son-143",
-      "object": {
-        "path": "objects/b73fae2c18debabaa80efd486ec0ac9c764a2e18fb3865e80f033b516ba4ed44.webp",
-        "sha256": "b73fae2c18debabaa80efd486ec0ac9c764a2e18fb3865e80f033b516ba4ed44",
-        "bytes": 1114320,
-        "mimeType": "image/webp",
-        "width": 800,
-        "height": 13205
-      },
-      "provenance": {
-        "provider": "asura",
-        "chapterUrl": "https://asurascans.com/comics/swordmasters-youngest-son-059befe1/chapter/143",
-        "pageIndex": 5,
-        "capturedAtUtc": "2026-07-28T17:30:00Z",
-        "captureNote": "Local continuation page with narration, dialogue, and multiple decorative attack labels."
-      },
-      "qualityFocus": [
-        "cross-image-dialogue-context",
-        "decorative-technique-lettering",
-        "mixed-color-lettering",
-        "narration",
-        "tall-page"
-      ],
-      "expectations": {
-        "minimumRegionCount": 4,
-        "requiredSourceFragments": [
-          "THIS FEAR IS IMPRINTED IN MY BLOOD",
-          "THE FEAR OF DEATH"
-        ],
-        "preservedArtworkSourceFragments": ["THIRD SWORD"],
-        "protectedArtworkRects": [
-          {
-            "x": 0.08,
-            "y": 0.48,
-            "width": 0.84,
-            "height": 0.22
-          }
-        ]
-      }
-    },
-    {
-      "id": "asura-swordmaster-son-143-page-8",
-      "chapterId": "asura-swordmaster-son-143",
-      "object": {
-        "path": "objects/d87983f942c32a948393e562e8fa11ad8aee1747fde378a9bdada5b187b0193e.webp",
-        "sha256": "d87983f942c32a948393e562e8fa11ad8aee1747fde378a9bdada5b187b0193e",
-        "bytes": 1009278,
-        "mimeType": "image/webp",
-        "width": 800,
-        "height": 12515
-      },
-      "provenance": {
-        "provider": "asura",
-        "chapterUrl": "https://asurascans.com/comics/swordmasters-youngest-son-059befe1/chapter/143",
-        "pageIndex": 8,
-        "capturedAtUtc": "2026-07-28T17:30:00Z",
-        "captureNote": "Local battle page with a standalone illustrated technique label and ordinary speech."
-      },
-      "qualityFocus": [
-        "decorative-technique-lettering",
-        "dialogue",
-        "irregular-bubbles",
-        "tall-page"
-      ],
-      "expectations": {
-        "minimumRegionCount": 1,
-        "requiredSourceFragments": ["I... NEED TO TAKE RESPONSIBILITY"],
-        "preservedArtworkSourceFragments": ["MYUNGWANG SWORD AUTHORITY"]
-      }
-    },
-    {
-      "id": "asura-swordmaster-son-143-page-12",
-      "chapterId": "asura-swordmaster-son-143",
-      "object": {
-        "path": "objects/442dad48a621c2de508aa295ce7f665cccbdd77c1be2b6b621148e0c4868449d.webp",
-        "sha256": "442dad48a621c2de508aa295ce7f665cccbdd77c1be2b6b621148e0c4868449d",
-        "bytes": 873714,
-        "mimeType": "image/webp",
-        "width": 800,
-        "height": 13570
-      },
-      "provenance": {
-        "provider": "asura",
-        "chapterUrl": "https://asurascans.com/comics/swordmasters-youngest-son-059befe1/chapter/143",
-        "pageIndex": 12,
-        "capturedAtUtc": "2026-07-28T17:30:00Z",
-        "captureNote": "Local dense internal-monologue page with linked bubbles and story terminology."
-      },
-      "qualityFocus": [
-        "cross-image-dialogue-context",
-        "dense-dialogue",
-        "linked-bubbles",
-        "proper-names",
-        "tall-page"
-      ],
-      "expectations": {
-        "minimumRegionCount": 8,
-        "requiredSourceFragments": ["ICE PALACE", "LUNA", "LIGHTNING", "HYSTER"],
-        "preserveNamesWhenDetected": ["TALARIS", "LUNA", "HYSTER"]
-      }
-    },
-    {
-      "id": "webtoon-rooftops-1-page-4",
-      "chapterId": "webtoon-rooftops-1",
-      "object": {
-        "path": "objects/67d16037890d7d4639d2e39e665bf4ead5cdde4d8244d5631960688c86a046ca.png",
-        "sha256": "67d16037890d7d4639d2e39e665bf4ead5cdde4d8244d5631960688c86a046ca",
-        "bytes": 214381,
-        "mimeType": "image/png",
-        "width": 800,
-        "height": 1280
-      },
-      "provenance": {
-        "provider": "webtoon",
-        "chapterUrl": "https://www.webtoons.com/en/comedy/rooftops-and-roommates/episode-1/viewer?episode_no=1&title_no=2576",
-        "pageIndex": 4,
-        "capturedAtUtc": "2026-07-27T00:00:00Z"
-      },
-      "qualityFocus": ["early-chapter", "fixed-height-reader-slice", "png-source"]
-    },
-    {
-      "id": "webtoon-rooftops-1-page-8",
-      "chapterId": "webtoon-rooftops-1",
-      "object": {
-        "path": "objects/22a1d9a40cd2bf89590ebf144afce56242e8ec33bdb807fc956d527f93075c42.png",
-        "sha256": "22a1d9a40cd2bf89590ebf144afce56242e8ec33bdb807fc956d527f93075c42",
-        "bytes": 158670,
-        "mimeType": "image/png",
-        "width": 800,
-        "height": 1280
-      },
-      "provenance": {
-        "provider": "webtoon",
-        "chapterUrl": "https://www.webtoons.com/en/comedy/rooftops-and-roommates/episode-1/viewer?episode_no=1&title_no=2576",
-        "pageIndex": 8,
-        "capturedAtUtc": "2026-07-27T00:00:00Z"
-      },
-      "qualityFocus": ["fixed-height-reader-slice", "mid-chapter", "png-source"]
-    },
-    {
-      "id": "webtoon-rooftops-1-page-12",
-      "chapterId": "webtoon-rooftops-1",
-      "object": {
-        "path": "objects/e80a973d2b095082d5b71f794d439b04f0be1990e14210b03e2d7c3cef5e4061.png",
-        "sha256": "e80a973d2b095082d5b71f794d439b04f0be1990e14210b03e2d7c3cef5e4061",
-        "bytes": 229085,
-        "mimeType": "image/png",
-        "width": 800,
-        "height": 1280
-      },
-      "provenance": {
-        "provider": "webtoon",
-        "chapterUrl": "https://www.webtoons.com/en/comedy/rooftops-and-roommates/episode-1/viewer?episode_no=1&title_no=2576",
-        "pageIndex": 12,
-        "capturedAtUtc": "2026-07-27T00:00:00Z"
-      },
-      "qualityFocus": ["fixed-height-reader-slice", "mid-chapter", "png-source"]
-    },
-    {
-      "id": "webtoon-rooftops-1-page-20",
-      "chapterId": "webtoon-rooftops-1",
-      "object": {
-        "path": "objects/95bb904a4b9c10908d5f2de250d1dbd87ab91cfe5b47db8c2974504566b7144d.png",
-        "sha256": "95bb904a4b9c10908d5f2de250d1dbd87ab91cfe5b47db8c2974504566b7144d",
-        "bytes": 162133,
-        "mimeType": "image/png",
-        "width": 800,
-        "height": 1280
-      },
-      "provenance": {
-        "provider": "webtoon",
-        "chapterUrl": "https://www.webtoons.com/en/comedy/rooftops-and-roommates/episode-1/viewer?episode_no=1&title_no=2576",
-        "pageIndex": 20,
-        "capturedAtUtc": "2026-07-27T00:00:00Z"
-      },
-      "qualityFocus": ["dialogue", "fixed-height-reader-slice", "png-source", "proper-names"],
-      "expectations": {
-        "minimumRegionCount": 1,
-        "requiredSourceFragments": ["JEB"],
-        "preserveNamesWhenDetected": ["JEB"]
-      }
-    },
-    {
-      "id": "webtoon-rooftops-1-page-27",
-      "chapterId": "webtoon-rooftops-1",
-      "object": {
-        "path": "objects/384bee9db7642de67618791de360d6446de3aad60b4d1cb7b413bcc2bbf3cdaa.png",
-        "sha256": "384bee9db7642de67618791de360d6446de3aad60b4d1cb7b413bcc2bbf3cdaa",
-        "bytes": 200658,
-        "mimeType": "image/png",
-        "width": 800,
-        "height": 1280
-      },
-      "provenance": {
-        "provider": "webtoon",
-        "chapterUrl": "https://www.webtoons.com/en/comedy/rooftops-and-roommates/episode-1/viewer?episode_no=1&title_no=2576",
-        "pageIndex": 27,
-        "capturedAtUtc": "2026-07-27T00:00:00Z"
-      },
-      "qualityFocus": ["fixed-height-reader-slice", "late-chapter", "png-source"]
-    }
+  "chapters": [
+    {"id":"webtoon-batman-wayne-family-adventures-1","provenance":{"provider":"webtoon","chapterUrl":"https://www.webtoons.com/en/slice-of-life/batman-wayne-family-adventures/ep-1-moving-in/viewer?episode_no=1&title_no=3180","capturedAtUtc":""},"reader":{"kind":"continuous-image"},"pageCount":0,"pages":[],"coverage":{"annotatedPageCount":0,"storyTargetCount":0,"exclusionCount":0}},
+    {"id":"webtoon-lore-olympus-1","provenance":{"provider":"webtoon","chapterUrl":"https://www.webtoons.com/en/romance/lore-olympus/episode-1/viewer?episode_no=1&title_no=1320","capturedAtUtc":""},"reader":{"kind":"continuous-image"},"pageCount":0,"pages":[],"coverage":{"annotatedPageCount":0,"storyTargetCount":0,"exclusionCount":0}},
+    {"id":"webtoon-cursed-princess-club-1","provenance":{"provider":"webtoon","chapterUrl":"https://www.webtoons.com/en/comedy/cursed-princess-club/ep-1-the-king-returns/viewer?episode_no=1&title_no=1537","capturedAtUtc":""},"reader":{"kind":"continuous-image"},"pageCount":0,"pages":[],"coverage":{"annotatedPageCount":0,"storyTargetCount":0,"exclusionCount":0}},
+    {"id":"webtoon-school-bus-graveyard-1","provenance":{"provider":"webtoon","chapterUrl":"https://www.webtoons.com/en/thriller/school-bus-graveyard/episode-1/viewer?episode_no=1&title_no=2705","capturedAtUtc":""},"reader":{"kind":"continuous-image"},"pageCount":0,"pages":[],"coverage":{"annotatedPageCount":0,"storyTargetCount":0,"exclusionCount":0}},
+    {"id":"webtoon-omniscient-reader-2","provenance":{"provider":"webtoon","chapterUrl":"https://www.webtoons.com/en/action/omniscient-reader/episode-1/viewer?episode_no=2&title_no=2154","capturedAtUtc":""},"reader":{"kind":"continuous-image"},"pageCount":0,"pages":[],"coverage":{"annotatedPageCount":0,"storyTargetCount":0,"exclusionCount":0}},
+    {"id":"webtoon-how-to-be-a-mind-reaver-363","provenance":{"provider":"webtoon","chapterUrl":"https://www.webtoons.com/en/canvas/how-to-be-a-mind-reaver/the-protagonist/viewer?episode_no=363&title_no=301213","capturedAtUtc":""},"reader":{"kind":"continuous-image"},"pageCount":0,"pages":[],"coverage":{"annotatedPageCount":0,"storyTargetCount":0,"exclusionCount":0}},
+    {"id":"tapas-free2play-1","provenance":{"provider":"tapas","chapterUrl":"https://tapas.io/series/free2play","capturedAtUtc":""},"reader":{"kind":"paged-image"},"pageCount":0,"pages":[],"coverage":{"annotatedPageCount":0,"storyTargetCount":0,"exclusionCount":0}},
+    {"id":"manga-plus-spy-family-1001834","provenance":{"provider":"manga-plus","chapterUrl":"https://mangaplus.shueisha.co.jp/viewer/1001834","capturedAtUtc":""},"reader":{"kind":"iframe-image"},"pageCount":0,"pages":[],"coverage":{"annotatedPageCount":0,"storyTargetCount":0,"exclusionCount":0}},
+    {"id":"globalcomix-bloodshot-1","provenance":{"provider":"globalcomix","chapterUrl":"https://globalcomix.com/read/82c4aaa9-f82c-4f77-b43b-d17e42f00c41/1","capturedAtUtc":""},"reader":{"kind":"canvas"},"pageCount":0,"pages":[],"coverage":{"annotatedPageCount":0,"storyTargetCount":0,"exclusionCount":0}},
+    {"id":"asura-return-of-the-unrivaled-spear-knight-208","provenance":{"provider":"asura","chapterUrl":"https://asurascans.com/comics/return-of-the-unrivaled-spear-knight-059befe1/chapter/208","capturedAtUtc":""},"reader":{"kind":"webgl"},"pageCount":0,"pages":[],"coverage":{"annotatedPageCount":0,"storyTargetCount":0,"exclusionCount":0}},
+    {"id":"asura-only-i-have-an-ex-grade-summon-33","provenance":{"provider":"asura","chapterUrl":"https://asurascans.com/comics/only-i-have-an-ex-grade-summon-059befe1/chapter/33","capturedAtUtc":""},"reader":{"kind":"continuous-image"},"pageCount":0,"pages":[],"coverage":{"annotatedPageCount":0,"storyTargetCount":0,"exclusionCount":0}},
+    {"id":"asura-absolute-regression-110","provenance":{"provider":"asura","chapterUrl":"https://asurascans.com/comics/absolute-regression-059befe1/chapter/110","capturedAtUtc":""},"reader":{"kind":"paged-image"},"pageCount":0,"pages":[],"coverage":{"annotatedPageCount":0,"storyTargetCount":0,"exclusionCount":0}},
+    {"id":"asura-the-demon-god-40","provenance":{"provider":"asura","chapterUrl":"https://asurascans.com/comics/the-demon-god-059befe1/chapter/40","capturedAtUtc":""},"reader":{"kind":"iframe-image"},"pageCount":0,"pages":[],"coverage":{"annotatedPageCount":0,"storyTargetCount":0,"exclusionCount":0}}
   ]
 }

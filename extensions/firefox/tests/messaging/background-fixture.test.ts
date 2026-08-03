@@ -6,7 +6,7 @@ import {
   PageArtifactStore,
 } from '../../src/messaging/active-jobs'
 import { BackgroundRouter } from '../../src/messaging/background'
-import { FixtureService } from '../../src/messaging/fixture-service'
+import { FixtureService } from '../support/fixture-service'
 
 const visibleRects = [{ x: 0, y: 0.1, width: 1, height: 0.4 }]
 
@@ -23,6 +23,8 @@ function submitMessage(pageSessionId = 'fixture-page-session') {
     type: 'job:submit' as const,
     pageSessionId,
     pageIndex: 0,
+    chapterPageOrder: [0],
+    surfaceKind: 'image' as const,
     imageUrl: 'https://reader.test/panel.svg',
     pageUrl: 'https://reader.test/chapter',
     naturalWidth: 1200,

@@ -43,10 +43,8 @@ button:hover { background: rgb(255 255 255 / 9%); }
 
 const BADGE_CSS = `
 :host {
-  left: 0;
   pointer-events: none;
-  position: fixed;
-  top: 0;
+  position: absolute;
   z-index: 2147483646;
 }
 .badge {
@@ -77,8 +75,130 @@ button {
 export type HudProgress = {
   current: number
   total: number
+  /** Stable identity for the image that produced the update. */
+  key?: string
   status?: ProgressJobUpdate
   message?: string
+}
+
+export type ChapterProgressPhase =
+  | 'starting'
+  | 'reading'
+  | 'preparing'
+  | 'translating'
+  | 'finishing'
+
+export type ChapterProgressSnapshot = {
+  phase: ChapterProgressPhase
+  message: string
+  active: number
+  overallProgress?: number
+}
+
+const CHAPTER_PHASES: readonly ChapterProgressPhase[] = [
+  'starting',
+  'reading',
+  'preparing',
+  'translating',
+  'finishing',
+]
+
+const CHAPTER_PHASE_MESSAGES: Record<ChapterProgressPhase, string> = {
+  starting: 'Starting translation',
+  reading: 'Reading the page',
+  preparing: 'Preparing the artwork',
+  translating: 'Writing the Chinese text',
+  finishing: 'Finishing the chapter',
+}
+
+const CHAPTER_STAGE_PHASE: Record<ProgressJobUpdate['stage'], ChapterProgressPhase> = {
+  queued: 'starting',
+  decoding: 'reading',
+  detecting: 'reading',
+  ocr: 'reading',
+  inpainting: 'preparing',
+  translating: 'translating',
+  'hsk-validating': 'translating',
+  styling: 'finishing',
+  packaging: 'finishing',
+}
+
+function phaseIndex(phase: ChapterProgressPhase): number {
+  return CHAPTER_PHASES.indexOf(phase)
+}
+
+/**
+ * Reduces concurrent image progress into one monotonic chapter phase.
+ *
+ * A chapter can have several images in different engine stages at once. A
+ * last-write-wins status therefore oscillates between "reading" and
+ * "writing". The reducer advances each image independently and advances the
+ * chapter only when a later phase has actually been observed. Completed
+ * images remain terminal and cannot re-introduce an earlier phase.
+ */
+export class ChapterProgressReducer {
+  private readonly jobs = new Map<
+    string,
+    { phase: ChapterProgressPhase; overallProgress?: number }
+  >()
+  private currentPhase: ChapterProgressPhase = 'starting'
+  private currentProgress = 0
+
+  update(
+    key: string,
+    status: Pick<ProgressJobUpdate, 'stage' | 'overallProgress'>,
+  ): ChapterProgressSnapshot {
+    const next = CHAPTER_STAGE_PHASE[status.stage]
+    const previous = this.jobs.get(key)
+    const phase =
+      !previous || phaseIndex(next) >= phaseIndex(previous.phase)
+        ? next
+        : previous.phase
+    const overallProgress =
+      status.overallProgress === undefined
+        ? previous?.overallProgress
+        : Math.max(0, Math.min(1, status.overallProgress))
+    this.jobs.set(key, {
+      phase,
+      ...(overallProgress === undefined ? {} : { overallProgress }),
+    })
+    if (overallProgress !== undefined) {
+      // A late update from a newly started image must not make the chapter
+      // progress bar jump backwards.
+      this.currentProgress = Math.max(this.currentProgress, overallProgress)
+    }
+    this.advance()
+    return this.snapshot()
+  }
+
+  complete(key: string): ChapterProgressSnapshot {
+    this.jobs.delete(key)
+    this.advance()
+    return this.snapshot()
+  }
+
+  reset(): void {
+    this.jobs.clear()
+    this.currentPhase = 'starting'
+    this.currentProgress = 0
+  }
+
+  snapshot(): ChapterProgressSnapshot {
+    return {
+      phase: this.currentPhase,
+      message: CHAPTER_PHASE_MESSAGES[this.currentPhase],
+      active: this.jobs.size,
+      ...(this.currentProgress > 0 ? { overallProgress: this.currentProgress } : {}),
+    }
+  }
+
+  private advance(): void {
+    const observed = [...this.jobs.values()].reduce(
+      (highest, job) => Math.max(highest, phaseIndex(job.phase)),
+      phaseIndex(this.currentPhase),
+    )
+    this.currentPhase = CHAPTER_PHASES[observed] ?? this.currentPhase
+  }
 }
 
 export function friendlyProgressMessage(
@@ -110,6 +230,7 @@ export class PageHud {
   private readonly detail: HTMLElement
   private readonly progress: HTMLProgressElement
   private readonly cancelButton: HTMLButtonElement
+  private readonly chapterProgress = new ChapterProgressReducer()
   private state: PageState = {
     state: 'idle',
     current: 0,
@@ -134,7 +255,7 @@ export class PageHud {
     this.title.textContent = 'Hskify'
     this.detail = document.createElement('span')
     this.detail.className = 'detail'
-    this.detail.textContent = 'Preparing page…'
+    this.detail.textContent = 'Preparing the chapter…'
     this.progress = document.createElement('progress')
     this.progress.max = 1
     this.progress.removeAttribute('value')
@@ -150,19 +271,26 @@ export class PageHud {
   update(input: HudProgress): void {
     const status = input.status
     const state = 'running'
-    // The queue has one active chapter image. Show a stable, user-facing phase
-    // rather than raw engine messages, which can change several times inside
-    // one model pass.
-    const message = input.message ?? (status ? friendlyProgressMessage(status) : 'Starting')
+    const progress = status
+      ? this.chapterProgress.update(input.key ?? 'chapter', status)
+      : this.chapterProgress.snapshot()
+    // The queue can work on several images concurrently. Show one chapter
+    // phase instead of letting whichever image reported last replace it.
+    const message = status ? progress.message : input.message ?? progress.message
     this.state = {
       state,
       current: input.current,
       total: input.total,
-      ...(status ? { stage: status.stage } : {}),
+      stage: progress.phase,
       message,
     }
-    this.title.textContent = `Translating image ${Math.min(input.current + 1, input.total)} of ${input.total}`
-    const measurable = status?.overallProgress
+    this.title.textContent = 'Translating chapter'
+    const completionProgress =
+      input.total > 0 ? Math.max(0, Math.min(1, input.current / input.total)) : 0
+    const measurable =
+      progress.overallProgress !== undefined || input.current > 0
+        ? Math.max(progress.overallProgress ?? 0, completionProgress)
+        : undefined
     if (measurable === undefined) this.progress.removeAttribute('value')
     else this.progress.value = measurable
     this.detail.textContent = message
@@ -180,6 +308,14 @@ export class PageHud {
     this.detail.textContent = this.state.message
     this.progress.value = 1
     this.cancelButton.hidden = true
+  }
+
+  completeImage(key: string): void {
+    this.chapterProgress.complete(key)
+  }
+
+  resetProgress(): void {
+    this.chapterProgress.reset()
   }
 
   fail(message: string, current: number, total: number): void {
@@ -216,60 +352,81 @@ export class ImageStatusBadge {
   private readonly host: HTMLElement
   private readonly message: HTMLElement
   private readonly retryButton: HTMLButtonElement
+  private anchor: HTMLElement | undefined
 
   constructor(
-    private readonly image: HTMLImageElement,
+    private readonly image: HTMLElement,
     onRetry: () => void,
-    private readonly root: HTMLElement = document.documentElement,
+    root?: HTMLElement,
+    anchor?: HTMLElement,
   ) {
-    this.host = document.createElement('span')
+    const documentRef = image.ownerDocument
+    this.root = root ?? documentRef.documentElement
+    this.host = documentRef.createElement('span')
     this.host.dataset.hmtOwned = 'true'
+    this.host.style.position = 'absolute'
     const shadow = this.host.attachShadow({ mode: 'open' })
-    const style = document.createElement('style')
+    const style = documentRef.createElement('style')
     style.textContent = BADGE_CSS
-    const badge = document.createElement('span')
+    const badge = documentRef.createElement('span')
     badge.className = 'badge'
-    this.message = document.createElement('span')
+    this.message = documentRef.createElement('span')
     this.message.textContent = 'Queued'
-    this.retryButton = document.createElement('button')
+    this.retryButton = documentRef.createElement('button')
     this.retryButton.type = 'button'
     this.retryButton.textContent = 'Retry'
     this.retryButton.hidden = true
     this.retryButton.addEventListener('click', onRetry)
     badge.append(this.message, this.retryButton)
     shadow.append(style, badge)
-    root.append(this.host)
-    addEventListener('scroll', this.position, true)
-    addEventListener('resize', this.position)
-    this.position()
+    this.attach(anchor)
   }
+
+  private readonly root: HTMLElement
 
   update(status: ProgressJobUpdate | string): void {
     this.message.textContent =
       typeof status === 'string' ? status : friendlyProgressMessage(status)
     this.retryButton.hidden = true
-    this.position()
+    this.host.style.pointerEvents = 'none'
   }
 
   failure(message: string): void {
     this.message.textContent = message
     this.retryButton.hidden = false
     this.host.style.pointerEvents = 'auto'
-    this.position()
+  }
+
+  /**
+   * Attach the notice to the document-anchored renderer wrapper. Once it is
+   * inside that wrapper, normal scrolling is handled entirely by the browser
+   * compositor and no scroll-time coordinate work is necessary.
+   */
+  attach(anchor?: HTMLElement): void {
+    this.anchor = anchor
+    ;(anchor ?? this.root).append(this.host)
+    if (anchor) {
+      this.host.style.left = '8px'
+      this.host.style.top = '8px'
+      this.host.style.transform = 'none'
+      return
+    }
+    // Submission can fail before a renderer wrapper exists. Keep the retry
+    // notice visible at the image's document position without following every
+    // scroll frame. A subsequent retry attaches it to the real wrapper.
+    const view = this.image.ownerDocument.defaultView
+    const rect = this.image.getBoundingClientRect()
+    this.host.style.left = `${Math.max(4, rect.left + (view?.scrollX ?? 0) + 8)}px`
+    this.host.style.top = `${Math.max(4, rect.top + (view?.scrollY ?? 0) + 8)}px`
+    this.host.style.transform = 'none'
+  }
+
+  detach(): void {
+    if (!this.host.isConnected) return
+    if (this.anchor) this.attach(undefined)
   }
 
   destroy(): void {
-    removeEventListener('scroll', this.position, true)
-    removeEventListener('resize', this.position)
     this.host.remove()
-  }
-
-  private readonly position = (): void => {
-    if (!this.image.isConnected) return
-    const rect = this.image.getBoundingClientRect()
-    this.host.style.transform = `translate(${Math.max(4, rect.left + 8)}px, ${Math.max(
-      4,
-      rect.top + 8,
-    )}px)`
   }
 }

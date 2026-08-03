@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { DiscoveredImage } from '../../src/discovery/images'
-import { createFixtureRegions } from '../../src/messaging/fixture-service'
+import { createFixtureRegions } from '../support/fixture-service'
 import { SelectableRenderer, type RenderedImage } from '../../src/rendering/renderer'
 import type { TextSpeaker } from '../../src/selection/speech'
 import { loadedImage, pngHeader } from '../helpers/images'
@@ -21,9 +21,13 @@ class TestResizeObserver {
 
 function candidate(image: HTMLImageElement): DiscoveredImage {
   return {
+    id: `image:0:${image.currentSrc}`,
+    kind: 'image',
     element: image,
     owner: image,
     sourceUrl: image.currentSrc,
+    sourceWidth: image.naturalWidth,
+    sourceHeight: image.naturalHeight,
     domIndex: 0,
     visible: true,
   }
@@ -171,6 +175,31 @@ describe('progressive selectable image renderer', () => {
     expect(shadow.querySelector('.hmt-region')?.textContent).toBe('我们现在要走！')
     image.dispatchEvent(new Event('custom-live-listener'))
     expect(liveListener).toHaveBeenCalledTimes(1)
+  })
+
+  it('mirrors a transformed page surface with one affine compositor transform', () => {
+    const image = loadedImage()
+    image.style.transform = 'matrix(0, 1, -1, 0, 900, 0)'
+    Object.defineProperties(image, {
+      offsetWidth: { configurable: true, value: 600 },
+      offsetHeight: { configurable: true, value: 900 },
+    })
+    ;(image as HTMLImageElement & { getBoxQuads: () => unknown[] }).getBoxQuads = () => [
+      { p1: { x: 40, y: 30 }, p2: { x: 40, y: 630 }, p3: { x: -860, y: 630 }, p4: { x: -860, y: 30 } },
+    ]
+    document.body.append(image)
+
+    const rendered = renderer().begin(candidate(image), {
+      jobId: 'fixture-job',
+      sourceWidth: 1200,
+      sourceHeight: 1800,
+    })
+
+    expect(rendered.wrapper.style.transformOrigin).toBe('0 0')
+    expect(rendered.wrapper.style.transform).toContain('matrix(0, 1, -1, 0')
+    expect(rendered.wrapper.style.width).toBe('600px')
+    expect(rendered.wrapper.style.height).toBe('900px')
+    rendered.destroy()
   })
 
   it('renders retained Latin names at the measured text size without changing selectable text', async () => {
@@ -373,7 +402,7 @@ describe('progressive selectable image renderer', () => {
     expect(imageClicked).toHaveBeenCalledTimes(1)
   })
 
-  it('uses measured binary search and leaves no scroll overflow', async () => {
+  it('preserves the source when measured fitting would require unreadable text', async () => {
     const image = loadedImage()
     document.body.append(image)
     const rendered = await renderAll(image)
@@ -392,8 +421,16 @@ describe('progressive selectable image renderer', () => {
       },
     })
     rendered.refit()
-    expect(region.scrollWidth).toBeLessThanOrEqual(region.clientWidth + 0.5)
-    expect(region.scrollHeight).toBeLessThanOrEqual(region.clientHeight + 0.5)
+    expect(region.isConnected).toBe(false)
+    expect(
+      shadowOf(rendered).querySelector(`[data-patch-id="${fixtureRegions()[0]!.patch.blobId}"]`),
+    ).toBeNull()
+    const preserved = shadowOf(rendered).querySelector<HTMLElement>(
+      `[data-region-id="${fixtureRegions()[0]!.id}"]`,
+    )
+    expect(preserved).not.toBeNull()
+    expect(preserved?.classList.contains('hmt-source-notice')).toBe(true)
+    expect(preserved?.dataset.translatedChinese).toBe('我们现在要走！')
   })
 
   it('never installs text for a corrupt patch and restores the exact original node', async () => {

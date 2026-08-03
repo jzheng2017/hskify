@@ -3,12 +3,18 @@
 //! The extension and daemon must carry the exact same build fingerprint.
 //! There is no protocol negotiation, migration adapter, or legacy result API.
 
+pub mod chapter_session;
 pub mod contracts;
 pub mod crypto;
 mod cuda_scheduler;
 pub mod daemon;
 mod decoded_cache;
 pub mod discovery;
+// Contract fixtures are compiled only for the crate's unit tests.  The
+// shipped daemon must never serve synthetic health, font, or translation
+// payloads when managed resources are unavailable; a missing setup is a real
+// setup failure, not a test backend.
+#[cfg(test)]
 pub mod fixtures;
 pub mod launcher;
 pub mod native_framing;
@@ -21,7 +27,7 @@ mod setup;
 pub use contracts::{
     BUILD_FINGERPRINT, BrowserJobCreated, BrowserSetupStatus, ContractError, CreateJobRequest,
     ErrorResponse, HealthResponse, JobUpdate, JobUpdatesResponse, LookupRequest, LookupResult,
-    NativeHandshakeRequest, NativeReadyResponse, NormalizedRect, ProgressiveRegion, Validate,
+    NativeHandshakeRequest, NativeReadyResponse, NormalizedRect, TranslatedRegion, Validate,
     ViewportUpdateRequest,
 };
 

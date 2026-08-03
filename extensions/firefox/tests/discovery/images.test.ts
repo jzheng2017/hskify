@@ -70,21 +70,28 @@ describe('conservative image discovery', () => {
     }
   })
 
-  it.each([
-    [
-      'tiny intrinsic dimensions',
-      loadedImage('https://reader.test/tiny.png', 64, 64),
-      'intrinsic-size',
-    ],
-    ['avatar semantics', loadedImage(), 'page-control'],
-    ['CSS rotation', loadedImage(), 'unsupported-transform'],
-  ])('rejects %s', (_label, image, expectedReason) => {
-    if (expectedReason === 'page-control') image.className = 'profile-avatar icon'
-    if (expectedReason === 'unsupported-transform') image.style.transform = 'rotate(4deg)'
-    document.body.append(image)
+  it('rejects tiny intrinsic dimensions while admitting transformed page surfaces', () => {
+    const tiny = loadedImage('https://reader.test/tiny.png', 64, 64)
+    document.body.append(tiny)
+    expect(evaluateImage(tiny, 0)).toEqual({
+      supported: false,
+      reason: 'intrinsic-size',
+    })
+
+    const rotated = loadedImage()
+    rotated.style.transform = 'rotate(4deg)'
+    document.body.append(rotated)
+    expect(evaluateImage(rotated, 1).supported).toBe(true)
+  })
+
+  it('rejects page controls', () => {
+    const button = document.createElement('button')
+    const image = loadedImage()
+    button.append(image)
+    document.body.append(button)
     expect(evaluateImage(image, 0)).toEqual({
       supported: false,
-      reason: expectedReason,
+      reason: 'page-control',
     })
   })
 
@@ -104,7 +111,7 @@ describe('conservative image discovery', () => {
     })
   })
 
-  it('selects exactly 20 long query-string webtoon pages among 154 site images', () => {
+  it('selects page-sized reader surfaces without semantic class wordlists', () => {
     const cover = loadedImage('https://reader.test/images/cover.png', 1200, 1800, {
       width: 320,
       height: 480,
@@ -133,25 +140,23 @@ describe('conservative image discovery', () => {
     }
 
     for (let index = 0; index < 133; index += 1) {
-      const avatar = loadedImage(`https://cdn.test/avatar.webp?user=${index}`, 900, 900, {
+      const avatar = loadedImage(`https://cdn.test/avatar.webp?user=${index}`, 96, 96, {
         width: 48,
         height: 48,
         right: 48,
         bottom: 48,
       })
-      avatar.className = 'comment-avatar'
       document.body.append(avatar)
     }
 
     const selected = discoverImages()
     expect(document.querySelectorAll('img')).toHaveLength(154)
-    expect(selected).toHaveLength(20)
-    expect(selected.every((candidate) => candidate.element.hasAttribute('data-page-index'))).toBe(
-      true,
-    )
-    expect(selected.every((candidate) => candidate.sourceUrl.includes('.webp?'))).toBe(true)
+    expect(selected).toHaveLength(21)
+    expect(selected.filter((candidate) => candidate.element.hasAttribute('data-page-index'))).toHaveLength(20)
+    expect(selected.filter((candidate) => candidate.sourceUrl.includes('.webp?'))).toHaveLength(20)
     expect(selected[0]?.visible).toBe(true)
-    expect(selected.slice(1).every((candidate) => !candidate.visible)).toBe(true)
+    expect(selected.slice(0, 2).every((candidate) => candidate.visible)).toBe(true)
+    expect(selected.slice(2).every((candidate) => !candidate.visible)).toBe(true)
 
     const responsive = selected[0]?.element
     if (!responsive) throw new Error('Synthetic responsive page missing.')
@@ -304,6 +309,9 @@ describe('conservative image discovery', () => {
     document.body.append(first, second)
     const discovery = new ImageDiscovery((event) => events.push(event), document, factories)
     discovery.start()
+    const idsBefore = new Map(
+      discovery.current().map((candidate) => [candidate.element, candidate.id]),
+    )
     events.splice(0)
 
     document.body.prepend(second)
@@ -324,6 +332,12 @@ describe('conservative image discovery', () => {
       { element: first, previousDomIndex: 0, domIndex: 1, sameSource: true },
     ])
     expect(discovery.current().map((candidate) => candidate.element)).toEqual([second, first])
+    expect(
+      updates.map((event) => [event.candidate.element, event.candidate.id]),
+    ).toEqual([
+      [second, idsBefore.get(second)],
+      [first, idsBefore.get(first)],
+    ])
     discovery.stop()
   })
 

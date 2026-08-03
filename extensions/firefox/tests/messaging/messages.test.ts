@@ -11,6 +11,8 @@ describe('strict extension runtime messages', () => {
       type: 'job:submit',
       pageSessionId: 'page-session',
       pageIndex: 3,
+      chapterPageOrder: [3],
+      surfaceKind: 'image',
       imageUrl: 'https://cdn.test/chapter.webp?page=3',
       pageUrl: 'https://reader.test/chapter/1',
       naturalWidth: 900,
@@ -21,7 +23,6 @@ describe('strict extension runtime messages', () => {
       learningMode: 'natural',
       nameTranslation: 'keep-original',
       visibleRects: [{ x: 0, y: 0.25, width: 1, height: 0.5 }],
-      properNameGlossary: [{ sourceEnglish: 'Cheon Yeo Woon', chinese: '天汝云' }],
     }
     expect(parseBackgroundRequest(valid)).toEqual(valid)
     expect(() =>
@@ -119,12 +120,13 @@ describe('strict extension runtime messages', () => {
         hskLevel: 5,
         learningMode: 'natural',
         nameTranslation: 'keep-original',
-        properNameGlossary: [
-          { sourceEnglish: 'Cheon Yeo Woon', chinese: '天汝云' },
-        ],
       }),
-    ).toMatchObject({
-      properNameGlossary: [{ sourceEnglish: 'Cheon Yeo Woon', chinese: '天汝云' }],
+    ).toEqual({
+      type: 'content:start',
+      scope: 'all',
+      hskLevel: 5,
+      learningMode: 'natural',
+      nameTranslation: 'keep-original',
     })
     expect(() =>
       parseContentRequest({

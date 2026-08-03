@@ -2,7 +2,9 @@ import { describe, expect, it, vi } from 'vitest'
 
 import {
   ExplanationController,
+  hoverResultRange,
   type HoverHitTester,
+  textRange,
 } from '../../src/selection/popover'
 
 function rect(
@@ -82,6 +84,25 @@ function fixture(hitTest?: HoverHitTester) {
 }
 
 describe('selection popover', () => {
+  it('keeps phrase lookup anchored at the start and suffix lookup inside a phrase', () => {
+    const item = fixture()
+    const whole = hoverResultRange(item.region, 0, '研究生')
+    expect(whole?.cloneContents().textContent).toBe('研究生')
+    const suffix = hoverResultRange(item.region, 2, '生')
+    expect(suffix?.cloneContents().textContent).toBe('生')
+    item.controller.destroy()
+    item.host.remove()
+  })
+
+  it('falls back to the hovered character for a stale dictionary span', () => {
+    const item = fixture()
+    const fallback = hoverResultRange(item.region, 2, '研究生')
+    expect(fallback?.cloneContents().textContent).toBe('生')
+    expect(textRange(item.region, 2)?.cloneContents().textContent).toBe('生')
+    item.controller.destroy()
+    item.host.remove()
+  })
+
   it('resolves hover explanations from the exact character position', async () => {
     let offset = 0
     const hoverRange = document.createRange()

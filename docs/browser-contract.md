@@ -12,6 +12,7 @@ is no `/v1` or `/api` prefix and no separate result resource.
 | `POST` | `/setup/models` | Start or report managed resource setup |
 | `POST` | `/jobs` | Validate multipart image + JSON metadata and create a job |
 | `DELETE` | `/jobs/{job_id}` | Cancel the job |
+| `DELETE` | `/chapters/{page_session_id}` | Release chapter dialogue/entity state after seal or cancellation |
 | `PUT` | `/jobs/{job_id}/viewport` | Replace visible normalized rectangles and active state |
 | `GET` | `/jobs/{job_id}/updates` | Replay or long-poll flat updates after a sequence |
 | `POST` | `/lookup` | Local pinyin/dictionary lookup, optionally bound to a job region |
@@ -45,16 +46,22 @@ fields are rejected by the contracts.
 - `image`: PNG, JPEG, WebP, or GIF bytes whose multipart type, declared type,
   sniffed type, SHA-256, and decoded dimensions agree;
 - `request`: `application/json` metadata containing the exact build
-  fingerprint, source identity, dimensions, page identity, HSK 2.0 level 1–6,
-  learning mode (`natural` or `strict`), name preference (`keep-original` or
-  `chinese`), reading direction, visible rectangles, up to six preceding
-  utterances, and an optional bounded proper-name glossary.
+  fingerprint, source identity, dimensions, immutable chapter page order,
+  page surface kind, HSK 2.0 level 1–6, learning mode (`natural` or `strict`),
+  name preference (`keep-original` or `chinese`), reading direction, and
+  visible rectangles.
+
+The browser never supplies dialogue context or a name glossary. The
+`chapterStart`, `chapterPage`, `chapterViewport`, `chapterSeal`, and
+`chapterCancel` messages establish the chapter session; the daemon owns
+canonical ordering, accepted context, continuation groups, and typed entity
+memory.
 
 The only supported language pair is English to Simplified Chinese. Sound-effect
 translation must be false. A successful request returns HTTP 202 with only the
 build fingerprint and `jobId`.
 
-## Flat progressive updates
+## Flat chapter updates
 
 `GET /jobs/{job_id}/updates?after=N&waitMs=M` returns:
 
@@ -91,6 +98,7 @@ The update union is flat and tagged by `type`:
 | `progress` | Current stage plus optional stage/overall fraction and count |
 | `regionReady` | Final renderable region and its stored patch descriptor |
 | `artworkPreserved` | Readable decorative story lettering intentionally left in the source artwork |
+| `unreadable` | Terminal source-preserving region whose OCR or visual evidence did not pass |
 | `complete` | Successful terminal event |
 | `failed` | Terminal error code, message, and retryability |
 | `cancelled` | Cancelled terminal event |
@@ -98,7 +106,8 @@ The update union is flat and tagged by `type`:
 Stages are `queued`, `decoding`, `detecting`, `ocr`, `inpainting`,
 `translating`, `hsk-validating`, `styling`, and `packaging`. Clients must not
 infer a page-result phase from them. Accurate Chinese is published only after
-deterministic validation and the optional single terminal repair. Pending
+deterministic validation and one bounded terminal repair batch; each rejected
+item gets at most one new-evidence attempt. Pending
 drafts are internal pipeline state and never cross the browser contract, so
 visible text is never revised after installation.
 
@@ -129,7 +138,7 @@ selectable text node. If patch loading fails, that region is not installed as
 text over uncleaned English.
 
 The original page image is never replaced with a cleaned-page response. The
-reader result is the original image plus a progressive patch layer and a text
+reader result is the original image plus a verified patch layer and a text
 layer.
 
 ## Lookup, comparison, and speech

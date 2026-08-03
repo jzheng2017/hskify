@@ -11,9 +11,9 @@ It contains only the required production resource identities.
 | CC-CEDICT-compatible artifact | generated normalized artifact | CC BY-SA 4.0 source obligations and combined-distribution review pending | not committed as production data |
 | Noto Sans SC / Noto Serif SC variable fonts | installed files verified by package manifest | SIL Open Font License 1.1; package must preserve licence text and exact hashes | local packaged resource when supplied |
 | Comic text and bubble detector | `ogkalu/comic-text-and-bubble-detector@16e8a622f91fabc6b5b65c96d32d1183f8843546` config, preprocessor, and weights plus manifest SHA-256 values | upstream model terms and exact identities must be preserved | mandatory local resource |
-| English PP-OCRv5 mobile recognizer | `PaddlePaddle/en_PP-OCRv5_mobile_rec_onnx@3fafbc3b5dcf93dd72add9f48368be8a3a2cd33b` plus manifest SHA-256 | upstream Paddle model terms and exact identity must be preserved | mandatory local resource |
-| *30 Years Since the Prologue* chapter 5 source pages | 36 remote source identities and local ignored bytes | benchmark-only evaluation; redistribution permission is not asserted | never committed |
-| Chapter 5 annotations | project-created factual evaluation data | audit records source-page identity and review provenance | 36 pages, 218 reviewed regions, and complete translation/pinyin/token gold committed |
+| PP-OCRv6-small detector and recognizer | exact official model revisions and manifest SHA-256 values | upstream Paddle model terms and exact identities must be preserved | mandatory local resource |
+| Real-reader v2 chapter source pages | content-addressed local objects from the reviewed core/stress set | source provenance and redistribution review required before release | capture-required; never fetched by the release runner |
+| Real-reader v2 annotations | project-created factual evaluation data | exhaustive geometry, entity, style, cleanup, HSK, and exclusion review required | capture-required |
 
 The repository's small HSK and dictionary test seeds are control-flow fixtures,
 not production language data. They must never be packaged or described as a

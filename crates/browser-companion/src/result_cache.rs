@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Cursor, Read, Write};
 use std::path::{Path, PathBuf};
@@ -14,14 +15,14 @@ use hsk_control::{
 };
 use image::{ImageFormat, ImageReader, Limits};
 use koharu_app::llm::{
-    HSK_SEMANTIC_ANALYSIS_REVISION, HSK_TRANSLATION_MODEL_REVISION, HSK_TRANSLATION_PROMPT_HASH,
-    HSK_TRANSLATION_VALIDATOR_HASH,
+    HSK_TRANSLATION_MODEL_REVISION, HSK_TRANSLATION_PROMPT_HASH, HSK_TRANSLATION_VALIDATOR_HASH,
 };
 use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
 
 use crate::contracts::{
-    BUILD_FINGERPRINT, BrowserJobRequest, PreservedArtworkRegion, ProgressiveRegion, Validate,
+    BUILD_FINGERPRINT, BrowserJobRequest, PreservedArtworkRegion, TranslatedRegion,
+    UnreadableRegion, Validate,
 };
 use crate::crypto::sha256_hex;
 use crate::pipeline_adapter::RegionLookupContext;
@@ -32,14 +33,21 @@ use crate::setup::{
 pub(crate) const RESULT_CACHE_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const RESULT_CACHE_MAX_ENTRY_BYTES: u64 = 512 * 1024 * 1024;
 const RESULT_CACHE_MAX_DECODED_PATCH_BYTES: u64 = 256 * 1024 * 1024;
-const RESULT_CACHE_SCHEMA: &str = "hskify-progressive-result-2026-07-28-v6";
+// Chapter sessions changed the meaning of a cached result (ordering,
+// context, entity memory, OCR evidence, and cleanup verification are all
+// part of the result now).  Deliberately use a new identity instead of
+// attempting to migrate the old per-image cache.
+// A chapter-session cache is intentionally invalidated as one unit whenever
+// the structural pipeline changes. There is no reader for the previous
+// per-image/progressive schema.
+const RESULT_CACHE_SCHEMA: &str = "hskify-chapter-session-result-2026-08-02-v3";
 const RESULT_CACHE_PIPELINE_REVISION: &str =
-    "region-adjudication-and-multiscale-ocr-recovery-v28-2026-08-01";
+    "chapter-session-pipeline-v2-qwen-page-understanding-2026-08-02";
 const MODEL_RESOURCE_MANIFEST: &[u8] = include_bytes!("../../../data/model-packs/manifest.v1.json");
 
 #[derive(Debug, Clone)]
 pub(crate) struct CachedRegion {
-    pub region: ProgressiveRegion,
+    pub region: TranslatedRegion,
     pub lookup_context: RegionLookupContext,
     pub patch_png: Arc<[u8]>,
 }
@@ -48,6 +56,43 @@ pub(crate) struct CachedRegion {
 pub(crate) struct CachedJob {
     pub regions: Vec<CachedRegion>,
     pub preserved_artwork: Vec<PreservedArtworkRegion>,
+    pub unreadable_regions: Vec<UnreadableRegion>,
+}
+
+impl CachedJob {
+    fn validate(&self) -> Result<()> {
+        let mut region_ids = HashSet::new();
+        let mut patch_ids = HashSet::new();
+        for cached in &self.regions {
+            cached
+                .region
+                .validate()
+                .context("validate cached translated region")?;
+            cached
+                .lookup_context
+                .validate_against(&cached.region)
+                .context("validate cached lookup context")?;
+            if !region_ids.insert(cached.region.id.as_str()) {
+                bail!("cached job contains duplicate terminal region identity");
+            }
+            if !patch_ids.insert(cached.region.patch.blob_id.as_str()) {
+                bail!("cached job contains duplicate patch identity");
+            }
+        }
+        for region in &self.preserved_artwork {
+            region.validate_at("preservedArtwork")?;
+            if !region_ids.insert(region.id.as_str()) {
+                bail!("cached job contains duplicate terminal region identity");
+            }
+        }
+        for region in &self.unreadable_regions {
+            region.validate_at("unreadableRegions")?;
+            if !region_ids.insert(region.id.as_str()) {
+                bail!("cached job contains duplicate terminal region identity");
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -59,12 +104,13 @@ struct StoredJob {
     key: String,
     regions: Vec<StoredRegion>,
     preserved_artwork: Vec<PreservedArtworkRegion>,
+    unreadable_regions: Vec<UnreadableRegion>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct StoredRegion {
-    region: ProgressiveRegion,
+    region: TranslatedRegion,
     lookup_context: RegionLookupContext,
     patch_png_base64: String,
 }
@@ -177,7 +223,11 @@ impl ResultCache {
             stored_region
                 .region
                 .validate()
-                .context("validate cached progressive region")?;
+                .context("validate cached translated region")?;
+            stored_region
+                .lookup_context
+                .validate_against(&stored_region.region)
+                .context("validate cached lookup context")?;
             let decoded_upper_bound =
                 base64_decoded_upper_bound(stored_region.patch_png_base64.len())?;
             if decoded_upper_bound
@@ -211,15 +261,13 @@ impl ResultCache {
                 patch_png: Arc::from(patch_png),
             });
         }
-        for region in &stored.preserved_artwork {
-            region
-                .validate_at("preservedArtwork")
-                .context("validate cached preserved artwork region")?;
-        }
-        Ok(Some(CachedJob {
+        let cached = CachedJob {
             regions,
             preserved_artwork: stored.preserved_artwork,
-        }))
+            unreadable_regions: stored.unreadable_regions,
+        };
+        cached.validate()?;
+        Ok(Some(cached))
     }
 
     pub(crate) fn invalidate(&self, request: &BrowserJobRequest) -> Result<()> {
@@ -237,6 +285,7 @@ impl ResultCache {
     /// only after visible processing has finished; no tile/OCR/translation
     /// phase performs synchronous intermediate writes.
     pub(crate) fn store(&self, request: &BrowserJobRequest, job: &CachedJob) -> Result<()> {
+        job.validate().context("validate completed result cache")?;
         fs::create_dir_all(&self.root)
             .with_context(|| format!("create result cache {}", self.root.display()))?;
         let pipeline_fingerprint = pipeline_fingerprint()?;
@@ -250,7 +299,11 @@ impl ResultCache {
                 cached
                     .region
                     .validate()
-                    .context("validate progressive region before caching")?;
+                    .context("validate translated region before caching")?;
+                cached
+                    .lookup_context
+                    .validate_against(&cached.region)
+                    .context("validate lookup context before caching")?;
                 validate_png(&cached.patch_png)?;
                 decoded_patch_bytes = decoded_patch_bytes
                     .checked_add(
@@ -278,6 +331,7 @@ impl ResultCache {
             key: key.clone(),
             regions,
             preserved_artwork: job.preserved_artwork.clone(),
+            unreadable_regions: job.unreadable_regions.clone(),
         };
 
         let mut temporary = NamedTempFile::new_in(&self.root)
@@ -371,7 +425,6 @@ fn pipeline_fingerprint() -> Result<String> {
         RESULT_CACHE_PIPELINE_REVISION,
         model_resources,
         HSK_TRANSLATION_MODEL_REVISION,
-        HSK_SEMANTIC_ANALYSIS_REVISION,
         HSK_TRANSLATION_PROMPT_HASH,
         HSK_TRANSLATION_VALIDATOR_HASH,
         (HSK_RESOURCE_BYTES, HSK_RESOURCE_SHA256),
@@ -425,19 +478,19 @@ mod tests {
     use super::*;
     use crate::contracts::{
         BrowserTextLayout, BrowserTextStyle, FontCategory, HskLevel, HskRepairState,
-        NormalizedRect, PatchMimeType, Point, ProgressiveHskStatus, RegionPatch, TextAlignment,
+        NormalizedRect, PatchMimeType, Point, RegionPatch, TextAlignment, TranslatedHskStatus,
         WritingMode,
     };
     use hsk_control::{ProperName, ProperNameReason};
     use image::{DynamicImage, ImageFormat};
 
-    fn region(id: &str) -> ProgressiveRegion {
+    fn region(id: &str) -> TranslatedRegion {
         let polygon = vec![
             Point { x: 0.1, y: 0.1 },
             Point { x: 0.2, y: 0.1 },
             Point { x: 0.2, y: 0.2 },
         ];
-        ProgressiveRegion {
+        TranslatedRegion {
             id: id.to_owned(),
             text_polygon: polygon.clone(),
             bubble_polygon: Some(polygon),
@@ -457,6 +510,15 @@ mod tests {
             pinyin: "n\u{01d0} h\u{01ce}o".to_owned(),
             ocr_confidence: 0.99,
             reading_order: 0,
+            role: Some(crate::contracts::TranslatedRegionRole::Dialogue),
+            context_group: None,
+            confidence_evidence: Some(crate::contracts::RegionConfidenceEvidence {
+                ocr_consensus: 0.99,
+                geometry_coverage: 1.0,
+                context_consistency: 1.0,
+                cleanup_score: 1.0,
+            }),
+            entities: Vec::new(),
             style: BrowserTextStyle {
                 font_id: "hmt-sans".to_owned(),
                 category: FontCategory::Sans,
@@ -477,9 +539,13 @@ mod tests {
             layout: BrowserTextLayout {
                 suggested_lines: vec!["\u{4f60}\u{597d}".to_owned()],
                 font_size_to_image_width: 0.02,
-                safe_polygon: None,
+                safe_polygon: vec![
+                    Point { x: 0.1, y: 0.1 },
+                    Point { x: 0.2, y: 0.1 },
+                    Point { x: 0.2, y: 0.2 },
+                ],
             },
-            hsk: ProgressiveHskStatus {
+            hsk: TranslatedHskStatus {
                 requested_level: HskLevel::Two,
                 learning_mode: crate::contracts::LearningMode::Natural,
                 strictly_valid: true,
@@ -511,6 +577,25 @@ mod tests {
             source_english: "MYUNGWANG SWORD TECHNIQUE".to_owned(),
             ocr_confidence: 0.98,
             reading_order: 1,
+            translated_chinese: None,
+            pinyin: None,
+            teaching_terms: Vec::new(),
+        }
+    }
+
+    fn unreadable_region() -> UnreadableRegion {
+        UnreadableRegion {
+            id: "unreadable-a".to_owned(),
+            text_polygon: vec![
+                Point { x: 0.3, y: 0.3 },
+                Point { x: 0.4, y: 0.3 },
+                Point { x: 0.4, y: 0.4 },
+                Point { x: 0.3, y: 0.4 },
+            ],
+            source_english: "UNKNOWN TEXT".to_owned(),
+            ocr_confidence: 0.3,
+            reading_order: 2,
+            reason: "Source pixels were preserved.".to_owned(),
         }
     }
 
@@ -581,6 +666,7 @@ mod tests {
                 patch_png: png(),
             }],
             preserved_artwork: vec![preserved_artwork()],
+            unreadable_regions: vec![unreadable_region()],
         };
 
         cache.store(&request, &job)?;
@@ -592,6 +678,7 @@ mod tests {
         assert_eq!(loaded.regions[0].lookup_context, lookup_context());
         assert_eq!(loaded.regions[0].patch_png.as_ref(), png().as_ref());
         assert_eq!(loaded.preserved_artwork, vec![preserved_artwork()]);
+        assert_eq!(loaded.unreadable_regions, vec![unreadable_region()]);
         Ok(())
     }
 
@@ -607,6 +694,7 @@ mod tests {
                 patch_png: png(),
             }],
             preserved_artwork: Vec::new(),
+            unreadable_regions: Vec::new(),
         };
 
         assert!(cache.store(&request, &job).is_err());
@@ -627,6 +715,7 @@ mod tests {
                     patch_png: png(),
                 }],
                 preserved_artwork: Vec::new(),
+                unreadable_regions: Vec::new(),
             },
         )?;
         let entry_bytes = fs::metadata(cache.entry_path(&ResultCache::key(&request)?))?.len();
@@ -658,6 +747,7 @@ mod tests {
                     },
                 ],
                 preserved_artwork: Vec::new(),
+                unreadable_regions: Vec::new(),
             },
         )?;
         let bounded =
@@ -683,6 +773,7 @@ mod tests {
                     patch_png: Arc::from(corrupt),
                 }],
                 preserved_artwork: Vec::new(),
+                unreadable_regions: Vec::new(),
             },
         )?;
 

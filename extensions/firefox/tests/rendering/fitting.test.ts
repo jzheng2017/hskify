@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import type { BrowserRegion } from '../../src/contracts/browser'
-import { createFixtureRegions } from '../../src/messaging/fixture-service'
+import { createFixtureRegions } from '../support/fixture-service'
 import {
   PolygonTextFitter,
   RectangleTextFitter,
@@ -9,6 +9,7 @@ import {
   horizontalPolygonSpan,
   isLegalLineBreak,
   minimumFontSizeForImage,
+  minimumReadableFontSize,
   nearbyLineCandidates,
   sourceDensityScale,
 } from '../../src/rendering/fitting'
@@ -114,7 +115,9 @@ describe('rectangle and polygon-aware text fitting', () => {
 
       expect(horizontalPolygonSpan(polygon, 0.5)).toBeGreaterThan(0)
       expect(new RectangleTextFitter().fit(region, 100, 100).fontSize).toBeGreaterThan(36)
-      expect(new PolygonTextFitter().fit(region, 100, 100).fontSize).toBe(0)
+      const fit = new PolygonTextFitter().fit(region, 100, 100)
+      expect(fit.fontSize).toBeGreaterThanOrEqual(minimumReadableFontSize(region, 100))
+      expect(fit.degraded).toBe(true)
     }
   })
 
@@ -139,7 +142,7 @@ describe('rectangle and polygon-aware text fitting', () => {
     const region: BrowserRegion = {
       ...base,
       sourceEnglish: 'A'.repeat(100),
-      displayedChinese: 'æˆ‘ä»¬çŽ°åœ¨å¿…é¡»ç¦»å¼€è¿™é‡Œ',
+      displayedChinese: '我们现在必须离开这里',
       style: {
         ...base.style,
         colorBands: [
@@ -150,7 +153,7 @@ describe('rectangle and polygon-aware text fitting', () => {
       },
       layout: {
         ...base.layout,
-        suggestedLines: ['æˆ‘ä»¬çŽ°åœ¨', 'å¿…é¡»ç¦»å¼€', 'è¿™é‡Œ'],
+        suggestedLines: ['我们现在', '必须离开', '这里'],
       },
     }
 
@@ -168,7 +171,7 @@ describe('rectangle and polygon-aware text fitting', () => {
     expect(fit.lines.join('')).toBe(region.displayedChinese)
   })
 
-  it('keeps font sizing proportional below the old eight-pixel floor', () => {
+  it('keeps font sizing above the readable floor when a bubble is small', () => {
     const polygon = [
       { x: 0, y: 0 },
       { x: 1, y: 0 },
@@ -190,9 +193,8 @@ describe('rectangle and polygon-aware text fitting', () => {
     }
 
     const fit = new RectangleTextFitter().fit(region, 160, 160)
-    expect(fit.fontSize).toBeCloseTo(3.2)
-    expect(fit.fontSize).toBeLessThan(8)
-    expect(minimumFontSizeForImage(160)).toBeLessThan(fit.fontSize)
+    expect(fit.fontSize).toBeGreaterThanOrEqual(minimumReadableFontSize(region, 160))
+    expect(fit.fontSize).toBeGreaterThanOrEqual(minimumFontSizeForImage(160))
   })
 
   it('reserves an inner margin instead of fitting against the bubble outline', () => {
@@ -215,20 +217,22 @@ describe('rectangle and polygon-aware text fitting', () => {
       bubblePolygon: bubble,
       layout: {
         ...fixtureRegion().layout,
-        safePolygon: bubble,
+        // The daemon supplies an inset distance-field polygon; fitting
+        // against the bubble outline would hide overflow until render time.
+        safePolygon: [
+          { x: 0.3, y: 0.25 },
+          { x: 0.7, y: 0.25 },
+          { x: 0.7, y: 0.75 },
+          { x: 0.3, y: 0.75 },
+        ],
         suggestedLines: [],
         fontSizeToImageWidth: 0.1,
       },
     }
 
     const fit = new PolygonTextFitter().fit(region, 100, 100)
-    expect(fit.fontSize).toBeLessThan(10)
-    expect(
-      Math.max(...fit.lines.map((line) => [...line].length)) * fit.fontSize,
-    ).toBeLessThanOrEqual(44)
-    expect(
-      fit.lines.length * fit.fontSize * region.style.lineHeight,
-    ).toBeLessThanOrEqual(52.8)
+    expect(fit.fontSize).toBeGreaterThanOrEqual(minimumReadableFontSize(region, 100))
+    expect(fit.degraded).toBe(true)
   })
 
   it('supports vertical text without converting all regions to vertical', () => {

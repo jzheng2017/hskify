@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { ImageStatusBadge, PageHud } from '../../src/progress/hud'
+import {
+  ChapterProgressReducer,
+  ImageStatusBadge,
+  PageHud,
+} from '../../src/progress/hud'
 import { loadedImage } from '../helpers/images'
 
 afterEach(() => {
@@ -26,7 +30,7 @@ describe('page and image progress UI', () => {
       },
     })
     const shadow = hud.host.shadowRoot
-    expect(shadow?.textContent).toContain('Translating image 2 of 4')
+    expect(shadow?.textContent).toContain('Translating chapter')
     expect(shadow?.textContent).toContain('Reading the page')
     expect(shadow?.textContent).not.toContain('OCR')
     expect(shadow?.textContent).not.toContain('2 of 7')
@@ -44,7 +48,7 @@ describe('page and image progress UI', () => {
         message: 'Removing lettering',
       },
     })
-    expect(shadow?.querySelector('progress')?.hasAttribute('value')).toBe(false)
+    expect(shadow?.querySelector('progress')?.getAttribute('value')).toBe('0.3')
   })
 
   it('reports complete, failure, and cancellation states explicitly', () => {
@@ -72,6 +76,35 @@ describe('page and image progress UI', () => {
     expect(button?.hidden).toBe(false)
     button?.dispatchEvent(new Event('click'))
     expect(retry).toHaveBeenCalled()
+    badge.destroy()
+  })
+
+  it('reduces concurrent image stages into one monotonic chapter phase', () => {
+    const reducer = new ChapterProgressReducer()
+    expect(reducer.update('page-a', { stage: 'translating' }).phase).toBe('translating')
+    expect(reducer.update('page-b', { stage: 'ocr' }).phase).toBe('translating')
+    expect(reducer.update('page-a', { stage: 'styling' }).message).toBe(
+      'Finishing the chapter',
+    )
+    // A late update from an image that started later must not make the
+    // chapter status flicker backwards.
+    expect(reducer.update('page-b', { stage: 'queued' }).phase).toBe('finishing')
+    reducer.complete('page-a')
+    reducer.complete('page-b')
+    expect(reducer.snapshot()).toMatchObject({ phase: 'finishing', active: 0 })
+  })
+
+  it('anchors image notices to a wrapper without scroll listeners', () => {
+    const image = loadedImage()
+    const wrapper = document.createElement('span')
+    wrapper.style.position = 'absolute'
+    document.body.append(image, wrapper)
+    const retry = vi.fn()
+    const badge = new ImageStatusBadge(image, retry, document.documentElement, wrapper)
+    const host = document.documentElement.querySelector<HTMLElement>('[data-hmt-owned]')
+    expect(host?.parentElement).toBe(wrapper)
+    expect(host?.style.position).toBe('absolute')
+    expect(host?.style.left).toBe('8px')
     badge.destroy()
   })
 })

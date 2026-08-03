@@ -235,11 +235,14 @@ $requiredResourceIds = @(
     'comic-text-bubble-detector-weights',
     'lama-manga-inpainter-weights',
     'manga-text-segmentation-weights',
-    'pp-ocr-v5-english-recognizer-config',
-    'pp-ocr-v5-english-recognizer-model',
+    'pp-ocr-v6-small-detector-config',
+    'pp-ocr-v6-small-detector-model',
+    'pp-ocr-v6-small-recognizer-config',
+    'pp-ocr-v6-small-recognizer-model',
     'speech-bubble-segmentation-config',
     'speech-bubble-segmentation-weights',
-    'translation-model'
+    'translation-model',
+    'translation-model-projector'
 )
 $resourceIdentities = @($modelManifest.resourceIdentities)
 if ($resourceIdentities.Count -ne $requiredResourceIds.Count) {
@@ -267,7 +270,10 @@ for ($index = 0; $index -lt $resourceIdentities.Count; $index++) {
         throw "the resource URL is not exactly pinned: $($identity.id)"
     }
 }
-$translationModel = $resourceIdentities[-1]
+$translationModel = $resourceIdentities | Where-Object id -eq 'translation-model'
+if (@($translationModel).Count -ne 1) {
+    throw 'the model manifest must contain exactly one translation-model identity'
+}
 if ($translationModel.filename -ne 'Qwen3.5-4B-Q4_K_M.gguf') {
     throw "the translation model filename is not the frozen Qwen 4B artifact: $($translationModel.filename)"
 }
@@ -664,7 +670,7 @@ $bundleManifest = [ordered]@{
         hskBundled = $true
         dictionaryBundled = $true
         modelBundled = $true
-        residentModelsBundled = $resolvedResidentResources.Count -eq 5
+        residentModelsBundled = $resolvedResidentResources.Count -eq 12
         residentModelCount = $resolvedResidentResources.Count
         residentRuntimeBundled = $resolvedResidentRuntimeFiles.Count -eq $expectedResidentRuntimeFiles.Count
         residentRuntimeFileCount = $resolvedResidentRuntimeFiles.Count

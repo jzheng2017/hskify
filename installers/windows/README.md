@@ -106,8 +106,9 @@ No uninstall step or legacy companion path is retained.
 
 ## Status
 
-The exact self-contained package has passed bundle validation, current-user
+The exact self-contained package must pass bundle validation, current-user
 installation, Firefox extension lint, and the complete installed packaged
-Chapter 5 sequence. See
+real-reader-v2 sequence before release. The tracked v2 corpus currently
+remains capture-required. See
 [`docs/firefox-manual-test-checklist.md`](../../docs/firefox-manual-test-checklist.md)
-and [`docs/chapter-5-benchmark.md`](../../docs/chapter-5-benchmark.md).
+and [`docs/real-reader-v2.md`](../../docs/real-reader-v2.md).

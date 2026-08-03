@@ -232,6 +232,17 @@ export class PageArtifactStore {
     await this.storage.remove(`${PAGE_ARTIFACT_PREFIX}${jobId}`)
   }
 
+  async forPage(
+    tabId: number,
+    frameId: number,
+    pageSessionId: string,
+  ): Promise<PageArtifactRecord[]> {
+    return (await this.forTab(tabId)).filter(
+      (record) =>
+        record.frameId === frameId && record.pageSessionId === pageSessionId,
+    )
+  }
+
   async removeForPage(
     tabId: number,
     frameId: number,

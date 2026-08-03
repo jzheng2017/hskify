@@ -3,6 +3,7 @@ mod jinja;
 pub mod language;
 mod model;
 pub mod paddleocr_vl;
+pub mod page_understanding;
 pub mod prompt;
 pub mod providers;
 pub mod safe;

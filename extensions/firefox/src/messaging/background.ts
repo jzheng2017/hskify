@@ -29,6 +29,7 @@ import {
   type PageArtifactRecord,
 } from './active-jobs'
 import { CompanionClient, CompanionHttpError } from './companion-client'
+import { ChapterLifecycleStore } from './chapter-lifecycle'
 import { NativeSessionError } from './native-session'
 import {
   parseBackgroundRequest,
@@ -203,6 +204,7 @@ export class BackgroundRouter {
   private readonly companion: CompanionClient
   private readonly fixture: FixtureBackend | undefined
   private readonly prefetches: SingleImagePrefetch<PrefetchedAcquisition>
+  private readonly chapters: ChapterLifecycleStore
   private readonly now: () => number
 
   constructor(dependencies?: Partial<BackgroundDependencies>) {
@@ -211,6 +213,7 @@ export class BackgroundRouter {
     this.companion = dependencies?.companion ?? new CompanionClient()
     this.fixture = dependencies?.fixture
     this.prefetches = dependencies?.prefetches ?? new SingleImagePrefetch()
+    this.chapters = new ChapterLifecycleStore()
     this.now = dependencies?.now ?? Date.now
   }
 
@@ -431,6 +434,8 @@ export class BackgroundRouter {
       naturalHeight: acquired.height,
       pageSessionId: message.pageSessionId,
       pageIndex: message.pageIndex,
+      chapterPageOrder: message.chapterPageOrder,
+      surfaceKind: message.surfaceKind,
       visibleRects: message.visibleRects,
       settings: {
         sourceLanguage: 'en',
@@ -442,12 +447,6 @@ export class BackgroundRouter {
         translateSoundEffects: false,
         nameTranslation: message.nameTranslation,
       },
-      ...(message.precedingContext?.length
-        ? { precedingContext: message.precedingContext.slice(-6) }
-        : {}),
-      ...(message.properNameGlossary?.length
-        ? { properNameGlossary: message.properNameGlossary }
-        : {}),
     }
     const submittedAtUnixMs = this.now()
     const jobId = this.fixture
@@ -810,8 +809,58 @@ export class BackgroundRouter {
         identity.pageSessionId === pageSessionId,
     )
     const records = await this.jobs.forPage(tabId, frameId, pageSessionId)
+    const artifacts = await this.artifacts.forPage(tabId, frameId, pageSessionId)
     await Promise.allSettled(records.map((record) => this.cancelRecord(record)))
     await this.artifacts.removeForPage(tabId, frameId, pageSessionId)
+    if (!this.fixture && (records.length > 0 || artifacts.length > 0)) {
+      // Jobs are cancelled before chapter state is released.  This ordering
+      // makes a late terminal update harmless while ensuring dialogue/entity
+      // memory cannot leak into a replacement run.
+      await this.companion.closeChapter(pageSessionId).catch(() => undefined)
+    }
+    this.chapters.remove(pageSessionId)
+  }
+
+  private chapterStart(
+    message: Extract<BackgroundRequest, { type: 'chapterStart' }>,
+    sender: Sender,
+  ): void {
+    assertSenderDocument(sender, message.pageUrl)
+    this.chapters.start(message.pageSessionId, normalizedDocumentUrl(message.pageUrl))
+  }
+
+  private chapterPage(
+    message: Extract<BackgroundRequest, { type: 'chapterPage' }>,
+    sender: Sender,
+  ): void {
+    assertSenderDocument(sender, message.pageUrl)
+    this.chapters.page(
+      message.pageSessionId,
+      normalizedDocumentUrl(message.pageUrl),
+      message.pageIndex,
+    )
+  }
+
+  private chapterViewport(
+    message: Extract<BackgroundRequest, { type: 'chapterViewport' }>,
+    sender: Sender,
+  ): void {
+    assertSenderDocument(sender, message.pageUrl)
+    this.chapters.viewport(message.pageSessionId, normalizedDocumentUrl(message.pageUrl))
+  }
+
+  private async chapterSeal(
+    message: Extract<BackgroundRequest, { type: 'chapterSeal' | 'chapterCancel' }>,
+    sender: Sender,
+  ): Promise<void> {
+    assertSenderDocument(sender, message.pageUrl)
+    const pageUrl = normalizedDocumentUrl(message.pageUrl)
+    if (message.type === 'chapterSeal') this.chapters.seal(message.pageSessionId, pageUrl)
+    else this.chapters.cancel(message.pageSessionId, pageUrl)
+    if (!this.fixture) {
+      await this.companion.closeChapter(message.pageSessionId).catch(() => undefined)
+    }
+    this.chapters.remove(message.pageSessionId)
   }
 
   async route(message: BackgroundRequest, sender: Sender): Promise<unknown> {
@@ -835,6 +884,15 @@ export class BackgroundRouter {
         return this.startSetup()
       case 'engine:warmup':
         return this.setupStatus()
+      case 'chapterStart':
+        return this.chapterStart(message, sender)
+      case 'chapterPage':
+        return this.chapterPage(message, sender)
+      case 'chapterViewport':
+        return this.chapterViewport(message, sender)
+      case 'chapterSeal':
+      case 'chapterCancel':
+        return this.chapterSeal(message, sender)
       case 'image:prefetch':
         return this.prefetch(message, sender)
       case 'image:prefetch-cancel':
@@ -882,6 +940,11 @@ const BACKGROUND_MESSAGE_TYPES = new Set([
   'setup:status',
   'setup:start',
   'engine:warmup',
+  'chapterStart',
+  'chapterPage',
+  'chapterViewport',
+  'chapterSeal',
+  'chapterCancel',
   'image:prefetch',
   'image:prefetch-cancel',
   'job:submit',

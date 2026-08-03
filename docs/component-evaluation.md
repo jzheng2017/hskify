@@ -3,7 +3,7 @@
 Hskify uses an established component when it satisfies the product contract
 and removes candidates that do not. The selection criterion is not whether a
 project can translate one manga page; it is whether it can supply
-color-agnostic English story regions progressively, preserve the live source
+color-agnostic English story regions in canonical chapter order, preserve the live source
 image, and produce region-local cleanup suitable for patch-before-text
 rendering.
 
@@ -12,7 +12,7 @@ rendering.
 | Component | Decision | Production role |
 | --- | --- | --- |
 | `ogkalu/comic-text-and-bubble-detector` RT-DETR-v2 R50 | Retained | CUDA-batched `text_bubble` and `text_free` proposals |
-| PaddlePaddle English PP-OCRv5 mobile recognizer | Retained | CUDA-batched English recognition |
+| PaddlePaddle PP-OCRv6-small detector and recognizer | Retained | CUDA-batched independent text polygons and English recognition |
 | Qwen3.5 4B Q4_K_M | Retained | Resident direct English-to-HSK-Chinese generation |
 
 The detector, Paddle recognizer, and translation model revisions and hashes are
@@ -32,20 +32,18 @@ would therefore remove required behavior rather than replace custom code.
 
 | Candidate | Reason it was not used |
 | --- | --- |
-| PaddlePaddle PP-OCRv5 mobile detector | Its general-purpose DB proposals missed too much colored, stylized, and low-contrast chapter-5 story text even at larger and multiscale inputs |
-| `manga-image-translator-rust` detector paths | Useful reference project, but its full pipeline and data model do not match the progressive live-image contract; its alternate DBNet/CTD candidates missed too much varied story text in visual review |
+| PaddlePaddle PP-OCRv5 mobile detector | Superseded by the PP-OCRv6-small detector/recognizer pair; no legacy recognizer path remains |
+| `manga-image-translator-rust` detector paths | Useful reference project, but its full pipeline and data model do not match the chapter-aware live-image contract; its alternate DBNet/CTD candidates missed too much varied story text in visual review |
 | Kiuyha Manga-Bubble-YOLO | Balloon-only detection did not solve narration/unballooned text and missed visually diverse regions |
-| Qwen3.5 2B Q4_K_M | Faster, but the controlled chapter-5 comparison did not qualify it as a naturalness/meaning-equivalent replacement |
-| Hy-MT2 1.8B Q4_K_M | Faster, but lower structured success and more critical proxy failures disqualified it |
+| Qwen3.5 2B Q4_K_M | Not packaged; any comparison must use the complete v2 browser corpus |
+| Hy-MT2 1.8B Q4_K_M | Not packaged; any comparison must use the complete v2 browser corpus |
 
 At the production threshold, the retained RT-DETR `text_bubble` plus
-`text_free` proposals provide the strongest reviewed coverage of the varied
-chapter-5 story regions among the evaluated candidates. Raw proposal precision
-is intentionally not a product gate: recognition and the story-role filter must
-reject non-English text, SFX, credits, and branding. The authoritative
-accepted-region precision, OCR, rendering, and performance results come from
-the packaged browser benchmark, whose retained evidence records the exact
-threshold, build, and source hashes.
+`text_free` proposals and independent PP-OCRv6-small polygons provide the
+structural evidence streams. Raw proposal precision is not a product gate:
+recognition, page understanding, and deterministic geometry checks must reject
+non-English text, SFX, credits, and branding. Authoritative quality and
+performance results come only from the packaged real-reader-v2 browser gate.
 
 Rejected model/runtime directories, superseded detector bundles, superseded
 benchmark runs, and incomplete experiment outputs are local cache artifacts

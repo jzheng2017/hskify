@@ -12,6 +12,8 @@ export type ImageGeometry = {
   image: Rect
 }
 
+export type LocalImageBox = Readonly<{ width: number; height: number }>
+
 export type Bounds = {
   minX: number
   minY: number
@@ -155,14 +157,16 @@ export function objectFitRect(
 }
 
 export function calculateImageGeometry(
-  image: HTMLImageElement,
+  image: Element,
   wrapper: HTMLElement,
   sourceWidth: number,
   sourceHeight: number,
+  localBox?: LocalImageBox,
 ): ImageGeometry {
   const imageRect = image.getBoundingClientRect()
   const wrapperRect = wrapper.getBoundingClientRect()
-  const style = getComputedStyle(image)
+  const ownerWindow = image.ownerDocument.defaultView
+  const style = ownerWindow?.getComputedStyle(image) ?? getComputedStyle(image)
   const borderLeft = finiteCssPixels(style.borderLeftWidth)
   const borderRight = finiteCssPixels(style.borderRightWidth)
   const borderTop = finiteCssPixels(style.borderTopWidth)
@@ -172,15 +176,19 @@ export function calculateImageGeometry(
   const paddingTop = finiteCssPixels(style.paddingTop)
   const paddingBottom = finiteCssPixels(style.paddingBottom)
   const viewport: Rect = {
-    left: imageRect.left - wrapperRect.left + borderLeft + paddingLeft,
-    top: imageRect.top - wrapperRect.top + borderTop + paddingTop,
+    left: localBox
+      ? borderLeft + paddingLeft
+      : imageRect.left - wrapperRect.left + borderLeft + paddingLeft,
+    top: localBox
+      ? borderTop + paddingTop
+      : imageRect.top - wrapperRect.top + borderTop + paddingTop,
     width: Math.max(
       0,
-      imageRect.width - borderLeft - borderRight - paddingLeft - paddingRight,
+      (localBox?.width ?? imageRect.width) - borderLeft - borderRight - paddingLeft - paddingRight,
     ),
     height: Math.max(
       0,
-      imageRect.height - borderTop - borderBottom - paddingTop - paddingBottom,
+      (localBox?.height ?? imageRect.height) - borderTop - borderBottom - paddingTop - paddingBottom,
     ),
   }
   const fitted = objectFitRect(
@@ -220,26 +228,61 @@ function clampUnit(value: number): number {
   return Math.min(1, Math.max(0, value))
 }
 
+function hasVisualTransform(element: Element): boolean {
+  const ownerWindow = element.ownerDocument.defaultView
+  for (let current: Element | null = element; current; current = current.parentElement) {
+    const style = ownerWindow?.getComputedStyle(current)
+    if (style?.transform && style.transform !== 'none') return true
+    if (style?.perspective && style.perspective !== 'none') return true
+  }
+  return false
+}
+
 /**
  * Maps the currently visible portion of an <img> back into normalized source
  * coordinates. The rectangle accounts for borders, padding, object-fit,
  * object-position, cover cropping, and the browser viewport.
  */
 export function visibleImageRects(
-  image: HTMLImageElement,
-  sourceWidth = image.naturalWidth,
-  sourceHeight = image.naturalHeight,
+  image: Element,
+  sourceWidth = image.tagName.toLowerCase() === 'img' && 'naturalWidth' in image
+    ? Number((image as HTMLImageElement).naturalWidth)
+    : Math.round(image.getBoundingClientRect().width),
+  sourceHeight = image.tagName.toLowerCase() === 'img' && 'naturalHeight' in image
+    ? Number((image as HTMLImageElement).naturalHeight)
+    : Math.round(image.getBoundingClientRect().height),
 ): NormalizedRect[] {
+  const ownerDocument = image.ownerDocument
+  const ownerWindow = ownerDocument.defaultView
   if (
     !image.isConnected ||
     sourceWidth <= 0 ||
     sourceHeight <= 0 ||
-    document.visibilityState === 'hidden'
+    ownerDocument.visibilityState === 'hidden'
   ) {
     return []
   }
   const rect = image.getBoundingClientRect()
-  const style = getComputedStyle(image)
+  const style = ownerWindow?.getComputedStyle(image) ?? getComputedStyle(image)
+  // The normalized viewport contract is axis-aligned. A transformed surface
+  // is rendered through the affine wrapper, but projecting a rotated quad to
+  // a rectangle here would under-report visible text and starve the daemon's
+  // visible-first scheduler. The bounding box is safe for priority: submit
+  // the full source whenever any transformed pixels intersect the viewport.
+  if (hasVisualTransform(image)) {
+    const viewportWidth = Math.max(
+      0,
+      ownerWindow?.innerWidth || ownerDocument.documentElement.clientWidth,
+    )
+    const viewportHeight = Math.max(
+      0,
+      ownerWindow?.innerHeight || ownerDocument.documentElement.clientHeight,
+    )
+    if (rect.right <= 0 || rect.bottom <= 0 || rect.left >= viewportWidth || rect.top >= viewportHeight) {
+      return []
+    }
+    return [{ x: 0, y: 0, width: 1, height: 1 }]
+  }
   const borderLeft = finiteCssPixels(style.borderLeftWidth)
   const borderRight = finiteCssPixels(style.borderRightWidth)
   const borderTop = finiteCssPixels(style.borderTopWidth)
@@ -279,8 +322,8 @@ export function visibleImageRects(
   const browserViewport: Rect = {
     left: 0,
     top: 0,
-    width: Math.max(0, window.innerWidth || document.documentElement.clientWidth),
-    height: Math.max(0, window.innerHeight || document.documentElement.clientHeight),
+    width: Math.max(0, ownerWindow?.innerWidth || ownerDocument.documentElement.clientWidth),
+    height: Math.max(0, ownerWindow?.innerHeight || ownerDocument.documentElement.clientHeight),
   }
   const clippedToImage = intersection(drawn, content)
   const visible = clippedToImage && intersection(clippedToImage, browserViewport)

@@ -3,18 +3,16 @@ const MIN_NATURAL_HEIGHT = 240
 const MIN_DISPLAY_WIDTH = 180
 const MIN_DISPLAY_HEIGHT = 140
 const MIN_DISPLAY_AREA = 36_000
-const EXCLUDED_SEMANTIC_WORDS =
-  /\b(?:avatar|badge|button|comment|control|cover|emoji|favicon|icon|logo|profile|sprite|thumbnail|userpic)\b/i
 const DEFERRED_SOURCE_ATTRIBUTE = /^data-(?:.*(?:src|url|image|original).*)$/i
+
+import type { DiscoveredSurface } from './surfaces'
 
 export type ImageOwner = HTMLImageElement | HTMLPictureElement
 
-export type DiscoveredImage = {
+export type DiscoveredImage = DiscoveredSurface & {
+  kind: 'image'
   element: HTMLImageElement
   owner: ImageOwner
-  sourceUrl: string
-  domIndex: number
-  visible: boolean
 }
 
 export type DiscoveryDecision =
@@ -56,31 +54,9 @@ function imageOwner(image: HTMLImageElement): ImageOwner {
   return parent instanceof HTMLPictureElement ? parent : image
 }
 
-function semanticText(image: HTMLImageElement): string {
-  const owner = imageOwner(image)
-  const ancestor = owner.closest('[class],[id],[role],button,nav')
-  return [
-    image.alt,
-    image.title,
-    image.id,
-    image.className,
-    owner.id,
-    owner.className,
-    ancestor?.id ?? '',
-    ancestor?.className ?? '',
-    ancestor?.getAttribute('role') ?? '',
-    ancestor?.tagName ?? '',
-  ].join(' ')
-}
-
-function hasUnsafeTransform(image: HTMLImageElement): boolean {
-  const transform = getComputedStyle(image).transform
-  return transform !== '' && transform !== 'none' && transform !== 'matrix(1, 0, 0, 1, 0, 0)'
-}
-
-function normalizedImageUrl(value: string): string | undefined {
+function normalizedImageUrl(value: string, ownerDocument: Document = document): string | undefined {
   try {
-    const url = new URL(value, document.baseURI)
+    const url = new URL(value, ownerDocument.baseURI)
     return ['http:', 'https:', 'blob:', 'data:'].includes(url.protocol) ? url.href : undefined
   } catch {
     return undefined
@@ -92,14 +68,14 @@ export function deferredImageSourceUrl(image: HTMLImageElement): string | undefi
     if (!DEFERRED_SOURCE_ATTRIBUTE.test(attribute.name)) continue
     const value = attribute.value.trim()
     if (!value) continue
-    const normalized = normalizedImageUrl(value)
+    const normalized = normalizedImageUrl(value, image.ownerDocument)
     if (normalized) return normalized
   }
   return undefined
 }
 
 function isRendered(image: HTMLImageElement, rect: DOMRect): boolean {
-  const style = getComputedStyle(image)
+  const style = image.ownerDocument.defaultView?.getComputedStyle(image) ?? getComputedStyle(image)
   return (
     image.isConnected &&
     style.display !== 'none' &&
@@ -138,23 +114,21 @@ export function evaluateImage(image: HTMLImageElement, domIndex: number): Discov
   ) {
     return { supported: false, reason: 'display-size' }
   }
-  if (
-    image.closest('button,[role="button"]') ||
-    EXCLUDED_SEMANTIC_WORDS.test(semanticText(image))
-  ) {
+  if (image.closest('button,[role="button"]')) {
     return { supported: false, reason: 'page-control' }
-  }
-  if (hasUnsafeTransform(image)) {
-    return { supported: false, reason: 'unsupported-transform' }
   }
   return {
     supported: true,
     candidate: {
+      id: `image:${domIndex}:${sourceUrl}`,
+      kind: 'image',
       element: image,
       owner: imageOwner(image),
       sourceUrl,
+      sourceWidth: image.naturalWidth,
+      sourceHeight: image.naturalHeight,
       domIndex,
-      visible: isRectVisible(rect),
+      visible: isRectVisible(rect, image.ownerDocument.defaultView ?? window),
     },
   }
 }
@@ -180,11 +154,7 @@ export function isDeferredPageImage(image: HTMLImageElement): boolean {
   ) {
     return false
   }
-  if (
-    image.closest('button,[role="button"]') ||
-    EXCLUDED_SEMANTIC_WORDS.test(semanticText(image)) ||
-    hasUnsafeTransform(image)
-  ) {
+  if (image.closest('button,[role="button"]')) {
     return false
   }
   return true
@@ -234,6 +204,11 @@ export function visibleFirst(candidates: readonly DiscoveredImage[]): Discovered
 
 export class ImageDiscovery {
   private readonly candidates = new Map<HTMLImageElement, DiscoveredImage>()
+  // DOM order is mutable in lazy/paged readers.  Keep the adapter identity
+  // attached to the element so inserting a page before an existing one does
+  // not invalidate its queue/cache key or cause a duplicate translation.
+  private readonly identities = new WeakMap<HTMLImageElement, string>()
+  private nextIdentity = 0
   private mutationObserver: Pick<MutationObserver, 'observe' | 'disconnect'> | undefined
   private intersectionObserver: IntersectionObserverLike | undefined
 
@@ -301,17 +276,16 @@ export class ImageDiscovery {
 
   completionKey(): string {
     const images = [...this.root.querySelectorAll('img')]
-    const indexByImage = new Map(images.map((image, index) => [image, index]))
     const candidates = this.current()
       .map(
         (candidate) =>
-          `ready:${candidate.domIndex}:${candidate.sourceUrl}:${candidate.element.naturalWidth}x${candidate.element.naturalHeight}`,
+          `ready:${candidate.id}:${candidate.sourceUrl}:${candidate.element.naturalWidth}x${candidate.element.naturalHeight}`,
       )
       .sort()
     const deferred = this.deferred()
       .map(
         (image) =>
-          `deferred:${indexByImage.get(image) ?? -1}:${image.currentSrc || image.src}:${deferredImageSourceUrl(image) ?? ''}`,
+          `deferred:${this.surfaceIdentity(image)}:${image.currentSrc || image.src}:${deferredImageSourceUrl(image) ?? ''}`,
       )
       .sort()
     return [...candidates, ...deferred].join('|')
@@ -319,6 +293,20 @@ export class ImageDiscovery {
 
   private readonly onLoad = (event: Event): void => {
     if (event.target instanceof HTMLImageElement) this.scan()
+  }
+
+  private stableCandidate(candidate: DiscoveredImage): DiscoveredImage {
+    const identity = this.surfaceIdentity(candidate.element)
+    return identity === candidate.id ? candidate : { ...candidate, id: identity }
+  }
+
+  private surfaceIdentity(image: HTMLImageElement): string {
+    let identity = this.identities.get(image)
+    if (!identity) {
+      identity = `image-surface-${this.nextIdentity++}`
+      this.identities.set(image, identity)
+    }
+    return identity
   }
 
   private scan(): void {
@@ -342,6 +330,8 @@ export class ImageDiscovery {
           const candidate = {
             ...previous,
             sourceUrl,
+            sourceWidth: image.naturalWidth,
+            sourceHeight: image.naturalHeight,
             domIndex,
           }
           this.candidates.set(image, candidate)
@@ -373,7 +363,7 @@ export class ImageDiscovery {
         }
         return
       }
-      const candidate = decision.candidate
+      const candidate = this.stableCandidate(decision.candidate)
       if (!previous) {
         this.candidates.set(image, candidate)
         this.intersectionObserver?.observe(image)
@@ -394,6 +384,25 @@ export class ImageDiscovery {
       const previousDomIndex = previous.domIndex
       previous.owner = candidate.owner
       previous.domIndex = candidate.domIndex
+      const dimensionsChanged =
+        previous.sourceWidth !== candidate.sourceWidth ||
+        previous.sourceHeight !== candidate.sourceHeight
+      if (dimensionsChanged) {
+        // Intrinsic dimensions are part of the immutable surface identity
+        // sent to the daemon. A reader can replace a decoded candidate (or
+        // finish a responsive srcset decode) without changing currentSrc;
+        // retaining the old dimensions would reuse a job for different
+        // pixels and make geometry/layout validation fail downstream.
+        const next = this.stableCandidate(candidate)
+        this.candidates.set(image, next)
+        this.onEvent({
+          type: 'updated',
+          candidate: next,
+          previousSourceUrl: previous.sourceUrl,
+          previousDomIndex,
+        })
+        return
+      }
       if (previousDomIndex !== previous.domIndex) {
         this.onEvent({
           type: 'updated',

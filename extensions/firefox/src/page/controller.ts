@@ -1,7 +1,6 @@
 import { sha256Hex } from '../acquisition/hash'
 import { DEFAULT_IMAGE_LIMITS } from '../acquisition/image-format'
 import type {
-  BrowserJobRequest,
   JobUpdateBatch,
   JobUpdate,
   LearningMode,
@@ -9,13 +8,16 @@ import type {
   NameTranslation,
 } from '../contracts/browser'
 import {
-  deferredImageSourceUrl,
   ImageDiscovery,
   isRectVisible,
-  visibleFirst,
-  type DiscoveredImage,
   type DiscoveryEvent,
 } from '../discovery/images'
+import {
+  LiveSurfaceDiscovery,
+  visibleFirst as visibleSurfaceFirst,
+  type DiscoveredSurface,
+  type SurfaceDiscoveryEvent,
+} from '../discovery/surfaces'
 import { VisibleFirstQueue, type QueueItem } from '../discovery/queue'
 import {
   parseContentRequest,
@@ -30,7 +32,6 @@ import { ImageStatusBadge, PageHud } from '../progress/hud'
 import { visibleImageRects } from '../rendering/geometry'
 import { SelectableRenderer, type RenderedImage } from '../rendering/renderer'
 import { ChapterRunState } from './run-state'
-import { ChapterContextLedger } from './chapter-context'
 
 const PAGE_SESSION_KEY = 'hmt.pageSessionId'
 const NAVIGATION_CHECK_INTERVAL_MS = 250
@@ -42,7 +43,7 @@ export const AUTOMATIC_IMAGE_RETRY_LIMIT = 2
 export const COMPLETION_SETTLE_MS = 300
 
 type TranslationCandidate = {
-  candidate: DiscoveredImage
+  candidate: DiscoveredSurface
   recovered?: RecoveredJob
 }
 
@@ -90,12 +91,79 @@ function normalizedSourceUrl(value: string): string {
   return url.href
 }
 
-function currentSourceUrl(image: HTMLImageElement): string {
-  return normalizedSourceUrl(image.currentSrc || image.src)
+function currentSourceUrl(candidate: DiscoveredSurface): string {
+  if (
+    candidate.kind !== 'image' ||
+    candidate.element.tagName.toLowerCase() !== 'img' ||
+    !('currentSrc' in candidate.element)
+  ) {
+    return normalizedSourceUrl(candidate.sourceUrl)
+  }
+  const image = candidate.element as HTMLImageElement
+  return normalizedSourceUrl(image.currentSrc || image.src || candidate.sourceUrl)
 }
 
-function candidateKey(candidate: DiscoveredImage): string {
-  return `${candidate.domIndex}:${normalizedSourceUrl(candidate.sourceUrl)}:${candidate.element.naturalWidth}x${candidate.element.naturalHeight}`
+function candidateKey(candidate: DiscoveredSurface): string {
+  return `${candidate.id}:${normalizedSourceUrl(candidate.sourceUrl)}:${candidate.sourceWidth}x${candidate.sourceHeight}`
+}
+
+/**
+ * Compare candidates in the reader's document order without using visibility
+ * as a tie breaker.  The specialised image and generic surface adapters
+ * maintain independent DOM indexes, so an element relationship is the only
+ * reliable ordering signal when both adapters report a surface from the same
+ * document.  Nested frame documents are disconnected from the parent DOM and
+ * fall back to their adapter index plus stable identity.
+ */
+function compareDocumentCandidates(
+  left: DiscoveredSurface,
+  right: DiscoveredSurface,
+): number {
+  if (left.element !== right.element && left.element.ownerDocument === right.element.ownerDocument) {
+    const position = left.element.compareDocumentPosition(right.element)
+    if (position & 4) return -1
+    if (position & 2) return 1
+  }
+  return left.domIndex - right.domIndex || left.id.localeCompare(right.id)
+}
+
+/**
+ * Reserve page identities for unloaded lazy images before the first request
+ * is submitted.  A reader is allowed to insert a decoded page before an
+ * already translated page; assigning an index at load time would make the
+ * chapter graph depend on network timing.  Cross-document surfaces cannot be
+ * compared with DOM position, so their global viewport position is the
+ * deterministic fallback after same-document relationships.
+ */
+function compareDocumentElements(left: Element, right: Element): number {
+  if (left === right) return 0
+  if (left.ownerDocument === right.ownerDocument) {
+    const position = left.compareDocumentPosition(right)
+    if (position & 4) return -1
+    if (position & 2) return 1
+  }
+  const globalPosition = (element: Element): { top: number; left: number } => {
+    let rect = element.getBoundingClientRect()
+    let ownerDocument = element.ownerDocument
+    while (ownerDocument !== document) {
+      const frame = ownerDocument.defaultView?.frameElement
+      if (!frame) break
+      const frameRect = frame.getBoundingClientRect()
+      rect = {
+        top: rect.top + frameRect.top,
+        left: rect.left + frameRect.left,
+      } as DOMRect
+      ownerDocument = frame.ownerDocument
+    }
+    return { top: rect.top, left: rect.left }
+  }
+  const leftPosition = globalPosition(left)
+  const rightPosition = globalPosition(right)
+  return (
+    leftPosition.top - rightPosition.top ||
+    leftPosition.left - rightPosition.left ||
+    left.tagName.localeCompare(right.tagName)
+  )
 }
 
 function recoveryKey(sourceUrl: string, width: number, height: number, pageIndex: number): string {
@@ -147,13 +215,27 @@ async function readBoundedBody(
   return merged.buffer
 }
 
-export async function tryContentBytes(candidate: DiscoveredImage): Promise<
+export async function tryContentBytes(candidate: DiscoveredSurface): Promise<
   | {
       bytes: ArrayBuffer
       mimeType?: string
     }
   | undefined
 > {
+  if (candidate.capture) {
+    try {
+      const captured = await candidate.capture()
+      if (!captured || captured.bytes.byteLength > DEFAULT_IMAGE_LIMITS.maximumBytes) {
+        return undefined
+      }
+      return {
+        bytes: captured.bytes,
+        ...(captured.mimeType ? { mimeType: captured.mimeType } : {}),
+      }
+    } catch {
+      return undefined
+    }
+  }
   let source: URL
   try {
     source = new URL(candidate.sourceUrl, location.href)
@@ -196,9 +278,10 @@ class ViewportReporter {
 
   constructor(
     private readonly jobId: string,
-    private readonly image: HTMLImageElement,
+    private readonly image: HTMLElement,
     private readonly sourceWidth: number,
     private readonly sourceHeight: number,
+    private readonly onViewport?: () => void,
   ) {
     addEventListener('scroll', this.schedule, true)
     addEventListener('resize', this.schedule)
@@ -232,6 +315,7 @@ class ViewportReporter {
           active,
         }),
       )
+      .then(() => this.onViewport?.())
   }
 
   async stop(): Promise<void> {
@@ -268,23 +352,33 @@ export class PageTranslationController {
   private navigationUrl = location.href
   private generation = 0
   private readonly discovery: ImageDiscovery
+  private readonly surfaceDiscovery: LiveSurfaceDiscovery
   private readonly renderer: SelectableRenderer
   private readonly queue: VisibleFirstQueue<TranslationCandidate>
-  private readonly rendered = new Map<HTMLImageElement, RenderedImage>()
-  private readonly badges = new Map<HTMLImageElement, ImageStatusBadge>()
-  private readonly queueIds = new Map<HTMLImageElement, string>()
-  private readonly processed = new Set<HTMLImageElement>()
-  private readonly runState = new ChapterRunState<HTMLImageElement>()
-  private readonly failures = new Map<HTMLImageElement, ImageFailureDiagnostic>()
-  private readonly context = new ChapterContextLedger()
-  private readonly pageIndexByImage = new Map<HTMLImageElement, number>()
-  private properNameGlossary: NonNullable<BrowserJobRequest['properNameGlossary']> = []
+  private readonly rendered = new Map<HTMLElement, RenderedImage>()
+  private readonly badges = new Map<HTMLElement, ImageStatusBadge>()
+  private readonly queueIds = new Map<HTMLElement, string>()
+  private readonly processed = new Set<HTMLElement>()
+  private readonly runState = new ChapterRunState<HTMLElement>()
+  private readonly failures = new Map<HTMLElement, ImageFailureDiagnostic>()
+  // A reader may insert or reorder DOM nodes while lazy loading.  DOM indexes
+  // are therefore observations, not page identities.  Assign one canonical
+  // index to each admitted surface for the lifetime of this chapter run and
+  // use it for every queue, recovery, daemon, and context-barrier message.
+  private readonly canonicalPageIndexByElement = new Map<HTMLElement, number>()
+  private readonly submittedPageIndexes = new Set<number>()
+  private readonly submittingPageIndexes = new Set<number>()
+  private nextCanonicalPageIndex = 0
   private readonly navigationTimer: number
   private hud: PageHud | undefined
   private scope: TranslationScope | undefined
   private hskLevel: 1 | 2 | 3 | 4 | 5 | 6 = 5
   private learningMode: LearningMode = 'natural'
   private nameTranslation: NameTranslation = 'keep-original'
+  // The daemon uses this immutable order barrier to admit concurrent page
+  // analysis without allowing a later page to translate before an earlier
+  // admitted page has contributed terminal context.
+  private chapterPageOrder: number[] = []
   private readonly activeJobIds = new Set<string>()
   private prefetchTargetId: string | undefined
   private prefetchEnabled = false
@@ -334,6 +428,7 @@ export class PageTranslationController {
           this.queueIds.delete(image)
           this.failures.delete(image)
           this.runState.complete(image)
+          this.hud?.completeImage(item.id)
           this.scheduleFinish()
         },
         onFailure: (item, error) => {
@@ -370,6 +465,7 @@ export class PageTranslationController {
             retryable: error instanceof RuntimeMessageError ? error.retryable : false,
           })
           this.badge(image).failure(errorMessage(error))
+          this.hud?.completeImage(item.id)
           this.scheduleFinish()
         },
         onIdle: () => this.scheduleFinish(),
@@ -380,11 +476,117 @@ export class PageTranslationController {
       },
     )
     this.discovery = new ImageDiscovery((event) => this.onDiscovery(event))
+    this.surfaceDiscovery = new LiveSurfaceDiscovery((event) => this.onDiscovery(event))
     this.discovery.start()
+    this.surfaceDiscovery.start()
     this.navigationTimer = window.setInterval(
       () => this.checkNavigation(),
       NAVIGATION_CHECK_INTERVAL_MS,
     )
+  }
+
+  private currentCandidates(): DiscoveredSurface[] {
+    const images = this.discovery.current()
+    const imageElements = new Set<HTMLElement>(images.map((candidate) => candidate.element))
+    const otherSurfaces = visibleSurfaceFirst(this.surfaceDiscovery.current()).filter(
+      (candidate) => !imageElements.has(candidate.element),
+    )
+    return [...images, ...otherSurfaces].sort(
+      (left, right) =>
+        Number(right.visible) - Number(left.visible) ||
+        this.orderingIndex(left) - this.orderingIndex(right),
+    )
+  }
+
+  /** Return the frozen chapter index when admitted, otherwise the discovery hint. */
+  private orderingIndex(candidate: DiscoveredSurface): number {
+    return this.canonicalPageIndexByElement.get(candidate.element) ?? candidate.domIndex
+  }
+
+  /**
+   * Admit a surface to the chapter's immutable document stream.  New pages
+   * discovered after startup append to that stream; a DOM reorder cannot
+   * rewrite the index of work already submitted or waiting in the queue.
+   */
+  private canonicalPageIndex(candidate: DiscoveredSurface): number {
+    const existing = this.canonicalPageIndexByElement.get(candidate.element)
+    if (existing !== undefined) {
+      this.includeChapterPage(existing)
+      return existing
+    }
+    const pageIndex = this.nextCanonicalPageIndex++
+    this.canonicalPageIndexByElement.set(candidate.element, pageIndex)
+    this.includeChapterPage(pageIndex)
+    return pageIndex
+  }
+
+  private includeChapterPage(pageIndex: number): void {
+    if (this.chapterPageOrder.includes(pageIndex)) return
+    this.chapterPageOrder = [...this.chapterPageOrder, pageIndex].sort(
+      (left, right) => left - right,
+    )
+  }
+
+  private removeUnsubmittedPage(element: HTMLElement): void {
+    const pageIndex = this.canonicalPageIndexByElement.get(element)
+    if (pageIndex === undefined) return
+    if (
+      this.submittedPageIndexes.has(pageIndex) ||
+      this.submittingPageIndexes.has(pageIndex)
+    ) {
+      return
+    }
+    this.chapterPageOrder = this.chapterPageOrder.filter((index) => index !== pageIndex)
+  }
+
+  private establishCanonicalPageOrder(candidates: readonly DiscoveredSurface[]): void {
+    const admitted = new Set<HTMLElement>(candidates.map((candidate) => candidate.element))
+    const lazyImages = this.discovery
+      .deferred()
+      .filter(
+        (image) =>
+          !admitted.has(image) &&
+          (this.scope === 'all' ||
+            isRectVisible(
+              image.getBoundingClientRect(),
+              image.ownerDocument.defaultView ?? window,
+            )),
+      )
+    const surfaces = [...candidates, ...lazyImages]
+      .sort((left, right) =>
+        compareDocumentElements(
+          'element' in left ? left.element : left,
+          'element' in right ? right.element : right,
+        ),
+      )
+    for (const surface of surfaces) {
+      if ('sourceUrl' in surface) this.canonicalPageIndex(surface)
+      else {
+        const element = surface as HTMLImageElement
+        if (!this.canonicalPageIndexByElement.has(element)) {
+          const pageIndex = this.nextCanonicalPageIndex++
+          this.canonicalPageIndexByElement.set(element, pageIndex)
+          this.includeChapterPage(pageIndex)
+        }
+      }
+    }
+  }
+
+  private completionKey(): string {
+    const imageCandidates = this.discovery.current()
+    const imageElements = new Set<HTMLElement>(
+      imageCandidates.map((candidate) => candidate.element),
+    )
+    const surfaceKey = this.surfaceDiscovery
+      .current()
+      .filter((candidate) => !imageElements.has(candidate.element))
+      .map(
+        (candidate) =>
+          `${candidate.id}:${candidate.sourceUrl}:${candidate.sourceWidth}x${candidate.sourceHeight}`,
+      )
+      .sort()
+      .join('|')
+    return [this.discovery.completionKey(), surfaceKey].filter(Boolean).join('|')
   }
 
   async start(
@@ -392,7 +594,6 @@ export class PageTranslationController {
     hskLevel: 1 | 2 | 3 | 4 | 5 | 6,
     learningMode: LearningMode,
     nameTranslation: NameTranslation,
-    properNameGlossary: BrowserJobRequest['properNameGlossary'] = [],
   ): Promise<PageState> {
     const replacingRun = this.scope !== undefined
     this.generation += 1
@@ -401,30 +602,47 @@ export class PageTranslationController {
     this.hskLevel = hskLevel
     this.learningMode = learningMode
     this.nameTranslation = nameTranslation
-    this.properNameGlossary = properNameGlossary.slice()
     this.cancelledState = false
     this.completionPublished = false
     this.runState.reset()
     this.failures.clear()
     this.cancelCompletion()
-    this.context.clear()
     this.hud?.destroy()
     this.hud = new PageHud(() => this.cancel())
 
     const generation = this.generation
     if (replacingRun) {
+      const previousSession = this.sessionId
       await sendBackgroundMessage({
         type: 'jobs:cancel-page',
-        pageSessionId: this.sessionId,
+        pageSessionId: previousSession,
       })
       if (generation !== this.generation || this.navigationUrl !== location.href) {
         throw abortError()
       }
+      // A chapter session is an immutable context boundary. Reusing the
+      // same id after cancelling a run would let the daemon's ordered
+      // dialogue graph and entity memory leak into the new translation.
+      // Start a fresh id for every explicit replacement run; recovery still
+      // uses the source hash/result cache rather than the session id.
+      this.sessionId = createPageSessionId(false)
     }
 
-    const candidates = visibleFirst(this.discovery.current()).filter(
+    await sendBackgroundMessage({
+      type: 'chapterStart',
+      pageSessionId: this.sessionId,
+      pageUrl: location.href,
+      scope,
+      hskLevel,
+      learningMode,
+      nameTranslation,
+    })
+
+    const candidates = this.currentCandidates().filter(
       (candidate) => scope === 'all' || candidate.visible,
     )
+    this.establishCanonicalPageOrder(candidates)
+    const unsupportedSurfaceCount = this.surfaceDiscovery.unsupported().length
     if (candidates.length === 0) {
       const deferred = scope === 'all' ? this.discovery.deferred().length : 0
       if (deferred > 0) {
@@ -436,8 +654,21 @@ export class PageTranslationController {
         this.scheduleFinish()
         return this.snapshot()
       }
-      this.hud.fail('No manga images were found on this page.', 0, 0)
+      this.hud.fail(
+        unsupportedSurfaceCount > 0
+          ? 'This reader hides its artwork from the extension.'
+          : 'No manga images were found on this page.',
+        0,
+        0,
+      )
       return this.snapshot()
+    }
+    if (unsupportedSurfaceCount > 0) {
+      this.hud.update({
+        current: 0,
+        total: candidates.length,
+        message: 'Some reader content cannot be accessed safely',
+      })
     }
 
     const recoveryCandidates = await Promise.all(
@@ -461,19 +692,34 @@ export class PageTranslationController {
         job,
       ]),
     )
+    // A complete chapter is a document-order language stream. Viewport-only
+    // requests may stay visible-first, but letting a later visible page start
+    // ahead of its predecessors makes context depend on scroll timing.
+    this.queue.setOrdering(scope === 'all' ? 'document' : 'visible-first')
     this.queue.beginInteractiveStartup()
-    for (const candidate of candidates) {
-      this.enqueue(
-        candidate,
-        recoveredByIdentity.get(
-          recoveryKey(
-            candidate.sourceUrl,
-            candidate.element.naturalWidth,
-            candidate.element.naturalHeight,
-            candidate.domIndex,
+    const submissionCandidates =
+      scope === 'all'
+        ? [...candidates].sort(
+            (left, right) => this.orderingIndex(left) - this.orderingIndex(right),
+          )
+        : candidates
+    this.queue.beginBatch()
+    try {
+      for (const candidate of submissionCandidates) {
+        this.enqueue(
+          candidate,
+          recoveredByIdentity.get(
+            recoveryKey(
+              candidate.sourceUrl,
+              candidate.sourceWidth,
+              candidate.sourceHeight,
+              this.canonicalPageIndex(candidate),
+            ),
           ),
-        ),
-      )
+        )
+      }
+    } finally {
+      this.queue.endBatch()
     }
     this.hud.update({
       current: 0,
@@ -488,6 +734,11 @@ export class PageTranslationController {
     this.generation += 1
     this.restoreAll()
     this.cancelledState = true
+    void sendBackgroundMessage({
+      type: 'chapterCancel',
+      pageSessionId: this.sessionId,
+      pageUrl: location.href,
+    }).catch(() => undefined)
     this.hud?.cancelled(run.completed, run.total)
     return this.snapshot()
   }
@@ -504,7 +755,7 @@ export class PageTranslationController {
   }
 
   diagnostics(): {
-    run: ReturnType<ChapterRunState<HTMLImageElement>['snapshot']>
+    run: ReturnType<ChapterRunState<HTMLElement>['snapshot']>
     failures: ImageFailureDiagnostic[]
   } {
     return {
@@ -518,6 +769,7 @@ export class PageTranslationController {
     this.destroyed = true
     this.generation += 1
     this.discovery.stop()
+    this.surfaceDiscovery.stop()
     window.clearInterval(this.navigationTimer)
     this.restoreAll()
     this.hud?.destroy()
@@ -525,24 +777,24 @@ export class PageTranslationController {
   }
 
   private async buildRecoveryCandidate(
-    candidate: DiscoveredImage,
+    candidate: DiscoveredSurface,
     generation: number,
   ): Promise<RecoveryCandidate> {
     const sourceUrl = normalizedSourceUrl(candidate.sourceUrl)
     const identity = {
       sourceUrl,
-      naturalWidth: candidate.element.naturalWidth,
-      naturalHeight: candidate.element.naturalHeight,
+      naturalWidth: candidate.sourceWidth,
+      naturalHeight: candidate.sourceHeight,
     }
     const protocol = new URL(sourceUrl).protocol
-    if (protocol === 'http:' || protocol === 'https:') return identity
+    if ((protocol === 'http:' || protocol === 'https:') && !candidate.capture) return identity
     const inline = await tryContentBytes(candidate)
-    if (generation !== this.generation || currentSourceUrl(candidate.element) !== sourceUrl) {
+    if (generation !== this.generation || currentSourceUrl(candidate) !== sourceUrl) {
       throw abortError()
     }
     if (!inline) return identity
     const sourceSha256 = await sha256Hex(inline.bytes)
-    if (generation !== this.generation || currentSourceUrl(candidate.element) !== sourceUrl) {
+    if (generation !== this.generation || currentSourceUrl(candidate) !== sourceUrl) {
       throw abortError()
     }
     return { ...identity, sourceSha256 }
@@ -570,8 +822,11 @@ export class PageTranslationController {
     this.runState.reset()
     this.failures.clear()
     this.completionPublished = false
-    this.context.clear()
-    this.pageIndexByImage.clear()
+    this.canonicalPageIndexByElement.clear()
+    this.submittedPageIndexes.clear()
+    this.submittingPageIndexes.clear()
+    this.nextCanonicalPageIndex = 0
+    this.chapterPageOrder = []
   }
 
   private clearPrefetch(): void {
@@ -592,7 +847,9 @@ export class PageTranslationController {
     if (candidate) {
       try {
         const protocol = new URL(candidate.sourceUrl, location.href).protocol
-        supported = protocol === 'http:' || protocol === 'https:'
+        supported =
+          candidate.kind === 'image' &&
+          (protocol === 'http:' || protocol === 'https:')
       } catch {
         supported = false
       }
@@ -611,15 +868,15 @@ export class PageTranslationController {
     void sendBackgroundMessage({
       type: 'image:prefetch',
       pageSessionId: this.sessionId,
-      pageIndex: candidate.domIndex,
+      pageIndex: this.canonicalPageIndex(candidate),
       imageUrl: candidate.sourceUrl,
       pageUrl: this.navigationUrl,
-      naturalWidth: candidate.element.naturalWidth,
-      naturalHeight: candidate.element.naturalHeight,
+      naturalWidth: candidate.sourceWidth,
+      naturalHeight: candidate.sourceHeight,
     }).catch(() => undefined)
   }
 
-  private enqueue(candidate: DiscoveredImage, recovered?: RecoveredJob): void {
+  private enqueue(candidate: DiscoveredSurface, recovered?: RecoveredJob): void {
     if (this.completionPublished) return
     if (
       this.processed.has(candidate.element) ||
@@ -632,19 +889,19 @@ export class PageTranslationController {
     if (
       recovered &&
       (normalizedSourceUrl(recovered.sourceUrl) !== normalizedSourceUrl(candidate.sourceUrl) ||
-        recovered.sourceWidth !== candidate.element.naturalWidth ||
-        recovered.sourceHeight !== candidate.element.naturalHeight)
+        recovered.sourceWidth !== candidate.sourceWidth ||
+        recovered.sourceHeight !== candidate.sourceHeight)
     ) {
       return
     }
+    const pageIndex = this.canonicalPageIndex(candidate)
     const id = candidateKey(candidate)
     if (!this.runState.register(candidate.element)) return
     this.cancelCompletion()
     this.queueIds.set(candidate.element, id)
-    this.pageIndexByImage.set(candidate.element, candidate.domIndex)
-    this.badge(candidate.element).update(
-      recovered ? 'Picking up where you left off' : 'Waiting to start',
-    )
+    // The chapter HUD owns queue progress. An image notice is mounted when
+    // processing creates its document-anchored wrapper, so it never has to
+    // chase the image during normal scrolling.
     const accepted = this.queue.enqueue({
       id,
       value: {
@@ -652,27 +909,30 @@ export class PageTranslationController {
         ...(recovered ? { recovered } : {}),
       },
       visible: candidate.visible,
-      order: candidate.domIndex,
-      cost: candidate.element.naturalWidth * candidate.element.naturalHeight,
+      order: pageIndex,
+      cost: candidate.sourceWidth * candidate.sourceHeight,
     })
     if (!accepted) {
       this.queueIds.delete(candidate.element)
-      this.pageIndexByImage.delete(candidate.element)
       this.runState.remove(candidate.element)
     } else {
       this.refreshPrefetch()
     }
   }
 
-  private badge(image: HTMLImageElement): ImageStatusBadge {
+  private badge(image: HTMLElement, anchor?: HTMLElement): ImageStatusBadge {
     const existing = this.badges.get(image)
-    if (existing) return existing
+    if (existing) {
+      if (anchor) existing.attach(anchor)
+      return existing
+    }
     const badge = new ImageStatusBadge(image, () => this.retry(image))
+    if (anchor) badge.attach(anchor)
     this.badges.set(image, badge)
     return badge
   }
 
-  private retry(image: HTMLImageElement): void {
+  private retry(image: HTMLElement): void {
     if (!this.runState.manualRetryQueued(image)) return
     this.failures.delete(image)
     if (this.requeueFailedImage(image, 'Trying again')) {
@@ -685,8 +945,8 @@ export class PageTranslationController {
     this.badge(image).failure('This image couldn’t be translated. Try again.')
   }
 
-  private requeueFailedImage(image: HTMLImageElement, status: string): boolean {
-    const candidate = this.discovery.current().find((item) => item.element === image)
+  private requeueFailedImage(image: HTMLElement, status: string): boolean {
+    const candidate = this.currentCandidates().find((item) => item.element === image)
     const failedId = this.queueIds.get(image)
     this.processed.delete(image)
     if (!candidate || !failedId) return false
@@ -694,8 +954,8 @@ export class PageTranslationController {
       id: failedId,
       value: { candidate },
       visible: candidate.visible,
-      order: candidate.domIndex,
-      cost: candidate.element.naturalWidth * candidate.element.naturalHeight,
+      order: this.canonicalPageIndex(candidate),
+      cost: candidate.sourceWidth * candidate.sourceHeight,
     })
     if (!queued) return false
     this.badge(image).update(status)
@@ -703,19 +963,19 @@ export class PageTranslationController {
     return true
   }
 
-  private sourceSnapshot(candidate: DiscoveredImage): SourceSnapshot {
+  private sourceSnapshot(candidate: DiscoveredSurface): SourceSnapshot {
     return {
       generation: this.generation,
       pageSessionId: this.sessionId,
       navigationUrl: this.navigationUrl,
       sourceUrl: normalizedSourceUrl(candidate.sourceUrl),
-      naturalWidth: candidate.element.naturalWidth,
-      naturalHeight: candidate.element.naturalHeight,
+      naturalWidth: candidate.sourceWidth,
+      naturalHeight: candidate.sourceHeight,
     }
   }
 
   private assertCurrent(
-    candidate: DiscoveredImage,
+    candidate: DiscoveredSurface,
     snapshot: SourceSnapshot,
     signal: AbortSignal,
   ): void {
@@ -730,9 +990,9 @@ export class PageTranslationController {
       snapshot.navigationUrl !== this.navigationUrl ||
       !candidate.owner.isConnected ||
       !candidate.element.isConnected ||
-      currentSourceUrl(candidate.element) !== snapshot.sourceUrl ||
-      candidate.element.naturalWidth !== snapshot.naturalWidth ||
-      candidate.element.naturalHeight !== snapshot.naturalHeight
+      currentSourceUrl(candidate) !== snapshot.sourceUrl ||
+      candidate.sourceWidth !== snapshot.naturalWidth ||
+      candidate.sourceHeight !== snapshot.naturalHeight
     ) {
       throw abortError()
     }
@@ -740,6 +1000,8 @@ export class PageTranslationController {
 
   private async process(item: QueueItem<TranslationCandidate>, signal: AbortSignal): Promise<void> {
     const { candidate, recovered } = item.value
+    const pageIndex = this.canonicalPageIndex(candidate)
+    if (recovered?.jobId) this.submittedPageIndexes.add(pageIndex)
     // Recovery is a one-shot attempt. If viewport preemption requeues this
     // item, its recovered daemon job has been cancelled and the retry must
     // submit a fresh job rather than polling a terminal identity.
@@ -769,30 +1031,33 @@ export class PageTranslationController {
         badge.update('Opening the image')
         const inline = consumesPrefetch ? undefined : await tryContentBytes(candidate)
         this.assertCurrent(candidate, snapshot, signal)
-        const precedingContext = this.context.before(candidate.domIndex)
-        const submitted = await sendBackgroundMessage({
-          type: 'job:submit',
-          pageSessionId: this.sessionId,
-          pageIndex: candidate.domIndex,
-          imageUrl: candidate.sourceUrl,
-          pageUrl: location.href,
-          naturalWidth: snapshot.naturalWidth,
-          naturalHeight: snapshot.naturalHeight,
-          ...(inline?.mimeType ? { sourceMimeType: inline.mimeType } : {}),
-          ...(inline ? { sourceBytes: inline.bytes } : {}),
-          hskLevel: this.hskLevel,
-          learningMode: this.learningMode,
-          nameTranslation: this.nameTranslation,
-          visibleRects: visibleImageRects(
-            candidate.element,
-            snapshot.naturalWidth,
-            snapshot.naturalHeight,
-          ),
-          ...(precedingContext.length ? { precedingContext } : {}),
-          ...(this.properNameGlossary.length
-            ? { properNameGlossary: this.properNameGlossary }
-            : {}),
-        })
+        this.submittingPageIndexes.add(pageIndex)
+        let submitted: Awaited<ReturnType<typeof sendBackgroundMessage<'job:submit'>>>
+        try {
+          submitted = await sendBackgroundMessage({
+            type: 'job:submit',
+            pageSessionId: this.sessionId,
+            pageIndex,
+            chapterPageOrder: [...this.chapterPageOrder],
+            surfaceKind: candidate.kind,
+            imageUrl: candidate.sourceUrl,
+            pageUrl: location.href,
+            naturalWidth: snapshot.naturalWidth,
+            naturalHeight: snapshot.naturalHeight,
+            ...(inline?.mimeType ? { sourceMimeType: inline.mimeType } : {}),
+            ...(inline ? { sourceBytes: inline.bytes } : {}),
+            hskLevel: this.hskLevel,
+            learningMode: this.learningMode,
+            nameTranslation: this.nameTranslation,
+            visibleRects: visibleImageRects(
+              candidate.element,
+              snapshot.naturalWidth,
+              snapshot.naturalHeight,
+            ),
+          })
+        } finally {
+          this.submittingPageIndexes.delete(pageIndex)
+        }
         // Retain the identity before checking the live DOM so a navigation or
         // source replacement that happened during submission can cancel the
         // newly-created companion job instead of leaking it.
@@ -802,6 +1067,13 @@ export class PageTranslationController {
         sourceWidth = submitted.sourceWidth
         sourceHeight = submitted.sourceHeight
         after = submitted.acknowledgedSequence
+        this.submittedPageIndexes.add(pageIndex)
+        void sendBackgroundMessage({
+          type: 'chapterPage',
+          pageSessionId: this.sessionId,
+          pageUrl: location.href,
+          pageIndex,
+        }).catch(() => undefined)
         this.assertCurrent(candidate, snapshot, signal)
       }
 
@@ -847,7 +1119,23 @@ export class PageTranslationController {
         },
       )
       this.rendered.set(candidate.element, rendered)
-      viewportReporter = new ViewportReporter(jobId, candidate.element, sourceWidth, sourceHeight)
+      badge.attach(rendered.wrapper)
+      viewportReporter = new ViewportReporter(
+        jobId,
+        candidate.element,
+        sourceWidth,
+        sourceHeight,
+        () => {
+          void sendBackgroundMessage({
+            type: 'chapterViewport',
+            pageSessionId: this.sessionId,
+            pageUrl: location.href,
+            pageIndex,
+            visibleRects: visibleImageRects(candidate.element, sourceWidth, sourceHeight),
+            active: true,
+          }).catch(() => undefined)
+        },
+      )
 
       let complete = false
       while (!complete) {
@@ -877,6 +1165,7 @@ export class PageTranslationController {
                 this.hud?.update({
                   current: run.resolved,
                   total: run.total,
+                  key: item.id,
                   status: update,
                 })
               }
@@ -908,8 +1197,16 @@ export class PageTranslationController {
               break
             }
             case 'artworkPreserved':
-              // The source pixels remain untouched by design. This update is
-              // retained for diagnostics and regression evidence.
+              // The source pixels remain untouched by design, but the OCR
+              // span remains a hover target for a teaching explanation.
+              rendered.installSourcePreservingRegion(update.region)
+              break
+            case 'unreadable':
+              // No patch is installed for low-confidence regions. Keep the
+              // original pixels and expose the source span as a stable
+              // hover/tap target instead of painting a guessed translation.
+              rendered.installSourcePreservingRegion(update.region)
+              badge.failure('Some text could not be read. Hover it for help.')
               break
             case 'complete':
             case 'failed':
@@ -936,7 +1233,6 @@ export class PageTranslationController {
       viewportReporter = undefined
       this.assertCurrent(candidate, snapshot, signal)
       this.processed.add(candidate.element)
-      this.context.commitPage(candidate.domIndex, rendered.regionsInReadingOrder())
       badge.destroy()
       this.badges.delete(candidate.element)
     } catch (error) {
@@ -946,10 +1242,20 @@ export class PageTranslationController {
         await sendBackgroundMessage({ type: 'job:cancel', jobId }).catch(() => undefined)
       }
       if (rendered && !this.processed.has(candidate.element)) {
+        // Move a failure notice out before the renderer removes its anchored
+        // wrapper. The fallback is positioned once at document coordinates;
+        // the next attempt attaches it to the new wrapper.
+        badge.detach()
         rendered.destroy()
         if (this.rendered.get(candidate.element) === rendered) {
           this.rendered.delete(candidate.element)
         }
+      }
+      if (
+        !this.submittedPageIndexes.has(pageIndex) &&
+        !this.submittingPageIndexes.has(pageIndex)
+      ) {
+        this.chapterPageOrder = this.chapterPageOrder.filter((index) => index !== pageIndex)
       }
       throw error
     } finally {
@@ -959,11 +1265,9 @@ export class PageTranslationController {
     }
   }
 
-  private removeTracked(image: HTMLImageElement): void {
+  private removeTracked(image: HTMLElement): void {
     let tracked = false
-    const pageIndex = this.pageIndexByImage.get(image)
-    if (pageIndex !== undefined) this.context.removePage(pageIndex)
-    this.pageIndexByImage.delete(image)
+    if (this.runState.phase(image) !== 'running') this.removeUnsubmittedPage(image)
     const id = this.queueIds.get(image)
     if (id) {
       this.queue.remove(id)
@@ -984,14 +1288,18 @@ export class PageTranslationController {
     if (tracked) this.scheduleFinish()
   }
 
-  private onDiscovery(event: DiscoveryEvent): void {
+  private onDiscovery(event: DiscoveryEvent | SurfaceDiscoveryEvent): void {
     this.checkNavigation()
     const image = event.candidate.element
     if (this.completionPublished && event.type === 'added') return
     if (event.type === 'visibility') {
       const id = this.queueIds.get(image)
       if (id) {
-        this.queue.reprioritize(id, event.candidate.visible, event.candidate.domIndex)
+        this.queue.reprioritize(
+          id,
+          event.candidate.visible,
+          this.orderingIndex(event.candidate),
+        )
       }
       if (
         !this.cancelledState &&
@@ -1014,7 +1322,11 @@ export class PageTranslationController {
       if (event.previousSourceUrl === event.candidate.sourceUrl) {
         const id = this.queueIds.get(image)
         if (id) {
-          this.queue.reprioritize(id, event.candidate.visible, event.candidate.domIndex)
+          this.queue.reprioritize(
+            id,
+            event.candidate.visible,
+            this.orderingIndex(event.candidate),
+          )
         }
         this.refreshPrefetch()
         return
@@ -1081,7 +1393,7 @@ export class PageTranslationController {
       return
     }
     const generation = this.generation
-    const completionKey = this.discovery.completionKey()
+    const completionKey = this.completionKey()
     this.completionTimer = window.setTimeout(() => {
       this.completionTimer = undefined
       if (
@@ -1093,7 +1405,7 @@ export class PageTranslationController {
       ) {
         return
       }
-      if (completionKey !== this.discovery.completionKey()) {
+      if (completionKey !== this.completionKey()) {
         this.scheduleFinish()
         return
       }
@@ -1132,9 +1444,19 @@ export class PageTranslationController {
         run.completed,
         run.total,
       )
+      void sendBackgroundMessage({
+        type: 'chapterSeal',
+        pageSessionId: this.sessionId,
+        pageUrl: location.href,
+      }).catch(() => undefined)
     } else {
       this.completionPublished = true
       this.hud?.complete(run.completed, run.total)
+      void sendBackgroundMessage({
+        type: 'chapterSeal',
+        pageSessionId: this.sessionId,
+        pageUrl: location.href,
+      }).catch(() => undefined)
     }
   }
 }
@@ -1177,7 +1499,6 @@ export function bootContentRuntime(): void {
           message.hskLevel,
           message.learningMode,
           message.nameTranslation,
-          message.properNameGlossary,
         )
       case 'content:cancel':
         return controller.cancel()

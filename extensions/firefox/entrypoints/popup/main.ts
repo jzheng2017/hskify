@@ -85,9 +85,7 @@ function renderState(state: PopupState): void {
   setBusy(false)
   statusTitle.textContent =
     state.state === 'running'
-      ? state.total > 0
-        ? `Image ${Math.min(state.current + 1, state.total)} of ${state.total}`
-        : 'Preparing page'
+      ? 'Translating chapter'
       : state.state === 'complete'
         ? 'Translation complete'
         : state.state === 'failed'
@@ -97,7 +95,7 @@ function renderState(state: PopupState): void {
             : 'Ready'
   statusDetail.textContent =
     state.state === 'running'
-      ? 'Hskify is translating this chapter.'
+      ? state.message || 'Reading the page'
       : state.state === 'complete'
         ? 'The translated text is ready.'
         : state.state === 'failed'

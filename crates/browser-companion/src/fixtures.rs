@@ -1,4 +1,4 @@
-//! Cross-language fixtures for the unversioned progressive browser contract.
+//! Cross-language fixtures for the unversioned terminal browser contract.
 
 use std::sync::OnceLock;
 

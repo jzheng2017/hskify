@@ -1,6 +1,6 @@
 [project]
 site_name = "Hskify"
-site_description = "Direct progressive HSK manga translation for Firefox."
+site_description = "Direct chapter-aware HSK manga translation for Firefox."
 site_author = "Hskify contributors"
 docs_dir = "."
 site_dir = "site"
@@ -8,7 +8,7 @@ nav = [
   {"Documentation" = "README.md"},
   {"Architecture" = "architecture.md"},
   {"Browser contract" = "browser-contract.md"},
-  {"Chapter 5 benchmark" = "chapter-5-benchmark.md"},
+  {"Real-reader v2 corpus" = "real-reader-v2.md"},
   {"Model record" = "model-benchmark.md"},
   {"Firefox checklist" = "firefox-manual-test-checklist.md"},
   {"Maintainer guide" = "maintainer-guide.md"},

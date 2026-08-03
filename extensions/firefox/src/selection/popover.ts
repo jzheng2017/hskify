@@ -31,7 +31,13 @@ const HOVER_DISMISS_DELAY_MS = 140
 
 function nodeElement(node: Node | null): Element | null {
   if (!node) return null
-  return node instanceof Element ? node : node.parentElement
+  return node.nodeType === 1 ? (node as Element) : node.parentElement
+}
+
+function eventNode(value: EventTarget | null): Node | null {
+  return value && typeof value === 'object' && 'nodeType' in value
+    ? (value as Node)
+    : null
 }
 
 function textNodes(element: HTMLElement): Text[] {
@@ -40,7 +46,7 @@ function textNodes(element: HTMLElement): Text[] {
   const showText = documentRef.defaultView?.NodeFilter.SHOW_TEXT ?? 4
   const walker = documentRef.createTreeWalker(element, showText)
   for (let node = walker.nextNode(); node; node = walker.nextNode()) {
-    if (node instanceof Text && node.data.length > 0) nodes.push(node)
+    if (node.nodeType === 3 && (node as Text).data.length > 0) nodes.push(node as Text)
   }
   return nodes
 }
@@ -77,6 +83,29 @@ export function textRange(
   range.setStart(start.node, start.offset)
   range.setEnd(end.node, end.offset)
   return range
+}
+
+/**
+ * Resolves the range returned by a hover lookup without assuming that the
+ * dictionary always returns the single character under the pointer. The
+ * daemon may return the longest phrase beginning at the pointer, or a suffix
+ * when the pointer is inside a longer phrase.
+ */
+export function hoverResultRange(
+  element: HTMLElement,
+  characterOffset: number,
+  selectedText: string,
+): Range | null {
+  const requested = [...selectedText]
+  if (requested.length === 0) return null
+  const direct = textRange(element, characterOffset, requested.length)
+  if (direct && (direct.cloneContents().textContent ?? '') === selectedText) {
+    return direct
+  }
+  // A malformed or stale dictionary response must not move the popover to a
+  // different occurrence of the same word. Keep the explanation anchored at
+  // the hovered character and show only the character that was actually hit.
+  return textRange(element, characterOffset)
 }
 
 export const characterRangeAtPoint: HoverHitTester = (
@@ -233,7 +262,8 @@ export class ExplanationController {
     selection: Selection
     range: Range
   } | null {
-    const selection = window.getSelection()
+    const documentRef = [...this.regions.keys()][0]?.ownerDocument
+    const selection = documentRef?.defaultView?.getSelection() ?? documentRef?.getSelection()
     if (!selection || selection.isCollapsed || selection.rangeCount !== 1) return null
     const range = selection.getRangeAt(0)
     for (const region of this.regions.values()) {
@@ -282,7 +312,7 @@ export class ExplanationController {
   }
 
   private readonly onClick = (event: Event): void => {
-    const target = nodeElement(event.target instanceof Node ? event.target : null)
+    const target = nodeElement(eventNode(event.target))
     if (!target) return
     const clickedRegion = [...this.regions.values()].find((region) =>
       region.element.contains(target),
@@ -294,13 +324,13 @@ export class ExplanationController {
       event.stopPropagation()
       return
     }
-    if (event instanceof MouseEvent && event.button === 0) {
-      this.forwardPrimaryClick?.(event)
+    if (event.type === 'click' && (event as MouseEvent).button === 0) {
+      this.forwardPrimaryClick?.(event as MouseEvent)
     }
   }
 
   private readonly onSelectionComplete = (event: Event): void => {
-    const target = nodeElement(event.target instanceof Node ? event.target : null)
+    const target = nodeElement(eventNode(event.target))
     if (
       !target ||
       ![...this.regions.values()].some((region) => region.element.contains(target))
@@ -313,7 +343,7 @@ export class ExplanationController {
   }
 
   private readonly onKeyUp = (event: Event): void => {
-    const target = nodeElement(event.target instanceof Node ? event.target : null)
+    const target = nodeElement(eventNode(event.target))
     if (
       !target ||
       ![...this.regions.values()].some((region) => region.element.contains(target))
@@ -326,16 +356,18 @@ export class ExplanationController {
   private readonly onRegionKeyDown = (event: KeyboardEvent): void => {
     const target = event.currentTarget
     if (
-      !(target instanceof HTMLElement) ||
+      !target ||
       event.key.toLowerCase() !== 'a' ||
       (!event.ctrlKey && !event.metaKey)
     ) {
       return
     }
     event.preventDefault()
-    const range = document.createRange()
-    range.selectNodeContents(target)
-    const selection = window.getSelection()
+    const elementTarget = target as HTMLElement
+    const documentRef = elementTarget.ownerDocument
+    const range = documentRef.createRange()
+    range.selectNodeContents(elementTarget)
+    const selection = documentRef.defaultView?.getSelection() ?? documentRef.getSelection()
     selection?.removeAllRanges()
     selection?.addRange(range)
     void this.showSelection()
@@ -361,9 +393,7 @@ export class ExplanationController {
   private readonly onPointerOut = (event: Event): void => {
     if (this.activeInteraction !== 'hover' && !this.pendingHoverKey) return
     const related = nodeElement(
-      event instanceof MouseEvent && event.relatedTarget instanceof Node
-        ? event.relatedTarget
-        : null,
+      eventNode((event as PointerEvent).relatedTarget),
     )
     if (related && (this.popover.contains(related) || [...this.regions.keys()].some(
       (element) => element.contains(related),
@@ -374,12 +404,20 @@ export class ExplanationController {
   }
 
   private readonly onPointerMove = (event: Event): void => {
-    if (!(event instanceof MouseEvent) || this.destroyed) return
-    if ('pointerType' in event && event.pointerType !== 'mouse' && event.pointerType !== 'pen') {
+    if (this.destroyed || event.type !== 'pointermove') return
+    const pointerEvent = event as PointerEvent
+    if (
+      pointerEvent.pointerType !== undefined &&
+      pointerEvent.pointerType !== 'mouse' &&
+      pointerEvent.pointerType !== 'pen'
+    ) {
       return
     }
-    if (this.selectedRegion()) return
-    const target = nodeElement(event.target instanceof Node ? event.target : null)
+    // A previous selection can remain in the browser after its popover was
+    // dismissed. It must not disable direct hover lookup; only an actively
+    // displayed selection explanation temporarily owns the pointer.
+    if (this.activeInteraction === 'selection' && this.selectedRegion()) return
+    const target = nodeElement(eventNode(event.target))
     const region = target
       ? [...this.regions.values()].find((candidate) =>
           candidate.element.contains(target),
@@ -387,7 +425,7 @@ export class ExplanationController {
       : undefined
     if (!region) return
     this.cancelHoverDismiss()
-    const hit = this.hitTest(region.element, event.clientX, event.clientY)
+    const hit = this.hitTest(region.element, pointerEvent.clientX, pointerEvent.clientY)
     if (!hit) {
       this.scheduleHoverDismiss()
       return
@@ -466,21 +504,22 @@ export class ExplanationController {
     this.popover.hidden = false
     this.popover.replaceChildren()
     const heading = this.createSpeechHeading(displayText)
-    const loading = document.createElement('span')
+    const documentRef = region.element.ownerDocument
+    const loading = documentRef.createElement('span')
     loading.textContent = 'Looking up…'
     this.popover.append(heading, loading)
     this.positionPopover(region.element, range)
     try {
       const result = await this.lookup(request)
       if (revision !== this.requestRevision || this.destroyed) return
-      if (result.tokens.length === 0) {
+      if (result.tokens.length === 0 && !result.region) {
         this.dismiss()
         return
       }
       this.renderResult(result, result.selectedText)
       const resolvedRange =
         interaction === 'hover' && characterOffset !== undefined
-          ? textRange(region.element, characterOffset, [...result.selectedText].length) ?? range
+          ? hoverResultRange(region.element, characterOffset, result.selectedText) ?? range
           : range
       this.positionPopover(region.element, resolvedRange)
     } catch {
@@ -488,7 +527,7 @@ export class ExplanationController {
       const heading = this.popover.querySelector<HTMLElement>('.hmt-lookup-heading')
       this.popover.replaceChildren()
       if (heading) this.popover.append(heading)
-      const message = document.createElement('span')
+      const message = documentRef.createElement('span')
       message.textContent = 'Dictionary lookup unavailable.'
       this.popover.append(message)
       this.positionPopover(region.element, range)
@@ -496,7 +535,8 @@ export class ExplanationController {
   }
 
   private selectionTouches(element: HTMLElement): boolean {
-    const selection = window.getSelection()
+    const documentRef = element.ownerDocument
+    const selection = documentRef.defaultView?.getSelection() ?? documentRef.getSelection()
     if (!selection || selection.rangeCount === 0) return false
     const anchor = nodeElement(selection.anchorNode)
     const focus = nodeElement(selection.focusNode)
@@ -526,14 +566,17 @@ export class ExplanationController {
     const popoverRect = this.popover.getBoundingClientRect()
     const popoverWidth = popoverRect.width || this.popover.offsetWidth
     const popoverHeight = popoverRect.height || this.popover.offsetHeight
-    const viewportRight = Math.min(hostRect.right, window.innerWidth - edge)
+    const view = region.ownerDocument.defaultView
+    const viewportWidth = view?.innerWidth ?? hostRect.right
+    const viewportHeight = view?.innerHeight ?? hostRect.bottom
+    const viewportRight = Math.min(hostRect.right, viewportWidth - edge)
     const maximumLeft = Math.max(edge, viewportRight - hostRect.left - popoverWidth)
     const left = Math.min(
       maximumLeft,
       Math.max(edge, obstruction.left - hostRect.left),
     )
     const below = obstruction.bottom - hostRect.top + gap
-    const belowSpace = Math.max(0, window.innerHeight - edge - obstruction.bottom - gap)
+    const belowSpace = Math.max(0, viewportHeight - edge - obstruction.bottom - gap)
     const aboveSpace = Math.max(0, obstruction.top - edge - gap)
     const placeBelow = popoverHeight === 0 || belowSpace >= popoverHeight || belowSpace >= aboveSpace
     const availableHeight = Math.max(1, placeBelow ? belowSpace : aboveSpace)
@@ -560,11 +603,12 @@ export class ExplanationController {
   }
 
   private createSpeechHeading(spokenText: string): HTMLElement {
-    const heading = document.createElement('div')
+    const documentRef = this.popover.ownerDocument
+    const heading = documentRef.createElement('div')
     heading.className = 'hmt-lookup-heading'
-    const selectedText = document.createElement('strong')
+    const selectedText = documentRef.createElement('strong')
     selectedText.textContent = spokenText
-    const speak = document.createElement('button')
+    const speak = documentRef.createElement('button')
     speak.type = 'button'
     speak.className = 'hmt-speak'
     const available = this.speaker.isAvailable()
@@ -641,29 +685,33 @@ export class ExplanationController {
     const heading = this.createSpeechHeading(selectedText)
     this.popover.replaceChildren()
     this.popover.append(heading)
+    const documentRef = this.popover.ownerDocument
     for (const token of result.tokens) {
-      const entry = document.createElement('div')
+      const entry = documentRef.createElement('div')
       entry.className = 'hmt-lookup-entry'
-      const word = document.createElement('b')
+      const word = documentRef.createElement('b')
       word.textContent = token.simplified
-      const detail = document.createElement('span')
+      const detail = documentRef.createElement('span')
       const hsk = token.properName
         ? 'Proper name · outside HSK list'
         : token.hskLevel
           ? `HSK ${token.hskLevel}`
           : 'Outside HSK list'
       detail.textContent = `${token.pinyin} · ${hsk}`
-      const definitions = document.createElement('span')
+      const definitions = documentRef.createElement('span')
       definitions.textContent = token.definitions.join('; ')
       entry.append(word, detail, definitions)
       this.popover.append(entry)
     }
     if (result.region) {
-      const context = document.createElement('div')
+      const context = documentRef.createElement('div')
       context.className = 'hmt-lookup-context'
-      const base = document.createElement('span')
-      base.textContent = result.region.baseChinese
-      const source = document.createElement('span')
+      const base = documentRef.createElement('span')
+      base.textContent =
+        result.tokens.length === 0
+          ? 'Original text kept; no reliable translation was available.'
+          : result.region.baseChinese
+      const source = documentRef.createElement('span')
       source.textContent = result.region.sourceEnglish
       context.append(base, source)
       this.popover.append(context)

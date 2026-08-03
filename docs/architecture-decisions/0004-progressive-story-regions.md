@@ -49,6 +49,6 @@ The browser path processes and publishes independent regions:
 
 The code and contract tests establish the structural invariants. Chapter-wide
 latency, memory, VRAM, recall, OCR, patch quality, and installed-Firefox
-evidence are pending under the sole canonical
-[Chapter 5 method](../chapter-5-benchmark.md). Its 36-image visual variety is a
-regression corpus, not permission for chapter-specific rules.
+evidence are pending under the
+[real-reader v2 method](../real-reader-v2.md). The corpus is a regression
+sample, not permission for chapter-specific rules.

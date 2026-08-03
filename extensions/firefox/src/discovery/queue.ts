@@ -19,6 +19,8 @@ export type QueueCapacity = {
   maximumActiveCost?: number
 }
 
+export type QueueOrdering = 'visible-first' | 'document'
+
 export class VisibleFirstQueue<T> {
   private pending: QueueItem<T>[] = []
   private pendingIds = new Set<string>()
@@ -26,6 +28,8 @@ export class VisibleFirstQueue<T> {
   private active = new Map<string, { item: QueueItem<T>; controller: AbortController }>()
   private stopped = false
   private interactiveStartup = false
+  private batchDepth = 0
+  private ordering: QueueOrdering = 'visible-first'
   private readonly maximumConcurrent: number
   private readonly maximumActiveCost: number
 
@@ -54,8 +58,37 @@ export class VisibleFirstQueue<T> {
     this.pendingIds.add(item.id)
     this.sort()
     this.preemptOffscreenForVisible()
-    void this.drain()
+    if (this.batchDepth === 0) void this.drain()
     return true
+  }
+
+  /**
+   * Atomically admit a discovered batch. Readers often discover the complete
+   * initial chapter synchronously; draining after the first item would start
+   * a later visible page before the lower document-order items are even in the
+   * queue. The batch boundary makes canonical ordering observable to the
+   * scheduler instead of depending on callback timing.
+   */
+  enqueueBatch(items: readonly QueueItem<T>[]): number {
+    this.batchDepth += 1
+    let accepted = 0
+    try {
+      for (const item of items) if (this.enqueue(item)) accepted += 1
+    } finally {
+      this.batchDepth -= 1
+      if (this.batchDepth === 0) void this.drain()
+    }
+    return accepted
+  }
+
+  beginBatch(): void {
+    this.batchDepth += 1
+  }
+
+  endBatch(): void {
+    if (this.batchDepth === 0) return
+    this.batchDepth -= 1
+    if (this.batchDepth === 0) void this.drain()
   }
 
   retry(item: QueueItem<T>): boolean {
@@ -81,6 +114,22 @@ export class VisibleFirstQueue<T> {
     if (!this.interactiveStartup) return
     this.interactiveStartup = false
     this.drain()
+  }
+
+  /**
+   * Select the ordering policy for the current chapter run.
+   *
+   * A visible-first queue is useful for a viewport-only request.  A complete
+   * chapter must instead submit pages in document order: the daemon owns one
+   * ordered language stream and later pages must not consume context before
+   * their predecessors have been admitted.  This is a policy boundary, not a
+   * priority hint, so preemption is disabled for document-order runs.
+   */
+  setOrdering(ordering: QueueOrdering): void {
+    this.ordering = ordering
+    this.sort()
+    this.preemptOffscreenForVisible()
+    if (this.batchDepth === 0) this.drain()
   }
 
   reprioritize(id: string, visible: boolean, order?: number): void {
@@ -128,13 +177,15 @@ export class VisibleFirstQueue<T> {
   }
 
   private sort(): void {
-    this.pending.sort(
-      (left, right) =>
-        Number(right.visible) - Number(left.visible) || left.order - right.order,
+    this.pending.sort((left, right) =>
+      this.ordering === 'document'
+        ? left.order - right.order
+        : Number(right.visible) - Number(left.visible) || left.order - right.order,
     )
   }
 
   private preemptOffscreenForVisible(): void {
+    if (this.ordering === 'document') return
     const visible = this.pending.find((item) => item.visible)
     if (!visible || this.canStart(visible)) return
     const active = this.running().find((entry) => !entry.item.visible)

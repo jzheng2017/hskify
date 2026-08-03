@@ -26,6 +26,13 @@ const HF_REPO: &str = "PaddlePaddle/PaddleOCR-VL-1.6-GGUF";
 const MODEL_FILENAME: &str = "PaddleOCR-VL-1.6-GGUF.gguf";
 const MMPROJ_FILENAME: &str = "PaddleOCR-VL-1.6-GGUF-mmproj.gguf";
 const PADDLEOCR_IMAGE_MARKER: &str = "<|IMAGE_START|><|IMAGE_PLACEHOLDER|><|IMAGE_END|>";
+/// Native media marker used by the Qwen3.5 vision chat template.
+///
+/// The marker is kept here (instead of silently replacing the model's chat
+/// template) so an optional page-understanding adapter can initialise the same
+/// llama.cpp/MTMD machinery with the Qwen projector when that resource is
+/// explicitly installed.
+pub const QWEN3_5_IMAGE_MARKER: &str = "<|vision_start|><|image_pad|><|vision_end|>";
 const DEFAULT_GPU_LAYERS: u32 = 1000;
 const DEFAULT_MAX_NEW_TOKENS: usize = 256;
 pub const DEFAULT_REPETITION_PENALTY: f32 = 1.2;
@@ -129,7 +136,7 @@ enum PromptContent {
 
 pub struct PaddleOcrVl {
     backend: Arc<LlamaBackend>,
-    model: LlamaModel,
+    model: Arc<LlamaModel>,
     chat_template: String,
     bos_token: String,
     eos_token_text: String,
@@ -156,8 +163,61 @@ impl PaddleOcrVl {
         cpu: bool,
         backend: Arc<LlamaBackend>,
     ) -> Result<Self> {
+        Self::load_from_dir_with_media_marker(runtime, dir, cpu, backend, PADDLEOCR_IMAGE_MARKER)
+    }
+
+    /// Load a local multimodal model/projector pair using an explicit media
+    /// marker.  The normal PaddleOCR-VL entry point above retains the
+    /// PaddleOCR marker; page-understanding adapters use this method for a
+    /// model-specific marker such as Qwen3.5's native vision placeholder.
+    pub fn load_from_dir_with_media_marker(
+        runtime: &RuntimeManager,
+        dir: impl AsRef<Path>,
+        cpu: bool,
+        backend: Arc<LlamaBackend>,
+        media_marker: &str,
+    ) -> Result<Self> {
         let files = resolve_local_model_files(dir.as_ref())?;
-        Self::load_from_files(runtime, files, cpu, backend)
+        Self::load_from_files_with_media_marker(runtime, files, cpu, backend, media_marker)
+    }
+
+    /// Load a local model and projector from explicit paths.
+    ///
+    /// This is intentionally separate from the managed PaddleOCR package:
+    /// callers must provide both files and therefore cannot accidentally make
+    /// an ordinary text-only Qwen model look vision-capable.
+    pub fn load_from_paths(
+        runtime: &RuntimeManager,
+        model_path: impl AsRef<Path>,
+        mmproj_path: impl AsRef<Path>,
+        cpu: bool,
+        backend: Arc<LlamaBackend>,
+        media_marker: &str,
+    ) -> Result<Self> {
+        let model = model_path.as_ref();
+        let mmproj = mmproj_path.as_ref();
+        if !model.is_file() {
+            bail!(
+                "multimodal model file is unavailable: `{}`",
+                model.display()
+            );
+        }
+        if !mmproj.is_file() {
+            bail!(
+                "multimodal projector file is unavailable: `{}`",
+                mmproj.display()
+            );
+        }
+        Self::load_from_files_with_media_marker(
+            runtime,
+            ModelFiles {
+                model: model.to_path_buf(),
+                mmproj: mmproj.to_path_buf(),
+            },
+            cpu,
+            backend,
+            media_marker,
+        )
     }
 
     fn load_from_files(
@@ -166,12 +226,58 @@ impl PaddleOcrVl {
         cpu: bool,
         backend: Arc<LlamaBackend>,
     ) -> Result<Self> {
+        Self::load_from_files_with_media_marker(
+            runtime,
+            files,
+            cpu,
+            backend,
+            PADDLEOCR_IMAGE_MARKER,
+        )
+    }
+
+    fn load_from_files_with_media_marker(
+        runtime: &RuntimeManager,
+        files: ModelFiles,
+        cpu: bool,
+        backend: Arc<LlamaBackend>,
+        media_marker: &str,
+    ) -> Result<Self> {
         crate::sys::initialize(runtime)
             .context("failed to initialize llama.cpp runtime bindings")?;
 
         let model_params = model_params(cpu, backend.as_ref());
-        let model = LlamaModel::load_from_file(backend.as_ref(), &files.model, &model_params)
-            .with_context(|| format!("unable to load model from `{}`", files.model.display()))?;
+        let model = Arc::new(
+            LlamaModel::load_from_file(backend.as_ref(), &files.model, &model_params)
+                .with_context(|| {
+                    format!("unable to load model from `{}`", files.model.display())
+                })?,
+        );
+        Self::load_from_model(runtime, model, files.mmproj, cpu, backend, media_marker)
+    }
+
+    /// Attach a projector to an already resident model.
+    ///
+    /// Translation and page understanding intentionally share the same
+    /// `Arc<LlamaModel>`.  This keeps one model graph in memory and makes the
+    /// multimodal path a capability of the resident translator rather than a
+    /// second, hidden model load.
+    pub fn load_from_model(
+        runtime: &RuntimeManager,
+        model: Arc<LlamaModel>,
+        mmproj_path: impl AsRef<Path>,
+        cpu: bool,
+        backend: Arc<LlamaBackend>,
+        media_marker: &str,
+    ) -> Result<Self> {
+        crate::sys::initialize(runtime)
+            .context("failed to initialize llama.cpp runtime bindings")?;
+        let mmproj_path = mmproj_path.as_ref();
+        if !mmproj_path.is_file() {
+            bail!(
+                "multimodal projector file is unavailable: `{}`",
+                mmproj_path.display()
+            );
+        }
         let eos_token = model.token_eos();
         let chat_template = model
             .meta_val_str("tokenizer.ggml.chat_template")
@@ -179,10 +285,9 @@ impl PaddleOcrVl {
             .context("missing embedded PaddleOCR-VL chat template")?;
         let bos_token = token_text(&model, model.token_bos());
         let eos_token_text = token_text(&model, eos_token);
-        let mmproj_path = files
-            .mmproj
+        let mmproj_path = mmproj_path
             .to_str()
-            .with_context(|| format!("invalid mmproj path `{}`", files.mmproj.display()))?;
+            .with_context(|| format!("invalid mmproj path `{}`", mmproj_path.display()))?;
         let mtmd = MtmdContext::init_from_file(
             mmproj_path,
             &model,
@@ -190,8 +295,8 @@ impl PaddleOcrVl {
                 use_gpu: !cpu && backend.as_ref().supports_gpu_offload(),
                 print_timings: false,
                 n_threads: crate::inference_threads(),
-                media_marker: CString::new(PADDLEOCR_IMAGE_MARKER)
-                    .expect("PaddleOCR image marker contains no null bytes"),
+                media_marker: CString::new(media_marker)
+                    .context("multimodal media marker contains a null byte")?,
             },
         )
         .context("unable to initialize multimodal projector")?;
@@ -248,13 +353,38 @@ impl PaddleOcrVl {
         task: PaddleOcrVlTask,
         options: &PaddleOcrVlGenerateOptions,
     ) -> Result<PaddleOcrVlOutput> {
+        self.inference_with_prompt_and_task(image, task.prompt(), task, options)
+    }
+
+    /// Run one image through the loaded model with an arbitrary user prompt.
+    ///
+    /// PaddleOCR-VL's public task API remains unchanged.  This generic prompt
+    /// path is used by the optional page-understanding adapter so the same
+    /// MTMD implementation can carry OCR/layout evidence alongside page
+    /// pixels without adding crop-specific probes or string post-processing.
+    pub fn inference_with_prompt(
+        &mut self,
+        image: &DynamicImage,
+        user_prompt: &str,
+        options: &PaddleOcrVlGenerateOptions,
+    ) -> Result<PaddleOcrVlOutput> {
+        self.inference_with_prompt_and_task(image, user_prompt, PaddleOcrVlTask::Ocr, options)
+    }
+
+    fn inference_with_prompt_and_task(
+        &mut self,
+        image: &DynamicImage,
+        user_prompt: &str,
+        task: PaddleOcrVlTask,
+        options: &PaddleOcrVlGenerateOptions,
+    ) -> Result<PaddleOcrVlOutput> {
         validate_generate_options(options)?;
         let max_new_tokens = options.max_new_tokens;
         let started = Instant::now();
         let original_width = image.width();
         let original_height = image.height();
         let bitmap = bitmap_from_image(image)?;
-        let prompt = self.render_prompt(task)?;
+        let prompt = self.render_user_prompt(user_prompt)?;
         let chunks = self
             .mtmd
             .tokenize(
@@ -298,10 +428,7 @@ impl PaddleOcrVl {
         let mut sampler = build_sampler(options);
         let mut decoder = encoding_rs::UTF_8.new_decoder();
         let mut token_ids = Vec::new();
-        let mut token_text_ends = Vec::new();
         let mut text = String::new();
-        let mut stopped_on_repeat = false;
-
         if max_new_tokens > 0 {
             let decoder_start = self.decoder_start_token();
             let (mut next_token, mut position) = if let Some(decoder_start) = decoder_start {
@@ -321,18 +448,13 @@ impl PaddleOcrVl {
                 token_ids
                     .push(u32::try_from(next_token.0).context("generated token id was negative")?);
                 text.push_str(&decode_token(&self.model, next_token, &mut decoder)?);
-                token_text_ends.push(text.len());
 
-                if let Some(trim_at) = repeated_ocr_suffix_start(&text) {
-                    let keep_tokens = token_text_ends
-                        .iter()
-                        .take_while(|&&end| end <= trim_at)
-                        .count();
-                    token_ids.truncate(keep_tokens);
-                    token_text_ends.truncate(keep_tokens);
-                    text.truncate(trim_at);
-                    stopped_on_repeat = true;
-                    break;
+                if has_repeated_ocr_output(&text) {
+                    // Never repair model text by deleting a guessed suffix.
+                    // A repetition is invalid evidence; the caller can retry
+                    // with a different crop/hypothesis and otherwise keep the
+                    // source pixels untouched.
+                    bail!("PaddleOCR-VL produced a repeated OCR sequence");
                 }
 
                 if token_ids.len() >= max_new_tokens {
@@ -351,7 +473,7 @@ impl PaddleOcrVl {
         }
 
         tracing::debug!(
-            task = ?task,
+            prompt_chars = user_prompt.chars().count(),
             original_width,
             original_height,
             prompt_total_tokens,
@@ -362,7 +484,6 @@ impl PaddleOcrVl {
             generation_ms = generation_started.elapsed().as_millis(),
             total_ms = started.elapsed().as_millis(),
             repetition_penalty = options.repetition_penalty,
-            stopped_on_repeat,
             "paddleocr-vl inference timings"
         );
 
@@ -421,12 +542,12 @@ impl PaddleOcrVl {
         token == self.eos_token || self.model.is_eog_token(token)
     }
 
-    fn render_prompt(&self, task: PaddleOcrVlTask) -> Result<RenderedPrompt> {
+    fn render_user_prompt(&self, user_prompt: &str) -> Result<RenderedPrompt> {
         let text = render_chat_prompt(
             &self.chat_template,
             &self.bos_token,
             &self.eos_token_text,
-            task,
+            user_prompt,
         )
         .context("failed to render PaddleOCR-VL prompt from embedded chat template")?;
         Ok(RenderedPrompt {
@@ -596,6 +717,7 @@ fn bitmap_from_image(image: &DynamicImage) -> Result<MtmdBitmap> {
         .context("failed to create MTMD bitmap from image")
 }
 
+#[cfg(test)]
 fn build_user_message_content(task: PaddleOcrVlTask) -> Vec<PromptContent> {
     vec![
         PromptContent::Image,
@@ -609,7 +731,7 @@ fn render_chat_prompt(
     chat_template: &str,
     bos_token: &str,
     eos_token: &str,
-    task: PaddleOcrVlTask,
+    user_prompt: &str,
 ) -> Result<String> {
     let env = jinja::environment();
     let tmpl = env
@@ -619,7 +741,12 @@ fn render_chat_prompt(
     tmpl.render(context! {
         messages => vec![PromptMessage {
             role: "user",
-            content: build_user_message_content(task),
+            content: vec![
+                PromptContent::Image,
+                PromptContent::Text {
+                    text: user_prompt.to_owned(),
+                },
+            ],
         }],
         bos_token => bos_token,
         eos_token => eos_token,
@@ -663,14 +790,14 @@ fn token_text(model: &LlamaModel, token: LlamaToken) -> String {
     }
 }
 
-fn repeated_ocr_suffix_start(text: &str) -> Option<usize> {
+fn has_repeated_ocr_output(text: &str) -> bool {
     let chars = text
         .char_indices()
         .filter(|(_, ch)| !ch.is_whitespace())
         .collect::<Vec<_>>();
     let len = chars.len();
     if len < OCR_REPEAT_MIN_TOTAL_CHARS {
-        return None;
+        return false;
     }
 
     let max_unit = OCR_REPEAT_MAX_UNIT_CHARS.min(len / OCR_REPEAT_MIN_REPETITIONS);
@@ -696,11 +823,11 @@ fn repeated_ocr_suffix_start(text: &str) -> Option<usize> {
         let repeated_chars = repetitions * unit_len;
         if repetitions >= OCR_REPEAT_MIN_REPETITIONS && repeated_chars >= OCR_REPEAT_MIN_TOTAL_CHARS
         {
-            return Some(chars[len - repeated_chars].0);
+            return true;
         }
     }
 
-    None
+    false
 }
 
 #[cfg(test)]
@@ -708,7 +835,7 @@ mod tests {
     use super::{
         DEFAULT_MAX_NEW_TOKENS, DEFAULT_REPETITION_PENALTY, PADDLEOCR_IMAGE_MARKER,
         PaddleOcrVlGenerateOptions, PaddleOcrVlTask, PromptContent, build_user_message_content,
-        render_chat_prompt, repeated_ocr_suffix_start, validate_generate_options,
+        has_repeated_ocr_output, render_chat_prompt, validate_generate_options,
     };
 
     #[test]
@@ -779,7 +906,7 @@ mod tests {
             "{{ bos_token }}{% for message in messages %}User: {% for content in message['content'] %}{% if content['type'] == 'image' %}<|IMAGE_START|><|IMAGE_PLACEHOLDER|><|IMAGE_END|>{% endif %}{% endfor %}{% for content in message['content'] %}{% if content['type'] == 'text' %}{{ content['text'] }}{% endif %}{% endfor %}\n{% endfor %}{% if add_generation_prompt %}Assistant:\n{% endif %}",
             "<|begin_of_sentence|>",
             "</s>",
-            PaddleOcrVlTask::Formula,
+            "Formula Recognition:",
         )?;
         assert_eq!(
             rendered,
@@ -816,43 +943,37 @@ mod tests {
     }
 
     #[test]
-    fn repeat_guard_trims_single_glyph_loop() {
+    fn repeat_guard_rejects_single_glyph_loop() {
         let text = "\u{25CF}".repeat(12);
-        assert_eq!(repeated_ocr_suffix_start(&text), Some(0));
+        assert!(has_repeated_ocr_output(&text));
     }
 
     #[test]
-    fn repeat_guard_trims_after_text_prefix() {
+    fn repeat_guard_rejects_repeated_suffix_after_text_prefix() {
         let text = format!("OCR{}", "\u{25CF}".repeat(12));
-        assert_eq!(repeated_ocr_suffix_start(&text), Some(3));
+        assert!(has_repeated_ocr_output(&text));
     }
 
     #[test]
-    fn repeat_guard_trims_short_cycle() {
-        assert_eq!(repeated_ocr_suffix_start("-_".repeat(6).as_str()), Some(0));
+    fn repeat_guard_rejects_short_cycle() {
+        assert!(has_repeated_ocr_output("-_".repeat(6).as_str()));
     }
 
     #[test]
     fn repeat_guard_keeps_short_emphasis_punctuation() {
-        assert_eq!(repeated_ocr_suffix_start("!!!"), None);
-        assert_eq!(repeated_ocr_suffix_start("......"), None);
+        assert!(!has_repeated_ocr_output("!!!"));
+        assert!(!has_repeated_ocr_output("......"));
     }
 
     #[test]
-    fn repeat_guard_trims_repeated_text_loop() {
-        assert_eq!(
-            repeated_ocr_suffix_start(
-                "\u{3042}\u{3042}\u{3042}\u{3042}\u{3042}\u{3042}\u{3042}\u{3042}\u{3042}\u{3042}\u{3042}\u{3042}"
-            ),
-            Some(0)
-        );
+    fn repeat_guard_rejects_repeated_text_loop() {
+        assert!(has_repeated_ocr_output(
+            "\u{3042}\u{3042}\u{3042}\u{3042}\u{3042}\u{3042}\u{3042}\u{3042}\u{3042}\u{3042}\u{3042}\u{3042}"
+        ));
     }
 
     #[test]
-    fn repeat_guard_trims_repeated_word_loop() {
-        assert_eq!(
-            repeated_ocr_suffix_start("test".repeat(4).as_str()),
-            Some(0)
-        );
+    fn repeat_guard_rejects_repeated_word_loop() {
+        assert!(has_repeated_ocr_output("test".repeat(4).as_str()));
     }
 }

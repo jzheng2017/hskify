@@ -1,7 +1,7 @@
 # Firefox extension implementation
 
 The Firefox MV3 extension is a direct client of the local, unversioned
-progressive companion API. There is no legacy result download or full cleaned
+chapter-aware companion API. There is no result download or full cleaned
 image path.
 
 Development runs through `pnpm dev:firefox`: WXT hot-reloads browser code while
@@ -25,12 +25,15 @@ The background worker uses these loopback routes:
   monotonic updates.
 - `GET /blobs/{patchId}` downloads a region's transparent PNG patch.
 - `DELETE /jobs/{jobId}` cancels and releases a job.
+- `DELETE /chapters/{pageSessionId}` releases the daemon's ordered dialogue
+  and entity memory after the chapter is sealed or cancelled.
 
 Setup, dictionary, and font requests remain authenticated root routes:
 `/setup`, `/setup/models`, `/lookup`, and `/fonts/{fontId}`.
 
 `JobUpdate` is the discriminated union `progress`, `regionReady`,
-`artworkPreserved`, `complete`, `failed`, and `cancelled`. `regionReady` carries
+`artworkPreserved`, `unreadable`, `complete`, `failed`, and `cancelled`.
+`regionReady` carries
 geometry, patch identity and rectangle, English/base/displayed Chinese,
 pinyin, OCR confidence, reading order, typography/layout, and HSK validation
 and repair state. Its HSK state also carries the selected learning mode,
@@ -55,7 +58,7 @@ idempotent restore-all path: completed and partial overlays are both destroyed,
 every original image returns to its exact parent/sibling position with its
 original attributes intact, and the companion job is released.
 
-## Progressive rendering
+## Final-region rendering
 
 The renderer keeps the exact original `<img>` node connected and visible. A
 layout-preserving wrapper adds a Shadow DOM containing:
@@ -83,16 +86,20 @@ Image geometry accounts for borders, padding, `object-fit`, and
 and browser viewport intersection. The overlay is document-anchored, so normal
 page scrolling moves it with the image in the compositor without a layout read
 or text refit. Nested scrollers receive a position-only update; resize and
-image-size changes trigger the more expensive geometry and text refit.
+image-size changes trigger the more expensive geometry and text refit. Image
+notices are mounted inside the same document-anchored wrapper while a page is
+being processed, so their coordinates are not recalculated on scroll.
 Viewport-priority reports remain coalesced at roughly 100 ms.
 
 Text fitting tests nearby legal Chinese line breaks against the safe polygon.
 Model fitting and final DOM measurement both use bounded binary searches.
 When a source region contains distinct learned color bands, fitting preserves
 that line-style count and applies each foreground/outline band in source order.
-The final measurement pass checks scroll dimensions, stays inside the
-subpixel boundary, and has a zero-size fallback only for degenerate geometry,
-so selectable text never overflows its region.
+The final measurement pass checks scroll dimensions and stays inside the
+subpixel boundary while enforcing a readable floor (at least 72% of the source
+font estimate and the local CSS minimum). If that floor cannot fit, the
+renderer removes the candidate patch and leaves the source artwork unchanged;
+it never publishes zero-size or clipped selectable text.
 
 ## Verification
 
@@ -105,7 +112,7 @@ npm run test:e2e
 npm run build
 ```
 
-The Vitest suite covers strict progressive contracts, exact root endpoints,
+The Vitest suite covers strict chapter contracts, exact root endpoints,
 update acknowledgement/recovery, patch ownership, atomic patch installation,
 final-only publication, viewport messages, measured fitting, hover hit-testing, selection, dictionary
 pinyin, and Mandarin speech. The Playwright Firefox harness covers real image
@@ -130,5 +137,5 @@ terms; those terms receive a dotted underline and use the same position-aware
 hover explanation as every other translated expression. `strict` accepts only
 translations whose non-name vocabulary is inside the selected HSK level. The
 learning mode travels through the popup, background, content, job, cache, and
-progressive-region contracts, so changing it cannot reuse output from the
+final-region contracts, so changing it cannot reuse output from the
 other mode.

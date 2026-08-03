@@ -31,13 +31,14 @@ pub struct Llm {
     prompt_renderer: PromptRenderer,
     eos_token: LlamaToken,
     // SAFETY INVARIANT: `session_context` borrows the pointee in `model`.
-    // The model is boxed, so moving `Llm` never moves that pointee. Fields are
-    // dropped in declaration order, which releases the context before the
-    // model and the backend. `model` is never replaced while the context lives.
+    // The model is reference counted, so moving or sharing `Llm` never moves
+    // that pointee. Fields are dropped in declaration order, which releases
+    // the context before the model and the backend. `model` is never replaced
+    // while the context lives.
     session_context: LlamaContext<'static>,
     prompt_batch: LlamaBatch<'static>,
     token_batch: LlamaBatch<'static>,
-    model: Box<LlamaModel>,
+    model: Arc<LlamaModel>,
     _backend: Arc<LlamaBackend>,
 }
 
@@ -179,7 +180,7 @@ impl Llm {
         inference_threads: i32,
     ) -> Result<Self> {
         let model_params = model_params(cpu, backend.as_ref())?;
-        let model = Box::new(
+        let model = Arc::new(
             LlamaModel::load_from_file(backend.as_ref(), &model_path, &model_params)
                 .with_context(|| format!("unable to load model from `{}`", model_path.display()))?,
         );
@@ -196,7 +197,7 @@ impl Llm {
             .new_context(backend.as_ref(), resident_context_params(inference_threads))
             .context("unable to create permanent llama.cpp context")?;
         // `LlamaContext` stores only a reference to the model pointee. The
-        // pointee is kept at a stable address by `Box`, and the field ordering
+        // pointee is kept at a stable address by `Arc`, and the field ordering
         // above guarantees that the context is dropped first.
         let session_context = unsafe {
             std::mem::transmute::<LlamaContext<'_>, LlamaContext<'static>>(session_context)
@@ -216,6 +217,15 @@ impl Llm {
 
     pub fn id(&self) -> ModelId {
         self.model_id
+    }
+
+    /// Share the loaded model weights with a multimodal adapter.
+    ///
+    /// The page-understanding path uses the same Qwen3.5 model that performs
+    /// translation.  Returning the owning handle avoids loading a second
+    /// 2.7&nbsp;GB GGUF merely to attach the vision projector.
+    pub fn shared_model(&self) -> Arc<LlamaModel> {
+        Arc::clone(&self.model)
     }
 
     /// Count model tokens without adding a beginning-of-sequence token.
@@ -295,7 +305,7 @@ impl Llm {
 
     /// Generate with an exact system prompt and optional GBNF constraint.
     ///
-    /// Unlike [`Self::generate`], this does not append Koharu's legacy
+    /// Unlike [`Self::generate`], this does not append Koharu's default
     /// numbered-block instructions to the supplied system prompt.
     pub fn generate_constrained(
         &mut self,

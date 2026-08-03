@@ -282,6 +282,12 @@ export class CompanionClient {
     await this.request(`/jobs/${encodeURIComponent(jobId)}`, { method: 'DELETE' })
   }
 
+  async closeChapter(pageSessionId: string): Promise<void> {
+    await this.request(`/chapters/${encodeURIComponent(pageSessionId)}`, {
+      method: 'DELETE',
+    })
+  }
+
   async getSetupStatus(): Promise<BrowserSetupStatus> {
     const response = await this.request('/setup')
     return parseBrowserSetupStatus(await parseJsonResponse(response))

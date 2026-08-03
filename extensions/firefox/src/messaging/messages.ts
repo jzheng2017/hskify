@@ -1,6 +1,4 @@
 import {
-  MAX_PRECEDING_CONTEXT,
-  MAX_PROPER_NAME_GLOSSARY,
   parseBrowserSetupStatus,
   parseJobUpdateBatch,
   parseLookupRequest,
@@ -15,6 +13,7 @@ import {
   type LookupResult,
   type NameTranslation,
   type NormalizedRect,
+  type PageSurfaceKind,
 } from '../contracts/browser'
 import { DEFAULT_IMAGE_LIMITS } from '../acquisition/image-format'
 
@@ -38,13 +37,38 @@ export type SetupStatusMessage = { type: 'setup:status' }
 export type SetupStartMessage = { type: 'setup:start' }
 export type EngineWarmupMessage = { type: 'engine:warmup' }
 
+export type ChapterStartMessage = {
+  type: 'chapterStart'
+  pageSessionId: string
+  pageUrl: string
+  scope: TranslationScope
+  hskLevel: HskLevel
+  learningMode: LearningMode
+  nameTranslation: NameTranslation
+}
+export type ChapterPageMessage = {
+  type: 'chapterPage'
+  pageSessionId: string
+  pageUrl: string
+  pageIndex: number
+}
+export type ChapterViewportMessage = {
+  type: 'chapterViewport'
+  pageSessionId: string
+  pageUrl: string
+  pageIndex: number
+  visibleRects: NormalizedRect[]
+  active: boolean
+}
+export type ChapterSealMessage = { type: 'chapterSeal'; pageSessionId: string; pageUrl: string }
+export type ChapterCancelMessage = { type: 'chapterCancel'; pageSessionId: string; pageUrl: string }
+
 export type ContentStartMessage = {
   type: 'content:start'
   scope: TranslationScope
   hskLevel: HskLevel
   learningMode: LearningMode
   nameTranslation: NameTranslation
-  properNameGlossary?: BrowserJobRequest['properNameGlossary']
 }
 export type ContentCancelMessage = { type: 'content:cancel' }
 export type ContentStateMessage = { type: 'content:state' }
@@ -53,6 +77,8 @@ export type SubmitImageMessage = {
   type: 'job:submit'
   pageSessionId: string
   pageIndex: number
+  chapterPageOrder: number[]
+  surfaceKind: PageSurfaceKind
   imageUrl: string
   pageUrl: string
   naturalWidth: number
@@ -63,8 +89,6 @@ export type SubmitImageMessage = {
   learningMode: LearningMode
   nameTranslation: NameTranslation
   visibleRects: NormalizedRect[]
-  precedingContext?: BrowserJobRequest['precedingContext']
-  properNameGlossary?: BrowserJobRequest['properNameGlossary']
 }
 
 export type PrefetchImageMessage = {
@@ -150,6 +174,11 @@ export type BackgroundRequest =
   | SetupStatusMessage
   | SetupStartMessage
   | EngineWarmupMessage
+  | ChapterStartMessage
+  | ChapterPageMessage
+  | ChapterViewportMessage
+  | ChapterSealMessage
+  | ChapterCancelMessage
   | PrefetchImageMessage
   | CancelImagePrefetchMessage
   | SubmitImageMessage
@@ -233,6 +262,11 @@ export type MessageResultMap = {
   'setup:status': BrowserSetupStatus
   'setup:start': BrowserSetupStatus
   'engine:warmup': BrowserSetupStatus
+  chapterStart: undefined
+  chapterPage: undefined
+  chapterViewport: undefined
+  chapterSeal: undefined
+  chapterCancel: undefined
   'image:prefetch': undefined
   'image:prefetch-cancel': undefined
   'job:submit': SubmittedJob
@@ -354,6 +388,41 @@ function learningMode(value: unknown, path: string): LearningMode {
   return value
 }
 
+function surfaceKind(value: unknown, path: string): PageSurfaceKind {
+  if (
+    value !== 'image' &&
+    value !== 'background' &&
+    value !== 'canvas' &&
+    value !== 'webgl' &&
+    value !== 'frame'
+  ) {
+    throw new RuntimeMessageValidationError(
+      `${path} must identify an image, background, canvas, WebGL, or frame surface.`,
+    )
+  }
+  return value
+}
+
+function integerArray(
+  value: unknown,
+  path: string,
+  maximumLength = 100_000,
+  minimum = 0,
+): number[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > maximumLength) {
+    throw new RuntimeMessageValidationError(
+      `${path} must be a non-empty array with at most ${maximumLength} items.`,
+    )
+  }
+  const values = value.map((item, index) => integer(item, `${path}[${index}]`, minimum))
+  for (let index = 1; index < values.length; index += 1) {
+    if (values[index - 1]! >= values[index]!) {
+      throw new RuntimeMessageValidationError(`${path} must be strictly increasing.`)
+    }
+  }
+  return values
+}
+
 function terminalType(
   value: unknown,
   path: string,
@@ -452,57 +521,6 @@ function pageState(value: unknown, includeHsk = false): PopupState | PageState {
     : parsed
 }
 
-function parsePrecedingContext(value: unknown): BrowserJobRequest['precedingContext'] {
-  if (!Array.isArray(value) || value.length > MAX_PRECEDING_CONTEXT) {
-    throw new RuntimeMessageValidationError(
-      `$.precedingContext must contain at most ${MAX_PRECEDING_CONTEXT} entries.`,
-    )
-  }
-  return value.map((entry, index) => {
-    const item = record(entry, `$.precedingContext[${index}]`)
-    exact(item, ['sourceEnglish', 'chinese'], `$.precedingContext[${index}]`)
-    return {
-      sourceEnglish: string(
-        item.sourceEnglish,
-        `$.precedingContext[${index}].sourceEnglish`,
-        4_096,
-      ),
-      chinese: string(item.chinese, `$.precedingContext[${index}].chinese`, 4_096),
-    }
-  })
-}
-
-function parseProperNameGlossary(
-  value: unknown,
-): BrowserJobRequest['properNameGlossary'] {
-  if (!Array.isArray(value) || value.length > MAX_PROPER_NAME_GLOSSARY) {
-    throw new RuntimeMessageValidationError(
-      `$.properNameGlossary must contain at most ${MAX_PROPER_NAME_GLOSSARY} entries.`,
-    )
-  }
-  const seen = new Set<string>()
-  return value.map((entry, index) => {
-    const item = record(entry, `$.properNameGlossary[${index}]`)
-    exact(item, ['sourceEnglish', 'chinese'], `$.properNameGlossary[${index}]`)
-    const sourceEnglish = string(
-      item.sourceEnglish,
-      `$.properNameGlossary[${index}].sourceEnglish`,
-      256,
-    )
-    const normalized = sourceEnglish.trim().toLocaleLowerCase('en-US')
-    if (seen.has(normalized)) {
-      throw new RuntimeMessageValidationError(
-        `$.properNameGlossary[${index}].sourceEnglish must be unique ignoring ASCII case.`,
-      )
-    }
-    seen.add(normalized)
-    return {
-      sourceEnglish,
-      chinese: string(item.chinese, `$.properNameGlossary[${index}].chinese`, 128),
-    }
-  })
-}
-
 function parseRecoveryCandidate(value: unknown, index: number): RecoveryCandidate {
   const path = `$.candidates[${index}]`
   const item = record(value, path)
@@ -539,6 +557,58 @@ export function parseBackgroundRequest(value: unknown): BackgroundRequest {
     case 'engine:warmup':
       exact(item, ['type'])
       return { type }
+    case 'chapterStart':
+      exact(item, [
+        'type',
+        'pageSessionId',
+        'pageUrl',
+        'scope',
+        'hskLevel',
+        'learningMode',
+        'nameTranslation',
+      ])
+      return {
+        type,
+        pageSessionId: string(item.pageSessionId, '$.pageSessionId', 256),
+        pageUrl: string(item.pageUrl, '$.pageUrl', 8_192),
+        scope: translationScope(item.scope, '$.scope'),
+        hskLevel: hskLevel(item.hskLevel, '$.hskLevel'),
+        learningMode: learningMode(item.learningMode, '$.learningMode'),
+        nameTranslation: nameTranslation(item.nameTranslation, '$.nameTranslation'),
+      }
+    case 'chapterPage':
+      exact(item, ['type', 'pageSessionId', 'pageUrl', 'pageIndex'])
+      return {
+        type,
+        pageSessionId: string(item.pageSessionId, '$.pageSessionId', 256),
+        pageUrl: string(item.pageUrl, '$.pageUrl', 8_192),
+        pageIndex: integer(item.pageIndex, '$.pageIndex', 0, 100_000),
+      }
+    case 'chapterViewport':
+      exact(item, [
+        'type',
+        'pageSessionId',
+        'pageUrl',
+        'pageIndex',
+        'visibleRects',
+        'active',
+      ])
+      return {
+        type,
+        pageSessionId: string(item.pageSessionId, '$.pageSessionId', 256),
+        pageUrl: string(item.pageUrl, '$.pageUrl', 8_192),
+        pageIndex: integer(item.pageIndex, '$.pageIndex', 0, 100_000),
+        visibleRects: normalizedRects(item.visibleRects, '$.visibleRects'),
+        active: boolean(item.active, '$.active'),
+      }
+    case 'chapterSeal':
+    case 'chapterCancel':
+      exact(item, ['type', 'pageSessionId', 'pageUrl'])
+      return {
+        type,
+        pageSessionId: string(item.pageSessionId, '$.pageSessionId', 256),
+        pageUrl: string(item.pageUrl, '$.pageUrl', 8_192),
+      }
     case 'popup:start':
       exact(item, ['type', 'scope', 'hskLevel', 'learningMode', 'nameTranslation'])
       return {
@@ -589,6 +659,8 @@ export function parseBackgroundRequest(value: unknown): BackgroundRequest {
         'type',
         'pageSessionId',
         'pageIndex',
+        'chapterPageOrder',
+        'surfaceKind',
         'imageUrl',
         'pageUrl',
         'naturalWidth',
@@ -599,8 +671,6 @@ export function parseBackgroundRequest(value: unknown): BackgroundRequest {
         'learningMode',
         'nameTranslation',
         'visibleRects',
-        'precedingContext',
-        'properNameGlossary',
       ])
       const sourceBytes =
         item.sourceBytes === undefined
@@ -610,18 +680,24 @@ export function parseBackgroundRequest(value: unknown): BackgroundRequest {
         item.sourceMimeType === undefined
           ? undefined
           : string(item.sourceMimeType, '$.sourceMimeType', 128)
-      const precedingContext =
-        item.precedingContext === undefined
-          ? undefined
-          : parsePrecedingContext(item.precedingContext)
-      const properNameGlossary =
-        item.properNameGlossary === undefined
-          ? undefined
-          : parseProperNameGlossary(item.properNameGlossary)
+      const pageIndex = integer(item.pageIndex, '$.pageIndex', 0, 100_000)
+      const chapterPageOrder = integerArray(
+        item.chapterPageOrder,
+        '$.chapterPageOrder',
+        100_000,
+        0,
+      )
+      if (!chapterPageOrder.includes(pageIndex)) {
+        throw new RuntimeMessageValidationError(
+          '$.chapterPageOrder must contain $.pageIndex.',
+        )
+      }
       return {
         type,
         pageSessionId: string(item.pageSessionId, '$.pageSessionId', 256),
-        pageIndex: integer(item.pageIndex, '$.pageIndex', 0, 100_000),
+        pageIndex,
+        chapterPageOrder,
+        surfaceKind: surfaceKind(item.surfaceKind, '$.surfaceKind'),
         imageUrl: string(item.imageUrl, '$.imageUrl', 8_192),
         pageUrl: string(item.pageUrl, '$.pageUrl', 8_192),
         naturalWidth: integer(
@@ -642,8 +718,6 @@ export function parseBackgroundRequest(value: unknown): BackgroundRequest {
         learningMode: learningMode(item.learningMode, '$.learningMode'),
         nameTranslation: nameTranslation(item.nameTranslation, '$.nameTranslation'),
         visibleRects: normalizedRects(item.visibleRects, '$.visibleRects'),
-        ...(precedingContext === undefined ? {} : { precedingContext }),
-        ...(properNameGlossary === undefined ? {} : { properNameGlossary }),
       }
     }
     case 'job:updates':
@@ -743,19 +817,13 @@ export function parseContentRequest(value: unknown): ContentRequest {
         'hskLevel',
         'learningMode',
         'nameTranslation',
-        'properNameGlossary',
       ])
-      const properNameGlossary =
-        item.properNameGlossary === undefined
-          ? undefined
-          : parseProperNameGlossary(item.properNameGlossary)
       return {
         type,
         scope: translationScope(item.scope, '$.scope'),
         hskLevel: hskLevel(item.hskLevel, '$.hskLevel'),
         learningMode: learningMode(item.learningMode, '$.learningMode'),
         nameTranslation: nameTranslation(item.nameTranslation, '$.nameTranslation'),
-        ...(properNameGlossary === undefined ? {} : { properNameGlossary }),
       }
     default:
       throw new RuntimeMessageValidationError(`$.type "${type}" is not supported.`)

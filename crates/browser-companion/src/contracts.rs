@@ -11,9 +11,8 @@ pub const BUILD_FINGERPRINT: &str = "hskify-windows-x86_64-msvc-cuda13.1-sm89-20
 pub const HSK_STANDARD: &str = "2.0";
 pub const SOURCE_LANGUAGE: &str = "en";
 pub const TARGET_LANGUAGE: &str = "zh-CN";
-pub const MAX_PRECEDING_CONTEXT: usize = 6;
-pub const MAX_PROPER_NAME_GLOSSARY: usize = 64;
 pub const MAX_VISIBLE_RECTS: usize = 64;
+pub const MAX_CHAPTER_PAGE_ORDER: usize = 100_000;
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 #[error("{path}: {message}")]
@@ -416,6 +415,20 @@ pub struct NormalizedRect {
     pub height: f32,
 }
 
+/// The browser's immutable acquisition contract records which rendered
+/// surface produced the submitted pixels.  The pipeline uses this only for
+/// surface provenance and safe policy decisions; OCR and translation always
+/// consume the captured raster itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BrowserSurfaceKind {
+    Image,
+    Background,
+    Canvas,
+    Webgl,
+    Frame,
+}
+
 impl NormalizedRect {
     pub fn validate_at(&self, path: &str) -> Result<(), ContractError> {
         for (field, value) in [
@@ -458,18 +471,39 @@ pub struct CreateJobRequest {
     pub natural_height: u32,
     pub page_session_id: String,
     pub page_index: u32,
+    pub chapter_page_order: Vec<u32>,
+    pub surface_kind: BrowserSurfaceKind,
     pub settings: BrowserJobSettings,
     pub visible_rects: Vec<NormalizedRect>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub preceding_context: Option<Vec<DialogueContext>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub proper_name_glossary: Option<Vec<ProperNameGlossaryEntry>>,
 }
 
 impl Validate for CreateJobRequest {
     fn validate(&self) -> Result<(), ContractError> {
         require_build_fingerprint("buildFingerprint", &self.build_fingerprint)?;
         validate_job_fields(self)?;
+        if self.chapter_page_order.is_empty() {
+            return Err(ContractError::at(
+                "chapterPageOrder",
+                "must contain at least the submitted page index",
+            ));
+        }
+        if self.chapter_page_order.len() > MAX_CHAPTER_PAGE_ORDER {
+            return Err(ContractError::at(
+                "chapterPageOrder",
+                format!("must contain at most {MAX_CHAPTER_PAGE_ORDER} page indexes"),
+            ));
+        }
+        if !self.chapter_page_order.contains(&self.page_index)
+            || self
+                .chapter_page_order
+                .windows(2)
+                .any(|window| window[0] >= window[1])
+        {
+            return Err(ContractError::at(
+                "chapterPageOrder",
+                "must be strictly increasing and contain pageIndex",
+            ));
+        }
         if self.visible_rects.len() > MAX_VISIBLE_RECTS {
             return Err(ContractError::at(
                 "visibleRects",
@@ -503,57 +537,6 @@ fn validate_job_fields(request: &CreateJobRequest) -> Result<(), ContractError> 
     }
     require_nonempty("pageSessionId", &request.page_session_id)?;
     request.settings.validate()?;
-    if request
-        .preceding_context
-        .as_ref()
-        .is_some_and(|items| items.len() > MAX_PRECEDING_CONTEXT)
-    {
-        return Err(ContractError::at(
-            "precedingContext",
-            format!("must contain at most {MAX_PRECEDING_CONTEXT} entries"),
-        ));
-    }
-    if let Some(items) = &request.preceding_context {
-        for (index, item) in items.iter().enumerate() {
-            require_nonempty(
-                &format!("precedingContext[{index}].sourceEnglish"),
-                &item.source_english,
-            )?;
-            require_nonempty(&format!("precedingContext[{index}].chinese"), &item.chinese)?;
-        }
-    }
-    if request
-        .proper_name_glossary
-        .as_ref()
-        .is_some_and(|items| items.len() > MAX_PROPER_NAME_GLOSSARY)
-    {
-        return Err(ContractError::at(
-            "properNameGlossary",
-            format!("must contain at most {MAX_PROPER_NAME_GLOSSARY} entries"),
-        ));
-    }
-    if let Some(items) = &request.proper_name_glossary {
-        let mut source_names = HashSet::with_capacity(items.len());
-        for (index, item) in items.iter().enumerate() {
-            require_nonempty_at_most(
-                &format!("properNameGlossary[{index}].sourceEnglish"),
-                &item.source_english,
-                256,
-            )?;
-            require_nonempty_at_most(
-                &format!("properNameGlossary[{index}].chinese"),
-                &item.chinese,
-                128,
-            )?;
-            let normalized = item.source_english.trim().to_ascii_lowercase();
-            if !source_names.insert(normalized) {
-                return Err(ContractError::at(
-                    format!("properNameGlossary[{index}].sourceEnglish"),
-                    "must be unique ignoring ASCII case",
-                ));
-            }
-        }
-    }
     Ok(())
 }
 
@@ -566,9 +549,9 @@ pub(crate) struct BrowserJobRequest {
     pub natural_height: u32,
     pub page_session_id: String,
     pub page_index: u32,
+    pub chapter_page_order: Vec<u32>,
+    pub surface_kind: BrowserSurfaceKind,
     pub settings: BrowserJobSettings,
-    pub preceding_context: Option<Vec<DialogueContext>>,
-    pub proper_name_glossary: Option<Vec<ProperNameGlossaryEntry>>,
 }
 
 impl CreateJobRequest {
@@ -580,9 +563,9 @@ impl CreateJobRequest {
             natural_height: self.natural_height,
             page_session_id: self.page_session_id.clone(),
             page_index: self.page_index,
+            chapter_page_order: self.chapter_page_order.clone(),
+            surface_kind: self.surface_kind,
             settings: self.settings.clone(),
-            preceding_context: self.preceding_context.clone(),
-            proper_name_glossary: self.proper_name_glossary.clone(),
         }
     }
 }
@@ -668,20 +651,6 @@ pub enum LearningMode {
     Strict,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct DialogueContext {
-    pub source_english: String,
-    pub chinese: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ProperNameGlossaryEntry {
-    pub source_english: String,
-    pub chinese: String,
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Point {
@@ -705,27 +674,6 @@ pub struct BrowserTextColorBand {
     pub outline_color: Option<String>,
 }
 
-impl BrowserTextColorBand {
-    fn validate_at(&self, path: &str) -> Result<(), ContractError> {
-        require_unit(&format!("{path}.position"), self.position)?;
-        if !is_css_color(&self.foreground) {
-            return Err(ContractError::at(
-                format!("{path}.foreground"),
-                "must be a hexadecimal CSS color",
-            ));
-        }
-        if let Some(value) = &self.outline_color
-            && !is_css_color(value)
-        {
-            return Err(ContractError::at(
-                format!("{path}.outlineColor"),
-                "must be a hexadecimal CSS color",
-            ));
-        }
-        Ok(())
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct BrowserTextStyle {
@@ -747,6 +695,27 @@ pub struct BrowserTextStyle {
     pub letter_spacing_em: f32,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub color_bands: Vec<BrowserTextColorBand>,
+}
+
+impl BrowserTextColorBand {
+    fn validate_at(&self, path: &str) -> Result<(), ContractError> {
+        require_unit(&format!("{path}.position"), self.position)?;
+        if !is_css_color(&self.foreground) {
+            return Err(ContractError::at(
+                format!("{path}.foreground"),
+                "must be a hexadecimal CSS color",
+            ));
+        }
+        if let Some(value) = &self.outline_color
+            && !is_css_color(value)
+        {
+            return Err(ContractError::at(
+                format!("{path}.outlineColor"),
+                "must be a hexadecimal CSS color",
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl BrowserTextStyle {
@@ -795,16 +764,10 @@ impl BrowserTextStyle {
                 ));
             }
         }
-        if self.outline_width_ratio < 0.0 {
-            return Err(ContractError::at(
-                format!("{path}.outlineWidthRatio"),
-                "must not be negative",
-            ));
-        }
-        if self.line_height <= 0.0 {
+        if self.outline_width_ratio < 0.0 || self.line_height <= 0.0 {
             return Err(ContractError::at(
                 format!("{path}.lineHeight"),
-                "must be positive",
+                "ratios must be non-negative and line height must be positive",
             ));
         }
         let mut previous_position = None;
@@ -859,8 +822,7 @@ pub enum WritingMode {
 pub struct BrowserTextLayout {
     pub suggested_lines: Vec<String>,
     pub font_size_to_image_width: f32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub safe_polygon: Option<Vec<Point>>,
+    pub safe_polygon: Vec<Point>,
 }
 
 impl BrowserTextLayout {
@@ -871,10 +833,7 @@ impl BrowserTextLayout {
                 "must be a positive finite ratio",
             ));
         }
-        if let Some(points) = &self.safe_polygon {
-            require_polygon(&format!("{path}.safePolygon"), points)?;
-        }
-        Ok(())
+        require_polygon(&format!("{path}.safePolygon"), &self.safe_polygon)
     }
 }
 
@@ -932,7 +891,7 @@ pub enum HskRepairState {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ProgressiveHskStatus {
+pub struct TranslatedHskStatus {
     pub requested_level: HskLevel,
     pub learning_mode: LearningMode,
     pub strictly_valid: bool,
@@ -942,7 +901,7 @@ pub struct ProgressiveHskStatus {
     pub repair_state: HskRepairState,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TeachingTerm {
     pub text: String,
@@ -962,7 +921,7 @@ pub enum TeachingTermReason {
     OutsideList,
 }
 
-impl ProgressiveHskStatus {
+impl TranslatedHskStatus {
     fn validate_at(&self, path: &str) -> Result<(), ContractError> {
         require_unit(&format!("{path}.levelCoverage"), self.level_coverage)?;
         let mut tokens = HashSet::with_capacity(self.above_level_tokens.len());
@@ -975,16 +934,12 @@ impl ProgressiveHskStatus {
                 ));
             }
         }
-        if self.strictly_valid && !self.above_level_tokens.is_empty() {
+        if self.strictly_valid
+            && (!self.above_level_tokens.is_empty() || !self.teaching_terms.is_empty())
+        {
             return Err(ContractError::at(
                 format!("{path}.strictlyValid"),
-                "strictly valid text cannot retain above-level tokens",
-            ));
-        }
-        if self.strictly_valid && !self.teaching_terms.is_empty() {
-            return Err(ContractError::at(
-                format!("{path}.strictlyValid"),
-                "strictly valid text cannot retain teaching terms",
+                "strictly valid text cannot retain teaching exceptions",
             ));
         }
         let mut previous_end = 0;
@@ -992,17 +947,16 @@ impl ProgressiveHskStatus {
             let term_path = format!("{path}.teachingTerms[{index}]");
             require_nonempty(&format!("{term_path}.text"), &term.text)?;
             require_nonempty(&format!("{term_path}.pinyin"), &term.pinyin)?;
-            if term.definitions.is_empty() {
+            if term.definitions.is_empty()
+                || term
+                    .definitions
+                    .iter()
+                    .any(|definition| definition.trim().is_empty())
+            {
                 return Err(ContractError::at(
                     format!("{term_path}.definitions"),
-                    "must contain at least one definition",
+                    "must contain non-empty definitions",
                 ));
-            }
-            for (definition_index, definition) in term.definitions.iter().enumerate() {
-                require_nonempty(
-                    &format!("{term_path}.definitions[{definition_index}]"),
-                    definition,
-                )?;
             }
             if term.start_char >= term.end_char {
                 return Err(ContractError::at(
@@ -1022,9 +976,64 @@ impl ProgressiveHskStatus {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TranslatedRegionRole {
+    Dialogue,
+    Narration,
+    System,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RegionEntityType {
+    Person,
+    Place,
+    Organization,
+    Coined,
+    Relationship,
+    Occupation,
+    Rank,
+    Title,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ProgressiveRegion {
+pub struct RegionEntitySpan {
+    pub source: String,
+    pub start_char: usize,
+    pub end_char: usize,
+    pub entity_type: RegionEntityType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub translated: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RegionConfidenceEvidence {
+    pub ocr_consensus: f32,
+    pub geometry_coverage: f32,
+    pub context_consistency: f32,
+    pub cleanup_score: f32,
+}
+
+impl RegionConfidenceEvidence {
+    fn validate_at(&self, path: &str) -> Result<(), ContractError> {
+        for (field, value) in [
+            ("ocrConsensus", self.ocr_consensus),
+            ("geometryCoverage", self.geometry_coverage),
+            ("contextConsistency", self.context_consistency),
+            ("cleanupScore", self.cleanup_score),
+        ] {
+            require_unit(&format!("{path}.{field}"), value)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TranslatedRegion {
     pub id: String,
     pub text_polygon: Vec<Point>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1036,12 +1045,20 @@ pub struct ProgressiveRegion {
     pub pinyin: String,
     pub ocr_confidence: f32,
     pub reading_order: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<TranslatedRegionRole>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_group: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence_evidence: Option<RegionConfidenceEvidence>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub entities: Vec<RegionEntitySpan>,
     pub style: BrowserTextStyle,
     pub layout: BrowserTextLayout,
-    pub hsk: ProgressiveHskStatus,
+    pub hsk: TranslatedHskStatus,
 }
 
-impl ProgressiveRegion {
+impl TranslatedRegion {
     fn validate_at(&self, path: &str) -> Result<(), ContractError> {
         require_nonempty(&format!("{path}.id"), &self.id)?;
         require_polygon(&format!("{path}.textPolygon"), &self.text_polygon)?;
@@ -1055,9 +1072,9 @@ impl ProgressiveRegion {
         let patch_y0 = self.patch.rect.y;
         let patch_x1 = patch_x0 + self.patch.rect.width;
         let patch_y1 = patch_y0 + self.patch.rect.height;
-        let overlap_width = text_x1.min(patch_x1) - text_x0.max(patch_x0);
-        let overlap_height = text_y1.min(patch_y1) - text_y0.max(patch_y0);
-        if overlap_width <= f32::EPSILON || overlap_height <= f32::EPSILON {
+        if text_x1.min(patch_x1) - text_x0.max(patch_x0) <= f32::EPSILON
+            || text_y1.min(patch_y1) - text_y0.max(patch_y0) <= f32::EPSILON
+        {
             return Err(ContractError::at(
                 format!("{path}.patch.rect"),
                 "must overlap the source text polygon",
@@ -1068,6 +1085,37 @@ impl ProgressiveRegion {
         require_nonempty(&format!("{path}.displayedChinese"), &self.displayed_chinese)?;
         require_nonempty(&format!("{path}.pinyin"), &self.pinyin)?;
         require_unit(&format!("{path}.ocrConfidence"), self.ocr_confidence)?;
+        if let Some(evidence) = &self.confidence_evidence {
+            evidence.validate_at(&format!("{path}.confidenceEvidence"))?;
+        }
+        for (index, entity) in self.entities.iter().enumerate() {
+            require_nonempty(&format!("{path}.entities[{index}].source"), &entity.source)?;
+            if entity.start_char >= entity.end_char {
+                return Err(ContractError::at(
+                    format!("{path}.entities[{index}].endChar"),
+                    "must be greater than startChar",
+                ));
+            }
+            let source_length = self.source_english.chars().count();
+            if entity.end_char > source_length {
+                return Err(ContractError::at(
+                    format!("{path}.entities[{index}].endChar"),
+                    "must be within sourceEnglish",
+                ));
+            }
+            let span = self
+                .source_english
+                .chars()
+                .skip(entity.start_char)
+                .take(entity.end_char - entity.start_char)
+                .collect::<String>();
+            if !span.eq_ignore_ascii_case(&entity.source) {
+                return Err(ContractError::at(
+                    format!("{path}.entities[{index}].source"),
+                    "must match the referenced sourceEnglish span",
+                ));
+            }
+        }
         self.style.validate_at(&format!("{path}.style"))?;
         self.layout.validate_at(&format!("{path}.layout"))?;
         self.hsk.validate_at(&format!("{path}.hsk"))
@@ -1089,7 +1137,7 @@ fn polygon_bounds(points: &[Point]) -> Option<(f32, f32, f32, f32)> {
     ))
 }
 
-impl Validate for ProgressiveRegion {
+impl Validate for TranslatedRegion {
     fn validate(&self) -> Result<(), ContractError> {
         self.validate_at("region")
     }
@@ -1103,6 +1151,12 @@ pub struct PreservedArtworkRegion {
     pub source_english: String,
     pub ocr_confidence: f32,
     pub reading_order: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub translated_chinese: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinyin: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub teaching_terms: Vec<TeachingTerm>,
 }
 
 impl PreservedArtworkRegion {
@@ -1110,7 +1164,38 @@ impl PreservedArtworkRegion {
         require_nonempty(&format!("{path}.id"), &self.id)?;
         require_polygon(&format!("{path}.textPolygon"), &self.text_polygon)?;
         require_nonempty(&format!("{path}.sourceEnglish"), &self.source_english)?;
-        require_unit(&format!("{path}.ocrConfidence"), self.ocr_confidence)
+        require_unit(&format!("{path}.ocrConfidence"), self.ocr_confidence)?;
+        if let Some(chinese) = &self.translated_chinese {
+            require_nonempty(&format!("{path}.translatedChinese"), chinese)?;
+        }
+        if let Some(pinyin) = &self.pinyin {
+            require_nonempty(&format!("{path}.pinyin"), pinyin)?;
+        }
+        for (index, term) in self.teaching_terms.iter().enumerate() {
+            require_nonempty(&format!("{path}.teachingTerms[{index}].text"), &term.text)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UnreadableRegion {
+    pub id: String,
+    pub text_polygon: Vec<Point>,
+    pub source_english: String,
+    pub ocr_confidence: f32,
+    pub reading_order: u32,
+    pub reason: String,
+}
+
+impl UnreadableRegion {
+    pub(crate) fn validate_at(&self, path: &str) -> Result<(), ContractError> {
+        require_nonempty(&format!("{path}.id"), &self.id)?;
+        require_polygon(&format!("{path}.textPolygon"), &self.text_polygon)?;
+        require_nonempty(&format!("{path}.sourceEnglish"), &self.source_english)?;
+        require_unit(&format!("{path}.ocrConfidence"), self.ocr_confidence)?;
+        require_nonempty(&format!("{path}.reason"), &self.reason)
     }
 }
 
@@ -1137,11 +1222,15 @@ pub enum JobUpdate {
     },
     RegionReady {
         sequence: u64,
-        region: Box<ProgressiveRegion>,
+        region: Box<TranslatedRegion>,
     },
     ArtworkPreserved {
         sequence: u64,
         region: PreservedArtworkRegion,
+    },
+    Unreadable {
+        sequence: u64,
+        region: UnreadableRegion,
     },
     Complete {
         sequence: u64,
@@ -1167,6 +1256,7 @@ impl JobUpdate {
             Self::Progress { sequence, .. }
             | Self::RegionReady { sequence, .. }
             | Self::ArtworkPreserved { sequence, .. }
+            | Self::Unreadable { sequence, .. }
             | Self::Complete { sequence, .. }
             | Self::Failed { sequence, .. }
             | Self::Cancelled { sequence, .. } => *sequence,
@@ -1229,6 +1319,7 @@ impl Validate for JobUpdate {
                 Ok(())
             }
             Self::ArtworkPreserved { region, .. } => region.validate_at("region"),
+            Self::Unreadable { region, .. } => region.validate_at("region"),
             Self::Complete { message, .. } | Self::Cancelled { message, .. } => {
                 if let Some(message) = message {
                     require_nonempty("message", message)?;
@@ -1495,14 +1586,14 @@ impl Validate for ErrorResponse {
 mod tests {
     use super::*;
 
-    fn progressive_region(patch_rect: NormalizedRect) -> ProgressiveRegion {
+    fn translated_region(patch_rect: NormalizedRect) -> TranslatedRegion {
         let text_polygon = vec![
             Point { x: 0.2, y: 0.3 },
             Point { x: 0.4, y: 0.3 },
             Point { x: 0.4, y: 0.4 },
             Point { x: 0.2, y: 0.4 },
         ];
-        ProgressiveRegion {
+        TranslatedRegion {
             id: "region-1".to_owned(),
             text_polygon: text_polygon.clone(),
             bubble_polygon: Some(text_polygon.clone()),
@@ -1512,11 +1603,20 @@ mod tests {
                 rect: patch_rect,
             },
             source_english: "HELLO".to_owned(),
-            base_chinese: "ä½ å¥½".to_owned(),
-            displayed_chinese: "ä½ å¥½".to_owned(),
-            pinyin: "nÇ hÇŽo".to_owned(),
+            base_chinese: "你好".to_owned(),
+            displayed_chinese: "你好".to_owned(),
+            pinyin: "nǐ hǎo".to_owned(),
             ocr_confidence: 0.99,
             reading_order: 1,
+            role: Some(TranslatedRegionRole::Dialogue),
+            context_group: None,
+            confidence_evidence: Some(RegionConfidenceEvidence {
+                ocr_consensus: 0.99,
+                geometry_coverage: 1.0,
+                context_consistency: 1.0,
+                cleanup_score: 1.0,
+            }),
+            entities: Vec::new(),
             style: BrowserTextStyle {
                 font_id: "hmt-sans".to_owned(),
                 category: FontCategory::Sans,
@@ -1535,11 +1635,11 @@ mod tests {
                 color_bands: Vec::new(),
             },
             layout: BrowserTextLayout {
-                suggested_lines: vec!["ä½ å¥½".to_owned()],
+                suggested_lines: vec!["你好".to_owned()],
                 font_size_to_image_width: 0.05,
-                safe_polygon: Some(text_polygon),
+                safe_polygon: text_polygon,
             },
-            hsk: ProgressiveHskStatus {
+            hsk: TranslatedHskStatus {
                 requested_level: HskLevel::try_from(3).unwrap(),
                 learning_mode: LearningMode::Natural,
                 strictly_valid: true,
@@ -1615,8 +1715,8 @@ mod tests {
     }
 
     #[test]
-    fn progressive_region_rejects_cleanup_disconnected_from_source_text() {
-        progressive_region(NormalizedRect {
+    fn translated_region_rejects_cleanup_disconnected_from_source_text() {
+        translated_region(NormalizedRect {
             x: 0.21,
             y: 0.31,
             width: 0.18,
@@ -1625,7 +1725,7 @@ mod tests {
         .validate()
         .unwrap();
 
-        let error = progressive_region(NormalizedRect {
+        let error = translated_region(NormalizedRect {
             x: 0.6,
             y: 0.6,
             width: 0.1,
@@ -1638,7 +1738,7 @@ mod tests {
 
     #[test]
     fn region_ready_rejects_a_pending_translation() {
-        let mut region = progressive_region(NormalizedRect {
+        let mut region = translated_region(NormalizedRect {
             x: 0.21,
             y: 0.31,
             width: 0.18,

@@ -1,6 +1,6 @@
 # Firefox performance-build manual checklist
 
-All rows are pending for the current direct progressive build unless an
+All rows are pending for the current direct chapter-aware build unless an
 evidence bundle records the exact fingerprint, binary/extension hashes,
 Firefox version, RTX 4080 SUPER/CUDA environment, commands, timestamps, and raw
 artifacts. Results from the retired page-result build do not satisfy this list.
@@ -22,13 +22,14 @@ artifacts. Results from the retired page-result build do not satisfy this list.
 - [ ] Verify the detached daemon survives one-shot host exit and cleans up
   after the 30-minute idle window.
 
-## Progressive reader behavior
+## Chapter-aware reader behavior
 
-- [x] Complete independent region and geometry review for all 36 Chapter 5
-  images.
-- [x] Complete the remaining Chinese, pinyin, and HSK-token gold before
-  treating any run as release evidence.
-- [ ] Run all 36 hash-pinned Chapter 5 images in reader order.
+- [ ] Capture and independently review every core/stress page in the local
+  real-reader-v2 corpus.
+- [ ] Complete the Chinese, pinyin, HSK-token, entity, continuation, style,
+  cleanup, and exclusion annotations before treating any run as release
+  evidence.
+- [ ] Run the packaged Firefox core and all selections in reader order.
 - [ ] Verify visible tiles/regions arrive ahead of off-screen work.
 - [ ] For every `regionReady`, verify the PNG is fetched, validated, decoded,
   and inserted before selectable Chinese.
@@ -78,5 +79,5 @@ artifacts. Results from the retired page-result build do not satisfy this list.
 - [ ] Preserve raw samples and hashes under an evidence path outside gold data.
 - [ ] Keep optional live-site network timing separate.
 
-See [the benchmark method](chapter-5-benchmark.md). A checked box without its
+See [the real-reader v2 method](real-reader-v2.md). A checked box without its
 linked raw evidence is not a passed release check.

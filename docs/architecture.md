@@ -63,7 +63,7 @@ polling. CORS allows only that origin and the required GET, POST, PUT, and
 DELETE methods. No general application router, URL fetch, telemetry, provider
 credential, or remote translation path is mounted.
 
-## Direct progressive data flow
+## Direct chapter-aware data flow
 
 1. The extension uploads one raster plus strict metadata to `POST /jobs`.
    Byte, MIME, hash, declared dimension, decoded dimension, pixel, and decoder
@@ -77,16 +77,20 @@ credential, or remote translation path is mounted.
    prerequisite. This covers dialogue, thoughts, captions, and unballooned
    story text while leaving the final semantic decision to OCR. Text proposals
    are spatially deduplicated at tile overlaps.
-4. PP-OCRv5 English recognition runs in batches of eight. Mechanically valid
-   Latin OCR at confidence 0.45 or higher remains eligible; hard-coded content
-   word lists do not decide whether a line is story text.
-5. Learned bubble segmentation assigns lines to real bubble identities so an
-   entire balloon is processed atomically. Learned manga-text segmentation
-   produces one stitched probability field that also drives OCR line discovery
-   and per-line appearance sampling. Shared geometry expansion grows its mask
-   around the detected glyphs, and manga LaMa restores the source artwork.
-   Transparent region patches take alpha only from that semantic mask. Layout uses the
-   measured, eroded bubble contour rather than a fixed detector-box inset.
+4. PP-OCRv6-small independently detects and recognizes text in batches of
+   eight. Mechanically valid Latin OCR at the calibrated 0.55 confidence floor
+   or higher remains
+   eligible; hard-coded content word lists do not decide whether a line is
+   story text.
+5. Learned bubble segmentation assigns accepted lines to real bubble identities
+   so an entire balloon is processed atomically. PP-OCRv6-small remains the
+   sole source of line polygons; manga-text segmentation supplies only the
+   glyph matte and appearance evidence used for cleanup. Shared geometry
+   expansion grows its mask around the detected glyphs, and manga LaMa restores
+   the source artwork. Transparent region patches take alpha only from that
+   verified semantic mask. Layout uses the measured, eroded bubble contour
+   rather than a fixed detector-box inset. A proposal that fails two distinct
+   OCR views becomes an `UnreadableRegion` and stays pixel-identical.
 6. Visible accepted regions jump ahead of off-screen work at every batch
    boundary. Translation batches contain up to six regions and normally flush
    once three are pending; an undersized visible tail waits no longer than
@@ -102,8 +106,9 @@ credential, or remote translation path is mounted.
    protocol validator checks protected names, standalone numbers, question
    intent, and output structure. Digits embedded in Latin OCR tokens such as
    `IDENTIT4` are not treated as semantic numbers. Only rejected items may
-   enter one terminal targeted repair batch. Each rejected candidate supplies
-   a typed validator avoid-list that strict repair must remove. Natural repair
+   enter one bounded terminal repair batch, with at most one new-evidence
+   attempt per item. Each rejected candidate supplies a typed validator
+   avoid-list that strict repair must remove. Natural repair
    remains Natural so it cannot discard an indispensable
    story concept merely to achieve a strict score. Natural learning accepts a bounded number
    of indispensable advanced terms after simplification and publishes their
@@ -155,8 +160,8 @@ jobs reuse loaded state.
 The 64 MiB byte-bounded in-memory translation cache is keyed by:
 
 - normalized OCR text;
-- up to six preceding dialogue utterances;
-- the complete proper-name glossary;
+- the canonical chapter context preceding the region;
+- ordered typed chapter entity memory;
 - requested HSK level;
 - natural or strict learning mode;
 - model ID and exact model revision;
@@ -168,8 +173,8 @@ Changing any output-affecting dependency invalidates the cache. There is no
 project cache, page history, stored page reconstruction, or level-change
 retranslation endpoint.
 
-Decoded images use a 512 MiB byte-bounded LRU. Completed per-image region
-results and PNG patches also have a byte-bounded
+Decoded images use a 512 MiB byte-bounded LRU. Completed terminal
+chapter-region results and PNG patches also have a byte-bounded
 2 GiB persistent cache. Its key includes the complete strict job request,
 source hash, exact build fingerprint, and a fingerprint of every
 output-affecting model, prompt, validator, dictionary, and pipeline resource.
@@ -182,7 +187,7 @@ previously fully decoded/validated result; full pixel decoding occurs only on
 a miss. No detector, OCR, translation, or patch intermediate is written to
 disk.
 
-The job log is append-only, starts at sequence 1, rejects regressive overall
+The chapter job log is append-only, starts at sequence 1, rejects regressive overall
 progress, rejects duplicate region publication, and permits one terminal
 `complete`, `failed`, or `cancelled` event. Clients long-poll after the last
 acknowledged sequence, so extension background suspension does not require a
@@ -223,7 +228,7 @@ different model revision are not evidence for this build.
 
 ## Reader features retained
 
-The progressive architecture preserves:
+The chapter-aware architecture preserves:
 
 - selectable Chinese with displayed pinyin;
 - position-anchored hover explanations with local longest-match dictionary
@@ -238,5 +243,7 @@ may overtake queued offscreen work at detector, OCR, and translation batch
 boundaries.
 
 See [the browser contract](browser-contract.md) for exact routes and event
-shapes and [the Chapter 5 evidence plan](chapter-5-benchmark.md) for the
-complete 36-image gold corpus and the passing packaged release measurements.
+shapes and [the real-reader v2 evidence plan](real-reader-v2.md) for the
+content-addressed corpus and packaged release measurements. The tracked
+manifest remains capture-required until all local pages and annotations are
+present.

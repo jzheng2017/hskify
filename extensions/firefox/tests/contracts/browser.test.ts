@@ -18,7 +18,7 @@ import {
   parseNativeReadyResponse,
   parseViewportUpdate,
 } from '../../src/contracts/browser'
-import { createFixtureRegions } from '../../src/messaging/fixture-service'
+import { createFixtureRegions } from '../support/fixture-service'
 
 function sharedFixture(name: string): unknown {
   const path = resolve(process.cwd(), '../../fixtures/contracts', name)
@@ -40,8 +40,9 @@ function jobRequest() {
     naturalHeight: 1800,
     pageSessionId: 'page',
     pageIndex: 0,
+    chapterPageOrder: [0],
+    surfaceKind: 'image',
     visibleRects: [{ x: 0, y: 0.2, width: 1, height: 0.4 }],
-    properNameGlossary: [{ sourceEnglish: 'Cheon Yeo Woon', chinese: '天汝云' }],
     settings: {
       sourceLanguage: 'en',
       targetLanguage: 'zh-CN',
@@ -97,7 +98,7 @@ describe('unversioned progressive browser contract', () => {
     )
     expect(parseNativeReadyResponse(sharedFixture('native-ready.valid.json')).type).toBe('ready')
     expect(parseHealthResponse(sharedFixture('health.ready.json')).resourceIdentities).toHaveLength(
-      10,
+      13,
     )
     expect(parseBrowserSetupStatus(sharedFixture('setup.ready.json'))).toMatchObject({
       state: 'ready',
@@ -118,7 +119,6 @@ describe('unversioned progressive browser contract', () => {
     expect(parseBrowserJobRequest(jobRequest())).toMatchObject({
       buildFingerprint: BUILD_FINGERPRINT,
       visibleRects: [{ y: 0.2, height: 0.4 }],
-      properNameGlossary: [{ sourceEnglish: 'Cheon Yeo Woon', chinese: '天汝云' }],
     })
     expect(
       parseBrowserJobCreated({
@@ -311,11 +311,14 @@ describe('unversioned progressive browser contract', () => {
       'comic-text-bubble-detector-weights',
       'lama-manga-inpainter-weights',
       'manga-text-segmentation-weights',
-      'pp-ocr-v5-english-recognizer-config',
-      'pp-ocr-v5-english-recognizer-model',
+      'pp-ocr-v6-small-detector-config',
+      'pp-ocr-v6-small-detector-model',
+      'pp-ocr-v6-small-recognizer-config',
+      'pp-ocr-v6-small-recognizer-model',
       'speech-bubble-segmentation-config',
       'speech-bubble-segmentation-weights',
       'translation-model',
+      'translation-model-projector',
     ])
     expect(() =>
       parseHealthResponse({

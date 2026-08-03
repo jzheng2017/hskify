@@ -1,4 +1,4 @@
-//! Secure unversioned loopback service with append-only progressive job updates.
+//! Secure unversioned loopback service with append-only terminal job updates.
 
 use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
@@ -20,7 +20,7 @@ use axum::http::header::{
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post, put};
+use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use chrono::Utc;
 use http_body::{Frame, SizeHint};
@@ -36,10 +36,11 @@ use crate::contracts::{
     BrowserSetupState, BrowserSetupStatus, CreateJobRequest, ErrorResponse, HealthResponse,
     HealthStatus, HskLevel, JobUpdate, JobUpdatesResponse, LookupInteraction, LookupRequest,
     NativeReadyResponse, NativeReadyType, NormalizedRect, PatchMimeType, PreservedArtworkRegion,
-    ProgressiveRegion, RegionPatch, Validate, ViewportUpdateRequest,
+    RegionPatch, TranslatedRegion, UnreadableRegion, Validate, ViewportUpdateRequest,
 };
 use crate::crypto::{SECRET_BYTES, decode_secret, generate_secret, secrets_equal, sha256_hex};
 use crate::decoded_cache::DecodedImageCache;
+#[cfg(test)]
 use crate::fixtures;
 use crate::origin::validate_extension_origin;
 use crate::pipeline_adapter::{
@@ -146,8 +147,9 @@ struct JobLog {
     terminal: bool,
     last_overall_progress: Option<f32>,
     published_regions: HashSet<String>,
-    progressive_regions: HashMap<String, ProgressiveRegion>,
+    translated_regions: HashMap<String, TranslatedRegion>,
     preserved_artwork_regions: HashMap<String, PreservedArtworkRegion>,
+    unreadable_regions: HashMap<String, UnreadableRegion>,
     lookup_contexts: HashMap<String, RegionLookupContext>,
     viewport: JobViewport,
 }
@@ -182,8 +184,9 @@ impl JobRecord {
                 terminal: false,
                 last_overall_progress: None,
                 published_regions: HashSet::new(),
-                progressive_regions: HashMap::new(),
+                translated_regions: HashMap::new(),
                 preserved_artwork_regions: HashMap::new(),
+                unreadable_regions: HashMap::new(),
                 lookup_contexts: HashMap::new(),
                 viewport: JobViewport {
                     revision: 1,
@@ -258,18 +261,20 @@ impl JobRecord {
         {
             return Err(PublishError::RegressiveProgress);
         }
-        match &draft {
-            JobUpdateDraft::RegionReady { region }
-                if log.published_regions.contains(&region.id) =>
-            {
-                return Err(PublishError::DuplicateRegion(region.id.clone()));
-            }
-            JobUpdateDraft::ArtworkPreserved { region }
-                if log.published_regions.contains(&region.id) =>
-            {
-                return Err(PublishError::DuplicateRegion(region.id.clone()));
-            }
-            _ => {}
+        // A region has one terminal publication regardless of its outcome.
+        // Treat translated, preserved-artwork, and unreadable records as the
+        // same identity so a failed cleanup cannot later be followed by a
+        // guessed patch (or by a second unreadable notice).
+        let region_id = match &draft {
+            JobUpdateDraft::RegionReady { region } => Some(region.id.as_str()),
+            JobUpdateDraft::ArtworkPreserved { region } => Some(region.id.as_str()),
+            JobUpdateDraft::Unreadable { region } => Some(region.id.as_str()),
+            _ => None,
+        };
+        if let Some(region_id) = region_id
+            && log.published_regions.contains(region_id)
+        {
+            return Err(PublishError::DuplicateRegion(region_id.to_owned()));
         }
         let sequence = log
             .updates
@@ -283,12 +288,17 @@ impl JobRecord {
         match &update {
             JobUpdate::RegionReady { region, .. } => {
                 log.published_regions.insert(region.id.clone());
-                log.progressive_regions
+                log.translated_regions
                     .insert(region.id.clone(), region.as_ref().clone());
             }
             JobUpdate::ArtworkPreserved { region, .. } => {
                 log.published_regions.insert(region.id.clone());
                 log.preserved_artwork_regions
+                    .insert(region.id.clone(), region.clone());
+            }
+            JobUpdate::Unreadable { region, .. } => {
+                log.published_regions.insert(region.id.clone());
+                log.unreadable_regions
                     .insert(region.id.clone(), region.clone());
             }
             JobUpdate::Progress {
@@ -358,12 +368,12 @@ impl JobRecord {
             .cloned()
     }
 
-    fn progressive_regions(&self) -> Vec<ProgressiveRegion> {
+    fn translated_regions(&self) -> Vec<TranslatedRegion> {
         let mut regions = self
             .log
             .lock()
             .expect("job log lock poisoned")
-            .progressive_regions
+            .translated_regions
             .values()
             .cloned()
             .collect::<Vec<_>>();
@@ -381,6 +391,23 @@ impl JobRecord {
             .lock()
             .expect("job log lock poisoned")
             .preserved_artwork_regions
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        regions.sort_by(|left, right| {
+            left.reading_order
+                .cmp(&right.reading_order)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        regions
+    }
+
+    fn unreadable_regions(&self) -> Vec<UnreadableRegion> {
+        let mut regions = self
+            .log
+            .lock()
+            .expect("job log lock poisoned")
+            .unreadable_regions
             .values()
             .cloned()
             .collect::<Vec<_>>();
@@ -411,10 +438,13 @@ pub enum JobUpdateDraft {
         message: String,
     },
     RegionReady {
-        region: Box<ProgressiveRegion>,
+        region: Box<TranslatedRegion>,
     },
     ArtworkPreserved {
         region: PreservedArtworkRegion,
+    },
+    Unreadable {
+        region: UnreadableRegion,
     },
     Complete {
         message: Option<String>,
@@ -450,6 +480,7 @@ impl JobUpdateDraft {
             },
             Self::RegionReady { region } => JobUpdate::RegionReady { sequence, region },
             Self::ArtworkPreserved { region } => JobUpdate::ArtworkPreserved { sequence, region },
+            Self::Unreadable { region } => JobUpdate::Unreadable { sequence, region },
             Self::Complete { message } => JobUpdate::Complete { sequence, message },
             Self::Failed {
                 code,
@@ -482,7 +513,7 @@ pub enum PublishError {
     UpdateLimit,
     #[error("overall progress must not move backwards")]
     RegressiveProgress,
-    #[error("progressive contract validation failed: {0}")]
+    #[error("translated-region contract validation failed: {0}")]
     Contract(crate::contracts::ContractError),
     #[error("patch must be a decodable PNG")]
     InvalidPatch,
@@ -574,7 +605,7 @@ impl JobUpdateSink {
     }
 
     /// Preserve only the language context used by the optional dictionary
-    /// lookup route. Browser clients receive `ProgressiveRegion` updates.
+    /// lookup route. Browser clients receive terminal `TranslatedRegion` updates.
     pub(crate) fn remember_region_for_lookup(
         &self,
         region_id: String,
@@ -1153,8 +1184,9 @@ impl BridgeState {
     }
 
     fn completed_cache_job(&self, record: &JobRecord) -> Result<CachedJob, CleaningError> {
-        let completed_regions = record.progressive_regions();
+        let completed_regions = record.translated_regions();
         let preserved_artwork = record.preserved_artwork_regions();
+        let unreadable_regions = record.unreadable_regions();
         let storage = self.storage.read().expect("storage lock poisoned");
         let regions = completed_regions
             .into_iter()
@@ -1186,6 +1218,7 @@ impl BridgeState {
         Ok(CachedJob {
             regions,
             preserved_artwork,
+            unreadable_regions,
         })
     }
 }
@@ -1324,9 +1357,10 @@ pub fn router(state: Arc<BridgeState>) -> Router {
         .route("/setup", get(setup))
         .route("/setup/models", post(setup_models))
         .route("/jobs", post(create_job))
-        .route("/jobs/{job_id}", axum::routing::delete(cancel_job))
+        .route("/jobs/{job_id}", delete(cancel_job))
         .route("/jobs/{job_id}/viewport", put(update_viewport))
         .route("/jobs/{job_id}/updates", get(job_updates))
+        .route("/chapters/{page_session_id}", delete(close_chapter))
         .route("/lookup", post(lookup))
         .route("/blobs/{patch_id}", get(blob))
         .route("/fonts/{font_id}", get(font))
@@ -1443,6 +1477,14 @@ fn browser_path(path: &str) -> bool {
             (segments.next(), segments.next()),
             (None, None) | (Some("viewport" | "updates"), None)
         );
+    }
+    if let Some(rest) = path.strip_prefix("/chapters/") {
+        return !rest.is_empty()
+            && !rest.contains('/')
+            && rest.len() <= 256
+            && rest
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'));
     }
     ["/blobs/", "/fonts/"].into_iter().any(|prefix| {
         path.strip_prefix(prefix)
@@ -1573,10 +1615,11 @@ async fn health(State(state): State<Arc<BridgeState>>) -> Json<HealthResponse> {
         engine_version: env!("CARGO_PKG_VERSION").to_owned(),
         status: HealthStatus::Ready,
         setup_state: setup_status.state,
-        resource_identities: state.setup.as_ref().map_or_else(
-            || fixtures::health().resource_identities,
-            |setup| setup.resource_identities(),
-        ),
+        resource_identities: state
+            .setup
+            .as_ref()
+            .map(|setup| setup.resource_identities())
+            .unwrap_or_default(),
     })
 }
 
@@ -1964,9 +2007,29 @@ async fn run_cleaning_job(
 
     if let Some(cached) = cached {
         record.release_source();
+        let translated_regions = cached
+            .regions
+            .iter()
+            .map(|cached_region| cached_region.region.clone())
+            .collect::<Vec<_>>();
+        let preserved_artwork = cached.preserved_artwork.clone();
+        let unreadable_regions = cached.unreadable_regions.clone();
         let result = replay_cached_job(&sink, cached);
         match result {
             Ok(()) => {
+                if !record.cancel.load(Ordering::Acquire) {
+                    if let Err(error) = state.pipeline.restore_cached_context(
+                        &request,
+                        &translated_regions,
+                        &preserved_artwork,
+                        &unreadable_regions,
+                    ) {
+                        fail_job(&state, &record, &sink, error);
+                        mark_terminal_page(&state, &request);
+                        finish_active(&state, &record);
+                        return;
+                    }
+                }
                 if !record.cancel.load(Ordering::Acquire) && !record.is_terminal() {
                     let _ = sink.publish(JobUpdateDraft::Complete {
                         message: Some("Exact cached translation replayed".to_owned()),
@@ -1976,6 +2039,7 @@ async fn run_cleaning_job(
             Err(error) => {
                 if !record.cancel.load(Ordering::Acquire) {
                     fail_job(&state, &record, &sink, error);
+                    mark_terminal_page(&state, &request);
                 }
             }
         }
@@ -1993,6 +2057,7 @@ async fn run_cleaning_job(
                 "Verified local model and language resources are not ready.",
             ),
         );
+        mark_terminal_page(&state, &request);
         finish_active(&state, &record);
         return;
     }
@@ -2007,6 +2072,7 @@ async fn run_cleaning_job(
                 message: "The bounded decoded source image is no longer available.".to_owned(),
             },
         );
+        mark_terminal_page(&state, &request);
         finish_active(&state, &record);
         return;
     };
@@ -2081,24 +2147,103 @@ async fn run_cleaning_job(
     finish_active(&state, &record);
 }
 
+fn mark_terminal_page(state: &BridgeState, request: &BrowserJobRequest) {
+    // The job error is already the user-visible failure.  If recording the
+    // chapter frontier also fails (for example, a poisoned session lock), do
+    // not replace the original diagnosis; the chapter will be sealed or
+    // cancelled by the browser lifecycle owner.
+    let _ = state.pipeline.mark_page_terminal(request);
+}
+
 fn replay_cached_job(sink: &JobUpdateSink, cached: CachedJob) -> Result<(), CleaningError> {
-    for region in cached.preserved_artwork {
-        sink.publish(JobUpdateDraft::ArtworkPreserved { region })
-            .map_err(|error| CleaningError::new("CACHE_REPLAY_FAILED", error.to_string()))?;
+    enum ReplayItem {
+        Unreadable(UnreadableRegion),
+        Artwork(PreservedArtworkRegion),
+        Translated(CachedRegion),
     }
-    for cached_region in cached.regions {
+    impl ReplayItem {
+        fn order(&self) -> (u32, &str) {
+            match self {
+                Self::Unreadable(region) => (region.reading_order, &region.id),
+                Self::Artwork(region) => (region.reading_order, &region.id),
+                Self::Translated(region) => (region.region.reading_order, &region.region.id),
+            }
+        }
+    }
+
+    let mut items = Vec::with_capacity(
+        cached.regions.len() + cached.preserved_artwork.len() + cached.unreadable_regions.len(),
+    );
+    items.extend(
+        cached
+            .unreadable_regions
+            .into_iter()
+            .map(ReplayItem::Unreadable),
+    );
+    items.extend(
+        cached
+            .preserved_artwork
+            .into_iter()
+            .map(ReplayItem::Artwork),
+    );
+    items.extend(cached.regions.into_iter().map(ReplayItem::Translated));
+    items.sort_by(|left, right| left.order().cmp(&right.order()));
+
+    for item in items {
         if sink.is_cancelled() {
             return Err(CleaningError::cancelled());
         }
-        let mut region = cached_region.region;
-        region.patch = sink
-            .store_cached_patch_png(region.patch.rect.clone(), cached_region.patch_png)
-            .map_err(|error| CleaningError::new("CACHE_REPLAY_FAILED", error.to_string()))?;
-        sink.remember_region_for_lookup(region.id.clone(), cached_region.lookup_context);
-        sink.publish(JobUpdateDraft::RegionReady {
-            region: Box::new(region),
-        })
-        .map_err(|error| CleaningError::new("CACHE_REPLAY_FAILED", error.to_string()))?;
+        match item {
+            ReplayItem::Unreadable(region) => {
+                let source = region.source_english.clone();
+                sink.remember_region_for_lookup(
+                    region.id.clone(),
+                    RegionLookupContext {
+                        source_english: source.clone(),
+                        base_chinese: source.clone(),
+                        displayed_chinese: source,
+                        proper_names: Vec::new(),
+                    },
+                );
+                sink.publish(JobUpdateDraft::Unreadable { region })
+                    .map_err(|error| {
+                        CleaningError::new("CACHE_REPLAY_FAILED", error.to_string())
+                    })?;
+            }
+            ReplayItem::Artwork(region) => {
+                let source = region.source_english.clone();
+                let displayed = region
+                    .translated_chinese
+                    .clone()
+                    .unwrap_or_else(|| source.clone());
+                sink.remember_region_for_lookup(
+                    region.id.clone(),
+                    RegionLookupContext {
+                        source_english: source,
+                        base_chinese: displayed.clone(),
+                        displayed_chinese: displayed,
+                        proper_names: Vec::new(),
+                    },
+                );
+                sink.publish(JobUpdateDraft::ArtworkPreserved { region })
+                    .map_err(|error| {
+                        CleaningError::new("CACHE_REPLAY_FAILED", error.to_string())
+                    })?;
+            }
+            ReplayItem::Translated(cached_region) => {
+                let mut region = cached_region.region;
+                region.patch = sink
+                    .store_cached_patch_png(region.patch.rect.clone(), cached_region.patch_png)
+                    .map_err(|error| {
+                        CleaningError::new("CACHE_REPLAY_FAILED", error.to_string())
+                    })?;
+                sink.remember_region_for_lookup(region.id.clone(), cached_region.lookup_context);
+                sink.publish(JobUpdateDraft::RegionReady {
+                    region: Box::new(region),
+                })
+                .map_err(|error| CleaningError::new("CACHE_REPLAY_FAILED", error.to_string()))?;
+            }
+        }
     }
     Ok(())
 }
@@ -2108,10 +2253,11 @@ fn fail_job(state: &BridgeState, record: &JobRecord, sink: &JobUpdateSink, error
     if record.cancel.load(Ordering::Acquire) || record.is_terminal() {
         return;
     }
+    let retryable = error.is_transient();
     let _ = sink.publish(JobUpdateDraft::Failed {
         code: error.code.to_owned(),
         message: error.message,
-        retryable: true,
+        retryable,
     });
     state.touch();
 }
@@ -2228,6 +2374,30 @@ async fn cancel_job(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Chapter state is owned by the daemon rather than by an individual image
+/// job.  The browser closes that state after the chapter reaches a terminal
+/// seal or is cancelled, so dialogue/entity memory cannot accumulate across
+/// tabs or replacement runs.
+async fn close_chapter(
+    State(state): State<Arc<BridgeState>>,
+    Path(page_session_id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    if page_session_id.is_empty()
+        || page_session_id.len() > 256
+        || !page_session_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(ApiError::bad_request(
+            "INVALID_CHAPTER_SESSION",
+            "The chapter session identifier is invalid.",
+        ));
+    }
+    state.pipeline.close_chapter(&page_session_id);
+    state.touch();
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn lookup(
     State(state): State<Arc<BridgeState>>,
     request: Request,
@@ -2334,9 +2504,10 @@ async fn font(
             .map_err(|_| ApiError::internal())?;
         return Ok(bytes_response(bytes, "font/ttf"));
     }
-    let bytes = fixtures::font_bytes(&font_id)
-        .ok_or_else(|| ApiError::not_found("FONT_NOT_FOUND", "The browser font does not exist."))?;
-    Ok(bytes_response(bytes.to_vec(), "font/ttf"))
+    Err(ApiError::not_found(
+        "FONT_NOT_FOUND",
+        "The browser font is unavailable until the local model setup is ready.",
+    ))
 }
 
 fn bytes_response(bytes: Vec<u8>, content_type: &'static str) -> Response {
@@ -2444,7 +2615,7 @@ mod tests {
         cursor.into_inner()
     }
 
-    fn cached_fixture_region() -> ProgressiveRegion {
+    fn cached_fixture_region() -> TranslatedRegion {
         fixtures::updates("cached-job")
             .updates
             .into_iter()
@@ -2455,7 +2626,7 @@ mod tests {
             .expect("cached fixture region")
     }
 
-    fn lookup_context_for(region: &ProgressiveRegion) -> RegionLookupContext {
+    fn lookup_context_for(region: &TranslatedRegion) -> RegionLookupContext {
         RegionLookupContext {
             source_english: region.source_english.clone(),
             base_chinese: region.base_chinese.clone(),
@@ -2575,6 +2746,7 @@ mod tests {
                     patch_png: cached_bytes.clone(),
                 }],
                 preserved_artwork: Vec::new(),
+                unreadable_regions: Vec::new(),
             },
         )
         .unwrap();
@@ -2598,7 +2770,7 @@ mod tests {
         ));
         {
             let mut log = record.log.lock().unwrap();
-            log.progressive_regions
+            log.translated_regions
                 .insert(region.id.clone(), region.clone());
             log.lookup_contexts
                 .insert(region.id.clone(), lookup_context_for(&region));
@@ -2737,6 +2909,7 @@ mod tests {
                         patch_png: Arc::from(valid_png()),
                     }],
                     preserved_artwork: Vec::new(),
+                    unreadable_regions: Vec::new(),
                 },
             )
             .unwrap();
@@ -2852,6 +3025,7 @@ mod tests {
             "/jobs/job-1",
             "/jobs/job-1/viewport",
             "/jobs/job-1/updates",
+            "/chapters/chapter-1",
             "/blobs/patch-1",
             "/lookup",
             "/fonts/hmt-sans",
@@ -2865,6 +3039,7 @@ mod tests {
             "/browser/v1/jobs/job-1/retranslate",
             "/jobs/job-1/result",
             "/jobs/job-1/retranslate",
+            "/chapters/chapter-1/jobs",
         ] {
             assert!(!browser_path(removed), "{removed}");
         }
@@ -2907,6 +3082,33 @@ mod tests {
                 .collect::<Vec<_>>(),
             [1, 2]
         );
+    }
+
+    #[test]
+    fn region_publication_is_terminal_across_translated_artwork_and_unreadable_outcomes() {
+        let request: CreateJobRequest = serde_json::from_str(include_str!(
+            "../../../fixtures/contracts/job-request.valid.json"
+        ))
+        .unwrap();
+        let record = JobRecord::new(0, "job-test".to_owned(), None, request.visible_rects);
+        let region = cached_fixture_region();
+        record
+            .append(JobUpdateDraft::RegionReady {
+                region: Box::new(region.clone()),
+            })
+            .unwrap();
+        let unreadable = UnreadableRegion {
+            id: region.id.clone(),
+            text_polygon: region.text_polygon.clone(),
+            source_english: region.source_english.clone(),
+            ocr_confidence: region.ocr_confidence,
+            reading_order: region.reading_order,
+            reason: "cleanup failed".to_owned(),
+        };
+        assert!(matches!(
+            record.append(JobUpdateDraft::Unreadable { region: unreadable }),
+            Err(PublishError::DuplicateRegion(id)) if id == region.id
+        ));
     }
 
     #[test]

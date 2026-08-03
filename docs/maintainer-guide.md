@@ -1,6 +1,6 @@
 # Maintainer guide
 
-The Hskify browser product is the direct progressive performance path, even
+The Hskify browser product is the direct chapter-aware performance path, even
 though it reuses implementation crates whose names and general capabilities
 are broader.
 
@@ -16,7 +16,7 @@ are broader.
 - Exact build fingerprint shared by extension, native host, daemon, and
   fixtures; no negotiated protocol version.
 - Unversioned loopback browser routes.
-- One append-only progressive job log; no status/result dual model.
+- One append-only chapter job log; no status/result dual model.
 - Region-local PNG patches; no reconstructed cleaned page.
 - Patch installed before selectable text.
 - Confirmed English dialogue, thought, and eligible story narration only;
@@ -27,11 +27,11 @@ are broader.
 - Proposal and OCR acceptance must work for arbitrary foreground/background
   colors; cleanup must preserve the accepted region's local color, texture,
   gradients, contours, and styling outside the erase mask.
-- Direct English-to-HSK Chinese primary generation, with at most one targeted
-  invalid-item repair batch.
-- Story inclusion is deterministic before the translation-only LLM; the LLM
-  returns either translated story text or the typed non-story disposition for
-  unrelated page furniture.
+- Direct English-to-HSK Chinese primary generation, with one bounded invalid-
+  item repair batch whose rejected regions remain hidden until terminal.
+- Qwen page understanding owns role, transcript, continuation, entity, and
+  style decisions; deterministic code validates the typed response and HSK
+  control validates the final Chinese.
 - Viewport priority controls processing and publication only. Stable
   `readingOrder` remains document order followed by within-image reading order.
 - No browser projects, history, page-level pipeline markers, or level-change
@@ -54,9 +54,11 @@ the same change.
 | Reader lookup/comparison/speech change | Architecture, Firefox checklist, accessibility/privacy checks |
 | Claimed performance or quality result | Raw hashed evidence bundle and completed fixture audit |
 
-The sole canonical release workload is the 36-image *30 Years Since the
-Prologue* chapter 5 fixture. It is intentionally visually diverse, but it is
-never a production allowlist or a license for benchmark-specific tuning.
+The sole canonical release workload is the complete local `real-reader-v2`
+corpus. It contains the ten core and three stress chapters listed in the
+tracked manifest, with content-addressed page objects and exhaustive
+annotations. A capture-required or incomplete corpus is a release failure;
+there is no smaller benchmark substitute.
 
 ## Verification commands
 

@@ -3,8 +3,7 @@ export const BUILD_FINGERPRINT =
 export const HSK_STANDARD = '2.0' as const
 export const SOURCE_LANGUAGE = 'en' as const
 export const TARGET_LANGUAGE = 'zh-CN' as const
-export const MAX_PRECEDING_CONTEXT = 6
-export const MAX_PROPER_NAME_GLOSSARY = 64
+export const MAX_CHAPTER_PAGE_ORDER = 100_000
 
 export type HskLevel = 1 | 2 | 3 | 4 | 5 | 6
 export type NameTranslation = 'keep-original' | 'chinese'
@@ -66,6 +65,8 @@ export type BrowserJobRequest = {
   naturalHeight: number
   pageSessionId: string
   pageIndex: number
+  chapterPageOrder: number[]
+  surfaceKind: PageSurfaceKind
   visibleRects: NormalizedRect[]
   settings: {
     sourceLanguage: 'en'
@@ -77,15 +78,9 @@ export type BrowserJobRequest = {
     nameTranslation: NameTranslation
     learningMode: LearningMode
   }
-  precedingContext?: Array<{
-    sourceEnglish: string
-    chinese: string
-  }>
-  properNameGlossary?: Array<{
-    sourceEnglish: string
-    chinese: string
-  }>
 }
+
+export type PageSurfaceKind = 'image' | 'background' | 'canvas' | 'webgl' | 'frame'
 
 export type BrowserJobCreated = {
   buildFingerprint: typeof BUILD_FINGERPRINT
@@ -140,7 +135,31 @@ export type RegionStyle = {
 export type RegionLayout = {
   suggestedLines: string[]
   fontSizeToImageWidth: number
-  safePolygon?: Point[]
+  safePolygon: Point[]
+}
+
+export type TranslatedRegionRole = 'dialogue' | 'narration' | 'system'
+export type RegionEntityType =
+  | 'person'
+  | 'place'
+  | 'organization'
+  | 'coined'
+  | 'relationship'
+  | 'occupation'
+  | 'rank'
+  | 'title'
+export type RegionEntitySpan = {
+  source: string
+  startChar: number
+  endChar: number
+  entityType: RegionEntityType
+  translated?: string
+}
+export type RegionConfidenceEvidence = {
+  ocrConsensus: number
+  geometryCoverage: number
+  contextConsistency: number
+  cleanupScore: number
 }
 
 export type BrowserRegion = {
@@ -158,6 +177,10 @@ export type BrowserRegion = {
   pinyin: string
   ocrConfidence: number
   readingOrder: number
+  role?: TranslatedRegionRole
+  contextGroup?: string
+  confidenceEvidence?: RegionConfidenceEvidence
+  entities?: RegionEntitySpan[]
   style: RegionStyle
   layout: RegionLayout
   hsk: RegionHsk
@@ -197,6 +220,24 @@ export type PreservedArtworkRegion = {
   sourceEnglish: string
   ocrConfidence: number
   readingOrder: number
+  translatedChinese?: string
+  pinyin?: string
+  teachingTerms?: RegionHsk['teachingTerms']
+}
+
+export type UnreadableRegion = {
+  id: string
+  textPolygon: Point[]
+  sourceEnglish: string
+  ocrConfidence: number
+  readingOrder: number
+  reason: string
+}
+
+export type UnreadableJobUpdate = {
+  sequence: number
+  type: 'unreadable'
+  region: UnreadableRegion
 }
 
 export type ArtworkPreservedJobUpdate = {
@@ -229,6 +270,7 @@ export type JobUpdate =
   | ProgressJobUpdate
   | RegionReadyJobUpdate
   | ArtworkPreservedJobUpdate
+  | UnreadableJobUpdate
   | CompleteJobUpdate
   | FailedJobUpdate
   | CancelledJobUpdate
@@ -452,6 +494,21 @@ function visibleRects(value: unknown, path: string): NormalizedRect[] {
   return array(value, path, 64).map((item, index) => normalizedRect(item, `${path}[${index}]`))
 }
 
+function chapterPageOrder(value: unknown, path: string, pageIndex: number): number[] {
+  const values = array(value, path, MAX_CHAPTER_PAGE_ORDER).map((item, index) =>
+    integer(item, `${path}[${index}]`),
+  )
+  if (values.length === 0 || !values.includes(pageIndex)) {
+    fail(path, 'must contain the submitted pageIndex')
+  }
+  for (let index = 1; index < values.length; index += 1) {
+    if (values[index - 1]! >= values[index]!) {
+      fail(path, 'must be strictly increasing')
+    }
+  }
+  return values
+}
+
 function resourceIdentity(value: unknown, path: string): ResourceIdentity {
   const item = record(value, path)
   exact(item, ['id', 'repository', 'repositoryRevision', 'filename', 'bytes', 'sha256'], path)
@@ -590,6 +647,31 @@ function parseHsk(value: unknown, path: string): RegionHsk {
   }
 }
 
+function parseTeachingTerms(value: unknown, path: string): RegionHsk['teachingTerms'] {
+  return array(value, path, 512).map((entry, index) => {
+    const termPath = `${path}[${index}]`
+    const term = record(entry, termPath)
+    exact(
+      term,
+      ['text', 'startChar', 'endChar', 'pinyin', 'definitions', 'requiredLevel', 'reason'],
+      termPath,
+    )
+    const startChar = integer(term.startChar, `${termPath}.startChar`)
+    const endChar = integer(term.endChar, `${termPath}.endChar`, 1)
+    if (endChar <= startChar) fail(`${termPath}.endChar`, 'must be greater than startChar')
+    const requiredLevel = optional(term.requiredLevel, `${termPath}.requiredLevel`, hskLevel)
+    return {
+      text: string(term.text, `${termPath}.text`, false, 256),
+      startChar,
+      endChar,
+      pinyin: string(term.pinyin, `${termPath}.pinyin`, false, 512),
+      definitions: stringArray(term.definitions, `${termPath}.definitions`, false, 32),
+      ...(requiredLevel === undefined ? {} : { requiredLevel }),
+      reason: oneOf(term.reason, `${termPath}.reason`, ['above-level', 'outside-list'] as const),
+    }
+  })
+}
+
 function parseStyle(value: unknown, path: string): RegionStyle {
   const item = record(value, path)
   exact(
@@ -685,11 +767,11 @@ function parseLayout(value: unknown, path: string): RegionLayout {
   if (fontSizeToImageWidth <= 0) {
     fail(`${path}.fontSizeToImageWidth`, 'must be positive')
   }
-  const safePolygon = optional(item.safePolygon, `${path}.safePolygon`, polygon)
+  const safePolygon = polygon(item.safePolygon, `${path}.safePolygon`)
   return {
     suggestedLines: stringArray(item.suggestedLines, `${path}.suggestedLines`, true, 256),
     fontSizeToImageWidth,
-    ...(safePolygon === undefined ? {} : { safePolygon }),
+    safePolygon,
   }
 }
 
@@ -708,6 +790,10 @@ function parseRegion(value: unknown, path: string): BrowserRegion {
       'pinyin',
       'ocrConfidence',
       'readingOrder',
+      'role',
+      'contextGroup',
+      'confidenceEvidence',
+      'entities',
       'style',
       'layout',
       'hsk',
@@ -742,6 +828,69 @@ function parseRegion(value: unknown, path: string): BrowserRegion {
     fail(`${path}.patch.rect`, 'must overlap the source text polygon')
   }
   const bubblePolygon = optional(item.bubblePolygon, `${path}.bubblePolygon`, polygon)
+  const role = optional(
+    item.role,
+    `${path}.role`,
+    (value, rolePath) => oneOf(value, rolePath, ['dialogue', 'narration', 'system'] as const),
+  )
+  const contextGroup = optional(item.contextGroup, `${path}.contextGroup`, (value, contextPath) =>
+    string(value, contextPath, false, 512),
+  )
+  const confidenceEvidence = optional(
+    item.confidenceEvidence,
+    `${path}.confidenceEvidence`,
+    (value, evidencePath) => {
+      const evidence = record(value, evidencePath)
+      exact(
+        evidence,
+        ['ocrConsensus', 'geometryCoverage', 'contextConsistency', 'cleanupScore'],
+        evidencePath,
+      )
+      return {
+        ocrConsensus: unit(evidence.ocrConsensus, `${evidencePath}.ocrConsensus`),
+        geometryCoverage: unit(evidence.geometryCoverage, `${evidencePath}.geometryCoverage`),
+        contextConsistency: unit(
+          evidence.contextConsistency,
+          `${evidencePath}.contextConsistency`,
+        ),
+        cleanupScore: unit(evidence.cleanupScore, `${evidencePath}.cleanupScore`),
+      }
+    },
+  )
+  const entities = optional(item.entities, `${path}.entities`, (value, entitiesPath) => {
+    const entries = array(value, entitiesPath, 128)
+    let previousEnd = 0
+    return entries.map((entry, index) => {
+      const entityPath = `${entitiesPath}[${index}]`
+      const entity = record(entry, entityPath)
+      exact(entity, ['source', 'startChar', 'endChar', 'entityType', 'translated'], entityPath)
+      const startChar = integer(entity.startChar, `${entityPath}.startChar`)
+      const endChar = integer(entity.endChar, `${entityPath}.endChar`)
+      if (startChar >= endChar || (index > 0 && startChar < previousEnd)) {
+        fail(`${entityPath}.endChar`, 'entity spans must be ordered and non-overlapping')
+      }
+      previousEnd = endChar
+      const translated = optional(entity.translated, `${entityPath}.translated`, (value, path) =>
+        string(value, path, false, 512),
+      )
+      return {
+        source: string(entity.source, `${entityPath}.source`, false, 512),
+        startChar,
+        endChar,
+        entityType: oneOf(entity.entityType, `${entityPath}.entityType`, [
+          'person',
+          'place',
+          'organization',
+          'coined',
+          'relationship',
+          'occupation',
+          'rank',
+          'title',
+        ] as const),
+        ...(translated === undefined ? {} : { translated }),
+      }
+    })
+  })
   return {
     id: string(item.id, `${path}.id`, false, 512),
     textPolygon,
@@ -757,6 +906,10 @@ function parseRegion(value: unknown, path: string): BrowserRegion {
     pinyin: string(item.pinyin, `${path}.pinyin`, false, 8_192),
     ocrConfidence: unit(item.ocrConfidence, `${path}.ocrConfidence`),
     readingOrder: integer(item.readingOrder, `${path}.readingOrder`),
+    ...(role === undefined ? {} : { role }),
+    ...(contextGroup === undefined ? {} : { contextGroup }),
+    ...(confidenceEvidence === undefined ? {} : { confidenceEvidence }),
+    ...(entities === undefined ? {} : { entities }),
     style: parseStyle(item.style, `${path}.style`),
     layout: parseLayout(item.layout, `${path}.layout`),
     hsk: parseHsk(item.hsk, `${path}.hsk`),
@@ -770,8 +923,26 @@ function parsePreservedArtworkRegion(
   const item = record(value, path)
   exact(
     item,
-    ['id', 'textPolygon', 'sourceEnglish', 'ocrConfidence', 'readingOrder'],
+    [
+      'id',
+      'textPolygon',
+      'sourceEnglish',
+      'ocrConfidence',
+      'readingOrder',
+      'translatedChinese',
+      'pinyin',
+      'teachingTerms',
+    ],
     path,
+  )
+  const translatedChinese = optional(item.translatedChinese, `${path}.translatedChinese`, (value, childPath) =>
+    string(value, childPath, false, 4_096),
+  )
+  const pinyin = optional(item.pinyin, `${path}.pinyin`, (value, childPath) =>
+    string(value, childPath, false, 8_192),
+  )
+  const teachingTerms = optional(item.teachingTerms, `${path}.teachingTerms`, (value, childPath) =>
+    parseTeachingTerms(value, childPath),
   )
   return {
     id: string(item.id, `${path}.id`, false, 512),
@@ -779,6 +950,22 @@ function parsePreservedArtworkRegion(
     sourceEnglish: string(item.sourceEnglish, `${path}.sourceEnglish`, false, 4_096),
     ocrConfidence: unit(item.ocrConfidence, `${path}.ocrConfidence`),
     readingOrder: integer(item.readingOrder, `${path}.readingOrder`),
+    ...(translatedChinese === undefined ? {} : { translatedChinese }),
+    ...(pinyin === undefined ? {} : { pinyin }),
+    ...(teachingTerms === undefined ? {} : { teachingTerms }),
+  }
+}
+
+function parseUnreadableRegion(value: unknown, path: string): UnreadableRegion {
+  const item = record(value, path)
+  exact(item, ['id', 'textPolygon', 'sourceEnglish', 'ocrConfidence', 'readingOrder', 'reason'], path)
+  return {
+    id: string(item.id, `${path}.id`, false, 512),
+    textPolygon: polygon(item.textPolygon, `${path}.textPolygon`),
+    sourceEnglish: string(item.sourceEnglish, `${path}.sourceEnglish`, false, 4_096),
+    ocrConfidence: unit(item.ocrConfidence, `${path}.ocrConfidence`),
+    readingOrder: integer(item.readingOrder, `${path}.readingOrder`),
+    reason: string(item.reason, `${path}.reason`, false, 2_048),
   }
 }
 
@@ -888,10 +1075,10 @@ export function parseBrowserJobRequest(value: unknown): BrowserJobRequest {
       'naturalHeight',
       'pageSessionId',
       'pageIndex',
+      'chapterPageOrder',
+      'surfaceKind',
       'visibleRects',
       'settings',
-      'precedingContext',
-      'properNameGlossary',
     ],
     '$',
   )
@@ -910,52 +1097,6 @@ export function parseBrowserJobRequest(value: unknown): BrowserJobRequest {
     ],
     'settings',
   )
-  const precedingContext =
-    item.precedingContext === undefined
-      ? undefined
-      : array(item.precedingContext, 'precedingContext', MAX_PRECEDING_CONTEXT).map(
-          (entry, index) => {
-            const parsed = record(entry, `precedingContext[${index}]`)
-            exact(parsed, ['sourceEnglish', 'chinese'], `precedingContext[${index}]`)
-            return {
-              sourceEnglish: string(
-                parsed.sourceEnglish,
-                `precedingContext[${index}].sourceEnglish`,
-                false,
-                4_096,
-              ),
-              chinese: string(parsed.chinese, `precedingContext[${index}].chinese`, false, 4_096),
-            }
-          },
-        )
-  const properNameGlossary =
-    item.properNameGlossary === undefined
-      ? undefined
-      : array(item.properNameGlossary, 'properNameGlossary', MAX_PROPER_NAME_GLOSSARY).map(
-          (entry, index) => {
-            const parsed = record(entry, `properNameGlossary[${index}]`)
-            exact(parsed, ['sourceEnglish', 'chinese'], `properNameGlossary[${index}]`)
-            return {
-              sourceEnglish: string(
-                parsed.sourceEnglish,
-                `properNameGlossary[${index}].sourceEnglish`,
-                false,
-                256,
-              ),
-              chinese: string(parsed.chinese, `properNameGlossary[${index}].chinese`, false, 128),
-            }
-          },
-        )
-  if (properNameGlossary) {
-    const seen = new Set<string>()
-    properNameGlossary.forEach((entry, index) => {
-      const normalized = entry.sourceEnglish.trim().toLocaleLowerCase('en-US')
-      if (seen.has(normalized)) {
-        fail(`properNameGlossary[${index}].sourceEnglish`, 'must be unique ignoring ASCII case')
-      }
-      seen.add(normalized)
-    })
-  }
   return {
     buildFingerprint: buildFingerprint(item.buildFingerprint),
     clientImageId: string(item.clientImageId, 'clientImageId', false, 512),
@@ -970,6 +1111,14 @@ export function parseBrowserJobRequest(value: unknown): BrowserJobRequest {
     naturalHeight: integer(item.naturalHeight, 'naturalHeight', 1),
     pageSessionId: string(item.pageSessionId, 'pageSessionId', false, 256),
     pageIndex: integer(item.pageIndex, 'pageIndex'),
+    chapterPageOrder: chapterPageOrder(item.chapterPageOrder, 'chapterPageOrder', integer(item.pageIndex, 'pageIndex')),
+    surfaceKind: oneOf(item.surfaceKind, 'surfaceKind', [
+      'image',
+      'background',
+      'canvas',
+      'webgl',
+      'frame',
+    ] as const),
     visibleRects: visibleRects(item.visibleRects, 'visibleRects'),
     settings: {
       sourceLanguage: oneOf(settings.sourceLanguage, 'settings.sourceLanguage', ['en'] as const),
@@ -995,8 +1144,6 @@ export function parseBrowserJobRequest(value: unknown): BrowserJobRequest {
         'strict',
       ] as const),
     },
-    ...(precedingContext === undefined ? {} : { precedingContext }),
-    ...(properNameGlossary === undefined ? {} : { properNameGlossary }),
   }
 }
 
@@ -1025,6 +1172,7 @@ export function parseJobUpdate(value: unknown, path = '$'): JobUpdate {
     'progress',
     'regionReady',
     'artworkPreserved',
+    'unreadable',
     'complete',
     'failed',
     'cancelled',
@@ -1089,6 +1237,13 @@ export function parseJobUpdate(value: unknown, path = '$'): JobUpdate {
         sequence,
         type,
         region: parsePreservedArtworkRegion(item.region, `${path}.region`),
+      }
+    case 'unreadable':
+      exact(item, ['sequence', 'type', 'region'], path)
+      return {
+        sequence,
+        type,
+        region: parseUnreadableRegion(item.region, `${path}.region`),
       }
     case 'complete': {
       exact(item, ['sequence', 'type', 'message'], path)

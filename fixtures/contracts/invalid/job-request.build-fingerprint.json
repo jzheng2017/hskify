@@ -7,6 +7,8 @@
   "naturalHeight": 1800,
   "pageSessionId": "fixture-page-0001",
   "pageIndex": 0,
+  "chapterPageOrder": [0],
+  "surfaceKind": "image",
   "settings": {
     "sourceLanguage": "en",
     "targetLanguage": "zh-CN",

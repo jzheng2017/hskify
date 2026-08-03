@@ -298,6 +298,38 @@ describe('visible-first page queue', () => {
     ])
   })
 
+  it('keeps a complete chapter in document order even when later pages are visible', async () => {
+    const gates = new Map([
+      ['page-0', deferred()],
+      ['page-1', deferred()],
+      ['page-2', deferred()],
+    ])
+    const order: string[] = []
+    const queue = new VisibleFirstQueue<string>(
+      async (item) => {
+        order.push(item.id)
+        await gates.get(item.id)?.promise
+      },
+      {},
+      { maximumConcurrent: 1 },
+    )
+    queue.setOrdering('document')
+    queue.beginInteractiveStartup()
+    queue.enqueueBatch([
+      { id: 'page-0', value: '0', visible: false, order: 0 },
+      { id: 'page-2', value: '2', visible: true, order: 2 },
+      { id: 'page-1', value: '1', visible: true, order: 1 },
+    ])
+
+    await vi.waitFor(() => expect(order).toEqual(['page-0']))
+    gates.get('page-0')?.resolve()
+    await vi.waitFor(() => expect(order).toEqual(['page-0', 'page-1']))
+    gates.get('page-1')?.resolve()
+    await vi.waitFor(() => expect(order).toEqual(['page-0', 'page-1', 'page-2']))
+    gates.get('page-2')?.resolve()
+    await vi.waitFor(() => expect(queue.size).toBe(0))
+  })
+
   it('does not automatically re-enqueue a failed item and requires explicit retry', async () => {
     let attempts = 0
     const failures: string[] = []

@@ -9,6 +9,7 @@ use koharu_runtime::RuntimeManager;
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
 
+use crate::ocr::{TextDetection, TextDetector};
 use crate::{Device, device, loading, types::TextRegion};
 
 use self::model::{RTDetrV2ForObjectDetection, RTDetrV2Outputs};
@@ -280,6 +281,30 @@ impl ComicTextBubbleRegion {
 
     pub fn is_text(&self) -> bool {
         matches!(self.label_id, 1 | 2)
+    }
+}
+
+impl TextDetector for ComicTextBubbleDetector {
+    fn detect_text(&mut self, image: &DynamicImage) -> Result<Vec<TextDetection>> {
+        let result = self.inference(image)?;
+        let width = result.image_width.max(1) as f32;
+        let height = result.image_height.max(1) as f32;
+        Ok(result
+            .text_blocks
+            .into_iter()
+            .map(|block| {
+                TextDetection::new(
+                    crate::ocr::TextRect::new(
+                        block.x / width,
+                        block.y / height,
+                        (block.x + block.width) / width,
+                        (block.y + block.height) / height,
+                    ),
+                    block.confidence,
+                    block.rotation_deg.unwrap_or_default().to_radians(),
+                )
+            })
+            .collect())
     }
 }
 

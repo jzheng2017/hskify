@@ -1,6 +1,6 @@
 # Browser companion implementation
 
-Status: direct progressive performance path. This note describes the current
+Status: direct chapter-aware performance path. This note describes the current
 Rust implementation, not the retired project-backed page pipeline.
 
 ## Executables and lifetime
@@ -63,6 +63,7 @@ GET    /setup
 POST   /setup/models
 POST   /jobs
 DELETE /jobs/{job_id}
+DELETE /chapters/{page_session_id}
 PUT    /jobs/{job_id}/viewport
 GET    /jobs/{job_id}/updates
 POST   /lookup
@@ -81,7 +82,7 @@ explicit `X-HSK-Manga-Extension-Origin` header covers privileged Firefox
 requests that omit `Origin`. Preflight permits only GET, POST, PUT, and DELETE
 plus Authorization, Content-Type, and that extension-origin header.
 
-## Job storage and progressive log
+## Job storage and chapter log
 
 An accepted upload reserves:
 
@@ -158,6 +159,13 @@ vocabulary inventory.
 
 ## Resident CUDA path
 
+The resident model pack includes the Qwen3.5-4B `mmproj-BF16.gguf` projector.
+The daemon requires this matching projector and the translation model as one
+capability; it never silently falls back to a text-only semantic path. The
+projector is attached only after the resident text model is loaded and receives
+one immutable page surface plus its ordered OCR/layout evidence. Malformed or
+incomplete adjudication fails the affected page without a partial decision.
+
 The browser-companion crate enables its `cuda` feature by default. The
 performance build script accepts only an NVIDIA GeForce RTX 4080 SUPER with at
 least 16,000 MiB and compute capability 8.9, installs pinned CUDA 13.1 compiler
@@ -165,7 +173,7 @@ components, and sets `CUDA_COMPUTE_CAP=89`.
 
 The adapter lazily initializes two `OnceCell` values:
 
-- the pinned CUDA RT-DETR-v2 comic text detector, batched English PP-OCRv5
+- the pinned CUDA RT-DETR-v2 comic/bubble detector, batched PP-OCRv6-small
   recognizer, learned text and bubble segmenters, manga LaMa inpainter,
   resident `RuntimeManager`, and local Qwen3.5 4B application state;
   and
@@ -175,7 +183,7 @@ The detector/translator runtime uses `ComputePolicy::CudaRequired`. The English
 recognizer uses `ort = 2.0.0-rc.12` with a mandatory CUDA execution provider,
 fatal provider-registration errors, and environment providers disabled. ONNX
 Runtime may place unsupported shape/control nodes on its built-in CPU provider;
-disabling that normal fallback makes the selected PP-OCRv5 graph impossible to
+disabling that normal fallback makes the selected PP-OCRv6-small graph impossible to
 load. Its warmed session, zero-copy input buffer, and caller-owned dynamic output
 allocations are reused across jobs.
 Output allocations use an LRU capped at four shapes and 32 MiB of host memory;
@@ -193,18 +201,22 @@ Default resource discovery is:
   models\resident\comic-text-bubble-detector-weights\model.safetensors
   models\resident\lama-manga-inpainter-weights\lama-manga.safetensors
   models\resident\manga-text-segmentation-weights\model.safetensors
-  models\resident\pp-ocr-v5-english-recognizer-config\inference.yml
-  models\resident\pp-ocr-v5-english-recognizer-model\inference.onnx
+  models\resident\pp-ocr-v6-small-detector-config\inference.yml
+  models\resident\pp-ocr-v6-small-detector-model\inference.onnx
+  models\resident\pp-ocr-v6-small-recognizer-config\inference.yml
+  models\resident\pp-ocr-v6-small-recognizer-model\inference.onnx
   models\resident\speech-bubble-segmentation-config\config.json
   models\resident\speech-bubble-segmentation-weights\model.safetensors
   fonts\NotoSansSC-VF.ttf
   fonts\NotoSerifSC-VF.ttf
 ```
 
-The detector is frozen to
+The comic topology detector is frozen to
 `ogkalu/comic-text-and-bubble-detector@16e8a622f91fabc6b5b65c96d32d1183f8843546`
-and the recognizer to
-`PaddlePaddle/en_PP-OCRv5_mobile_rec_onnx@3fafbc3b5dcf93dd72add9f48368be8a3a2cd33b`;
+; independent text-line detection is frozen to
+`PaddlePaddle/PP-OCRv6_small_det_onnx@28fe5895c24fd108c19eb3e8479f4ab385fbfc62`;
+the recognizer is frozen to
+`PaddlePaddle/PP-OCRv6_small_rec_onnx@b8f84f0b80c529de40b4fbb3544b84fa7233a513`;
 setup verifies their exact byte counts and SHA-256 identities before the
 resident session is created.
 
@@ -218,8 +230,7 @@ first-time model installation instead of being frozen as missing for the
 daemon's lifetime.
 
 The explicit overrides are `HSK_MANGA_RESOURCES_DIR`,
-`HSK_MANGA_HSK_PATH`, `HSK_MANGA_DICTIONARY_PATH`, and
-`HSK_MANGA_QWEN_MODEL_PATH`.
+`HSK_MANGA_HSK_PATH`, and `HSK_MANGA_DICTIONARY_PATH`.
 
 ## Viewport-first region pipeline
 
@@ -233,10 +244,11 @@ The explicit overrides are `HSK_MANGA_RESOURCES_DIR`,
    `text_bubble` and `text_free` classes. Do not require a detected balloon.
 4. Convert tile-local text geometry to source coordinates, enforce tile
    ownership, and spatially deduplicate overlapping candidates.
-5. Run PP-OCRv5 English line recognition in batches of at most eight, and yield
+5. Run PP-OCRv6-small multilingual line recognition in batches of at most eight, and yield
    after each candidate chunk so newly visible translation work can overtake
    off-screen OCR.
-6. Accept mechanically valid Latin OCR at confidence 0.45 or higher. A
+6. Accept mechanically valid Latin OCR at the calibrated 0.55 confidence
+   floor. A
    detector-backed bubble becomes finalizable only after every unprocessed
    tile-ownership cell that could contain another line in that bubble is gone.
    Segment its local contour, group every accepted line by bubble identity,
@@ -245,24 +257,25 @@ The explicit overrides are `HSK_MANGA_RESOURCES_DIR`,
    tail pass, while the active viewport keeps the immediate path for newly
    finalized lines. This removes the whole-image publication barrier without
    re-running the page-tail analysis at every detector frontier or splitting a
-   balloon at an overlap boundary.
-7. Fuse detector-confirmed bubbles without accepted OCR with the independent
-   glyph-probability field. A bubble-local adaptive threshold proposes tight
-   faint or stylized text bands, while the unchanged OCR confidence and Latin
-   script gates reject empty bubbles and visual noise.
-8. Segment source glyph pixels with the learned manga text model, constrain the
+   balloon at an overlap boundary. A proposal that fails both genuinely
+   different recognition views becomes a terminal `UnreadableRegion`; it never
+   disappears from the chapter coverage graph and receives no cleanup patch.
+7. Segment source glyph pixels with the learned manga text model, constrain the
    mask to accepted text regions, expand it by measured source geometry, and
    restore the masked artwork with the manga-trained LaMa model. Bubble
    segmentation and inpainting operate on tiles intersecting the finalized
    region supports, not an unconditional second pass over the entire image.
-9. Run learned missed-text recovery only when detector evidence leaves an
-   unresolved candidate, bubble, or an entirely unverified page. Recovery is
-   restricted to tiles touching that evidence; a page whose detector lines
-   already cover every bubble does not pay for a second full-page segmentation
-   pass. Recovery and bubble-contour inference are admitted in bounded tile
-   batches so visible work can overtake offscreen recovery between model calls.
-   This keeps fallback coverage generic while removing redundant model work
-   from ordinary pages.
+8. Verify cleanup candidates against residual source language, boundary
+   continuity, texture preservation, protected pixels, and mask sparsity. A
+   uniform fill is accepted only for a measured uniform interior; gradients,
+   line art, and textured surfaces use the edge-aware/model path. A failed
+   candidate remains source pixels with an unreadable hover state.
+9. Run one multimodal page adjudication call over the immutable surface (or a
+   geometry-derived evidence viewport) and all numbered OCR polygons. It
+   classifies roles, corrected transcripts, continuation links, entities, and
+   style evidence. The deterministic boundary validates geometry, language,
+   counts, and HSK policy; it does not use capitalization or artwork wordlists
+   to infer semantics.
 10. Queue accepted regions for translation and reprioritize visible work at
    every OCR or detector boundary. Ready batches begin at three pending
    regions, contain at most six, and an undersized tail becomes eligible when
@@ -274,10 +287,11 @@ The explicit overrides are `HSK_MANGA_RESOURCES_DIR`,
     page is finishing, without allowing an unbounded set of long pages to
     occupy memory.
 
-Low-confidence, undecodable, and non-Latin OCR are excluded before translation.
-Content is not rejected by hard-coded story, credit, role, or sound-effect word
-lists. Eligible narration and other story text outside a balloon remain in
-scope.
+Low-confidence, undecodable, and non-Latin OCR is never translated or painted.
+Detector proposals that cannot reach terminal consensus remain visible source
+pixels with an `UnreadableRegion` hover target. Content is not rejected by
+hard-coded story, credit, role, or sound-effect word lists. Eligible narration
+and other story text outside a balloon remain in scope.
 
 ## Model-backed cleanup
 
@@ -317,9 +331,9 @@ prevents Chinese text from appearing over uncleaned English.
 
 ## Direct HSK translation
 
-The primary generation request sends up to six English dialogue utterances
-directly to Qwen3.5 4B with the requested cumulative HSK 2.0 level and at most
-six preceding dialogue utterances. It does not generate a page-wide faithful
+The primary generation request sends up to six ordered English dialogue
+utterances directly to Qwen3.5 4B with the requested cumulative HSK 2.0 level
+and at most six accepted chapter-context utterances. It does not generate a page-wide faithful
 translation and then rewrite it.
 
 The requested level controls syntax as well as vocabulary. Levels 1-2 prefer
@@ -329,12 +343,10 @@ Levels 3-4 permit familiar compound sentences while simplifying dense
 embedding and formal synonyms; levels 5-6 permit natural advanced grammar.
 The job's name preference is part of generation, validation, and both cache
 keys. `keep-original` preserves the source's exact Latin name spelling and
-permits only exact source spans approved by a two-stage semantic entity pipeline
-as Latin HSK exceptions. Page-role classification and entity discovery have
-separate bounded response contracts, so malformed name output cannot alter
-story/artwork decisions. Discovery may return only the shortest exact source
-spans typed as person, place, organization, event, or unique entity; one
-batched contextual adjudication then accepts or rejects every candidate.
+permits only exact source spans typed and approved by the contextual page
+understanding call as Latin HSK exceptions. The same bounded response carries
+page roles, corrected transcripts, continuation links, entities, and style;
+deterministic parsing rejects malformed or incomplete output as a page failure.
 Personal and place names are preserved, while roles, titles, descriptive
 epithets, and color-plus-noun codenames remain ordinary translation input. The
 decision uses the generic opaque-identifier versus translatable-description
@@ -344,13 +356,12 @@ uses approved glossary forms first, then established Chinese names when certain
 and otherwise consistent phonetic transliteration. Neither mode translates a
 name by its dictionary meaning.
 
-Before cleanup, a dedicated semantic pass receives the page dimensions once,
+Before cleanup, one multimodal page pass receives the page dimensions once,
 compact normalized region geometry, enclosure topology, and every OCR item in
-the ready page section. Detector OCR from the final tile is held until learned
-fallback OCR completes, so an arbitrary detector/fallback boundary cannot
-split one cover, credit cluster, or connected phrase. The role response budget
-is derived from its compact fixed schema and constrained by the model's actual
-remaining context. It classifies both the page section and each region as
+the bounded ready page window. Regions are merged in canonical reading order,
+so an arbitrary tile boundary cannot split a connected phrase. The response
+budget is derived from its compact fixed schema and constrained by the model's
+actual remaining context. It classifies both the page section and each region as
 story text, decorative story artwork, page furniture/unreadable OCR, or a
 standalone sound effect. One authoritative semantic decision applies to every
 region; uncertainty fails safe to story text. Decorative artwork and excluded
@@ -362,12 +373,11 @@ so the source image remains untouched. Standalone numbers remain
 exact-preservation requirements; digits embedded in Latin OCR tokens do not.
 
 `hsk-control` validates each returned story item. Items that already pass are
-accepted. Rejected items enter one terminal batched repair with their rejected
-Chinese and exact deterministic problems. Repair output is never recursively
-fed back through another strategy.
-When names must remain unchanged, malformed or omitted numbered NER analysis is
-a retryable image failure rather than permission to transliterate an undecided
-span.
+accepted. Rejected items enter one logical batched repair with their rejected
+Chinese and exact deterministic problems; an item can receive at most one new
+evidence attempt. Repair output is never recursively fed back through another
+strategy. If the page evidence is malformed or incomplete, the page remains
+original and is exposed as unreadable rather than allowing an undecided name.
 Up to six rejected regions enter one logical numbered repair request. Before
 generation, the translator measures each candidate subbatch with the resident
 model's real tokenizer and chat template, chooses the largest ordered prefix
@@ -389,7 +399,7 @@ a retry of the whole image.
 Pending meaning-valid primaries can provide internal discourse context to
 later ordered batches, but they never cross the browser contract. Pinyin is
 derived after the accepted/rejected final state by local
-longest-match lookup. A progressive region carries:
+longest-match lookup. A terminal `TranslatedRegion` carries:
 
 - source English;
 - the direct generation as `baseChinese`;
@@ -406,7 +416,7 @@ the fitted output lines after layout and never force the Chinese translation
 to retain the source line count; polygon geometry and measured source glyph
 size determine the largest non-overflowing layout.
 
-## Translation cache
+## Chapter translation cache
 
 The daemon holds a 64 MiB byte-bounded in-memory direct-translation cache. Its
 SHA-256 key covers:
@@ -414,7 +424,7 @@ SHA-256 key covers:
 ```text
 schema
 OCR text
-last six preceding utterances
+canonical chapter context before the region
 HSK level
 learning mode
 model ID
@@ -422,15 +432,16 @@ model revision
 prompt hash
 validator hash
 HSK/dictionary control revision
-proper-name glossary
+ordered typed chapter entities
 ```
 
-The key prevents reuse when dialogue context, level, model bytes/revision,
-prompt behavior, validation logic, or language data changes. The cache is not a
+The key prevents reuse when chapter context/entity memory, level, model
+bytes/revision, prompt behavior, validation logic, or language data changes.
+The cache is not a
 project, browser history, persistent page artifact, or retranslation facility.
 
-The separate 2 GiB persistent result cache stores only complete per-image
-regions and their patch PNGs. Its key covers the strict request, build
+The separate 2 GiB persistent result cache stores only complete terminal
+chapter-region results and their patch PNGs. Its key covers the strict request, build
 fingerprint, source identity, all output-affecting resource identities, and
 the HSK normalization, segmentation, lookup, Jieba, and Unicode-table policy
 revisions. A validator-code change therefore cannot replay regions assessed by
@@ -469,8 +480,7 @@ voice; neither comparison nor speech adds a daemon result endpoint.
 | One patch | 16 MiB |
 | One font | 32 MiB |
 | Visible rectangles | 64 |
-| Preceding context entries accepted by contract | 6 |
-| Preceding entries used by direct translation/cache | 6 |
+| Chapter context entries used by direct translation/cache | 6 |
 | Update long-poll | 20 s |
 | Idle lifetime | 30 min |
 
@@ -481,14 +491,9 @@ there are no admitted requests and no active jobs.
 ## Evidence status
 
 Architecture claims above are traced to the current code and contract
-fixtures. The sole canonical workload is the 36-image *30 Years Since the
-Prologue* chapter 5 fixture. Its 218-region geometry review and 214-target
-translation, pinyin, and token-level HSK gold are complete. Release claims
-require the complete packaged-Firefox run sequence in
-[the benchmark evidence method](../../docs/chapter-5-benchmark.md); source-only
-diagnostics are labeled separately. The current exact package passed all 426
-gates across one installed-cold run and 20 measured warm runs; the benchmark
-document records the timings, quality, memory, VRAM, cache, cancellation, and
-disk evidence. Keep raw outputs, do not add chapter-specific tuning, and never
-reuse measurements from a different workload or the retired page-result
-pipeline.
+fixtures. Release evidence belongs to the complete packaged-Firefox
+real-reader-v2 corpus described in
+[the real-reader v2 method](../../docs/real-reader-v2.md). The tracked
+manifest is currently capture-required, so no source-only diagnostic or
+retired benchmark can be reported as a release pass. Keep raw outputs and
+never add chapter-specific tuning.

@@ -45,20 +45,36 @@
       "sha256": "f7e68a0c3e53dda4aba056a2370bcfb99f4dd189e9867d4570bc12578f9c7c4a"
     },
     {
-      "id": "pp-ocr-v5-english-recognizer-config",
-      "repository": "PaddlePaddle/en_PP-OCRv5_mobile_rec_onnx",
-      "repositoryRevision": "3fafbc3b5dcf93dd72add9f48368be8a3a2cd33b",
+      "id": "pp-ocr-v6-small-detector-config",
+      "repository": "PaddlePaddle/PP-OCRv6_small_det_onnx",
+      "repositoryRevision": "28fe5895c24fd108c19eb3e8479f4ab385fbfc62",
       "filename": "inference.yml",
-      "bytes": 3964,
-      "sha256": "27e91d0582f40168aa218303c76e184bc78fa7a5d105aad0cfbad8458b441067"
+      "bytes": 885,
+      "sha256": "193f435274bf9f0b5f71a929bbfbcf148282df7e633b34e7c373e8f44741b516"
     },
     {
-      "id": "pp-ocr-v5-english-recognizer-model",
-      "repository": "PaddlePaddle/en_PP-OCRv5_mobile_rec_onnx",
-      "repositoryRevision": "3fafbc3b5dcf93dd72add9f48368be8a3a2cd33b",
+      "id": "pp-ocr-v6-small-detector-model",
+      "repository": "PaddlePaddle/PP-OCRv6_small_det_onnx",
+      "repositoryRevision": "28fe5895c24fd108c19eb3e8479f4ab385fbfc62",
       "filename": "inference.onnx",
-      "bytes": 7848423,
-      "sha256": "b5f833dfc5d0eb71da397b4efa06ebeee9b431b690a47d6af40d77d8eabc557f"
+      "bytes": 9880512,
+      "sha256": "d73e0058b7a8086bbd57f3d10b8bcd4ff95363f67e06e2762b5e814fe9c9410e"
+    },
+    {
+      "id": "pp-ocr-v6-small-recognizer-config",
+      "repository": "PaddlePaddle/PP-OCRv6_small_rec_onnx",
+      "repositoryRevision": "b8f84f0b80c529de40b4fbb3544b84fa7233a513",
+      "filename": "inference.yml",
+      "bytes": 150579,
+      "sha256": "ab078671bb49f06228eadccd34f1bb501e157f7a047095ffb943ba81512c77d1"
+    },
+    {
+      "id": "pp-ocr-v6-small-recognizer-model",
+      "repository": "PaddlePaddle/PP-OCRv6_small_rec_onnx",
+      "repositoryRevision": "b8f84f0b80c529de40b4fbb3544b84fa7233a513",
+      "filename": "inference.onnx",
+      "bytes": 21159378,
+      "sha256": "5435fd747c9e0efe15a96d0b378d5bd157e9492ed8fd80edf08f30d02fa24634"
     },
     {
       "id": "speech-bubble-segmentation-config",
@@ -83,6 +99,14 @@
       "filename": "Qwen3.5-4B-Q4_K_M.gguf",
       "bytes": 2740937888,
       "sha256": "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4"
+    },
+    {
+      "id": "translation-model-projector",
+      "repository": "unsloth/Qwen3.5-4B-GGUF",
+      "repositoryRevision": "e87f176479d0855a907a41277aca2f8ee7a09523",
+      "filename": "mmproj-BF16.gguf",
+      "bytes": 675569344,
+      "sha256": "302b92d565080b9cc0281186979ae75a7429ec23d14f6f7607a035539b21f3a6"
     }
   ]
 }

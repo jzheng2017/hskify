@@ -25,6 +25,7 @@ imageproc = { workspace = true }
 hsk-control = { path = "../hsk-control" }
 koharu-app = { workspace = true }
 koharu-core = { workspace = true }
+koharu-llm = { workspace = true }
 koharu-ml = { workspace = true }
 koharu-runtime = { workspace = true }
 ort = { workspace = true }
@@ -36,6 +37,7 @@ subtle = "2.6"
 tempfile = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
+tracing = { workspace = true }
 uuid = { workspace = true }
 
 [features]

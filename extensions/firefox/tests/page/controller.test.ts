@@ -21,6 +21,9 @@ type ControllerInternals = {
   scope: 'visible' | 'all' | undefined
   queue: VisibleFirstQueue<unknown>
   queueIds: Map<HTMLImageElement, string>
+  chapterPageOrder: number[]
+  canonicalPageIndex(candidate: DiscoveredImage): number
+  establishCanonicalPageOrder(candidates: readonly DiscoveredImage[]): void
   sourceSnapshot(candidate: DiscoveredImage): {
     generation: number
     pageSessionId: string
@@ -54,9 +57,15 @@ type ChapterFixture = {
 
 function candidate(image: HTMLImageElement, domIndex: number): DiscoveredImage {
   return {
+    // Discovery identities are element-bound; a DOM reorder must not create a
+    // second logical page in the chapter stream.
+    id: `image-surface:${image.dataset.page || image.currentSrc || image.src}`,
+    kind: 'image',
     element: image,
     owner: image.parentElement instanceof HTMLPictureElement ? image.parentElement : image,
     sourceUrl: image.currentSrc || image.src,
+    sourceWidth: image.naturalWidth,
+    sourceHeight: image.naturalHeight,
     domIndex,
     visible: true,
   }
@@ -131,7 +140,7 @@ function addTrackedOverlay(
   const text = document.createElement('span')
   text.className = 'hmt-region'
   text.dataset.regionId = `region-${domIndex}`
-  text.textContent = 'å®Œæ•´æ–‡æœ¬'
+  text.textContent = '完整文本'
   host.shadowRoot.append(patch, text)
 
   internals.rendered.set(image, rendered)
@@ -215,7 +224,6 @@ beforeEach(() => {
     },
   })
 })
-
 afterEach(() => {
   document.documentElement
     .querySelectorAll('[data-hmt-owned]')
@@ -438,6 +446,39 @@ describe('page controller terminal restoration', () => {
 
     expect(reprioritize).toHaveBeenCalledWith('queued-second', true, 0)
     expect(internals.scope).toBe('all')
+    controller.destroy()
+  })
+
+  it('freezes canonical page indexes when lazy readers insert or reorder surfaces', () => {
+    const page = fixture()
+    const late = loadedImage('https://reader.test/page-late.webp')
+    late.dataset.page = 'late'
+    document.body.append(late)
+    const controller = new PageTranslationController()
+    const internals = controller as unknown as ControllerInternals
+    const first = candidate(page.first, 0)
+    const second = candidate(page.second, 1)
+    const insertedBeforeFirst = candidate(late, 0)
+
+    internals.establishCanonicalPageOrder([first, second])
+    expect(internals.canonicalPageIndex(first)).toBe(0)
+    expect(internals.canonicalPageIndex(second)).toBe(1)
+
+    // The same elements report new mutable DOM indexes after a reader
+    // prepends a lazy page. Their chapter identities and context positions
+    // remain unchanged; the genuinely new surface appends to the stream.
+    expect(internals.canonicalPageIndex(candidate(page.second, 0))).toBe(1)
+    expect(internals.canonicalPageIndex(candidate(page.first, 1))).toBe(0)
+    expect(internals.canonicalPageIndex(insertedBeforeFirst)).toBe(2)
+    expect(internals.chapterPageOrder).toEqual([0, 1, 2])
+
+    // A page removed before submission must not remain in the daemon's
+    // expected-page barrier. Re-inserting the same element restores its
+    // frozen identity rather than allocating a new position.
+    internals.onDiscovery({ type: 'removed', candidate: first })
+    expect(internals.chapterPageOrder).toEqual([1, 2])
+    expect(internals.canonicalPageIndex(first)).toBe(0)
+    expect(internals.chapterPageOrder).toEqual([0, 1, 2])
     controller.destroy()
   })
 

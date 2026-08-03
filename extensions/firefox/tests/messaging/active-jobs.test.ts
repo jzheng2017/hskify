@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import { BUILD_FINGERPRINT } from '../../src/contracts/browser'
 import { ActiveJobStore, type ActiveJobRecord } from '../../src/messaging/active-jobs'
-import { FixtureService } from '../../src/messaging/fixture-service'
+import { FixtureService } from '../support/fixture-service'
 import { MemoryStorage } from '../helpers/storage'
 
 function record(overrides: Partial<ActiveJobRecord> = {}): ActiveJobRecord {
@@ -28,6 +28,8 @@ function record(overrides: Partial<ActiveJobRecord> = {}): ActiveJobRecord {
       naturalHeight: 16_000,
       pageSessionId: 'page',
       pageIndex: 0,
+      chapterPageOrder: [0],
+      surfaceKind: 'image',
       visibleRects: [],
       settings: {
         sourceLanguage: 'en',

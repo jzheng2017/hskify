@@ -120,8 +120,14 @@ try {
         [ordered]@{ id = 'comic-text-bubble-detector-config'; filename = 'config.json' },
         [ordered]@{ id = 'comic-text-bubble-detector-preprocessor-config'; filename = 'preprocessor_config.json' },
         [ordered]@{ id = 'comic-text-bubble-detector-weights'; filename = 'model.safetensors' },
-        [ordered]@{ id = 'pp-ocr-v5-english-recognizer-config'; filename = 'inference.yml' },
-        [ordered]@{ id = 'pp-ocr-v5-english-recognizer-model'; filename = 'inference.onnx' }
+        [ordered]@{ id = 'lama-manga-inpainter-weights'; filename = 'lama-manga.safetensors' },
+        [ordered]@{ id = 'manga-text-segmentation-weights'; filename = 'model.safetensors' },
+        [ordered]@{ id = 'pp-ocr-v6-small-detector-config'; filename = 'inference.yml' },
+        [ordered]@{ id = 'pp-ocr-v6-small-detector-model'; filename = 'inference.onnx' },
+        [ordered]@{ id = 'pp-ocr-v6-small-recognizer-config'; filename = 'inference.yml' },
+        [ordered]@{ id = 'pp-ocr-v6-small-recognizer-model'; filename = 'inference.onnx' },
+        [ordered]@{ id = 'speech-bubble-segmentation-config'; filename = 'config.json' },
+        [ordered]@{ id = 'speech-bubble-segmentation-weights'; filename = 'model.safetensors' }
     )
     $resourceIdentities = @($residentDescriptors | ForEach-Object {
         $directory = Join-Path $residentModelsRoot $_.id
@@ -205,6 +211,25 @@ try {
         url = "https://huggingface.co/example/models/resolve/$fixtureRevision/Qwen3.5-4B-Q4_K_M.gguf"
         bytes = $modelBytes
         sha256 = $modelHash
+    }
+    $projectorId = 'translation-model-projector'
+    $projectorDirectory = Join-Path $residentModelsRoot $projectorId
+    [IO.Directory]::CreateDirectory($projectorDirectory) | Out-Null
+    $projectorPath = Join-Path $projectorDirectory 'mmproj-BF16.gguf'
+    [IO.File]::WriteAllBytes(
+        $projectorPath,
+        [Text.Encoding]::UTF8.GetBytes("resident fixture $projectorId")
+    )
+    $projectorBytes = (Get-Item -LiteralPath $projectorPath).Length
+    $projectorHash = (Get-FileHash -LiteralPath $projectorPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $resourceIdentities += [ordered]@{
+        id = $projectorId
+        repository = 'example/models'
+        repositoryRevision = $fixtureRevision
+        filename = 'mmproj-BF16.gguf'
+        url = "https://huggingface.co/example/models/resolve/$fixtureRevision/mmproj-BF16.gguf"
+        bytes = $projectorBytes
+        sha256 = $projectorHash
     }
     $modelManifest = [ordered]@{
         manifestVersion = 1
@@ -418,8 +443,8 @@ try {
         'resources\models\resident\comic-text-bubble-detector-config\config.json',
         'resources\models\resident\comic-text-bubble-detector-preprocessor-config\preprocessor_config.json',
         'resources\models\resident\comic-text-bubble-detector-weights\model.safetensors',
-        'resources\models\resident\pp-ocr-v5-english-recognizer-config\inference.yml',
-        'resources\models\resident\pp-ocr-v5-english-recognizer-model\inference.onnx',
+        'resources\models\resident\pp-ocr-v6-small-recognizer-config\inference.yml',
+        'resources\models\resident\pp-ocr-v6-small-recognizer-model\inference.onnx',
         'resources\runtime\cuda\.installed',
         'resources\runtime\cuda\cudart64_13.dll',
         'resources\runtime\llama.cpp\b8935\windows-cuda13-x64\.installed',
@@ -444,7 +469,7 @@ try {
     Assert-True -Condition $bundleManifest.resources.dictionaryBundled -Message 'bundle did not record dictionary data'
     Assert-True -Condition $bundleManifest.resources.modelBundled -Message 'bundle did not record the translation model'
     Assert-True -Condition $bundleManifest.resources.residentModelsBundled -Message 'bundle did not record detector/OCR resources'
-    Assert-True -Condition ($bundleManifest.resources.residentModelCount -eq 5) -Message 'bundle recorded the wrong detector/OCR resource count'
+    Assert-True -Condition ($bundleManifest.resources.residentModelCount -eq 12) -Message 'bundle recorded the wrong resident resource count'
     Assert-True -Condition $bundleManifest.resources.residentRuntimeBundled -Message 'bundle did not record CUDA/llama runtime resources'
     Assert-True -Condition ($bundleManifest.resources.residentRuntimeFileCount -eq 39) -Message 'bundle recorded the wrong CUDA/llama runtime resource count'
     Assert-True `
@@ -504,6 +529,7 @@ try {
     $installedHsk = Join-Path $productRoot 'resources\hsk-2.0.normalized.json'
     $installedDictionary = Join-Path $productRoot 'resources\cc-cedict.normalized.json'
     $installedModel = Join-Path $productRoot 'resources\models\Qwen3.5-4B-Q4_K_M.gguf'
+    $installedProjector = Join-Path $productRoot 'resources\models\resident\translation-model-projector\mmproj-BF16.gguf'
     $installedResidentModels = @($residentDescriptors | ForEach-Object {
         Join-Path $productRoot "resources\models\resident\$($_.id)\$($_.filename)"
     })
@@ -517,15 +543,15 @@ try {
     $installedSerifFont = Join-Path $productRoot 'resources\fonts\NotoSerifSC-VF.ttf'
     $installedAttestation = Join-Path $productRoot 'app\provenance\performance-build-attestation.json'
     $installedReadinessMarker = Join-Path $productRoot 'browser-companion\browser-cache\browser-runtime\models.ready'
-    foreach ($installedPath in @($installedNativeHost) + $installedVcRuntime + $installedOnnxRuntimeProviders + @($installedHsk, $installedDictionary, $installedModel) + $installedResidentModels + $installedRuntimeFiles + @($installedSansFont, $installedSerifFont, $installedAttestation, $installedReadinessMarker)) {
+    foreach ($installedPath in @($installedNativeHost) + $installedVcRuntime + $installedOnnxRuntimeProviders + @($installedHsk, $installedDictionary, $installedModel, $installedProjector) + $installedResidentModels + $installedRuntimeFiles + @($installedSansFont, $installedSerifFont, $installedAttestation, $installedReadinessMarker)) {
         Assert-True -Condition (Test-Path -LiteralPath $installedPath -PathType Leaf) -Message "installed file missing: $installedPath"
     }
     $readinessMarker = Get-Content -LiteralPath $installedReadinessMarker -Raw | ConvertFrom-Json
     Assert-True `
         -Condition (
             $readinessMarker.buildFingerprint -eq $script:HskifyPerformanceBuildFingerprint -and
-            @($readinessMarker.resourceIdentities).Count -eq 10 -and
-            @($readinessMarker.installations).Count -eq 10
+            @($readinessMarker.resourceIdentities).Count -eq 13 -and
+            @($readinessMarker.installations).Count -eq 13
         ) `
         -Message 'installer wrote an invalid model-readiness marker'
 

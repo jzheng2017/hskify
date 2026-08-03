@@ -5,7 +5,7 @@ use std::path::Path;
 
 use anyhow::{Result, bail};
 use candle_core::{DType, Device, Tensor};
-use image::{GenericImageView, GrayImage, RgbImage};
+use image::{GrayImage, RgbImage};
 use koharu_runtime::RuntimeManager;
 use tracing::instrument;
 

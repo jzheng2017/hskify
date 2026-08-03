@@ -144,7 +144,7 @@ if (
     -not $bundleManifest.resources.dictionaryBundled -or
     -not $bundleManifest.resources.modelBundled -or
     -not $bundleManifest.resources.residentModelsBundled -or
-    $bundleManifest.resources.residentModelCount -ne 5 -or
+    $bundleManifest.resources.residentModelCount -ne 12 -or
     -not $bundleManifest.resources.residentRuntimeBundled -or
     $bundleManifest.resources.residentRuntimeFileCount -ne 39
 ) {

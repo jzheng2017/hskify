@@ -281,15 +281,35 @@ fn pad_forward<F: InpaintForward>(
     let pad_h = ceil_multiple(h, pad_mod);
 
     let out = if pad_w == w && pad_h == h {
-        model.forward(image, mask, bubble_mask)?
+        let candidate = model.forward(image, mask, bubble_mask)?;
+        // A model is allowed to use the surrounding artwork as context, but
+        // it must never publish changes outside the measured erase mask. Keep
+        // that invariant at the shared strategy boundary so every model and
+        // every reader receives the same protected-pixel guarantee.
+        composite_masked_image(image, &candidate, mask)
     } else {
         let pad_img = symmetric_pad_rgb(image, pad_w, pad_h);
         let pad_msk = symmetric_pad_gray(mask, pad_w, pad_h);
         let pad_bubble = bubble_mask.map(|bubble_mask| zero_pad_gray(bubble_mask, pad_w, pad_h));
         let padded_out = model.forward(&pad_img, &pad_msk, pad_bubble.as_ref())?;
-        crop_imm(&padded_out, 0, 0, w, h).to_image()
+        let candidate = crop_imm(&padded_out, 0, 0, w, h).to_image();
+        composite_masked_image(image, &candidate, mask)
     };
     Ok(out)
+}
+
+fn composite_masked_image(source: &RgbImage, candidate: &RgbImage, mask: &GrayImage) -> RgbImage {
+    debug_assert_eq!(source.dimensions(), candidate.dimensions());
+    debug_assert_eq!(source.dimensions(), mask.dimensions());
+    let mut output = source.clone();
+    for y in 0..source.height() {
+        for x in 0..source.width() {
+            if mask.get_pixel(x, y).0[0] > 0 {
+                output.put_pixel(x, y, *candidate.get_pixel(x, y));
+            }
+        }
+    }
+    output
 }
 
 /// External-contour bounding boxes of a binarized mask. Equivalent to
@@ -561,6 +581,35 @@ mod tests {
     struct PaintForward {
         calls: Cell<u32>,
         color: [u8; 3],
+    }
+
+    #[test]
+    fn strategy_protects_pixels_outside_the_erase_mask() {
+        let source = solid_rgb(24, 24, [12, 34, 56]);
+        let mut mask = GrayImage::new(24, 24);
+        for y in 8..16 {
+            for x in 9..17 {
+                mask.put_pixel(x, y, Luma([255]));
+            }
+        }
+        let candidate = PaintForward::new([240, 240, 240]);
+        let result = run_inpaint(
+            &candidate,
+            &source,
+            &mask,
+            None,
+            &HdStrategyConfig::lama_default(),
+        )
+        .unwrap();
+
+        for y in 0..source.height() {
+            for x in 0..source.width() {
+                if mask.get_pixel(x, y).0[0] == 0 {
+                    assert_eq!(result.get_pixel(x, y), source.get_pixel(x, y));
+                }
+            }
+        }
+        assert_eq!(result.get_pixel(12, 12), &Rgb([240, 240, 240]));
     }
 
     impl PaintForward {

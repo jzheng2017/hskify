@@ -1,4 +1,5 @@
 import { looksLikeSequentialArtReader } from '../src/discovery/images'
+import { discoverPageSurfaces } from '../src/discovery/surfaces'
 import { sendBackgroundMessage } from '../src/messaging/messages'
 
 const PROBE_LIFETIME_MS = 20_000
@@ -21,7 +22,18 @@ export default defineContentScript({
 
     const inspect = (): void => {
       scheduled = undefined
-      if (finished || !looksLikeSequentialArtReader()) return
+      if (
+        finished ||
+        (!looksLikeSequentialArtReader() &&
+          !discoverPageSurfaces().surfaces.some(
+            (surface) =>
+              surface.kind !== 'image' &&
+              (surface.continuous || surface.width >= 500) &&
+              surface.height >= 700,
+          ))
+      ) {
+        return
+      }
       stop()
       void sendBackgroundMessage({ type: 'engine:warmup' }).catch(() => {
         // The popup exposes actionable setup errors. A speculative page probe

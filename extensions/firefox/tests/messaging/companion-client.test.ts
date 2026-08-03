@@ -47,6 +47,8 @@ function request(): BrowserJobRequest {
     naturalHeight: 1800,
     pageSessionId: 'page',
     pageIndex: 0,
+    chapterPageOrder: [0],
+    surfaceKind: 'image',
     visibleRects: [{ x: 0, y: 0, width: 1, height: 0.5 }],
     settings: {
       sourceLanguage: 'en',
@@ -207,6 +209,7 @@ describe('authenticated unversioned companion client', () => {
     expect((await client.getJobUpdates('job', 4)).nextSequence).toBe(5)
     expect(await client.getPatch('patch/1', 'image/png')).toBeInstanceOf(ArrayBuffer)
     await client.cancelJob('job')
+    await client.closeChapter('chapter-1')
 
     expect(requests).toEqual([
       {
@@ -227,6 +230,10 @@ describe('authenticated unversioned companion client', () => {
       },
       {
         url: 'http://127.0.0.1:43127/jobs/job',
+        method: 'DELETE',
+      },
+      {
+        url: 'http://127.0.0.1:43127/chapters/chapter-1',
         method: 'DELETE',
       },
     ])

@@ -14,21 +14,21 @@
 mod direct_hsk;
 
 pub use direct_hsk::{
-    DirectHskTranslator, HSK_SEMANTIC_ANALYSIS_REVISION, HSK_TRANSLATION_MODEL,
-    HSK_TRANSLATION_MODEL_REVISION, HSK_TRANSLATION_PROMPT_HASH, HSK_TRANSLATION_PROMPT_REVISION,
-    HSK_TRANSLATION_VALIDATOR_HASH, HskLearningMode, HskNameHandling, HskPrecedingUtterance,
-    HskProtectedName, HskRepairUtterance, HskSemanticClassification, HskSemanticLayout,
+    DirectHskTranslator, HSK_TRANSLATION_MODEL, HSK_TRANSLATION_MODEL_REVISION,
+    HSK_TRANSLATION_PROMPT_HASH, HSK_TRANSLATION_PROMPT_REVISION, HSK_TRANSLATION_VALIDATOR_HASH,
+    HskLearningMode, HskNameHandling, HskPrecedingUtterance, HskProtectedName, HskRepairUtterance,
     HskSourceUtterance, HskTranslationBatchRequest, HskTranslationBatchResult,
     HskTranslationDisposition, HskTranslationIssue, HskTranslationOutcome,
     HskTranslationRepairBatchRequest, HskTranslationRepairRequest, HskUtteranceKind,
-    MAX_HSK_CONTEXT_TOKENS, MAX_HSK_PRECEDING_UTTERANCES, MAX_HSK_SEMANTIC_PAGE_REGIONS,
-    MAX_HSK_TRANSLATION_BATCH, direct_hsk_prompt_hash, direct_hsk_validator_hash,
+    MAX_HSK_CONTEXT_TOKENS, MAX_HSK_LAYOUT_CHARACTERS, MAX_HSK_LAYOUT_LINES,
+    MAX_HSK_PRECEDING_UTTERANCES, MAX_HSK_TRANSLATION_BATCH, MIN_HSK_LAYOUT_CHARACTERS,
+    direct_hsk_prompt_hash, direct_hsk_validator_hash,
 };
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use koharu_core::{
     LlmCatalog, LlmCatalogModel, LlmLoadRequest, LlmProviderCatalog, LlmProviderCatalogStatus,
     LlmState, LlmStateStatus, LlmTarget, LlmTargetKind,
@@ -38,6 +38,7 @@ use koharu_llm::providers::{
     all_provider_descriptors, build_provider, discover_models,
 };
 use koharu_llm::safe::llama_backend::LlamaBackend;
+use koharu_llm::safe::model::LlamaModel;
 use koharu_llm::{Language, Llm, ModelId, language::tags as language_tags};
 use koharu_runtime::RuntimeManager;
 use strum::IntoEnumIterator;
@@ -141,6 +142,24 @@ impl Model {
 
     pub fn backend(&self) -> Arc<LlamaBackend> {
         self.backend.clone()
+    }
+
+    /// Return the resident local model without transferring ownership.
+    ///
+    /// Multimodal adapters use this to attach a projector to the same loaded
+    /// translation weights. Provider-backed and loading states are explicit
+    /// errors rather than silently loading a duplicate model.
+    pub async fn local_model_handle(&self) -> Result<Arc<LlamaModel>> {
+        let guard = self.state.read().await;
+        match &*guard {
+            State::ReadyLocal(llm) => Ok(llm.shared_model()),
+            State::Loading { .. } => Err(anyhow::anyhow!("LLM is still loading")),
+            State::Failed { error, .. } => Err(anyhow::anyhow!("LLM failed to load: {error}")),
+            State::ReadyProvider { .. } => {
+                Err(anyhow::anyhow!("the active LLM is provider-backed"))
+            }
+            State::Empty => Err(anyhow::anyhow!("no local LLM loaded")),
+        }
     }
 
     /// Load a provider target (remote API) immediately.
@@ -297,10 +316,7 @@ impl Model {
         }?;
 
         let translation = strip_thinking_block(&translation);
-        let out = match parse_tagged_blocks(translation, sources.len())? {
-            Some(blocks) => blocks,
-            None => split_legacy_lines(translation, sources.len()),
-        };
+        let out = parse_tagged_blocks(translation, sources.len())?;
         Ok(out
             .into_iter()
             .map(|s| strip_wrapping_quotes(s.trim()))
@@ -540,9 +556,9 @@ fn find_next_tag(text: &str) -> Option<(usize, usize, usize)> {
     None
 }
 
-fn parse_tagged_blocks(translation: &str, expected_blocks: usize) -> Result<Option<Vec<String>>> {
+fn parse_tagged_blocks(translation: &str, expected_blocks: usize) -> Result<Vec<String>> {
     if find_next_tag(translation).is_none() {
-        return Ok(None);
+        bail!("translation response did not contain the required numbered blocks");
     }
     let mut blocks = vec![String::new(); expected_blocks];
     let mut cursor = translation;
@@ -559,19 +575,10 @@ fn parse_tagged_blocks(translation: &str, expected_blocks: usize) -> Result<Opti
         }
         cursor = &cursor[content_end..];
     }
-    Ok(found_any.then_some(blocks))
-}
-
-fn split_legacy_lines(translation: &str, expected_blocks: usize) -> Vec<String> {
-    let mut lines: Vec<String> = translation
-        .lines()
-        .map(|line| line.trim_end_matches('\r').to_string())
-        .collect();
-    lines.truncate(expected_blocks);
-    while lines.len() < expected_blocks {
-        lines.push(String::new());
+    if !found_any {
+        bail!("translation response did not contain any numbered blocks");
     }
-    lines
+    Ok(blocks)
 }
 
 fn strip_thinking_block(text: &str) -> &str {

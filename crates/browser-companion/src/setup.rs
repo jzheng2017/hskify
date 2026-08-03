@@ -38,8 +38,11 @@ const SERIF_FONT_BYTES: u64 = 25_129_160;
 const SERIF_FONT_SHA256: &str = "a4aed9985a5916fbf6690456f8732a9fccd517938e353165d4142b4f11a39280";
 
 pub(crate) const TRANSLATION_MODEL_ID: &str = "translation-model";
-pub(crate) const OCR_CONFIG_ID: &str = "pp-ocr-v5-english-recognizer-config";
-pub(crate) const OCR_MODEL_ID: &str = "pp-ocr-v5-english-recognizer-model";
+pub(crate) const PAGE_PROJECTOR_ID: &str = "translation-model-projector";
+pub(crate) const OCR_CONFIG_ID: &str = "pp-ocr-v6-small-recognizer-config";
+pub(crate) const OCR_MODEL_ID: &str = "pp-ocr-v6-small-recognizer-model";
+pub(crate) const OCR_DETECTOR_CONFIG_ID: &str = "pp-ocr-v6-small-detector-config";
+pub(crate) const OCR_DETECTOR_MODEL_ID: &str = "pp-ocr-v6-small-detector-model";
 pub(crate) const DETECTOR_CONFIG_ID: &str = "comic-text-bubble-detector-config";
 pub(crate) const DETECTOR_PREPROCESSOR_ID: &str = "comic-text-bubble-detector-preprocessor-config";
 pub(crate) const DETECTOR_WEIGHTS_ID: &str = "comic-text-bubble-detector-weights";
@@ -185,11 +188,14 @@ fn model_resources() -> Result<ModelResources> {
         DETECTOR_WEIGHTS_ID,
         INPAINTER_WEIGHTS_ID,
         TEXT_SEGMENTER_WEIGHTS_ID,
+        OCR_DETECTOR_CONFIG_ID,
+        OCR_DETECTOR_MODEL_ID,
         OCR_CONFIG_ID,
         OCR_MODEL_ID,
         BUBBLE_SEGMENTER_CONFIG_ID,
         BUBBLE_SEGMENTER_WEIGHTS_ID,
         TRANSLATION_MODEL_ID,
+        PAGE_PROJECTOR_ID,
     ];
     if identities.len() != required_ids.len()
         || identities
@@ -209,7 +215,8 @@ fn model_resources() -> Result<ModelResources> {
         }
     }
     if identities
-        .last()
+        .iter()
+        .find(|identity| identity.id == TRANSLATION_MODEL_ID)
         .is_none_or(|identity| identity.filename != EXPECTED_MODEL_FILE)
     {
         bail!("translation-model is not the approved Qwen 4B artifact");
@@ -270,7 +277,10 @@ impl ResidentResourcePaths {
             DETECTOR_WEIGHTS_ID,
             OCR_CONFIG_ID,
             OCR_MODEL_ID,
+            OCR_DETECTOR_CONFIG_ID,
+            OCR_DETECTOR_MODEL_ID,
             TRANSLATION_MODEL_ID,
+            PAGE_PROJECTOR_ID,
         ] {
             if !paths.contains_key(required_id) {
                 bail!("resident resource path is missing: {required_id}");
@@ -880,11 +890,14 @@ mod tests {
                 DETECTOR_WEIGHTS_ID,
                 INPAINTER_WEIGHTS_ID,
                 TEXT_SEGMENTER_WEIGHTS_ID,
+                OCR_DETECTOR_CONFIG_ID,
+                OCR_DETECTOR_MODEL_ID,
                 OCR_CONFIG_ID,
                 OCR_MODEL_ID,
                 BUBBLE_SEGMENTER_CONFIG_ID,
                 BUBBLE_SEGMENTER_WEIGHTS_ID,
                 TRANSLATION_MODEL_ID,
+                PAGE_PROJECTOR_ID,
             ]
         );
         let detector_config = model
@@ -935,36 +948,33 @@ mod tests {
             .unwrap();
         assert_eq!(
             ocr_config.repository,
-            "PaddlePaddle/en_PP-OCRv5_mobile_rec_onnx"
+            "PaddlePaddle/PP-OCRv6_small_rec_onnx"
         );
         assert_eq!(
             ocr_config.repository_revision,
-            "3fafbc3b5dcf93dd72add9f48368be8a3a2cd33b"
+            "b8f84f0b80c529de40b4fbb3544b84fa7233a513"
         );
         assert_eq!(ocr_config.filename, "inference.yml");
-        assert_eq!(ocr_config.bytes, 3_964);
+        assert_eq!(ocr_config.bytes, 150_579);
         assert_eq!(
             ocr_config.sha256,
-            "27e91d0582f40168aa218303c76e184bc78fa7a5d105aad0cfbad8458b441067"
+            "ab078671bb49f06228eadccd34f1bb501e157f7a047095ffb943ba81512c77d1"
         );
         let ocr_model = model
             .identities
             .iter()
             .find(|identity| identity.id == OCR_MODEL_ID)
             .unwrap();
-        assert_eq!(
-            ocr_model.repository,
-            "PaddlePaddle/en_PP-OCRv5_mobile_rec_onnx"
-        );
+        assert_eq!(ocr_model.repository, "PaddlePaddle/PP-OCRv6_small_rec_onnx");
         assert_eq!(
             ocr_model.repository_revision,
-            "3fafbc3b5dcf93dd72add9f48368be8a3a2cd33b"
+            "b8f84f0b80c529de40b4fbb3544b84fa7233a513"
         );
         assert_eq!(ocr_model.filename, "inference.onnx");
-        assert_eq!(ocr_model.bytes, 7_848_423);
+        assert_eq!(ocr_model.bytes, 21_159_378);
         assert_eq!(
             ocr_model.sha256,
-            "b5f833dfc5d0eb71da397b4efa06ebeee9b431b690a47d6af40d77d8eabc557f"
+            "5435fd747c9e0efe15a96d0b378d5bd157e9492ed8fd80edf08f30d02fa24634"
         );
         let translation = model
             .identities
