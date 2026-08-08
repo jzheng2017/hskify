@@ -5,6 +5,7 @@ import {
   type JobUpdateBatch,
   type LookupRequest,
   type LookupResult,
+  type ReadingDirection,
   type ViewportUpdate,
 } from '../contracts/browser'
 import {
@@ -48,12 +49,11 @@ import {
 import {
   loadHskLevel,
   loadLearningMode,
-  loadNameTranslation,
+  loadReadingDirection,
   saveHskLevel,
   saveLearningMode,
-  saveNameTranslation,
+  saveReadingDirection,
   type LearningMode,
-  type NameTranslation,
 } from './settings'
 
 type Sender = browser.runtime.MessageSender
@@ -258,13 +258,13 @@ export class BackgroundRouter {
     scope: 'visible' | 'all',
     hskLevel: 1 | 2 | 3 | 4 | 5 | 6,
     learningMode: LearningMode,
-    nameTranslation: NameTranslation,
+    readingDirection: ReadingDirection,
   ): Promise<PageState> {
     const tabId = await this.activeTab()
     await Promise.all([
       saveHskLevel(hskLevel),
       saveLearningMode(learningMode),
-      saveNameTranslation(nameTranslation),
+      saveReadingDirection(readingDirection),
     ])
     await this.ensureContent(tabId)
     return parsePageState(
@@ -273,7 +273,7 @@ export class BackgroundRouter {
         scope,
         hskLevel,
         learningMode,
-        nameTranslation,
+        readingDirection,
       }),
     )
   }
@@ -301,13 +301,14 @@ export class BackgroundRouter {
 
   private async popupState(): Promise<PopupState> {
     const tabId = await this.activeTab()
-    const [level, learningMode, nameTranslation] = await Promise.all([
+    const [level, learningMode, readingDirection] = await Promise.all([
       loadHskLevel(),
       loadLearningMode(),
-      loadNameTranslation(),
+      loadReadingDirection(),
     ])
     const content = await this.contentState(tabId)
-    if (content) return { ...content, hskLevel: level, learningMode, nameTranslation }
+    if (content)
+      return { ...content, hskLevel: level, learningMode, readingDirection }
     const active = await this.jobs.forTab(tabId)
     return {
       state: active.length > 0 ? 'running' : 'idle',
@@ -316,7 +317,7 @@ export class BackgroundRouter {
       message: active.length > 0 ? 'Translation continues in this tab.' : 'Ready',
       hskLevel: level,
       learningMode,
-      nameTranslation,
+      readingDirection,
     }
   }
 
@@ -443,9 +444,7 @@ export class BackgroundRouter {
         hskStandard: '2.0',
         hskLevel: message.hskLevel,
         learningMode: message.learningMode,
-        readingDirection: 'auto',
-        translateSoundEffects: false,
-        nameTranslation: message.nameTranslation,
+        readingDirection: message.readingDirection,
       },
     }
     const submittedAtUnixMs = this.now()
@@ -872,7 +871,7 @@ export class BackgroundRouter {
           message.scope,
           message.hskLevel,
           message.learningMode,
-          message.nameTranslation,
+          message.readingDirection,
         )
       case 'popup:cancel':
         return this.cancelTab(await this.activeTab())

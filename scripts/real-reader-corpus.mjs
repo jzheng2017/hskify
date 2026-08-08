@@ -10,6 +10,10 @@ export const DEFAULT_MANIFEST_PATH = resolve(
   'fixtures/real-reader-corpus/manifest.json',
 )
 export const DEFAULT_CORPUS_ROOT = resolve(REPOSITORY_ROOT, 'local-corpus/real-reader-v2')
+export const DEFAULT_CAPTURE_RESULT_PATH = resolve(
+  REPOSITORY_ROOT,
+  'temp/real-reader-capture-result.json',
+)
 
 export const REAL_READER_SCHEMA_VERSION = 2
 export const REAL_READER_CORPUS_ID = 'real-reader-v2'
@@ -48,6 +52,7 @@ const READER_KINDS = new Set([
   'canvas',
   'webgl',
 ])
+const READING_DIRECTIONS = new Set(['ltr', 'rtl'])
 export const REQUIRED_READER_KINDS = [...READER_KINDS]
 const REGION_ROLES = new Set([
   'dialogue',
@@ -57,17 +62,6 @@ const REGION_ROLES = new Set([
   'artwork',
   'furniture',
 ])
-const ENTITY_TYPES = new Set([
-  'person',
-  'place',
-  'organization',
-  'coined',
-  'relationship',
-  'occupation',
-  'rank',
-  'title',
-])
-
 const SHA256 = /^[a-f0-9]{64}$/
 const ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
 const MIME_BY_EXTENSION = new Map([
@@ -316,22 +310,6 @@ function validStyleRuns(value, maximumLength = Number.POSITIVE_INFINITY) {
   )
 }
 
-function validEntitySpans(value, maximumLength = Number.POSITIVE_INFINITY) {
-  if (!Array.isArray(value)) return false
-  return value.every(
-    (entity) =>
-      objectRecord(entity) &&
-      Number.isSafeInteger(entity.start) &&
-      Number.isSafeInteger(entity.end) &&
-      entity.start >= 0 &&
-      entity.end > entity.start &&
-      entity.end <= maximumLength &&
-      ENTITY_TYPES.has(entity.type) &&
-      (entity.source === undefined ||
-        (typeof entity.source === 'string' && entity.source.trim().length > 0)),
-  )
-}
-
 function validRegionAnnotation(region) {
   if (!objectRecord(region)) return false
   if (typeof region.sourceEnglish !== 'string') return false
@@ -345,7 +323,6 @@ function validRegionAnnotation(region) {
     region.readingOrder < 0 ||
     typeof region.sourceEnglish !== 'string' ||
     region.sourceEnglish.trim().length === 0 ||
-    !validEntitySpans(region.entities ?? [], sourceLength) ||
     !validStyleRuns(region.styleRuns ?? [], sourceLength) ||
     !validReviewedAlternatives(region.reviewedTranslations) ||
     !Object.hasOwn(region, 'cleanupAllowance')
@@ -495,6 +472,12 @@ export function validateManifest(manifest) {
         READER_KINDS.has(chapter.reader?.kind),
         [...READER_KINDS].sort(),
         chapter.reader?.kind,
+      ),
+      assertion(
+        `${prefix}.reading-direction`,
+        READING_DIRECTIONS.has(chapter.reader?.direction),
+        [...READING_DIRECTIONS],
+        chapter.reader?.direction,
       ),
     )
     const pages = Array.isArray(chapter.pages) ? chapter.pages : []
@@ -667,6 +650,225 @@ function pageCase(chapter, page) {
     qualityFocus: chapter.qualityFocus ?? [],
     expectations: page.expectations ?? {},
     reader: chapter.reader,
+  }
+}
+
+export function validateCaptureResult(capture) {
+  const checks = [
+    assertion(
+      'capture.schema-version',
+      objectRecord(capture) && capture.schemaVersion === 1,
+      1,
+      objectRecord(capture) ? capture.schemaVersion : typeof capture,
+    ),
+  ]
+  if (!objectRecord(capture)) return checks
+  checks.push(
+    assertion('capture.status', capture.status === 'complete-images', 'complete-images', capture.status),
+    assertion(
+      'capture.failures',
+      Array.isArray(capture.failures) && capture.failures.length === 0,
+      [],
+      capture.failures,
+    ),
+  )
+  const chapters = Array.isArray(capture.chapters) ? capture.chapters : []
+  checks.push(assertion('capture.chapter-count', chapters.length > 0, '> 0', chapters.length))
+  const chapterIds = new Set()
+  for (const [chapterIndex, chapter] of chapters.entries()) {
+    const prefix = `capture.chapter.${chapterIndex + 1}`
+    const validRecord = objectRecord(chapter)
+    checks.push(assertion(`${prefix}.record`, validRecord, 'object', typeof chapter))
+    if (!validRecord) continue
+    const idValid =
+      typeof chapter.id === 'string' && ID.test(chapter.id) && !chapterIds.has(chapter.id)
+    checks.push(
+      assertion(`${prefix}.id`, idValid, 'unique lowercase kebab-case identifier', chapter.id),
+      assertion(
+        `${prefix}.url`,
+        typeof chapter.actualUrl === 'string' && /^https:\/\//u.test(chapter.actualUrl),
+        'HTTPS chapter URL',
+        chapter.actualUrl,
+      ),
+      assertion(
+        `${prefix}.reader-kind`,
+        READER_KINDS.has(chapter.readerKind),
+        [...READER_KINDS].sort(),
+        chapter.readerKind,
+      ),
+      assertion(
+        `${prefix}.reading-direction`,
+        READING_DIRECTIONS.has(chapter.readingDirection),
+        [...READING_DIRECTIONS],
+        chapter.readingDirection,
+      ),
+    )
+    if (typeof chapter.id === 'string') chapterIds.add(chapter.id)
+    const pages = Array.isArray(chapter.pages) ? chapter.pages : []
+    checks.push(
+      assertion(
+        `${prefix}.page-count`,
+        Number.isSafeInteger(chapter.pageCount) &&
+          chapter.pageCount > 0 &&
+          chapter.pageCount === pages.length,
+        'positive pageCount equal to pages.length',
+        { pageCount: chapter.pageCount, pages: pages.length },
+      ),
+      assertion(
+        `${prefix}.page-order`,
+        pages.every((page, pageIndex) => page?.order === pageIndex),
+        'contiguous zero-based canonical page order',
+        pages.map((page) => page?.order),
+      ),
+    )
+    for (const [pageIndex, page] of pages.entries()) {
+      const pagePrefix = `${prefix}.page.${pageIndex + 1}`
+      const object = page?.object
+      const extension = typeof object?.path === 'string' ? extname(object.path).toLowerCase() : ''
+      checks.push(
+        assertion(`${pagePrefix}.record`, objectRecord(page), 'object', typeof page),
+        assertion(`${pagePrefix}.order`, page?.order === pageIndex, pageIndex, page?.order),
+        assertion(
+          `${pagePrefix}.source-url`,
+          typeof page?.sourceUrl === 'string' && /^https:\/\//u.test(page.sourceUrl),
+          'HTTPS image URL',
+          page?.sourceUrl,
+        ),
+        assertion(
+          `${pagePrefix}.object-path`,
+          canonicalObjectPath(object),
+          'objects/<sha256>.<extension>',
+          object?.path,
+        ),
+        assertion(
+          `${pagePrefix}.mime-type`,
+          MIME_BY_EXTENSION.get(extension) === object?.mimeType,
+          MIME_BY_EXTENSION.get(extension),
+          object?.mimeType,
+        ),
+        assertion(
+          `${pagePrefix}.byte-length`,
+          Number.isSafeInteger(object?.bytes) && object.bytes > 0,
+          'positive integer',
+          object?.bytes,
+        ),
+        assertion(
+          `${pagePrefix}.dimensions`,
+          Number.isSafeInteger(object?.width) &&
+            object.width > 0 &&
+            Number.isSafeInteger(object?.height) &&
+            object.height > 0,
+          'positive integer width and height',
+          { width: object?.width, height: object?.height },
+        ),
+      )
+    }
+  }
+  return checks
+}
+
+export function captureReaderChapters(capture) {
+  return (capture.chapters ?? []).map((chapter) => ({
+    id: chapter.id,
+    title: chapter.title,
+    provenance: {
+      chapterUrl: chapter.actualUrl,
+      capturedAtUtc: chapter.capturedAtUtc,
+    },
+    reader: { kind: chapter.readerKind, direction: chapter.readingDirection },
+    pageCount: chapter.pageCount,
+    pages: chapter.pages,
+  }))
+}
+
+export function auditCapture({
+  capturePath = DEFAULT_CAPTURE_RESULT_PATH,
+  corpusRoot = DEFAULT_CORPUS_ROOT,
+} = {}) {
+  const absoluteCapture = resolve(capturePath)
+  const absoluteCorpus = resolve(corpusRoot)
+  const capture = JSON.parse(readFileSync(absoluteCapture, 'utf8'))
+  const assertions = validateCaptureResult(capture)
+  const assets = []
+  if (assertions.every((item) => item.passed)) {
+    for (const chapter of captureReaderChapters(capture)) {
+      for (const page of chapter.pages) {
+        const id = `${chapter.id}-page-${String(page.order + 1).padStart(4, '0')}`
+        const path = safeObjectPath(absoluteCorpus, page.object.path)
+        if (!path) {
+          assertions.push(
+            assertion(`capture.asset.${id}.path`, false, 'path contained by corpus root', page.object.path),
+          )
+          assets.push({ id, state: 'invalid-path', path: page.object.path })
+          continue
+        }
+        if (!existsSync(path)) {
+          assertions.push(assertion(`capture.asset.${id}.present`, false, true, false))
+          assets.push({ id, state: 'missing', path })
+          continue
+        }
+        const bytes = readFileSync(path)
+        const byteLength = statSync(path).size
+        const sha256 = createHash('sha256').update(bytes).digest('hex')
+        const dimensions = imageDimensions(bytes, page.object.mimeType)
+        const byteMatch = byteLength === page.object.bytes
+        const hashMatch = sha256 === page.object.sha256
+        const dimensionMatch =
+          dimensions?.width === page.object.width && dimensions?.height === page.object.height
+        assertions.push(
+          assertion(`capture.asset.${id}.present`, true, true, true),
+          assertion(`capture.asset.${id}.bytes`, byteMatch, page.object.bytes, byteLength),
+          assertion(`capture.asset.${id}.sha256`, hashMatch, page.object.sha256, sha256),
+          assertion(
+            `capture.asset.${id}.dimensions`,
+            dimensionMatch,
+            { width: page.object.width, height: page.object.height },
+            dimensions,
+          ),
+        )
+        assets.push({
+          id,
+          chapterId: chapter.id,
+          order: page.order,
+          state: byteMatch && hashMatch && dimensionMatch ? 'verified' : 'mismatch',
+          path,
+          sha256,
+          bytes: byteLength,
+          dimensions,
+        })
+      }
+    }
+  }
+  const failures = assertions.filter((item) => !item.passed)
+  const caseCount = (capture.chapters ?? []).reduce(
+    (sum, chapter) => sum + (Array.isArray(chapter?.pages) ? chapter.pages.length : 0),
+    0,
+  )
+  return {
+    schemaVersion: 1,
+    evidenceKind: 'captured-images',
+    releaseReady: false,
+    annotationsRequired: true,
+    capturePath: absoluteCapture,
+    corpusRoot: absoluteCorpus,
+    chapterCount: Array.isArray(capture.chapters) ? capture.chapters.length : 0,
+    caseCount,
+    verifiedCount: assets.filter((item) => item.state === 'verified').length,
+    missingCount: assets.filter((item) => item.state === 'missing').length,
+    status: failures.length === 0 ? 'passed' : 'failed',
+    assertions,
+    assets,
+    failures,
+    remediation:
+      failures.length > 0
+        ? {
+            message:
+              'Captured images are incomplete or do not match their content-addressed inventory. Recapture the chapter before running an observational probe.',
+          }
+        : {
+            message:
+              'Image bytes are verified. Human annotations are still required before this capture can become release evidence.',
+          },
   }
 }
 
@@ -890,6 +1092,7 @@ function parseArguments(argv) {
   const options = {
     command: 'verify',
     manifestPath: DEFAULT_MANIFEST_PATH,
+    capturePath: DEFAULT_CAPTURE_RESULT_PATH,
     corpusRoot: DEFAULT_CORPUS_ROOT,
     selection: 'all',
     json: false,
@@ -900,11 +1103,12 @@ function parseArguments(argv) {
     const argument = args.shift()
     if (argument === '--json') options.json = true
     else if (argument === '--manifest') options.manifestPath = resolve(args.shift() ?? '')
+    else if (argument === '--capture') options.capturePath = resolve(args.shift() ?? '')
     else if (argument === '--corpus') options.corpusRoot = resolve(args.shift() ?? '')
     else if (argument === '--selection') options.selection = args.shift() ?? ''
     else throw new Error(`Unknown argument: ${argument}`)
   }
-  if (!['verify', 'manifest'].includes(options.command)) {
+  if (!['verify', 'manifest', 'capture'].includes(options.command)) {
     throw new Error(`Unknown command: ${options.command}`)
   }
   return options
@@ -913,6 +1117,18 @@ function parseArguments(argv) {
 function printResult(result, json) {
   if (json) {
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`)
+    return
+  }
+  if (result.evidenceKind === 'captured-images') {
+    process.stdout.write(
+      `${result.status.toUpperCase()}: ${result.verifiedCount}/${result.caseCount} captured page objects verified; annotations remain required.\n`,
+    )
+    for (const failure of result.failures) {
+      process.stdout.write(
+        `- ${failure.id}: expected ${JSON.stringify(failure.expected)}, got ${JSON.stringify(failure.actual)}\n`,
+      )
+    }
+    process.stdout.write(`${result.remediation.message}\n`)
     return
   }
   process.stdout.write(
@@ -933,12 +1149,15 @@ const invokedPath = process.argv[1] ? resolve(process.argv[1]) : undefined
 if (invokedPath === fileURLToPath(import.meta.url)) {
   try {
     const options = parseArguments(process.argv.slice(2))
-    const result = auditCorpus({
-      manifestPath: options.manifestPath,
-      corpusRoot: options.corpusRoot,
-      selection: options.selection,
-      manifestOnly: options.command === 'manifest',
-    })
+    const result =
+      options.command === 'capture'
+        ? auditCapture({ capturePath: options.capturePath, corpusRoot: options.corpusRoot })
+        : auditCorpus({
+            manifestPath: options.manifestPath,
+            corpusRoot: options.corpusRoot,
+            selection: options.selection,
+            manifestOnly: options.command === 'manifest',
+          })
     printResult(result, options.json)
     if (result.status !== 'passed') {
       process.exitCode = result.captureRequired || result.missingCount > 0 ? 2 : 1

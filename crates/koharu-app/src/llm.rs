@@ -14,11 +14,11 @@
 mod direct_hsk;
 
 pub use direct_hsk::{
-    DirectHskTranslator, HSK_TRANSLATION_MODEL, HSK_TRANSLATION_MODEL_REVISION,
-    HSK_TRANSLATION_PROMPT_HASH, HSK_TRANSLATION_PROMPT_REVISION, HSK_TRANSLATION_VALIDATOR_HASH,
-    HskLearningMode, HskNameHandling, HskPrecedingUtterance, HskProtectedName, HskRepairUtterance,
-    HskSourceUtterance, HskTranslationBatchRequest, HskTranslationBatchResult,
-    HskTranslationDisposition, HskTranslationIssue, HskTranslationOutcome,
+    DirectHskTranslator, FaithfulSourceUtterance, FaithfulTranslationBatchRequest,
+    HSK_TRANSLATION_MODEL, HSK_TRANSLATION_MODEL_REVISION, HSK_TRANSLATION_PROMPT_HASH,
+    HSK_TRANSLATION_PROMPT_REVISION, HSK_TRANSLATION_VALIDATOR_HASH, HskLearningMode,
+    HskPrecedingUtterance, HskRepairUtterance, HskSourceUtterance, HskTranslationBatchRequest,
+    HskTranslationBatchResult, HskTranslationIssue, HskTranslationOutcome,
     HskTranslationRepairBatchRequest, HskTranslationRepairRequest, HskUtteranceKind,
     MAX_HSK_CONTEXT_TOKENS, MAX_HSK_LAYOUT_CHARACTERS, MAX_HSK_LAYOUT_LINES,
     MAX_HSK_PRECEDING_UTTERANCES, MAX_HSK_TRANSLATION_BATCH, MIN_HSK_LAYOUT_CHARACTERS,

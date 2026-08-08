@@ -117,7 +117,6 @@ field must be JSON. Before source retention, the server validates:
 
 - exact build fingerprint and semantic request contract;
 - supported English-to-Simplified-Chinese/HSK 2.0 settings;
-- sound-effect translation disabled;
 - multipart, declared, and sniffed MIME agreement;
 - declared SHA-256;
 - non-zero declared and decoded dimensions;
@@ -133,20 +132,19 @@ rechecks that its dimensions match job metadata.
 Every job selects one explicit learning mode, and that mode is part of the
 translation-cache identity:
 
-- `natural` simplifies vocabulary and grammar first, then permits a small,
-  level-dependent number of indispensable story terms. Levels 1-3 target at
-  least 90% level-appropriate lexical tokens, level 4 targets 93%, and levels
-  5-6 target 95%. Short dialogue may keep one useful term where a longer
-  paraphrase would be less readable.
+- `natural` publishes the text translator's faithful Chinese reference
+  directly. Deterministic vocabulary validation adds teaching metadata but
+  never launches a second rewrite or repair generation.
 - `strict` requires every non-exempt lexical token to pass the selected HSK
   vocabulary level before the result is accepted.
 
-Protected proper names remain separate from this policy and follow the
-reader's Names setting. Every accepted above-level occurrence is emitted as a
-bounded `teachingTerm` with exact Unicode character offsets, pinyin, local
+Names are always rendered naturally in Chinese and unapproved Latin output is
+rejected. There is no browser name mode or protected-Latin exception. Every
+above-level occurrence is emitted as a bounded `teachingTerm` with exact
+Unicode character offsets, pinyin, local
 dictionary definitions, its known required HSK level, and whether it is above
 the selected level or outside the HSK list. The extension therefore teaches
-the actual final wording; it does not rely on a second model call or a
+the actual final wording; it does not rely on a separate annotation model or a
 hard-coded list of story phrases.
 
 Vocabulary validation treats explicit higher-level HSK headwords as atomic
@@ -163,8 +161,11 @@ The resident model pack includes the Qwen3.5-4B `mmproj-BF16.gguf` projector.
 The daemon requires this matching projector and the translation model as one
 capability; it never silently falls back to a text-only semantic path. The
 projector is attached only after the resident text model is loaded and receives
-one immutable page surface plus its ordered OCR/layout evidence. Malformed or
-incomplete adjudication fails the affected page without a partial decision.
+one immutable page surface plus its ordered OCR/layout evidence. It returns
+only visual role and optional continuation metadata; OCR remains the transcript
+authority and a separate text-only generation owns faithful Chinese. Mandatory
+role/translation failures preserve only the affected region, while invalid
+optional continuation metadata is discarded independently.
 
 The browser-companion crate enables its `cuda` feature by default. The
 performance build script accepts only an NVIDIA GeForce RTX 4080 SUPER with at
@@ -234,58 +235,64 @@ The explicit overrides are `HSK_MANGA_RESOURCES_DIR`,
 
 ## Viewport-first region pipeline
 
-1. Split the decoded page into 2,048-pixel tiles with 410-pixel overlap and
-   resize detector input to the model's trained 640-pixel dimensions.
+1. Split the decoded page into 2,048-pixel tiles with 410-pixel overlap. The
+   comic detector uses its trained 640-pixel canvas; the PP-OCR detector keeps
+   aspect ratio and scans tall inputs through overlapping near-native windows
+   instead of squeezing a long page into one square.
 2. Before each detector batch, reprioritize remaining tiles against the current
    `visibleRects` and active state. When the visible frontier is smaller than
    six tiles, submit only that frontier first instead of filling the batch with
    off-screen tiles.
-3. Run RT-DETR-v2 in true CUDA batches of at most six tiles and retain its
-   `text_bubble` and `text_free` classes. Do not require a detected balloon.
-4. Convert tile-local text geometry to source coordinates, enforce tile
-   ownership, and spatially deduplicate overlapping candidates.
-5. Run PP-OCRv6-small multilingual line recognition in batches of at most eight, and yield
-   after each candidate chunk so newly visible translation work can overtake
-   off-screen OCR.
-6. Accept mechanically valid Latin OCR at the calibrated 0.55 confidence
-   floor. A
-   detector-backed bubble becomes finalizable only after every unprocessed
-   tile-ownership cell that could contain another line in that bubble is gone.
-   Segment its local contour, group every accepted line by bubble identity,
-   inpaint, translate, and publish it immediately while the remaining page
-   tiles continue. Non-visible finalized lines are accumulated into one page
-   tail pass, while the active viewport keeps the immediate path for newly
-   finalized lines. This removes the whole-image publication barrier without
-   re-running the page-tail analysis at every detector frontier or splitting a
-   balloon at an overlap boundary. A proposal that fails both genuinely
-   different recognition views becomes a terminal `UnreadableRegion`; it never
-   disappears from the chapter coverage graph and receives no cleanup patch.
-7. Segment source glyph pixels with the learned manga text model, constrain the
-   mask to accepted text regions, expand it by measured source geometry, and
-   restore the masked artwork with the manga-trained LaMa model. Bubble
-   segmentation and inpainting operate on tiles intersecting the finalized
-   region supports, not an unconditional second pass over the entire image.
-8. Verify cleanup candidates against residual source language, boundary
-   continuity, texture preservation, protected pixels, and mask sparsity. A
-   uniform fill is accepted only for a measured uniform interior; gradients,
-   line art, and textured surfaces use the edge-aware/model path. A failed
-   candidate remains source pixels with an unreadable hover state.
-9. Run one multimodal page adjudication call over the immutable surface (or a
-   geometry-derived evidence viewport) and all numbered OCR polygons. It
-   classifies roles, corrected transcripts, continuation links, entities, and
-   style evidence. The deterministic boundary validates geometry, language,
-   counts, and HSK policy; it does not use capitalization or artwork wordlists
-   to infer semantics.
-10. Queue accepted regions for translation and reprioritize visible work at
-   every OCR or detector boundary. Ready batches begin at three pending
-   regions, contain at most six, and an undersized tail becomes eligible when
-   its hard 75 ms batching deadline expires (or at the final forced drain).
-   Boundary checks never sleep, and no page-wide translation call exists.
-11. The Firefox chapter coordinator may keep two visible image jobs in flight
-    within a bounded two-image decoded source-pixel budget. This lets the
-    following visible story strip share the daemon pipeline while the first
-    page is finishing, without allowing an unbounded set of long pages to
-    occupy memory.
+3. Run the comic and PP-OCR text detectors in bounded CUDA batches. PP-OCR
+   polygons are preferred line geometry; the comic detector contributes
+   independent recovery proposals where PP-OCR has no overlapping line.
+   Convert both streams to source coordinates, enforce overlap ownership, and
+   spatially deduplicate them.
+4. Run PP-OCRv6-small recognition in batches of at most eight. Each detector
+   line is read from the original crop and a contrast-normalized grayscale
+   crop. Consensus is decided per line before region concatenation, so one
+   disagreeing background glyph is discarded without erasing neighboring
+   dialogue that agrees in both views.
+5. Accept mechanically valid Latin OCR at the calibrated 0.55 confidence
+   floor. A detector-backed bubble becomes finalizable only after every
+   unprocessed tile-ownership cell that could contain another line in that
+   bubble is gone. Visible finalized groups enter semantic analysis and
+   publication immediately; non-visible groups share one bounded page-tail
+   pass. Rejected proposals become terminal source-preserving unreadable
+   regions instead of disappearing.
+6. Run multimodal page adjudication over the immutable source surface (or a
+   geometry-derived evidence viewport) and numbered OCR polygons. The model
+   classifies story, SFX, embedded furniture, and decorative artwork and may
+   link a story continuation. It cannot emit or alter the OCR transcript or
+   translate text. Invalid optional continuation metadata is dropped
+   independently.
+7. Only admitted story and SFX regions enter cleanup and translation. Segment
+   source glyphs and start one page-level LaMa cleanup task. In parallel, one
+   text-only generation translates at most six role-filtered OCR regions. Its
+   role-position index is separate from the numbered source lines so metadata
+   cannot be copied into Chinese. Context is refreshed when language work is
+   dispatched, after time spent in OCR/vision, without waiting for unfinished
+   pages.
+8. Verify cleanup with direct safety invariants: some masked pixels changed,
+   residual edge energy stays bounded, the patch-to-source seam stays below
+   its error limit, and every protected pixel is byte-identical. A clipped
+   half-glyph therefore fails through its seam; unrelated mask density and
+   unstable smooth-area residual ratios are not used as proxies.
+9. Natural mode validates and publishes the faithful reference directly once
+   cleanup succeeds. Strict mode sends ordered HSK rewrite batches: the first
+   visible region dispatches alone, throughput batches start at three and
+   contain at most six, and the remaining tail flushes when the page frontier
+   closes. Boundary checks never sleep.
+10. Vision and language workloads have separate serialized CUDA lanes, so two
+     page jobs can pipeline semantic vision for the next page alongside HSK
+     realization for the current page. Queue registration is scoped to the
+     acquiring future: aborting cleanup removes its waiter immediately instead
+     of leaving an ownerless lane head.
+11. Firefox keeps at most two image jobs in flight within a two-image decoded
+    pixel budget. Pending work is reprioritized as the viewport moves, but an
+    admitted page is never cancelled and restarted merely because it scrolled
+    off screen. Automatic image retry is absent; retry is an explicit user
+    action after a terminal failure.
 
 Low-confidence, undecodable, and non-Latin OCR is never translated or painted.
 Detector proposals that cannot reach terminal consensus remain visible source
@@ -316,9 +323,10 @@ erosion whose clearance is bounded by both measured glyph height and the
 bubble's own smaller dimension; oversized source lettering therefore cannot
 collapse a large balloon into a tiny replacement-text area.
 
-An empty semantic mask fails the image and enters the extension's bounded
-automatic retry state machine. It never silently leaves half a balloon
-translated and never substitutes a painted text-sized rectangle.
+An empty or unsafe semantic mask preserves that region's source pixels and
+publishes an unreadable notice without retrying the page. It never silently
+leaves half a balloon translated and never substitutes a painted text-sized
+rectangle.
 
 The server validates the PNG and its normalized rectangle, enforces a 16 MiB
 per-patch limit and 256 MiB total retained source/patch budget, stores it under
@@ -329,55 +337,47 @@ Firefox then fetches and validates the patch, decodes it, inserts it into the
 patch layer, and inserts selectable text synchronously afterward. This ordering
 prevents Chinese text from appearing over uncleaned English.
 
-## Direct HSK translation
+## Faithful natural and strict HSK translation
 
-The primary generation request sends up to six ordered English dialogue
-utterances directly to Qwen3.5 4B with the requested cumulative HSK 2.0 level
-and at most six accepted chapter-context utterances. It does not generate a page-wide faithful
-translation and then rewrite it.
+After visual role filtering, the resident text model supplies one complete,
+unconstrained faithful Chinese reference for each story or SFX region. Roles
+are carried as a separate position index, not labels beside source or output
+text. Outputs containing role labels, Latin words, punctuation-only text,
+source echoes, or malformed/missing positions are rejected per region. Natural
+mode uses the faithful reference as final text and adds HSK coverage, pinyin,
+and teaching terms deterministically. Strict mode sends up to six ordered
+references plus immutable English OCR structure to Qwen3.5 4B with the
+requested cumulative HSK 2.0 level and at most six accepted chapter-context
+utterances.
 
 The requested level controls syntax as well as vocabulary. Levels 1-2 prefer
 short direct clauses, explicit referents, everyday wording, and no avoidable
 idioms, formal nominalization, nested clauses, or passive constructions.
 Levels 3-4 permit familiar compound sentences while simplifying dense
 embedding and formal synonyms; levels 5-6 permit natural advanced grammar.
-The job's name preference is part of generation, validation, and both cache
-keys. `keep-original` preserves the source's exact Latin name spelling and
-permits only exact source spans typed and approved by the contextual page
-understanding call as Latin HSK exceptions. The same bounded response carries
-page roles, corrected transcripts, continuation links, entities, and style;
-deterministic parsing rejects malformed or incomplete output as a page failure.
-Personal and place names are preserved, while roles, titles, descriptive
-epithets, and color-plus-noun codenames remain ordinary translation input. The
-decision uses the generic opaque-identifier versus translatable-description
-distinction, without title-, series-, chapter-, or vocabulary-specific lists. Approved spans enter opaque translation placeholders,
-deterministic validation, chapter entity memory, and both cache keys. `chinese`
-uses approved glossary forms first, then established Chinese names when certain
-and otherwise consistent phonetic transliteration. Neither mode translates a
-name by its dictionary meaning.
+Names are always rendered naturally in Chinese, using established Chinese
+forms or consistent phonetic transliteration. No Latin name survives as an HSK
+exception, and page understanding does not own a glossary or entity-memory
+contract.
 
-Before cleanup, one multimodal page pass receives the page dimensions once,
-compact normalized region geometry, enclosure topology, and every OCR item in
-the bounded ready page window. Regions are merged in canonical reading order,
-so an arbitrary tile boundary cannot split a connected phrase. The response
-budget is derived from its compact fixed schema and constrained by the model's
-actual remaining context. It classifies both the page section and each region as
-story text, decorative story artwork, page furniture/unreadable OCR, or a
-standalone sound effect. One authoritative semantic decision applies to every
-region; uncertainty fails safe to story text. Decorative artwork and excluded
-regions never enter segmentation, inpainting, or patch encoding. A surviving region is thereafter
-authoritatively story content: the translation and repair stages must return
-Simplified Chinese and cannot independently remove it with `[NON-STORY]` or
-`[SFX]`. Excluded regions publish neither cleanup pixels nor replacement text,
-so the source image remains untouched. Standalone numbers remain
-exact-preservation requirements; digits embedded in Latin OCR tokens do not.
+The page pass receives compact normalized geometry, enclosure topology, and
+every OCR item in its bounded evidence window. Regions are merged in canonical
+reading order, so an arbitrary tile boundary cannot split a connected phrase.
+It explicitly distinguishes reader-facing dialogue/narration from text painted
+on signs, books, clothing, interfaces, credits, and title artwork. Furniture
+and artwork emit a silent terminal preservation event and never enter
+segmentation, inpainting, or patch encoding. A surviving region is thereafter
+authoritatively story content: HSK generation cannot independently reclassify
+or skip it. Standalone numbers remain exact-preservation requirements; digits
+embedded in Latin OCR tokens do not.
 
-`hsk-control` validates each returned story item. Items that already pass are
-accepted. Rejected items enter one logical batched repair with their rejected
-Chinese and exact deterministic problems; an item can receive at most one new
-evidence attempt. Repair output is never recursively fed back through another
-strategy. If the page evidence is malformed or incomplete, the page remains
-original and is exposed as unreadable rather than allowing an undecided name.
+`hsk-control` validates every displayed story item. In natural mode, its
+vocabulary findings are emitted immediately as teaching terms and the faithful
+reference is terminal. In strict mode, above-level vocabulary and deterministic
+meaning/preservation failures such as missing output, source echo, number
+loss, question-intent loss, and excessive expansion enter one
+logical batched repair. A strict item can receive at most one repair attempt;
+repair output is never recursively fed into another strategy.
 Up to six rejected regions enter one logical numbered repair request. Before
 generation, the translator measures each candidate subbatch with the resident
 model's real tokenizer and chat template, chooses the largest ordered prefix
@@ -386,11 +386,7 @@ the results by application ID. Parsing, validation, and avoid-lists remain
 isolated, so one malformed sibling cannot authorize
 or invalidate another and an oversized logical batch never burns retries on a
 known context overflow. The deterministic validator supplies a typed avoid-list
-from each rejected primary. Strict repair must emit none of those exact terms.
-Natural repair remains governed by Natural learning: it must
-simplify the avoid-list while retaining at most the level-specific budget of
-indispensable story terms. It never silently escalates to Strict and discards a
-core story concept merely to improve the vocabulary score.
+for strict vocabulary repairs. Natural mode never enters this rewrite path.
 The repair never restarts the page. If one OCR region remains unsafe to
 publish, its original pixels remain untouched and the other regions still
 complete; deterministic per-region validation exhaustion is not promoted into
@@ -402,8 +398,8 @@ derived after the accepted/rejected final state by local
 longest-match lookup. A terminal `TranslatedRegion` carries:
 
 - source English;
-- the direct generation as `baseChinese`;
-- the displayed post-validation/repair Chinese;
+- the faithful reference as `baseChinese`;
+- the normalized natural or post-repair strict Chinese;
 - pinyin;
 - OCR confidence and reading order;
 - normalized text/bubble/patch geometry;
@@ -413,18 +409,21 @@ longest-match lookup. A terminal `TranslatedRegion` carries:
 
 Source color bands remain vertical appearance samples. They are mapped onto
 the fitted output lines after layout and never force the Chinese translation
-to retain the source line count; polygon geometry and measured source glyph
-size determine the largest non-overflowing layout.
+to retain the source line count. Polygon geometry determines the largest
+non-overflowing layout; a 12 CSS-pixel/one-percent-of-image accessibility floor,
+not an arbitrary fraction of oversized source lettering, decides whether the
+result is readable.
 
 ## Chapter translation cache
 
-The daemon holds a 64 MiB byte-bounded in-memory direct-translation cache. Its
+The daemon holds a 64 MiB byte-bounded in-memory strict-HSK translation cache. Its
 SHA-256 key covers:
 
 ```text
 schema
 OCR text
-canonical chapter context before the region
+faithful Chinese reference and utterance kind
+canonical preceding and following chapter context
 HSK level
 learning mode
 model ID
@@ -432,20 +431,20 @@ model revision
 prompt hash
 validator hash
 HSK/dictionary control revision
-ordered typed chapter entities
 ```
 
-The key prevents reuse when chapter context/entity memory, level, model
+The key prevents reuse when chapter context, level, model
 bytes/revision, prompt behavior, validation logic, or language data changes.
 The cache is not a
 project, browser history, persistent page artifact, or retranslation facility.
 
 The separate 2 GiB persistent result cache stores only complete terminal
-chapter-region results and their patch PNGs. Its key covers the strict request, build
-fingerprint, source identity, all output-affecting resource identities, and
-the HSK normalization, segmentation, lookup, Jieba, and Unicode-table policy
-revisions. A validator-code change therefore cannot replay regions assessed by
-the previous policy.
+chapter-region results and their patch PNGs. Its key covers the strict request,
+build fingerprint, source identity, all output-affecting resource identities,
+the semantic/OCR/cleanup pipeline revision, and the HSK normalization,
+segmentation, lookup, Jieba, and Unicode-table policy revisions. A pipeline or
+validator change therefore cannot replay regions assessed by the previous
+policy.
 Each entry is installed with one atomic rename after visible processing
 finishes. Size accounting and eviction occur on that store path. A replay
 computes the exact key and opens only that entry; it does not scan all cached

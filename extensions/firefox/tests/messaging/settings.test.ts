@@ -3,16 +3,16 @@ import { describe, expect, it } from 'vitest'
 import {
   DEFAULT_HSK_LEVEL,
   DEFAULT_LEARNING_MODE,
-  DEFAULT_NAME_TRANSLATION,
+  DEFAULT_READING_DIRECTION,
   HSK_LEVEL_KEY,
   LEARNING_MODE_KEY,
-  NAME_TRANSLATION_KEY,
+  READING_DIRECTION_KEY,
   loadHskLevel,
   loadLearningMode,
-  loadNameTranslation,
+  loadReadingDirection,
   saveHskLevel,
   saveLearningMode,
-  saveNameTranslation,
+  saveReadingDirection,
 } from '../../src/messaging/settings'
 import { MemoryStorage } from '../helpers/storage'
 
@@ -33,16 +33,6 @@ describe('popup HSK persistence', () => {
     expect(await loadHskLevel(storage)).toBe(5)
   })
 
-  it('keeps original names by default and remembers the name preference', async () => {
-    const storage = new MemoryStorage()
-    expect(await loadNameTranslation(storage)).toBe(DEFAULT_NAME_TRANSLATION)
-    await saveNameTranslation('chinese', storage)
-    expect(await loadNameTranslation(storage)).toBe('chinese')
-    expect(storage.values[NAME_TRANSLATION_KEY]).toBe('chinese')
-    storage.values[NAME_TRANSLATION_KEY] = 'literal-translation'
-    expect(await loadNameTranslation(storage)).toBe('keep-original')
-  })
-
   it('uses natural learning by default and remembers strict HSK mode', async () => {
     const storage = new MemoryStorage()
     expect(await loadLearningMode(storage)).toBe(DEFAULT_LEARNING_MODE)
@@ -51,5 +41,15 @@ describe('popup HSK persistence', () => {
     expect(storage.values[LEARNING_MODE_KEY]).toBe('strict')
     storage.values[LEARNING_MODE_KEY] = 'automatic'
     expect(await loadLearningMode(storage)).toBe('natural')
+  })
+
+  it('uses LTR by default and remembers explicit manga reading order', async () => {
+    const storage = new MemoryStorage()
+    expect(await loadReadingDirection(storage)).toBe(DEFAULT_READING_DIRECTION)
+    await saveReadingDirection('rtl', storage)
+    expect(await loadReadingDirection(storage)).toBe('rtl')
+    expect(storage.values[READING_DIRECTION_KEY]).toBe('rtl')
+    storage.values[READING_DIRECTION_KEY] = 'auto'
+    expect(await loadReadingDirection(storage)).toBe('ltr')
   })
 })

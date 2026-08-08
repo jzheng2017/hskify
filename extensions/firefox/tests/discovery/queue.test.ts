@@ -41,7 +41,7 @@ describe('visible-first page queue', () => {
     await vi.waitFor(() => expect(queue.size).toBe(0))
   })
 
-  it('isolates the visible startup frontier until the first final result', async () => {
+  it('fills configured capacity in visible-first order', async () => {
     const gates = new Map([
       ['cover', deferred()],
       ['story', deferred()],
@@ -57,47 +57,42 @@ describe('visible-first page queue', () => {
       { maximumConcurrent: 3 },
     )
 
-    queue.beginInteractiveStartup()
     queue.enqueue({ id: 'cover', value: 'cover', visible: true, order: 0 })
     queue.enqueue({ id: 'story', value: 'story', visible: true, order: 1 })
     queue.enqueue({ id: 'offscreen', value: 'offscreen', visible: false, order: 2 })
 
-    await vi.waitFor(() => expect(order).toEqual(['cover']))
-    gates.get('cover')?.resolve()
-    await vi.waitFor(() => expect(order).toEqual(['cover', 'story']))
-
-    queue.enableThroughput()
     await vi.waitFor(() => expect(order).toEqual(['cover', 'story', 'offscreen']))
+    gates.get('cover')?.resolve()
     gates.get('story')?.resolve()
     gates.get('offscreen')?.resolve()
     await vi.waitFor(() => expect(queue.size).toBe(0))
   })
 
-  it('opens throughput after a visible frontier with no final result is exhausted', async () => {
+  it('starts the next page as soon as bounded capacity is available', async () => {
     const visible = deferred()
-    const offscreen = deferred()
+    const firstOffscreen = deferred()
+    const secondOffscreen = deferred()
     const order: string[] = []
     const queue = new VisibleFirstQueue<string>(
       async (item) => {
         order.push(item.id)
-        if (item.visible) await visible.promise
-        else await offscreen.promise
+        if (item.id === 'visible') await visible.promise
+        else if (item.id === 'offscreen-a') await firstOffscreen.promise
+        else await secondOffscreen.promise
       },
       {},
       { maximumConcurrent: 2 },
     )
 
-    queue.beginInteractiveStartup()
     queue.enqueue({ id: 'visible', value: 'visible', visible: true, order: 0 })
     queue.enqueue({ id: 'offscreen-a', value: 'a', visible: false, order: 1 })
     queue.enqueue({ id: 'offscreen-b', value: 'b', visible: false, order: 2 })
 
-    await vi.waitFor(() => expect(order).toEqual(['visible']))
+    await vi.waitFor(() => expect(order).toEqual(['visible', 'offscreen-a']))
     visible.resolve()
-    await vi.waitFor(() =>
-      expect(order).toEqual(['visible', 'offscreen-a', 'offscreen-b']),
-    )
-    offscreen.resolve()
+    await vi.waitFor(() => expect(order).toEqual(['visible', 'offscreen-a', 'offscreen-b']))
+    firstOffscreen.resolve()
+    secondOffscreen.resolve()
     await vi.waitFor(() => expect(queue.size).toBe(0))
   })
 
@@ -195,64 +190,24 @@ describe('visible-first page queue', () => {
     expect(processed).toEqual(['active'])
   })
 
-  it('preempts and requeues active offscreen work when a pending image becomes visible', async () => {
+  it('reprioritizes pending work without cancelling or restarting in-flight work', async () => {
     const order: string[] = []
-    const preempted: string[] = []
-    let releaseVisible!: () => void
-    const visibleGate = new Promise<void>((resolve) => {
-      releaseVisible = resolve
+    const inFlight = deferred()
+    const queue = new VisibleFirstQueue<string>(async (item) => {
+      order.push(item.id)
+      if (item.id === 'offscreen') await inFlight.promise
     })
-    const queue = new VisibleFirstQueue<string>(
-      async (item, signal) => {
-        order.push(item.id)
-        if (item.id === 'offscreen' && order.length === 1) {
-          await new Promise<void>((resolve) => {
-            signal.addEventListener('abort', () => resolve(), { once: true })
-          })
-        }
-        if (item.id === 'visible') await visibleGate
-      },
-      { onPreempt: (item) => preempted.push(item.id) },
-    )
 
     queue.enqueue({ id: 'offscreen', value: 'offscreen', visible: true, order: 0 })
     queue.enqueue({ id: 'visible', value: 'visible', visible: false, order: 1 })
     queue.reprioritize('offscreen', false)
     queue.reprioritize('visible', true)
 
-    await vi.waitFor(() => expect(order).toEqual(['offscreen', 'visible']))
-    releaseVisible()
+    await Promise.resolve()
+    expect(order).toEqual(['offscreen'])
+    inFlight.resolve()
     await vi.waitFor(() => expect(queue.size).toBe(0))
-    expect(order).toEqual(['offscreen', 'visible', 'offscreen'])
-    expect(preempted).toEqual(['offscreen'])
-  })
-
-  it('preempts active offscreen work when a newly enqueued image is visible', async () => {
-    const order: string[] = []
-    const succeeded: string[] = []
-    const failed: string[] = []
-    const queue = new VisibleFirstQueue<string>(
-      async (item, signal) => {
-        order.push(item.id)
-        if (item.id === 'offscreen' && order.length === 1) {
-          await new Promise<void>((resolve) => {
-            signal.addEventListener('abort', () => resolve(), { once: true })
-          })
-        }
-      },
-      {
-        onSuccess: (item) => succeeded.push(item.id),
-        onFailure: (item) => failed.push(item.id),
-      },
-    )
-
-    queue.enqueue({ id: 'offscreen', value: 'offscreen', visible: false, order: 0 })
-    queue.enqueue({ id: 'visible', value: 'visible', visible: true, order: 1 })
-
-    await vi.waitFor(() => expect(queue.size).toBe(0))
-    expect(order).toEqual(['offscreen', 'visible', 'offscreen'])
-    expect(succeeded).toEqual(['visible', 'offscreen'])
-    expect(failed).toEqual([])
+    expect(order).toEqual(['offscreen', 'visible'])
   })
 
   it('does not preempt active visible work for another visible image', async () => {
@@ -296,38 +251,6 @@ describe('visible-first page queue', () => {
       'offscreen-moved',
       'offscreen-first',
     ])
-  })
-
-  it('keeps a complete chapter in document order even when later pages are visible', async () => {
-    const gates = new Map([
-      ['page-0', deferred()],
-      ['page-1', deferred()],
-      ['page-2', deferred()],
-    ])
-    const order: string[] = []
-    const queue = new VisibleFirstQueue<string>(
-      async (item) => {
-        order.push(item.id)
-        await gates.get(item.id)?.promise
-      },
-      {},
-      { maximumConcurrent: 1 },
-    )
-    queue.setOrdering('document')
-    queue.beginInteractiveStartup()
-    queue.enqueueBatch([
-      { id: 'page-0', value: '0', visible: false, order: 0 },
-      { id: 'page-2', value: '2', visible: true, order: 2 },
-      { id: 'page-1', value: '1', visible: true, order: 1 },
-    ])
-
-    await vi.waitFor(() => expect(order).toEqual(['page-0']))
-    gates.get('page-0')?.resolve()
-    await vi.waitFor(() => expect(order).toEqual(['page-0', 'page-1']))
-    gates.get('page-1')?.resolve()
-    await vi.waitFor(() => expect(order).toEqual(['page-0', 'page-1', 'page-2']))
-    gates.get('page-2')?.resolve()
-    await vi.waitFor(() => expect(queue.size).toBe(0))
   })
 
   it('does not automatically re-enqueue a failed item and requires explicit retry', async () => {

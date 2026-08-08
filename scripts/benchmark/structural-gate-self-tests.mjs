@@ -32,7 +32,6 @@ function region(overrides = {}) {
     sourceEnglish: 'The evidence',
     displayedChinese: '证据',
     pinyin: 'zhèng jù',
-    entities: [],
     confidenceEvidence: {
       ocrConsensus: 0.95,
       geometryCoverage: 1,
@@ -104,9 +103,7 @@ const opaquePatch = publicationConsistency(
 )
 assert.deepEqual(opaquePatch.weakEvidence, ['region-1'])
 
-// Source-preserving terminal updates (decorative artwork and unreadable OCR)
-// are part of the same terminal identity set and must not be mistaken for
-// missing or mismatched translated regions.
+// Unreadable OCR is an interactive source notice and must reconcile exactly.
 const unreadable = {
   id: 'unreadable-1',
   textPolygon: polygon,
@@ -136,6 +133,23 @@ assert.equal(
   0,
 )
 
+// Known decorative artwork is preserved silently. A route event proves the
+// decision; adding any DOM overlay over it is a publication mismatch.
+const artwork = { ...unreadable, id: 'artwork-1' }
+const silentArtwork = publicationConsistency(
+  { regions: [] },
+  { jobs: [{ pageIndex: 0, updates: [{ type: 'artworkPreserved', region: artwork }] }] },
+)
+assert.equal(silentArtwork.publishedCount, 0)
+assert.equal(silentArtwork.renderedCount, 0)
+assert.deepEqual(silentArtwork.missing, [])
+assert.deepEqual(silentArtwork.mismatched, [])
+const overlaidArtwork = publicationConsistency(
+  { regions: [{ regionId: artwork.id, sourcePreserving: true }] },
+  { jobs: [{ pageIndex: 0, updates: [{ type: 'artworkPreserved', region: artwork }] }] },
+)
+assert.deepEqual(overlaidArtwork.mismatched, [artwork.id])
+
 // A retained early snapshot or reordered replay is not a complete chapter.
 const stale = routeJobConsistency(
   [
@@ -143,10 +157,32 @@ const stale = routeJobConsistency(
     { jobId: 'job-2', pageIndex: 1, sourceSha256: 'b'.repeat(64) },
   ],
   {
-    jobs: [{ jobId: 'job-1', pageIndex: 0, sourceSha256: 'a'.repeat(64) }],
+    jobs: [
+      {
+        jobId: 'job-1',
+        pageIndex: 0,
+        sourceSha256: 'a'.repeat(64),
+        terminal: { type: 'complete' },
+      },
+    ],
   },
 )
 assert.equal(stale.exact, false)
+
+const failedTerminal = routeJobConsistency(
+  [{ jobId: 'job-1', pageIndex: 0, sourceSha256: 'a'.repeat(64) }],
+  {
+    jobs: [
+      {
+        jobId: 'job-1',
+        pageIndex: 0,
+        sourceSha256: 'a'.repeat(64),
+        terminal: { type: 'failed' },
+      },
+    ],
+  },
+)
+assert.equal(failedTerminal.exact, false)
 
 const chapter = {
   id: 'chapter-1',
@@ -183,8 +219,7 @@ withAnnotation(
   },
 )
 
-// Names stay opaque while relationship/occupation/title spans remain ordinary
-// translation input; continuation groups must survive page adjudication.
+// Continuation groups must survive page adjudication.
 withAnnotation(
   {
     regions: [
@@ -192,17 +227,12 @@ withAnnotation(
         id: 'dialogue-1',
         polygon,
         sourceEnglish: 'Alice calls Wife.',
-        entities: [
-          { start: 0, end: 5, type: 'person', source: 'Alice' },
-          { start: 12, end: 16, type: 'relationship', source: 'Wife' },
-        ],
         continuationGroup: 'exchange',
       },
       {
         id: 'dialogue-2',
         polygon: polygon.map((point) => ({ ...point, y: point.y + 0.3 })),
         sourceEnglish: 'She answers.',
-        entities: [],
         continuationGroup: 'exchange',
       },
     ],
@@ -221,10 +251,6 @@ withAnnotation(
                 type: 'regionReady',
                 region: {
                   ...region({ id: 'dialogue-1', sourceEnglish: 'Alice calls Wife.' }),
-                  entities: [
-                    { startChar: 0, endChar: 5, entityType: 'person', source: 'Alice', translated: 'Alice' },
-                    { startChar: 12, endChar: 16, entityType: 'relationship', source: 'Wife', translated: 'Wife' },
-                  ],
                   contextGroup: 'ctx',
                 },
               },
@@ -240,8 +266,6 @@ withAnnotation(
         ],
       },
     )
-    assert.deepEqual(semantic.nameViolations, [])
-    assert.deepEqual(semantic.translatedDescriptionViolations, [{ page: 1, id: 'dialogue-1', source: 'Wife', type: 'relationship' }])
     assert.equal(semantic.continuationViolations.length, 1)
   },
 )

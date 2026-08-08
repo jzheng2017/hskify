@@ -2,7 +2,6 @@ export type ImageRunPhase = 'queued' | 'running' | 'complete' | 'failed'
 
 type ImageRunEntry = {
   phase: ImageRunPhase
-  automaticRetries: number
 }
 
 export type ChapterRunSnapshot = {
@@ -21,7 +20,7 @@ export class ChapterRunState<Key> {
 
   register(key: Key): boolean {
     if (this.entries.has(key)) return false
-    this.entries.set(key, { phase: 'queued', automaticRetries: 0 })
+    this.entries.set(key, { phase: 'queued' })
     return true
   }
 
@@ -31,28 +30,6 @@ export class ChapterRunState<Key> {
       throw new Error(`Cannot start an image while it is ${entry.phase}.`)
     }
     entry.phase = 'running'
-  }
-
-  preempt(key: Key): void {
-    const entry = this.required(key)
-    if (entry.phase !== 'running') {
-      throw new Error(`Cannot preempt an image while it is ${entry.phase}.`)
-    }
-    entry.phase = 'queued'
-  }
-
-  automaticRetries(key: Key): number {
-    return this.required(key).automaticRetries
-  }
-
-  automaticRetryQueued(key: Key): number {
-    const entry = this.required(key)
-    if (entry.phase !== 'running') {
-      throw new Error(`Cannot retry an image automatically while it is ${entry.phase}.`)
-    }
-    entry.automaticRetries += 1
-    entry.phase = 'queued'
-    return entry.automaticRetries
   }
 
   complete(key: Key): void {
@@ -75,7 +52,6 @@ export class ChapterRunState<Key> {
     const entry = this.entries.get(key)
     if (!entry || entry.phase !== 'failed') return false
     entry.phase = 'queued'
-    entry.automaticRetries = 0
     return true
   }
 

@@ -12,7 +12,7 @@ is no `/v1` or `/api` prefix and no separate result resource.
 | `POST` | `/setup/models` | Start or report managed resource setup |
 | `POST` | `/jobs` | Validate multipart image + JSON metadata and create a job |
 | `DELETE` | `/jobs/{job_id}` | Cancel the job |
-| `DELETE` | `/chapters/{page_session_id}` | Release chapter dialogue/entity state after seal or cancellation |
+| `DELETE` | `/chapters/{page_session_id}` | Release chapter dialogue context after seal or cancellation |
 | `PUT` | `/jobs/{job_id}/viewport` | Replace visible normalized rectangles and active state |
 | `GET` | `/jobs/{job_id}/updates` | Replay or long-poll flat updates after a sequence |
 | `POST` | `/lookup` | Local pinyin/dictionary lookup, optionally bound to a job region |
@@ -48,18 +48,17 @@ fields are rejected by the contracts.
 - `request`: `application/json` metadata containing the exact build
   fingerprint, source identity, dimensions, immutable chapter page order,
   page surface kind, HSK 2.0 level 1–6, learning mode (`natural` or `strict`),
-  name preference (`keep-original` or `chinese`), reading direction, and
-  visible rectangles.
+  reading direction, and visible rectangles.
 
 The browser never supplies dialogue context or a name glossary. The
 `chapterStart`, `chapterPage`, `chapterViewport`, `chapterSeal`, and
 `chapterCancel` messages establish the chapter session; the daemon owns
-canonical ordering, accepted context, continuation groups, and typed entity
-memory.
+canonical ordering, accepted context, and continuation groups.
 
-The only supported language pair is English to Simplified Chinese. Sound-effect
-translation must be false. A successful request returns HTTP 202 with only the
-build fingerprint and `jobId`.
+The only supported language pair is English to Simplified Chinese. Visually
+classified story sound effects are always translated; there is no request
+toggle for them. A successful request returns HTTP 202 with only the build
+fingerprint and `jobId`.
 
 ## Flat chapter updates
 
@@ -75,7 +74,7 @@ build fingerprint and `jobId`.
       "sequence": 11,
       "stage": "translating",
       "overallProgress": 0.42,
-      "message": "Translating English directly into HSK-targeted Chinese"
+      "message": "Translating visually verified story text into Chinese"
     },
     {
       "type": "regionReady",
@@ -124,10 +123,11 @@ on `regionReady`. Each teaching term includes pinyin, local dictionary
 definitions, an optional required HSK level, and an `above-level` or
 `outside-list` reason.
 
-Natural learning targets 90% level-appropriate lexical coverage at levels 1-3,
-93% at level 4, and 95% at levels 5-6 while bounding the absolute number of
-preserved terms. Strict mode requires strict vocabulary validity. Proper-name
-exceptions are controlled independently by the Names setting.
+Natural learning publishes complete faithful Chinese and reports exact
+above-level teaching terms without turning vocabulary coverage into a
+publication gate. Strict mode requires strict vocabulary validity. Names are
+rendered in Chinese and remaining Latin text is rejected; there is no browser
+name preference.
 
 ## Patch-before-text invariant
 

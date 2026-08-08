@@ -1083,10 +1083,7 @@ export class RenderedImage {
       this.geometry.image.width,
       this.geometry.image.height,
     )
-    const minimumFontSize = minimumReadableFontSize(
-      view.region,
-      this.geometry.image.width,
-    )
+    const minimumFontSize = minimumReadableFontSize(this.geometry.image.width)
     if (fit.degraded || fit.fontSize < minimumFontSize) {
       this.markFitDegraded(view)
       return false

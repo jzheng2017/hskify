@@ -1,4 +1,8 @@
-import type { BrowserSetupStatus, HskLevel } from '../../src/contracts/browser'
+import type {
+  BrowserSetupStatus,
+  HskLevel,
+  ReadingDirection,
+} from '../../src/contracts/browser'
 import {
   RuntimeMessageError,
   sendBackgroundMessage,
@@ -7,18 +11,17 @@ import {
 import {
   DEFAULT_HSK_LEVEL,
   DEFAULT_LEARNING_MODE,
-  DEFAULT_NAME_TRANSLATION,
+  DEFAULT_READING_DIRECTION,
   isHskLevel,
   isLearningMode,
-  isNameTranslation,
+  isReadingDirection,
   loadHskLevel,
   loadLearningMode,
-  loadNameTranslation,
+  loadReadingDirection,
   saveHskLevel,
   saveLearningMode,
-  saveNameTranslation,
+  saveReadingDirection,
   type LearningMode,
-  type NameTranslation,
 } from '../../src/messaging/settings'
 
 function requiredElement<T extends Element>(selector: string): T {
@@ -29,7 +32,7 @@ function requiredElement<T extends Element>(selector: string): T {
 
 const levelSelect = requiredElement<HTMLSelectElement>('#hsk-level')
 const learningModeSelect = requiredElement<HTMLSelectElement>('#learning-mode')
-const nameTranslationSelect = requiredElement<HTMLSelectElement>('#name-translation')
+const readingDirectionSelect = requiredElement<HTMLSelectElement>('#reading-direction')
 const translateAll = requiredElement<HTMLButtonElement>('#translate-all')
 const cancel = requiredElement<HTMLButtonElement>('#cancel')
 const statusTitle = requiredElement<HTMLElement>('#status-title')
@@ -52,16 +55,16 @@ function selectedLevel(): HskLevel {
   return isHskLevel(parsed) ? parsed : DEFAULT_HSK_LEVEL
 }
 
-function selectedNameTranslation(): NameTranslation {
-  return isNameTranslation(nameTranslationSelect.value)
-    ? nameTranslationSelect.value
-    : DEFAULT_NAME_TRANSLATION
-}
-
 function selectedLearningMode(): LearningMode {
   return isLearningMode(learningModeSelect.value)
     ? learningModeSelect.value
     : DEFAULT_LEARNING_MODE
+}
+
+function selectedReadingDirection(): ReadingDirection {
+  return isReadingDirection(readingDirectionSelect.value)
+    ? readingDirectionSelect.value
+    : DEFAULT_READING_DIRECTION
 }
 
 function setBusy(busy: boolean): void {
@@ -69,7 +72,7 @@ function setBusy(busy: boolean): void {
   translateAll.disabled = unavailable || !setupReady || !pagePrepared
   levelSelect.disabled = unavailable || !setupReady
   learningModeSelect.disabled = unavailable || !setupReady
-  nameTranslationSelect.disabled = unavailable || !setupReady
+  readingDirectionSelect.disabled = unavailable || !setupReady
   setupPrimary.disabled = unavailable
 }
 
@@ -79,7 +82,7 @@ function renderState(state: PopupState): void {
   setupPrimary.hidden = true
   levelSelect.value = String(state.hskLevel)
   learningModeSelect.value = state.learningMode
-  nameTranslationSelect.value = state.nameTranslation
+  readingDirectionSelect.value = state.readingDirection
   const active = state.state === 'running'
   cancel.hidden = !active
   setBusy(false)
@@ -197,23 +200,23 @@ function renderSetup(status: BrowserSetupStatus): void {
 async function finishStart(
   hskLevel: HskLevel,
   learningMode: LearningMode,
-  nameTranslation: NameTranslation,
+  readingDirection: ReadingDirection,
 ): Promise<void> {
   try {
     await Promise.all([
       saveHskLevel(hskLevel),
       saveLearningMode(learningMode),
-      saveNameTranslation(nameTranslation),
+      saveReadingDirection(readingDirection),
     ])
     const state = await sendBackgroundMessage({
       type: 'popup:start',
       scope: 'all',
       hskLevel,
       learningMode,
-      nameTranslation,
+      readingDirection,
     })
     startInFlight = false
-    renderState({ ...state, hskLevel, learningMode, nameTranslation })
+    renderState({ ...state, hskLevel, learningMode, readingDirection })
   } catch (error) {
     startInFlight = false
     renderError(error)
@@ -228,14 +231,14 @@ function startChapter(): void {
   }
   const hskLevel = selectedLevel()
   const learningMode = selectedLearningMode()
-  const nameTranslation = selectedNameTranslation()
+  const readingDirection = selectedReadingDirection()
   startInFlight = true
   setBusy(true)
   statusTitle.textContent = 'Preparing chapter'
   statusDetail.textContent = 'Finding the chapter images…'
   statusProgress.hidden = false
   statusProgress.removeAttribute('value')
-  void finishStart(hskLevel, learningMode, nameTranslation)
+  void finishStart(hskLevel, learningMode, readingDirection)
 }
 
 translateAll.addEventListener('click', startChapter)
@@ -246,7 +249,7 @@ cancel.addEventListener('click', async () => {
       ...state,
       hskLevel: selectedLevel(),
       learningMode: selectedLearningMode(),
-      nameTranslation: selectedNameTranslation(),
+      readingDirection: selectedReadingDirection(),
     })
   } catch (error) {
     renderError(error)
@@ -256,8 +259,8 @@ levelSelect.addEventListener('change', () => void saveHskLevel(selectedLevel()))
 learningModeSelect.addEventListener('change', () =>
   void saveLearningMode(selectedLearningMode()),
 )
-nameTranslationSelect.addEventListener('change', () =>
-  void saveNameTranslation(selectedNameTranslation()),
+readingDirectionSelect.addEventListener('change', () =>
+  void saveReadingDirection(selectedReadingDirection()),
 )
 
 setupPrimary.addEventListener('click', async () => {
@@ -290,14 +293,14 @@ async function refresh(): Promise<void> {
   try {
     renderState(await sendBackgroundMessage({ type: 'popup:state' }))
   } catch (error) {
-    const [hskLevel, learningMode, nameTranslation] = await Promise.all([
+    const [hskLevel, learningMode, readingDirection] = await Promise.all([
       loadHskLevel(),
       loadLearningMode(),
-      loadNameTranslation(),
+      loadReadingDirection(),
     ])
     levelSelect.value = String(hskLevel)
     learningModeSelect.value = learningMode
-    nameTranslationSelect.value = nameTranslation
+    readingDirectionSelect.value = readingDirection
     renderError(error)
   }
 }
@@ -342,11 +345,14 @@ async function refreshAll(): Promise<void> {
   }
 }
 
-void loadHskLevel().then((level) => {
+void Promise.all([
+  loadHskLevel(),
+  loadLearningMode(),
+  loadReadingDirection(),
+]).then(([level, learningMode, readingDirection]) => {
   levelSelect.value = String(level)
-})
-void loadNameTranslation().then((preference) => {
-  nameTranslationSelect.value = preference
+  learningModeSelect.value = learningMode
+  readingDirectionSelect.value = readingDirection
 })
 void refreshAll()
 const refreshTimer = window.setInterval(() => void refreshAll(), 1_000)

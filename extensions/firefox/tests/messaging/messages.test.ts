@@ -21,7 +21,7 @@ describe('strict extension runtime messages', () => {
       sourceBytes: Uint8Array.of(1, 2, 3).buffer,
       hskLevel: 4,
       learningMode: 'natural',
-      nameTranslation: 'keep-original',
+      readingDirection: 'ltr',
       visibleRects: [{ x: 0, y: 0.25, width: 1, height: 0.5 }],
     }
     expect(parseBackgroundRequest(valid)).toEqual(valid)
@@ -119,14 +119,14 @@ describe('strict extension runtime messages', () => {
         scope: 'all',
         hskLevel: 5,
         learningMode: 'natural',
-        nameTranslation: 'keep-original',
+        readingDirection: 'ltr',
       }),
     ).toEqual({
       type: 'content:start',
       scope: 'all',
       hskLevel: 5,
       learningMode: 'natural',
-      nameTranslation: 'keep-original',
+      readingDirection: 'ltr',
     })
     expect(() =>
       parseContentRequest({
@@ -134,7 +134,7 @@ describe('strict extension runtime messages', () => {
         scope: 'everything',
         hskLevel: 9,
         learningMode: 'natural',
-        nameTranslation: 'literal',
+        readingDirection: 'ltr',
       }),
     ).toThrow(/scope/i)
     expect(() =>
@@ -143,7 +143,8 @@ describe('strict extension runtime messages', () => {
         scope: 'all',
         hskLevel: 3,
         learningMode: 'natural',
-        nameTranslation: 'literal',
+        nameTranslation: 'keep-original',
+        readingDirection: 'ltr',
       }),
     ).toThrow(/nameTranslation/i)
     expect(() =>

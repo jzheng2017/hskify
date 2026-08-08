@@ -34,7 +34,7 @@ pub(crate) const RESULT_CACHE_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const RESULT_CACHE_MAX_ENTRY_BYTES: u64 = 512 * 1024 * 1024;
 const RESULT_CACHE_MAX_DECODED_PATCH_BYTES: u64 = 256 * 1024 * 1024;
 // Chapter sessions changed the meaning of a cached result (ordering,
-// context, entity memory, OCR evidence, and cleanup verification are all
+// context, OCR evidence, and cleanup verification are all
 // part of the result now).  Deliberately use a new identity instead of
 // attempting to migrate the old per-image cache.
 // A chapter-session cache is intentionally invalidated as one unit whenever
@@ -42,7 +42,7 @@ const RESULT_CACHE_MAX_DECODED_PATCH_BYTES: u64 = 256 * 1024 * 1024;
 // per-image/progressive schema.
 const RESULT_CACHE_SCHEMA: &str = "hskify-chapter-session-result-2026-08-02-v3";
 const RESULT_CACHE_PIPELINE_REVISION: &str =
-    "chapter-session-pipeline-v2-qwen-page-understanding-2026-08-02";
+    "chapter-session-pipeline-v20-single-chinese-name-and-sfx-policy-2026-08-08";
 const MODEL_RESOURCE_MANIFEST: &[u8] = include_bytes!("../../../data/model-packs/manifest.v1.json");
 
 #[derive(Debug, Clone)]
@@ -518,7 +518,6 @@ mod tests {
                 context_consistency: 1.0,
                 cleanup_score: 1.0,
             }),
-            entities: Vec::new(),
             style: BrowserTextStyle {
                 font_id: "hmt-sans".to_owned(),
                 category: FontCategory::Sans,

@@ -592,8 +592,6 @@ pub struct BrowserJobSettings {
     pub hsk_standard: String,
     pub hsk_level: HskLevel,
     pub reading_direction: ReadingDirection,
-    pub translate_sound_effects: bool,
-    pub name_translation: NameTranslation,
     #[serde(default)]
     pub learning_mode: LearningMode,
 }
@@ -618,12 +616,6 @@ impl Validate for BrowserJobSettings {
                 "this build supports HSK 2.0 only",
             ));
         }
-        if self.translate_sound_effects {
-            return Err(ContractError::at(
-                "settings.translateSoundEffects",
-                "sound-effect translation is disabled in this build",
-            ));
-        }
         Ok(())
     }
 }
@@ -631,16 +623,8 @@ impl Validate for BrowserJobSettings {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ReadingDirection {
-    Auto,
     Ltr,
     Rtl,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum NameTranslation {
-    KeepOriginal,
-    Chinese,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -984,30 +968,6 @@ pub enum TranslatedRegionRole {
     System,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum RegionEntityType {
-    Person,
-    Place,
-    Organization,
-    Coined,
-    Relationship,
-    Occupation,
-    Rank,
-    Title,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct RegionEntitySpan {
-    pub source: String,
-    pub start_char: usize,
-    pub end_char: usize,
-    pub entity_type: RegionEntityType,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub translated: Option<String>,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RegionConfidenceEvidence {
@@ -1051,8 +1011,6 @@ pub struct TranslatedRegion {
     pub context_group: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confidence_evidence: Option<RegionConfidenceEvidence>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub entities: Vec<RegionEntitySpan>,
     pub style: BrowserTextStyle,
     pub layout: BrowserTextLayout,
     pub hsk: TranslatedHskStatus,
@@ -1087,34 +1045,6 @@ impl TranslatedRegion {
         require_unit(&format!("{path}.ocrConfidence"), self.ocr_confidence)?;
         if let Some(evidence) = &self.confidence_evidence {
             evidence.validate_at(&format!("{path}.confidenceEvidence"))?;
-        }
-        for (index, entity) in self.entities.iter().enumerate() {
-            require_nonempty(&format!("{path}.entities[{index}].source"), &entity.source)?;
-            if entity.start_char >= entity.end_char {
-                return Err(ContractError::at(
-                    format!("{path}.entities[{index}].endChar"),
-                    "must be greater than startChar",
-                ));
-            }
-            let source_length = self.source_english.chars().count();
-            if entity.end_char > source_length {
-                return Err(ContractError::at(
-                    format!("{path}.entities[{index}].endChar"),
-                    "must be within sourceEnglish",
-                ));
-            }
-            let span = self
-                .source_english
-                .chars()
-                .skip(entity.start_char)
-                .take(entity.end_char - entity.start_char)
-                .collect::<String>();
-            if !span.eq_ignore_ascii_case(&entity.source) {
-                return Err(ContractError::at(
-                    format!("{path}.entities[{index}].source"),
-                    "must match the referenced sourceEnglish span",
-                ));
-            }
         }
         self.style.validate_at(&format!("{path}.style"))?;
         self.layout.validate_at(&format!("{path}.layout"))?;
@@ -1616,7 +1546,6 @@ mod tests {
                 context_consistency: 1.0,
                 cleanup_score: 1.0,
             }),
-            entities: Vec::new(),
             style: BrowserTextStyle {
                 font_id: "hmt-sans".to_owned(),
                 category: FontCategory::Sans,

@@ -41,14 +41,14 @@ When gold is complete, compare these candidates in one controlled GPU sequence:
 3. Hy-MT2 1.8B Q4_K_M
 
 Each candidate must receive exactly the same ordered target rows, batching,
-chapter context/entity memory, prompt, validator, decoding settings, warm-up,
+chapter context, role metadata, prompt, validator, decoding settings, warm-up,
 and resource monitoring. Raw evidence must preserve model hashes, commands,
 environment, per-row outputs, timing samples, and failure classifications.
 
 A smaller model qualifies only if it:
 
 - adds no critical meaning errors under human review;
-- preserves protected names and numbers at least 99%;
+- renders names in Chinese and preserves numbers at least 99%;
 - matches the 4B model's naturalness under blinded fluent-reader review; and
 - satisfies the structural and deterministic validation gates.
 

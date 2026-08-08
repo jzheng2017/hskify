@@ -5,7 +5,7 @@ import type {
   JobUpdate,
   LearningMode,
   LookupRequest,
-  NameTranslation,
+  ReadingDirection,
 } from '../contracts/browser'
 import {
   ImageDiscovery,
@@ -36,10 +36,13 @@ import { ChapterRunState } from './run-state'
 const PAGE_SESSION_KEY = 'hmt.pageSessionId'
 const NAVIGATION_CHECK_INTERVAL_MS = 250
 const VIEWPORT_THROTTLE_MS = 100
+// The daemon already admits one Vision phase and one Language phase while
+// prioritizing the live viewport. Two in-flight pages keep the independent
+// Vision and Language lanes fed without making visible pages contend with a
+// speculative tail for the same resident models.
 const CHAPTER_PIPELINE_CONCURRENCY = 2
-const CHAPTER_PIPELINE_PIXEL_BUDGET =
-  DEFAULT_IMAGE_LIMITS.maximumPixels * CHAPTER_PIPELINE_CONCURRENCY
-export const AUTOMATIC_IMAGE_RETRY_LIMIT = 2
+// Keep source retention inside the same two-page bound as execution.
+const CHAPTER_PIPELINE_PIXEL_BUDGET = DEFAULT_IMAGE_LIMITS.maximumPixels * 2
 export const COMPLETION_SETTLE_MS = 300
 
 type TranslationCandidate = {
@@ -339,14 +342,6 @@ function errorMessage(error: unknown): string {
   return 'This image couldn’t be translated. Try again.'
 }
 
-export function shouldAutomaticallyRetryImage(error: unknown, attempts: number): boolean {
-  return (
-    error instanceof RuntimeMessageError &&
-    error.retryable &&
-    attempts < AUTOMATIC_IMAGE_RETRY_LIMIT
-  )
-}
-
 export class PageTranslationController {
   private sessionId = createPageSessionId(true)
   private navigationUrl = location.href
@@ -374,10 +369,9 @@ export class PageTranslationController {
   private scope: TranslationScope | undefined
   private hskLevel: 1 | 2 | 3 | 4 | 5 | 6 = 5
   private learningMode: LearningMode = 'natural'
-  private nameTranslation: NameTranslation = 'keep-original'
-  // The daemon uses this immutable order barrier to admit concurrent page
-  // analysis without allowing a later page to translate before an earlier
-  // admitted page has contributed terminal context.
+  private readingDirection: ReadingDirection = 'ltr'
+  // Stable page identities remain useful for recovery and available-context
+  // ordering, but never form a wait barrier.
   private chapterPageOrder: number[] = []
   private readonly activeJobIds = new Set<string>()
   private prefetchTargetId: string | undefined
@@ -414,17 +408,8 @@ export class PageTranslationController {
           this.cancelCompletion()
           this.runState.start(item.value.candidate.element)
         },
-        onPreempt: (item) => {
-          this.runState.preempt(item.value.candidate.element)
-        },
         onSuccess: (item) => {
           const image = item.value.candidate.element
-          // Interactive startup reserves one slot until the first final
-          // region is committed. A legitimate cover/credit image can finish
-          // with no translatable regions, however, which otherwise leaves
-          // every later image serialized behind an empty result. Completion
-          // is the authoritative startup boundary for both outcomes.
-          this.queue.enableThroughput()
           this.queueIds.delete(image)
           this.failures.delete(image)
           this.runState.complete(image)
@@ -433,23 +418,6 @@ export class PageTranslationController {
         },
         onFailure: (item, error) => {
           const image = item.value.candidate.element
-          const attempts = this.runState.automaticRetries(image)
-          if (shouldAutomaticallyRetryImage(error, attempts)) {
-            const retryNumber = this.runState.automaticRetryQueued(image)
-            if (
-              this.requeueFailedImage(
-                image,
-                `Trying again automatically (${retryNumber}/${AUTOMATIC_IMAGE_RETRY_LIMIT})`,
-              )
-            ) {
-              // A failed first image must not hold the chapter in startup
-              // serialization while its bounded retry is queued.
-              this.queue.enableThroughput()
-              return
-            }
-            this.runState.start(image)
-          }
-          this.queue.enableThroughput()
           this.runState.fail(image)
           this.failures.set(image, {
             sourceUrl: item.value.candidate.sourceUrl,
@@ -593,7 +561,7 @@ export class PageTranslationController {
     scope: TranslationScope,
     hskLevel: 1 | 2 | 3 | 4 | 5 | 6,
     learningMode: LearningMode,
-    nameTranslation: NameTranslation,
+    readingDirection: ReadingDirection,
   ): Promise<PageState> {
     const replacingRun = this.scope !== undefined
     this.generation += 1
@@ -601,7 +569,7 @@ export class PageTranslationController {
     this.scope = scope
     this.hskLevel = hskLevel
     this.learningMode = learningMode
-    this.nameTranslation = nameTranslation
+    this.readingDirection = readingDirection
     this.cancelledState = false
     this.completionPublished = false
     this.runState.reset()
@@ -622,7 +590,7 @@ export class PageTranslationController {
       }
       // A chapter session is an immutable context boundary. Reusing the
       // same id after cancelling a run would let the daemon's ordered
-      // dialogue graph and entity memory leak into the new translation.
+      // dialogue graph leak into the new translation.
       // Start a fresh id for every explicit replacement run; recovery still
       // uses the source hash/result cache rather than the session id.
       this.sessionId = createPageSessionId(false)
@@ -635,7 +603,7 @@ export class PageTranslationController {
       scope,
       hskLevel,
       learningMode,
-      nameTranslation,
+      readingDirection,
     })
 
     const candidates = this.currentCandidates().filter(
@@ -692,20 +660,9 @@ export class PageTranslationController {
         job,
       ]),
     )
-    // A complete chapter is a document-order language stream. Viewport-only
-    // requests may stay visible-first, but letting a later visible page start
-    // ahead of its predecessors makes context depend on scroll timing.
-    this.queue.setOrdering(scope === 'all' ? 'document' : 'visible-first')
-    this.queue.beginInteractiveStartup()
-    const submissionCandidates =
-      scope === 'all'
-        ? [...candidates].sort(
-            (left, right) => this.orderingIndex(left) - this.orderingIndex(right),
-          )
-        : candidates
     this.queue.beginBatch()
     try {
-      for (const candidate of submissionCandidates) {
+      for (const candidate of candidates) {
         this.enqueue(
           candidate,
           recoveredByIdentity.get(
@@ -1048,7 +1005,7 @@ export class PageTranslationController {
             ...(inline ? { sourceBytes: inline.bytes } : {}),
             hskLevel: this.hskLevel,
             learningMode: this.learningMode,
-            nameTranslation: this.nameTranslation,
+            readingDirection: this.readingDirection,
             visibleRects: visibleImageRects(
               candidate.element,
               snapshot.naturalWidth,
@@ -1190,16 +1147,12 @@ export class PageTranslationController {
                 signal,
                 validate: () => this.assertCurrent(candidate, snapshot, signal),
               })
-              // The first final patch is now actually visible. Throughput work
-              // may use the remaining chapter capacity without delaying the
-              // interaction the user was waiting for.
-              this.queue.enableThroughput()
               break
             }
             case 'artworkPreserved':
-              // The source pixels remain untouched by design, but the OCR
-              // span remains a hover target for a teaching explanation.
-              rendered.installSourcePreservingRegion(update.region)
+              // Furniture, credits, and artwork are intentional non-story
+              // content. Preserve them silently: adding a label changes the
+              // artwork and turns a correct no-op into visible clutter.
               break
             case 'unreadable':
               // No patch is installed for low-confidence regions. Keep the
@@ -1498,7 +1451,7 @@ export function bootContentRuntime(): void {
           message.scope,
           message.hskLevel,
           message.learningMode,
-          message.nameTranslation,
+          message.readingDirection,
         )
       case 'content:cancel':
         return controller.cancel()

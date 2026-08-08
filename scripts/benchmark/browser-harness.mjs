@@ -296,8 +296,8 @@ async function timedExtensionMessage(extensionPage, message) {
   return { issuedAtEpochMs: timed.issuedAtEpochMs, responseAtEpochMs: timed.responseAtEpochMs, value: timed.response.value }
 }
 
-export async function timedContentStart(extensionPage, hskLevel, expectedPageUrl, nameTranslation = 'keep-original') {
-  const timed = await extensionPage.evaluate(async ({ level, pageUrl, names }) => {
+export async function timedContentStart(extensionPage, hskLevel, expectedPageUrl, readingDirection) {
+  const timed = await extensionPage.evaluate(async ({ level, pageUrl, direction }) => {
     const tabs = await globalThis.browser.tabs.query({})
     const tab = tabs.find((candidate) => candidate.url === pageUrl)
     if (!Number.isInteger(tab?.id)) throw new Error(`No chapter tab for ${pageUrl}.`)
@@ -306,10 +306,10 @@ export async function timedContentStart(extensionPage, hskLevel, expectedPageUrl
       globalThis.__hskifyJobMonitor.actionIssuedAtEpochMs = issuedAtEpochMs
     }
     const response = await globalThis.browser.tabs.sendMessage(tab.id, {
-      type: 'content:start', scope: 'all', hskLevel: level, learningMode: 'natural', nameTranslation: names,
+      type: 'content:start', scope: 'all', hskLevel: level, learningMode: 'natural', readingDirection: direction,
     })
     return { issuedAtEpochMs, responseAtEpochMs: Date.now(), response }
-  }, { level: hskLevel, pageUrl: expectedPageUrl, names: nameTranslation })
+  }, { level: hskLevel, pageUrl: expectedPageUrl, direction: readingDirection })
   if (!timed.response || typeof timed.response.state !== 'string') throw new Error('Content runtime returned no valid start state.')
   return { issuedAtEpochMs: timed.issuedAtEpochMs, responseAtEpochMs: timed.responseAtEpochMs, value: timed.response }
 }
@@ -429,7 +429,7 @@ export async function installDomObserver(page, runId) {
     recordElement = (element) => {
       if (!(element instanceof Element)) return
       for (const patch of [...(element.matches('.hmt-patch') ? [element] : []), ...element.querySelectorAll('.hmt-patch')]) emit('patchDomCommitted', { patchId: patch.dataset.patchId ?? '', complete: patch.complete, naturalWidth: patch.naturalWidth, naturalHeight: patch.naturalHeight, decodedAndInstalled: patch.complete && patch.naturalWidth > 0 && patch.naturalHeight > 0, page: pageFor(patch), visible: visible(patch) })
-      for (const region of [...(element.matches('.hmt-region') ? [element] : []), ...element.querySelectorAll('.hmt-region')]) emit('selectableTextDomCommitted', { regionId: region.dataset.regionId ?? '', hskValid: region.dataset.hskValid ?? '', repairState: region.dataset.hskRepairState ?? '', text: region.textContent ?? '', pinyin: region.dataset.pinyin ?? '', page: pageFor(region), visible: visible(region) })
+      for (const region of [...(element.matches('.hmt-region') ? [element] : []), ...element.querySelectorAll('.hmt-region')]) emit('selectableTextDomCommitted', { regionId: region.dataset.regionId ?? '', sourceEnglish: region.dataset.sourceEnglish ?? '', hskValid: region.dataset.hskValid ?? '', repairState: region.dataset.hskRepairState ?? '', sourcePreserving: region.classList.contains('hmt-source-notice'), text: region.textContent ?? '', pinyin: region.dataset.pinyin ?? '', page: pageFor(region), visible: visible(region) })
       for (const owned of [...(element.matches('[data-hmt-owned="true"]') ? [element] : []), ...element.querySelectorAll('[data-hmt-owned="true"]')]) {
         if (owned.classList.contains('hmt-wrapper')) emit('imageWrapperCommitted', { page: Number(owned.querySelector('img[data-page]')?.dataset.page ?? 0) })
         if (owned.shadowRoot) observeShadow(owned.shadowRoot)
@@ -468,7 +468,7 @@ export async function chapterDomEvidence(page) {
     }
     const events = globalThis.__hskifyRuntimeEvidence?.events ?? []
     const firstPatch = events.find((event) => event.type === 'patchDomCommitted')
-    const firstText = events.find((event) => event.type === 'selectableTextDomCommitted')
+    const firstText = events.find((event) => event.type === 'selectableTextDomCommitted' && event.sourcePreserving !== true)
     return { sourceImageCount: document.querySelectorAll('#chapter > img').length, wrappedImageCount: wrapperNodes.length, patchCount: patches.length, regionCount: regions.length, degradedFitCount, wrappers, patches, regions, events, patchBeforeText: Boolean(firstPatch) && Boolean(firstText) && firstPatch.index < firstText.index, observerInstalledAtEpochMs: globalThis.__hskifyRuntimeEvidence?.observerInstalledAtEpochMs }
   })
 }
@@ -511,7 +511,7 @@ export async function routeEvidence(extensionPage, records, terminalRequired, ex
         const digest = await crypto.subtle.digest('SHA-256', bytes)
         patches.push({ patchId, regionId: update.region.id, route: `/blobs/${patchId}`, httpStatus: patchFetch.response.status, bytes: bytes.byteLength, sha256: [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, '0')).join(''), rect: update.region.patch.rect, textPolygon: update.region.textPolygon, bubblePolygon: update.region.bubblePolygon })
       }
-      jobsEvidence.push({ jobId: job.jobId, pageIndex: job.pageIndex, sourceSha256: job.sourceSha256, sourceWidth: job.sourceWidth, sourceHeight: job.sourceHeight, route: `/jobs/${job.jobId}/updates`, updatesHttpStatus: replayFetch.response.status, updatesDurationMs: replayFetch.durationMs, nextSequence: batch.nextSequence, terminal, updates: batch.updates, patches })
+      jobsEvidence.push({ jobId: job.jobId, pageIndex: job.pageIndex, sourceSha256: job.sourceSha256, sourceWidth: job.sourceWidth, sourceHeight: job.sourceHeight, submittedAtUnixMs: job.submittedAtUnixMs, firstObservedAtEpochMs: job.firstObservedAtEpochMs, terminalObservedAtEpochMs: job.terminalObservedAtEpochMs, jobDurationMs: Number.isFinite(job.submittedAtUnixMs) && Number.isFinite(job.terminalObservedAtEpochMs) ? job.terminalObservedAtEpochMs - job.submittedAtUnixMs : undefined, route: `/jobs/${job.jobId}/updates`, updatesHttpStatus: replayFetch.response.status, updatesDurationMs: replayFetch.durationMs, nextSequence: batch.nextSequence, terminal, updates: batch.updates, patches })
     }
     return {
       session: { buildFingerprint: session.buildFingerprint, engineVersion: session.engineVersion, port: session.port, sessionExpiresAtUnixMs: session.sessionExpiresAtUnixMs, capabilities: session.capabilities, tokenRedacted: true },

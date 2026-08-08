@@ -56,9 +56,7 @@ function request(): BrowserJobRequest {
       hskStandard: '2.0',
       hskLevel: 5,
       learningMode: 'natural',
-      readingDirection: 'auto',
-      translateSoundEffects: false,
-      nameTranslation: 'keep-original',
+      readingDirection: 'ltr',
     },
   }
 }

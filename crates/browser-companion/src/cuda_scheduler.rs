@@ -154,10 +154,17 @@ impl CudaScheduler {
             });
             sequence
         };
+        // Queue membership must follow the lifetime of this acquire future.
+        // Page cleanup tasks are deliberately abortable; without this guard,
+        // aborting one while it waits leaves an ownerless sequence at the
+        // head of the lane and permanently blocks every later page.
+        let mut registration = CudaWaiterRegistration {
+            scheduler: self.clone(),
+            sequence: Some(sequence),
+        };
 
         loop {
             if cancel.load(Ordering::Acquire) {
-                self.cancel_waiter(sequence);
                 return Err(CudaAdmissionError::Cancelled);
             }
 
@@ -173,6 +180,7 @@ impl CudaScheduler {
                     let removed = state.remove_waiter(sequence);
                     debug_assert!(removed, "admitted CUDA waiter must still be queued");
                     state.set_active(workload, true);
+                    registration.disarm();
                     return Ok(CudaPermit {
                         scheduler: self.clone(),
                         workload,
@@ -225,6 +233,26 @@ impl CudaScheduler {
             .expect("CUDA scheduler lock poisoned")
             .waiters
             .len()
+    }
+}
+
+#[derive(Debug)]
+struct CudaWaiterRegistration {
+    scheduler: Arc<CudaScheduler>,
+    sequence: Option<u64>,
+}
+
+impl CudaWaiterRegistration {
+    fn disarm(&mut self) {
+        self.sequence = None;
+    }
+}
+
+impl Drop for CudaWaiterRegistration {
+    fn drop(&mut self) {
+        if let Some(sequence) = self.sequence {
+            self.scheduler.cancel_waiter(sequence);
+        }
     }
 }
 
@@ -379,6 +407,59 @@ mod tests {
         assert_eq!(error, CudaAdmissionError::Cancelled);
         assert_eq!(scheduler.pending(), 0);
         drop(active);
+    }
+
+    #[tokio::test]
+    async fn aborting_a_queued_acquire_cannot_orphan_the_lane() {
+        let scheduler = Arc::new(CudaScheduler::new(4));
+        let active = scheduler
+            .acquire(
+                CudaWorkload::Vision,
+                CudaPriority::Offscreen,
+                Arc::new(AtomicBool::new(false)),
+            )
+            .await
+            .unwrap();
+        let abandoned = {
+            let scheduler = scheduler.clone();
+            tokio::spawn(async move {
+                scheduler
+                    .acquire(
+                        CudaWorkload::Vision,
+                        CudaPriority::Offscreen,
+                        Arc::new(AtomicBool::new(false)),
+                    )
+                    .await
+            })
+        };
+        wait_for_pending(&scheduler, 1).await;
+
+        abandoned.abort();
+        assert!(abandoned.await.unwrap_err().is_cancelled());
+        wait_for_pending(&scheduler, 0).await;
+
+        let following = {
+            let scheduler = scheduler.clone();
+            tokio::spawn(async move {
+                scheduler
+                    .acquire(
+                        CudaWorkload::Vision,
+                        CudaPriority::Offscreen,
+                        Arc::new(AtomicBool::new(false)),
+                    )
+                    .await
+            })
+        };
+        wait_for_pending(&scheduler, 1).await;
+        drop(active);
+
+        let permit = tokio::time::timeout(Duration::from_secs(1), following)
+            .await
+            .expect("following waiter remained blocked behind an aborted future")
+            .unwrap()
+            .unwrap();
+        drop(permit);
+        assert_eq!(scheduler.pending(), 0);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

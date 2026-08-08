@@ -26,7 +26,7 @@ The background worker uses these loopback routes:
 - `GET /blobs/{patchId}` downloads a region's transparent PNG patch.
 - `DELETE /jobs/{jobId}` cancels and releases a job.
 - `DELETE /chapters/{pageSessionId}` releases the daemon's ordered dialogue
-  and entity memory after the chapter is sealed or cancelled.
+  context after the chapter is sealed or cancelled.
 
 Setup, dictionary, and font requests remain authenticated root routes:
 `/setup`, `/setup/models`, `/lookup`, and `/fonts/{fontId}`.
@@ -127,15 +127,12 @@ Raw pipeline stages and daemon messages never appear in the popup, page HUD,
 or image badge. Internal stages map to short phrases such as “Reading the
 page,” “Writing the Chinese text,” and “Fitting the text.”
 
-The persisted Names setting defaults to `keep-original`; readers may switch to
-`chinese`. The selected value travels through the strict popup/content/job
-contracts and is included in the companion request.
-
 The persisted Learning style defaults to `natural`. Natural learning asks for
-simple vocabulary and grammar while allowing a small number of useful story
-terms; those terms receive a dotted underline and use the same position-aware
-hover explanation as every other translated expression. `strict` accepts only
-translations whose non-name vocabulary is inside the selected HSK level. The
+complete natural Chinese first; above-level words become teaching terms with a
+dotted underline and the same position-aware hover explanation as every other
+translated expression. `strict` additionally rewrites and validates the text
+against the selected HSK level. Names are always rendered in Chinese; there is
+no name-mode setting or Latin-name exception. The
 learning mode travels through the popup, background, content, job, cache, and
 final-region contracts, so changing it cannot reuse output from the
 other mode.

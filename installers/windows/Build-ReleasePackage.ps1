@@ -387,7 +387,7 @@ if ([uint64] (Get-Item -LiteralPath $resolvedModel).Length -ne [uint64] $transla
 
 $resolvedHskArtifact = Resolve-LeafFile -Path $HskArtifactPath -Label 'HskArtifactPath'
 $resolvedDictionaryArtifact = Resolve-LeafFile -Path $DictionaryArtifactPath -Label 'DictionaryArtifactPath'
-Assert-ExactArtifact -Path $resolvedHskArtifact -Label 'hsk-2.0.normalized.json' -ExpectedBytes 1219917 -ExpectedSha256 'e603244c49d6a231426e9696574e98bd1e76fbea68f56e76ea98695d26ce478f'
+Assert-ExactArtifact -Path $resolvedHskArtifact -Label 'hsk-2.0.normalized.json' -ExpectedBytes 1219917 -ExpectedSha256 '35134ec9a0e61ab520c9737bf57dbb10cda25d54ac80144033f51eaa7df59fd6'
 Assert-ExactArtifact -Path $resolvedDictionaryArtifact -Label 'cc-cedict.normalized.json' -ExpectedBytes 28604488 -ExpectedSha256 '4011f023d27e576559ae0f2afe6fd0cc4458f96d225baa80f0ddbc9bb0344f33'
 
 if ([string]::IsNullOrWhiteSpace($NativeHostPath)) {

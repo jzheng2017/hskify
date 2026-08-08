@@ -56,8 +56,9 @@ artifacts. Results from the retired page-result build do not satisfy this list.
 
 - [ ] Annotated English dialogue, thought, and story narration is detected and
   OCRed.
-- [ ] Sound effects, credits, promotion, branding, non-English text, ambiguous
-  regions, and sub-0.45 OCR do not create patches or translations.
+- [ ] Visual story sound effects create faithful Chinese patches/translations;
+  credits, promotion, branding, depicted furniture, non-English text,
+  ambiguous regions, and sub-threshold OCR do not.
 - [ ] Light, dark, gradient, textured, outlined, and arbitrarily colored
   regions work without hue-specific rules.
 - [ ] Patch alpha is confined to the intended glyph mask.

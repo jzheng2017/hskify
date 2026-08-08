@@ -20,13 +20,15 @@ The browser path processes and publishes independent regions:
    without requiring a white balloon.
 3. OCR must meet the fixed confidence floor and contain Latin alphabetic text
    only.
-4. Sound effects, credits, scanlation promotion, branding, non-English text,
-   and ambiguous OCR are rejected before cleanup or translation.
+4. Visual story sound effects are translated. Credits, scanlation promotion,
+   branding, depicted interface/object text, non-English text, and ambiguous
+   OCR are preserved before cleanup or translation.
 5. Cleanup produces one transparent PNG patch whose opaque pixels are limited
    to the inferred erase/glyph mask. Local image structure, not a fixed color
    list, determines foreground, background, fill, and styling.
-6. English is translated directly to HSK-targeted Simplified Chinese in small
-   batches; only invalid items may use one bounded targeted repair.
+6. A text-only pass establishes complete faithful Simplified Chinese in small
+   batches. Natural mode publishes it directly; strict mode performs a bounded
+   HSK rewrite and only invalid strict items may use one terminal repair.
 7. The patch blob is stored before `regionReady`, and Firefox installs the
    decoded patch before its selectable Chinese.
 8. Completion is a terminal log event, not a separate page result.

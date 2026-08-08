@@ -49,9 +49,7 @@ function jobRequest() {
       hskStandard: '2.0',
       hskLevel: 5,
       learningMode: 'natural',
-      readingDirection: 'auto',
-      translateSoundEffects: false,
-      nameTranslation: 'keep-original',
+      readingDirection: 'ltr',
     },
   } as const
 }
@@ -129,9 +127,15 @@ describe('unversioned progressive browser contract', () => {
     expect(() =>
       parseBrowserJobRequest({
         ...jobRequest(),
-        settings: { ...jobRequest().settings, nameTranslation: 'literal' },
+        settings: { ...jobRequest().settings, nameTranslation: 'keep-original' },
       }),
     ).toThrow(/nameTranslation/i)
+    expect(() =>
+      parseBrowserJobRequest({
+        ...jobRequest(),
+        settings: { ...jobRequest().settings, translateSoundEffects: false },
+      }),
+    ).toThrow(/translateSoundEffects/i)
   })
 
   it('parses monotonic final-region and terminal updates', () => {

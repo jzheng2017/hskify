@@ -31,7 +31,7 @@ function submitMessage(pageSessionId = 'fixture-page-session') {
     naturalHeight: 1800,
     hskLevel: 5 as const,
     learningMode: 'natural' as const,
-    nameTranslation: 'keep-original' as const,
+    readingDirection: 'ltr' as const,
     visibleRects,
   }
 }

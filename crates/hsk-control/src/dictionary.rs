@@ -186,17 +186,47 @@ impl LocalDictionary {
     }
 
     pub(crate) fn merged_fields(&self, word: &str) -> (String, Vec<String>) {
-        let mut pinyin = BTreeSet::new();
+        let mut readings = BTreeMap::<String, (usize, usize)>::new();
         let mut definitions = BTreeSet::new();
         for entry in self.entries_for(word) {
-            pinyin.insert(entry.pinyin.clone());
+            let score = readings.entry(entry.pinyin.clone()).or_default();
+            score.1 += entry.definitions.len();
+            score.0 += entry
+                .definitions
+                .iter()
+                .filter(|definition| is_primary_definition(definition))
+                .count();
             definitions.extend(entry.definitions.iter().cloned());
         }
-        (
-            pinyin.into_iter().collect::<Vec<_>>().join(" / "),
-            definitions.into_iter().collect(),
-        )
+        let pinyin = readings
+            .into_iter()
+            .max_by(|(left_pinyin, left_score), (right_pinyin, right_score)| {
+                left_score
+                    .cmp(right_score)
+                    .then_with(|| {
+                        starts_with_lowercase(left_pinyin).cmp(&starts_with_lowercase(right_pinyin))
+                    })
+                    // Reverse lexical tie-breaking keeps selection stable
+                    // while `max_by` still chooses the alphabetically first
+                    // reading when linguistic evidence is equal.
+                    .then_with(|| right_pinyin.cmp(left_pinyin))
+            })
+            .map(|(pinyin, _)| pinyin)
+            .unwrap_or_default();
+        (pinyin, definitions.into_iter().collect())
     }
+}
+
+fn starts_with_lowercase(pinyin: &str) -> bool {
+    pinyin.chars().next().is_some_and(char::is_lowercase)
+}
+
+fn is_primary_definition(definition: &str) -> bool {
+    let folded = definition.trim().to_ascii_lowercase();
+    !(folded.contains("surname")
+        || folded.starts_with("variant of ")
+        || folded.starts_with("old variant of ")
+        || folded.starts_with("taiwan pr."))
 }
 
 fn validate_entry(entry: &DictionaryEntry) -> Result<()> {

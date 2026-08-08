@@ -599,11 +599,13 @@ impl HskControl {
     }
 
     fn lookup_token(&self, word: &str, proper_name: bool) -> LookupToken {
-        let (mut pinyin, mut definitions) = self.dictionary.merged_fields(word);
+        let (dictionary_pinyin, mut definitions) = self.dictionary.merged_fields(word);
+        let mut pinyin = dictionary_pinyin;
         if let Some(entry) = self.hsk.entry(word) {
-            if pinyin.is_empty() {
-                pinyin.clone_from(&entry.pinyin);
-            }
+            // The HSK headword carries the standard learner-facing reading.
+            // CC-CEDICT deliberately contains surnames, dialect readings, and
+            // heteronyms; presenting all of them in a sentence is not pinyin.
+            pinyin.clone_from(&entry.pinyin);
             let mut merged = definitions.into_iter().collect::<BTreeSet<_>>();
             merged.extend(entry.glosses.iter().cloned());
             definitions = merged.into_iter().collect();
@@ -634,9 +636,7 @@ impl HskControl {
                 .unwrap_or(start + 1);
             let component = characters[start..end].iter().collect::<String>();
             let (mut pinyin, _) = self.dictionary.merged_fields(&component);
-            if pinyin.is_empty()
-                && let Some(entry) = self.hsk.entry(&component)
-            {
+            if let Some(entry) = self.hsk.entry(&component) {
                 pinyin.clone_from(&entry.pinyin);
             }
             if pinyin.trim().is_empty() {

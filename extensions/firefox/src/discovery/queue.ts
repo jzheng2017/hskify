@@ -8,7 +8,6 @@ export type QueueItem<T> = {
 
 export type QueueCallbacks<T> = {
   onStart?: (item: QueueItem<T>) => void
-  onPreempt?: (item: QueueItem<T>) => void
   onSuccess?: (item: QueueItem<T>) => void
   onFailure?: (item: QueueItem<T>, error: unknown) => void
   onIdle?: () => void
@@ -19,17 +18,13 @@ export type QueueCapacity = {
   maximumActiveCost?: number
 }
 
-export type QueueOrdering = 'visible-first' | 'document'
-
 export class VisibleFirstQueue<T> {
   private pending: QueueItem<T>[] = []
   private pendingIds = new Set<string>()
   private failedIds = new Set<string>()
   private active = new Map<string, { item: QueueItem<T>; controller: AbortController }>()
   private stopped = false
-  private interactiveStartup = false
   private batchDepth = 0
-  private ordering: QueueOrdering = 'visible-first'
   private readonly maximumConcurrent: number
   private readonly maximumActiveCost: number
 
@@ -57,7 +52,6 @@ export class VisibleFirstQueue<T> {
     this.pending.push(item)
     this.pendingIds.add(item.id)
     this.sort()
-    this.preemptOffscreenForVisible()
     if (this.batchDepth === 0) void this.drain()
     return true
   }
@@ -96,42 +90,6 @@ export class VisibleFirstQueue<T> {
     return this.enqueue(item)
   }
 
-  /**
-   * Reserve startup capacity for the initially visible frontier.
-   *
-   * Model generations that have already started are not preemptible. Starting
-   * throughput work beside the first visible image can therefore turn a
-   * one-second interactive result into a multi-second queue wait. Startup
-   * admits one visible image at a time until the consumer reports that the
-   * first final result is installed. If the visible frontier contains no
-   * result, throughput opens automatically after that frontier is exhausted.
-   */
-  beginInteractiveStartup(): void {
-    this.interactiveStartup = true
-  }
-
-  enableThroughput(): void {
-    if (!this.interactiveStartup) return
-    this.interactiveStartup = false
-    this.drain()
-  }
-
-  /**
-   * Select the ordering policy for the current chapter run.
-   *
-   * A visible-first queue is useful for a viewport-only request.  A complete
-   * chapter must instead submit pages in document order: the daemon owns one
-   * ordered language stream and later pages must not consume context before
-   * their predecessors have been admitted.  This is a policy boundary, not a
-   * priority hint, so preemption is disabled for document-order runs.
-   */
-  setOrdering(ordering: QueueOrdering): void {
-    this.ordering = ordering
-    this.sort()
-    this.preemptOffscreenForVisible()
-    if (this.batchDepth === 0) this.drain()
-  }
-
   reprioritize(id: string, visible: boolean, order?: number): void {
     const item = this.pending.find((entry) => entry.id === id)
     if (item) {
@@ -144,7 +102,6 @@ export class VisibleFirstQueue<T> {
       if (order !== undefined) active.item.order = order
     }
     this.sort()
-    this.preemptOffscreenForVisible()
   }
 
   remove(id: string): void {
@@ -157,7 +114,6 @@ export class VisibleFirstQueue<T> {
 
   cancelAll(): void {
     this.stopped = true
-    this.interactiveStartup = false
     this.pending = []
     this.pendingIds.clear()
     this.failedIds.clear()
@@ -177,26 +133,10 @@ export class VisibleFirstQueue<T> {
   }
 
   private sort(): void {
-    this.pending.sort((left, right) =>
-      this.ordering === 'document'
-        ? left.order - right.order
-        : Number(right.visible) - Number(left.visible) || left.order - right.order,
+    this.pending.sort(
+      (left, right) =>
+        Number(right.visible) - Number(left.visible) || left.order - right.order,
     )
-  }
-
-  private preemptOffscreenForVisible(): void {
-    if (this.ordering === 'document') return
-    const visible = this.pending.find((item) => item.visible)
-    if (!visible || this.canStart(visible)) return
-    const active = this.running().find((entry) => !entry.item.visible)
-    if (!active) return
-    // Put interrupted offscreen work back in reading order. Bounded capacity
-    // admits newly visible work immediately when resources allow it.
-    this.callbacks.onPreempt?.(active.item)
-    this.pending.push(active.item)
-    this.pendingIds.add(active.item.id)
-    this.sort()
-    active.controller.abort()
   }
 
   private running(): Array<{ item: QueueItem<T>; controller: AbortController }> {
@@ -209,7 +149,6 @@ export class VisibleFirstQueue<T> {
 
   private canStart(item: QueueItem<T>): boolean {
     const running = this.running()
-    if (this.interactiveStartup && running.length >= 1) return false
     if (running.length >= this.maximumConcurrent) return false
     if (running.length === 0) return true
     const activeCost = running.reduce(
@@ -221,16 +160,6 @@ export class VisibleFirstQueue<T> {
 
   private drain(): void {
     if (this.stopped) return
-    if (
-      this.interactiveStartup &&
-      this.running().length === 0 &&
-      !this.pending.some((item) => item.visible)
-    ) {
-      // Nothing else in the initial viewport can produce an interactive
-      // result. Restore normal chapter throughput instead of serializing
-      // unrelated offscreen work.
-      this.interactiveStartup = false
-    }
     while (this.pending[0] && this.canStart(this.pending[0])) {
       const item = this.pending.shift()
       if (!item) break

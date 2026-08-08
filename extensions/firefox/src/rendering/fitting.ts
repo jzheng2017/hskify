@@ -4,9 +4,8 @@ import { polygonBounds, type Bounds } from './geometry'
 const CLOSING_PUNCTUATION = new Set([...'，。！？；：、）》】」』”’…'])
 const OPENING_PUNCTUATION = new Set([...'（《【「『“‘'])
 const FIT_CONTENT_RATIO = 0.88
-const MINIMUM_FONT_TO_IMAGE_WIDTH = 0.006
-const ABSOLUTE_MINIMUM_FONT_PX = 8
-const SOURCE_SIZE_RETENTION = 0.72
+const MINIMUM_FONT_TO_IMAGE_WIDTH = 0.01
+const ABSOLUTE_MINIMUM_FONT_PX = 12
 const BINARY_SEARCH_STEPS = 20
 
 export type TextFit = {
@@ -250,22 +249,13 @@ export function minimumFontSizeForImage(imageWidth: number): number {
 }
 
 /**
- * A translation that only fits after shrinking below this threshold is not a
- * usable translation. Keeping the source artwork and exposing it through the
- * dictionary is safer than presenting unreadably small Chinese text.
+ * Readability is a viewport property, not a fraction of the source lettering.
+ * A compact Chinese translation may legitimately use fewer, denser glyphs than
+ * large hand-lettered English. The preferred size still follows the source;
+ * this floor is the actual CSS-pixel legibility gate.
  */
-export function minimumReadableFontSize(
-  region: BrowserRegion,
-  imageWidth: number,
-): number {
-  const sourceSize = Math.max(
-    ABSOLUTE_MINIMUM_FONT_PX,
-    region.layout.fontSizeToImageWidth * imageWidth,
-  )
-  return Math.max(
-    minimumFontSizeForImage(imageWidth),
-    sourceSize * SOURCE_SIZE_RETENTION,
-  )
+export function minimumReadableFontSize(imageWidth: number): number {
+  return minimumFontSizeForImage(imageWidth)
 }
 
 function chooseFit(
@@ -286,7 +276,7 @@ function chooseFit(
   )
   const preferredFontSize =
     sourceFontSize * sourceDensityScale(region.sourceEnglish, text)
-  const minimumFontSize = minimumReadableFontSize(region, imageWidth)
+  const minimumFontSize = minimumReadableFontSize(imageWidth)
   let best: TextFit | undefined
   for (const lines of candidates) {
     const fits = (fontSize: number): boolean =>

@@ -3,8 +3,8 @@
 use hsk_control::{
     AllowedWordTrie, DatasetCompleteness, DictionaryArtifact, DictionaryEntry,
     EMBEDDED_DICTIONARY_TEST_SEED, EMBEDDED_HSK_TEST_SEED, HSK_STANDARD, HskArtifact, HskControl,
-    HskControlError, HskEntry, HskLevel, LicenceAudit, ProperName, ProperNameReason, SourceAudit,
-    TextNormalizer, ViolationReason,
+    HskControlError, HskEntry, HskLevel, LicenceAudit, LoadPolicy, ProperName, ProperNameReason,
+    SourceAudit, TextNormalizer, ViolationReason,
 };
 
 #[test]
@@ -52,6 +52,9 @@ fn unicode_zero_width_punctuation_whitespace_and_traditional_are_normalized() {
     assert_eq!(normalizer.normalize("  學\u{200b}習！\nＡ  "), "学习！ A");
     assert_eq!(normalizer.normalize("臺灣軟體"), "台湾软件");
     assert_eq!(normalizer.normalize("三．五，１２３"), "三.五，123");
+    assert_eq!(normalizer.normalize("什么？"), "什么？");
+    assert_eq!(normalizer.normalize("嗯......"), "嗯……");
+    assert_eq!(normalizer.normalize("好。。。"), "好……");
 }
 
 #[test]
@@ -190,6 +193,53 @@ fn dictionary_lookup_uses_longest_match_pinyin_gloss_and_hsk_overlay() {
     assert_eq!(lookup.tokens[1].simplified, "离开");
     assert_eq!(lookup.tokens[1].pinyin, "lí kāi");
     assert_eq!(lookup.tokens[1].hsk_level, Some(HskLevel::TWO));
+}
+
+#[test]
+fn learner_pinyin_prefers_the_hsk_reading_over_dictionary_heteronyms() {
+    let mut hsk = entry("好", HskLevel::ONE, &["good"]);
+    hsk.pinyin = "hǎo".into();
+    let control = custom_control(
+        "learner-pinyin",
+        vec![hsk],
+        vec![
+            dictionary_entry("好", "hǎo", &["good"]),
+            dictionary_entry("好", "hào", &["to be fond of"]),
+        ],
+    );
+
+    assert_eq!(control.lookup("好", &[]).tokens[0].pinyin, "hǎo");
+}
+
+#[test]
+fn dictionary_primary_reading_rejects_surname_only_noise() {
+    let control = custom_control(
+        "primary-dictionary-pinyin",
+        vec![entry("我", HskLevel::ONE, &["I"])],
+        vec![
+            dictionary_entry("于", "Yú", &["surname Yu"]),
+            dictionary_entry("于", "yú", &["from", "at", "toward"]),
+        ],
+    );
+
+    assert_eq!(control.lookup("于", &[]).tokens[0].pinyin, "yú");
+}
+
+#[test]
+fn runtime_rejects_an_hsk_artifact_from_an_old_normalizer() {
+    let mut hsk: HskArtifact = serde_json::from_str(EMBEDDED_HSK_TEST_SEED).unwrap();
+    hsk.entries[0].simplified = "學".into();
+    let error = HskControl::from_json_with_policy(
+        &serde_json::to_string(&hsk).unwrap(),
+        EMBEDDED_DICTIONARY_TEST_SEED,
+        LoadPolicy::AllowIncompleteTestSeed,
+    )
+    .err()
+    .expect("old-normalizer data must fail closed");
+
+    assert!(
+        matches!(error, HskControlError::InvalidData(message) if message.contains("not normalized"))
+    );
 }
 
 #[test]

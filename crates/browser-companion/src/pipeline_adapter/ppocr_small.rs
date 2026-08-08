@@ -323,29 +323,7 @@ impl PpOcrSmallRecognizer {
                         bounds: *bounds,
                     })
                     .collect::<Vec<_>>();
-                // A region is only as reliable as its weakest recognized
-                // line.  Use a character-weighted geometric mean instead of
-                // an arithmetic mean so a long, low-confidence line cannot
-                // be hidden by a short high-confidence line (and retain the
-                // per-line confidence as actual evidence rather than dead
-                // metadata).
-                let confidence = if ocr_lines.is_empty() {
-                    0.0
-                } else {
-                    let (log_sum, weight_sum) =
-                        ocr_lines
-                            .iter()
-                            .fold((0.0_f32, 0_usize), |(log_sum, weight_sum), line| {
-                                let weight = line.text.chars().count().max(1);
-                                (
-                                    log_sum
-                                        + line.confidence.clamp(f32::EPSILON, 1.0).ln()
-                                            * weight as f32,
-                                    weight_sum + weight,
-                                )
-                            });
-                    (log_sum / weight_sum.max(1) as f32).exp().clamp(0.0, 1.0)
-                };
+                let confidence = aggregate_line_confidence(&ocr_lines);
                 let appearance_bands = predictions
                     .iter()
                     .map(|(_, bounds)| {
@@ -394,12 +372,9 @@ impl PpOcrSmallRecognizer {
             .collect())
     }
 
-    /// Resolve only uncertain detector regions with a genuinely different
-    /// visual view.  The primary pass remains the hot path; the alternate
-    /// contrast view is batched by the same recognizer and is admitted only
-    /// for low-confidence or non-alphabetic output.  Consensus is decided by
-    /// the shared OCR evidence gate, so a plausible single-view transcript
-    /// can never authorize cleanup on its own.
+    /// Resolve every detector line with two genuinely different visual views.
+    /// A stray background proposal must not invalidate the independent story
+    /// lines beside it, so consensus is applied before region concatenation.
     pub(super) fn recognize_regions_with_consensus(
         &mut self,
         block_crops: &[DynamicImage],
@@ -409,22 +384,7 @@ impl PpOcrSmallRecognizer {
         if primary.len() != block_crops.len() {
             bail!("PP-OCR primary pass returned an incomplete region batch");
         }
-        let uncertain = primary
-            .iter()
-            .enumerate()
-            .filter_map(|(index, prediction)| {
-                let text = prediction.text.trim();
-                (prediction.confidence < super::ocr::BROWSER_OCR_MIN_CONFIDENCE
-                    || text.is_empty()
-                    || !text
-                        .chars()
-                        .any(|character| character.is_ascii_alphabetic()))
-                .then_some(index)
-            })
-            .collect::<Vec<_>>();
-        if uncertain.is_empty() {
-            return Ok(primary);
-        }
+        let uncertain = (0..primary.len()).collect::<Vec<_>>();
 
         let alternate_crops = uncertain
             .iter()
@@ -439,40 +399,14 @@ impl PpOcrSmallRecognizer {
             bail!("PP-OCR alternate pass returned an incomplete region batch");
         }
         for (alternate_index, &region_index) in uncertain.iter().enumerate() {
-            let primary_prediction = &primary[region_index];
             let alternate_prediction = &alternate[alternate_index];
             let crop = &block_crops[region_index];
-            let bounds = CropBounds {
-                left: 0,
-                top: 0,
-                right: crop.width(),
-                bottom: crop.height(),
-            };
-            let Some((text, confidence, _)) = super::ocr::resolve_line_hypotheses(
-                (
-                    primary_prediction.text.as_str(),
-                    primary_prediction.confidence,
-                    bounds,
-                ),
-                (
-                    alternate_prediction.text.as_str(),
-                    alternate_prediction.confidence,
-                    bounds,
-                ),
+            apply_line_consensus(
+                &mut primary[region_index],
+                alternate_prediction,
                 crop.width(),
                 crop.height(),
-            ) else {
-                // Retain the source region but make the candidate ineligible
-                // for translation/cleanup publication.  No string repair or
-                // crop-specific probe is allowed to manufacture evidence.
-                primary[region_index].text.clear();
-                primary[region_index].confidence = 0.0;
-                primary[region_index].ocr_lines.clear();
-                primary[region_index].appearance_bands.clear();
-                continue;
-            };
-            primary[region_index].text = text;
-            primary[region_index].confidence = confidence;
+            )?;
         }
         Ok(primary)
     }
@@ -529,6 +463,93 @@ impl PpOcrSmallRecognizer {
         Ok(decoded)
     }
 }
+
+fn aggregate_line_confidence(lines: &[PpOcrLine]) -> f32 {
+    if lines.is_empty() {
+        return 0.0;
+    }
+    // A region is only as reliable as its weakest recognized line. Use a
+    // character-weighted geometric mean so a long, low-confidence line cannot
+    // be hidden by a short high-confidence line.
+    let (log_sum, weight_sum) =
+        lines
+            .iter()
+            .fold((0.0_f32, 0_usize), |(log_sum, weight_sum), line| {
+                let weight = line.text.chars().count().max(1);
+                (
+                    log_sum + line.confidence.clamp(f32::EPSILON, 1.0).ln() * weight as f32,
+                    weight_sum + weight,
+                )
+            });
+    (log_sum / weight_sum.max(1) as f32).exp().clamp(0.0, 1.0)
+}
+
+fn apply_line_consensus(
+    primary: &mut PpOcrPrediction,
+    alternate: &PpOcrPrediction,
+    crop_width: u32,
+    crop_height: u32,
+) -> Result<()> {
+    if primary.ocr_lines.len() != alternate.ocr_lines.len()
+        || primary.appearance_bands.len() != primary.ocr_lines.len()
+    {
+        bail!("PP-OCR views returned inconsistent detector-line evidence");
+    }
+
+    let mut lines = Vec::with_capacity(primary.ocr_lines.len());
+    let mut appearance_bands = Vec::with_capacity(primary.appearance_bands.len());
+    for (index, (primary_line, alternate_line)) in primary
+        .ocr_lines
+        .iter()
+        .zip(&alternate.ocr_lines)
+        .enumerate()
+    {
+        let Some((text, confidence, bounds)) = super::ocr::resolve_line_hypotheses(
+            (
+                primary_line.text.as_str(),
+                primary_line.confidence,
+                primary_line.bounds,
+            ),
+            (
+                alternate_line.text.as_str(),
+                alternate_line.confidence,
+                alternate_line.bounds,
+            ),
+            crop_width,
+            crop_height,
+        ) else {
+            continue;
+        };
+        lines.push(PpOcrLine {
+            text,
+            confidence,
+            bounds,
+        });
+        appearance_bands.push(primary.appearance_bands[index].clone());
+    }
+
+    primary.text = lines
+        .iter()
+        .map(|line| line.text.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    primary.confidence = aggregate_line_confidence(&lines);
+    primary.ocr_lines = lines;
+    primary.appearance_bands = appearance_bands;
+    if let Some((index, _)) = primary
+        .ocr_lines
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, line)| line.text.chars().count())
+        && let Some(appearance) = primary.appearance_bands.get(index)
+    {
+        primary.text_color = appearance.text_color;
+        primary.stroke_color = appearance.stroke_color;
+        primary.has_stroke_color = appearance.has_stroke_color;
+    }
+    Ok(())
+}
+
 fn alternate_view(image: &DynamicImage) -> DynamicImage {
     let rgb = image.to_rgb8();
     let mut grayscale = RgbImage::new(rgb.width(), rgb.height());
@@ -639,7 +660,11 @@ fn load_characters(config_path: &Path) -> Result<Vec<String>> {
 }
 
 fn parse_pinned_yaml_scalar(raw: &str) -> Result<String> {
-    let raw = raw.trim_end();
+    // YAML separation whitespace is ASCII space/tab. Unicode characters such
+    // as U+3000 IDEOGRAPHIC SPACE are real dictionary symbols in the pinned
+    // multilingual recognizer and must not be erased by Rust's Unicode-aware
+    // `trim_end`.
+    let raw = raw.trim_end_matches([' ', '\t']);
     if raw.starts_with('\'') {
         if raw.len() < 2 || !raw.ends_with('\'') {
             bail!("unterminated single-quoted PP-OCR character scalar");
@@ -915,6 +940,75 @@ mod tests {
         }
     }
 
+    fn prediction_for_test(lines: &[(&str, f32, CropBounds)]) -> PpOcrPrediction {
+        PpOcrPrediction {
+            text: lines
+                .iter()
+                .map(|(text, _, _)| *text)
+                .collect::<Vec<_>>()
+                .join(" "),
+            confidence: 0.9,
+            text_color: [0, 0, 0],
+            stroke_color: [255, 255, 255],
+            has_stroke_color: false,
+            appearance_bands: lines
+                .iter()
+                .map(|_| PpOcrAppearanceBand {
+                    top_ratio: 0.0,
+                    bottom_ratio: 1.0,
+                    text_color: [0, 0, 0],
+                    stroke_color: [255, 255, 255],
+                    has_stroke_color: false,
+                })
+                .collect(),
+            ocr_lines: lines
+                .iter()
+                .map(|(text, confidence, bounds)| PpOcrLine {
+                    text: (*text).to_owned(),
+                    confidence: *confidence,
+                    bounds: *bounds,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn line_consensus_drops_only_a_disagreeing_background_glyph() {
+        let top = CropBounds {
+            left: 0,
+            top: 0,
+            right: 300,
+            bottom: 30,
+        };
+        let middle = CropBounds {
+            top: 30,
+            bottom: 60,
+            ..top
+        };
+        let background = CropBounds {
+            top: 60,
+            bottom: 120,
+            ..top
+        };
+        let mut primary = prediction_for_test(&[
+            ("MANKIND WOULD BEGIN", 0.97, top),
+            ("TO SEE AND CREATE", 0.96, middle),
+            ("米", 0.91, background),
+        ]);
+        let alternate = prediction_for_test(&[
+            ("MANKIND WOULD BEGIN", 0.98, top),
+            ("TO SEE AND CREATE", 0.95, middle),
+            ("大", 0.90, background),
+        ]);
+
+        apply_line_consensus(&mut primary, &alternate, 300, 120).unwrap();
+
+        assert_eq!(primary.text, "MANKIND WOULD BEGIN TO SEE AND CREATE");
+        assert_eq!(primary.ocr_lines.len(), 2);
+        assert_eq!(primary.appearance_bands.len(), 2);
+        assert!(primary.confidence > 0.95);
+    }
+
     #[test]
     fn line_width_buckets_round_up_and_keep_first_seen_sample_order() {
         assert_eq!(raw_line_model_width(319, 48), 320);
@@ -1064,6 +1158,7 @@ mod tests {
         assert_eq!(parse_pinned_yaml_scalar("''''").unwrap(), "'");
         assert_eq!(parse_pinned_yaml_scalar("'#'").unwrap(), "#");
         assert_eq!(parse_pinned_yaml_scalar("\\").unwrap(), "\\");
+        assert_eq!(parse_pinned_yaml_scalar("\u{3000}").unwrap(), "\u{3000}");
     }
 
     #[test]
@@ -1076,7 +1171,7 @@ mod tests {
         for character in [
             "'!'", "'a'", "'b'", "'c'", "'d'", "'e'", "'f'", "'g'", "'h'", "'i'", "'j'", "'k'",
             "'l'", "'m'", "'n'", "'o'", "'p'", "'q'", "'r'", "'s'", "'t'", "'u'", "'v'", "'w'",
-            "'x'", "'y'", "'z'", "'你好'", "'🛁'", "' '",
+            "'x'", "'y'", "'z'", "'你好'", "'🛁'", "\u{3000}", "' '",
         ] {
             config.push_str("  - ");
             config.push_str(character);
@@ -1087,7 +1182,8 @@ mod tests {
         assert_eq!(characters.first().map(String::as_str), Some("blank"));
         assert_eq!(characters.last().map(String::as_str), Some(" "));
         assert!(characters.iter().any(|character| character == "你好"));
-        assert_eq!(characters.len(), 32);
+        assert!(characters.iter().any(|character| character == "\u{3000}"));
+        assert_eq!(characters.len(), 33);
     }
 
     #[test]

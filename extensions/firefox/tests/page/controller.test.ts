@@ -2,12 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { DiscoveredImage, DiscoveryEvent } from '../../src/discovery/images'
 import type { VisibleFirstQueue } from '../../src/discovery/queue'
+import type { JobUpdate } from '../../src/contracts/browser'
 import { RuntimeMessageError } from '../../src/messaging/messages'
-import {
-  AUTOMATIC_IMAGE_RETRY_LIMIT,
-  PageTranslationController,
-  shouldAutomaticallyRetryImage,
-} from '../../src/page/controller'
+import { PageTranslationController } from '../../src/page/controller'
 import { SelectableRenderer, type RenderedImage } from '../../src/rendering/renderer'
 import { loadedImage } from '../helpers/images'
 
@@ -215,6 +212,55 @@ function installJobLifecycle(failuresBeforeSuccess: number): {
   return { submitCount: () => submitted }
 }
 
+function installUpdateLifecycle(updates: readonly JobUpdate[]): void {
+  const sendMessage = vi.mocked(browser.runtime.sendMessage)
+  sendMessage.mockImplementation(async (raw: unknown) => {
+    const message = raw as Record<string, unknown>
+    switch (String(message.type)) {
+      case 'jobs:recover':
+        return { ok: true, value: [] }
+      case 'job:submit':
+        return {
+          ok: true,
+          value: {
+            jobId: 'job-preservation',
+            clientImageId: 'image-preservation',
+            sourceSha256: 'a'.repeat(64),
+            sourceUrl: message.imageUrl,
+            sourceWidth: message.naturalWidth,
+            sourceHeight: message.naturalHeight,
+            acknowledgedSequence: 0,
+          },
+        }
+      case 'job:updates':
+        return {
+          ok: true,
+          value: {
+            jobId: 'job-preservation',
+            nextSequence: updates.at(-1)?.sequence ?? 0,
+            updates,
+          },
+        }
+      default:
+        return { ok: true, value: undefined }
+    }
+  })
+}
+
+function renderedShadowRoot(
+  controller: PageTranslationController,
+  image: HTMLImageElement,
+): ShadowRoot {
+  const rendered = (controller as unknown as ControllerInternals).rendered.get(image)
+  const host = [...(rendered?.wrapper.children ?? [])].find(
+    (element) => element instanceof HTMLElement && element.shadowRoot,
+  )
+  if (!(host instanceof HTMLElement) || !host.shadowRoot) {
+    throw new Error('Renderer shadow root was not created.')
+  }
+  return host.shadowRoot
+}
+
 beforeEach(() => {
   document.body.replaceChildren()
   sessionStorage.clear()
@@ -234,47 +280,13 @@ afterEach(() => {
 })
 
 describe('page controller terminal restoration', () => {
-  it('automatically retries only retryable image failures within the limit', () => {
-    const retryable = new RuntimeMessageError('PIPELINE_FAILED', 'Temporary local failure', true)
-    const permanent = new RuntimeMessageError('UNSUPPORTED_IMAGE', 'Unsupported image', false)
-
-    expect(shouldAutomaticallyRetryImage(retryable, 0)).toBe(true)
-    expect(shouldAutomaticallyRetryImage(retryable, AUTOMATIC_IMAGE_RETRY_LIMIT - 1)).toBe(true)
-    expect(shouldAutomaticallyRetryImage(retryable, AUTOMATIC_IMAGE_RETRY_LIMIT)).toBe(false)
-    expect(shouldAutomaticallyRetryImage(permanent, 0)).toBe(false)
-    expect(shouldAutomaticallyRetryImage(new Error('unknown'), 0)).toBe(false)
-  })
-
-  it('retries a transient image twice and publishes one stable chapter completion', async () => {
-    const image = loadedImage('https://reader.test/retry-page.webp')
-    document.body.append(image)
-    const lifecycle = installJobLifecycle(2)
-    const controller = new PageTranslationController()
-
-    await controller.start('all', 3, 'natural', 'keep-original')
-    await vi.waitFor(
-      () =>
-        expect(controller.snapshot()).toMatchObject({
-          state: 'complete',
-          current: 1,
-          total: 1,
-        }),
-      { timeout: 3_000 },
-    )
-    expect(lifecycle.submitCount()).toBe(3)
-    await new Promise((resolve) => setTimeout(resolve, AUTOMATIC_IMAGE_RETRY_LIMIT * 25))
-    expect(controller.snapshot().state).toBe('complete')
-    expect(lifecycle.submitCount()).toBe(3)
-    controller.destroy()
-  })
-
-  it('exhausts the automatic retry budget before publishing attention state', async () => {
+  it('fails a retryable image once without creating hidden duplicate work', async () => {
     const image = loadedImage('https://reader.test/retry-page.webp')
     document.body.append(image)
     const lifecycle = installJobLifecycle(Number.POSITIVE_INFINITY)
     const controller = new PageTranslationController()
 
-    await controller.start('all', 3, 'natural', 'keep-original')
+    await controller.start('all', 3, 'natural', 'ltr')
     await vi.waitFor(
       () =>
         expect(controller.snapshot()).toMatchObject({
@@ -284,7 +296,71 @@ describe('page controller terminal restoration', () => {
         }),
       { timeout: 3_000 },
     )
-    expect(lifecycle.submitCount()).toBe(1 + AUTOMATIC_IMAGE_RETRY_LIMIT)
+    expect(lifecycle.submitCount()).toBe(1)
+    controller.destroy()
+  })
+
+  it('preserves known artwork without adding a visible or interactive overlay', async () => {
+    const image = loadedImage('https://reader.test/credits.webp')
+    document.body.append(image)
+    installUpdateLifecycle([
+      {
+        sequence: 1,
+        type: 'artworkPreserved',
+        region: {
+          id: 'credits',
+          textPolygon: [
+            { x: 0.1, y: 0.1 },
+            { x: 0.4, y: 0.1 },
+            { x: 0.4, y: 0.2 },
+            { x: 0.1, y: 0.2 },
+          ],
+          sourceEnglish: 'Thanks for reading',
+          ocrConfidence: 0.99,
+          readingOrder: 0,
+        },
+      },
+      { sequence: 2, type: 'complete', message: 'Complete' },
+    ])
+    const controller = new PageTranslationController()
+
+    await controller.start('all', 3, 'natural', 'ltr')
+    await vi.waitFor(() => expect(controller.snapshot().state).toBe('complete'))
+
+    expect(renderedShadowRoot(controller, image).querySelector('.hmt-region')).toBeNull()
+    controller.destroy()
+  })
+
+  it('keeps an explicit source notice for genuinely unreadable story text', async () => {
+    const image = loadedImage('https://reader.test/unreadable.webp')
+    document.body.append(image)
+    installUpdateLifecycle([
+      {
+        sequence: 1,
+        type: 'unreadable',
+        region: {
+          id: 'uncertain-dialogue',
+          textPolygon: [
+            { x: 0.1, y: 0.1 },
+            { x: 0.4, y: 0.1 },
+            { x: 0.4, y: 0.2 },
+            { x: 0.1, y: 0.2 },
+          ],
+          sourceEnglish: 'What did she say?',
+          ocrConfidence: 0.31,
+          readingOrder: 0,
+          reason: 'OCR views disagreed',
+        },
+      },
+      { sequence: 2, type: 'complete', message: 'Complete' },
+    ])
+    const controller = new PageTranslationController()
+
+    await controller.start('all', 3, 'natural', 'ltr')
+    await vi.waitFor(() => expect(controller.snapshot().state).toBe('complete'))
+
+    const notice = renderedShadowRoot(controller, image).querySelector('.hmt-source-notice')
+    expect(notice?.getAttribute('data-source-english')).toBe('What did she say?')
     controller.destroy()
   })
 
@@ -303,7 +379,7 @@ describe('page controller terminal restoration', () => {
     const controller = new PageTranslationController()
     const internals = controller as unknown as ControllerInternals
 
-    await controller.start('all', 3, 'natural', 'keep-original')
+    await controller.start('all', 3, 'natural', 'ltr')
     await vi.waitFor(
       () =>
         expect(controller.snapshot()).toMatchObject({
@@ -351,7 +427,9 @@ describe('page controller terminal restoration', () => {
     const controller = new PageTranslationController()
     const internals = controller as unknown as ControllerInternals
 
-    await expect(controller.start('all', 3, 'natural', 'keep-original')).resolves.toMatchObject({
+    await expect(
+      controller.start('all', 3, 'natural', 'ltr'),
+    ).resolves.toMatchObject({
       state: 'running',
       current: 0,
       total: 1,

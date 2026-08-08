@@ -45,7 +45,7 @@ pub const SEGMENTATION_REVISION: &str = "jieba-hsk-headword-guard-level-surface-
 
 /// Dictionary lookup policy revision included in cache identities.
 pub const LOOKUP_REVISION: &str =
-    "longest-match-simplified-optional-region-context-composed-name-pinyin-v3";
+    "longest-match-simplified-learner-reading-region-context-composed-name-pinyin-v4";
 
 /// Exact `jieba-rs` release whose segmentation behavior is cache-relevant.
 pub const JIEBA_CRATE_VERSION: &str = "0.10.1";

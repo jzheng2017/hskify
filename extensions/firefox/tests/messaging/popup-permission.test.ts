@@ -20,7 +20,7 @@ describe('popup permission gesture', () => {
     document.body.innerHTML = `
       <select id="hsk-level"><option value="5" selected>5</option></select>
       <select id="learning-mode"><option value="natural" selected>Natural</option></select>
-      <select id="name-translation"><option value="keep-original" selected>Keep</option></select>
+      <select id="reading-direction"><option value="ltr" selected>LTR</option></select>
       <button id="translate-all">All</button>
       <button id="cancel">Cancel</button>
       <span id="status-title"></span>
@@ -37,7 +37,7 @@ describe('popup permission gesture', () => {
         message: string
         hskLevel: 5
         learningMode: 'natural'
-        nameTranslation: 'keep-original'
+        readingDirection: 'ltr'
       }
     }>()
     let stateCalls = 0
@@ -63,7 +63,7 @@ describe('popup permission gesture', () => {
             message: 'Done',
             hskLevel: 5,
             learningMode: 'natural',
-            nameTranslation: 'keep-original',
+            readingDirection: 'ltr',
           },
         }
       }
@@ -102,7 +102,7 @@ describe('popup permission gesture', () => {
         message: 'Done',
         hskLevel: 5,
         learningMode: 'natural',
-        nameTranslation: 'keep-original',
+        readingDirection: 'ltr',
       },
     })
   })
@@ -111,7 +111,7 @@ describe('popup permission gesture', () => {
     document.body.innerHTML = `
       <select id="hsk-level"><option value="5" selected>5</option></select>
       <select id="learning-mode"><option value="natural" selected>Natural</option></select>
-      <select id="name-translation"><option value="keep-original" selected>Keep</option></select>
+      <select id="reading-direction"><option value="ltr" selected>LTR</option></select>
       <button id="translate-all">All</button>
       <button id="cancel">Cancel</button>
       <span id="status-title"></span>
@@ -144,7 +144,7 @@ describe('popup permission gesture', () => {
             message: 'Ready',
             hskLevel: 5,
             learningMode: 'natural',
-            nameTranslation: 'keep-original',
+            readingDirection: 'ltr',
           },
         }
       }
@@ -189,7 +189,7 @@ describe('popup permission gesture', () => {
         type: 'popup:start',
         scope: 'all',
         learningMode: 'natural',
-        nameTranslation: 'keep-original',
+        readingDirection: 'ltr',
       }),
     )
   })
@@ -198,7 +198,7 @@ describe('popup permission gesture', () => {
     document.body.innerHTML = `
       <select id="hsk-level"><option value="5" selected>5</option></select>
       <select id="learning-mode"><option value="natural" selected>Natural</option></select>
-      <select id="name-translation"><option value="keep-original" selected>Keep</option></select>
+      <select id="reading-direction"><option value="ltr" selected>LTR</option></select>
       <button id="translate-all">All</button>
       <button id="cancel">Cancel</button>
       <span id="status-title"></span>
@@ -248,7 +248,7 @@ describe('popup permission gesture', () => {
     document.body.innerHTML = `
       <select id="hsk-level"><option value="5" selected>5</option></select>
       <select id="learning-mode"><option value="natural" selected>Natural</option></select>
-      <select id="name-translation"><option value="keep-original" selected>Keep</option></select>
+      <select id="reading-direction"><option value="ltr" selected>LTR</option></select>
       <button id="translate-all">All</button>
       <button id="cancel">Cancel</button>
       <span id="status-title"></span>

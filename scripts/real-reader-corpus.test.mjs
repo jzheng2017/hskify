@@ -10,6 +10,7 @@ import {
   DEFAULT_MANIFEST_PATH,
   REQUIRED_READER_KINDS,
   STRESS_CHAPTER_IDS,
+  auditCapture,
   auditCorpus,
   validateManifest,
 } from './real-reader-corpus.mjs'
@@ -57,7 +58,10 @@ function completeManifest() {
         chapterUrl: `https://reader.test/${id}`,
         capturedAtUtc: '2026-08-02T00:00:00Z',
       },
-      reader: { kind: REQUIRED_READER_KINDS[index % REQUIRED_READER_KINDS.length] },
+      reader: {
+        kind: REQUIRED_READER_KINDS[index % REQUIRED_READER_KINDS.length],
+        direction: id.startsWith('manga-plus-') ? 'rtl' : 'ltr',
+      },
       pageCount: 1,
       pages: [
         {
@@ -131,7 +135,6 @@ function writeCompleteCorpus(manifestRoot, corpusRoot) {
         ],
         readingOrder: 0,
         continuationGroup: null,
-        entities: [],
         styleRuns: [{ start: 0, end: 5, fontCategory: 'dialogue' }],
         protectedArtwork: false,
         cleanupAllowance: null,
@@ -184,6 +187,70 @@ test('the tracked v2 manifest is capture-required and cannot be green', () => {
   assert.equal(result.status, 'failed')
   assert.equal(result.captureRequired, true)
   assert.match(result.remediation.message, /real-reader-v2 corpus is not complete/u)
+})
+
+test('captured images are independently verified without pretending annotations exist', () => {
+  const corpusRoot = mkdtempSync(join(tmpdir(), 'hskify-capture-corpus-'))
+  const captureRoot = mkdtempSync(join(tmpdir(), 'hskify-capture-result-'))
+  try {
+    const png = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+      'base64',
+    )
+    const sha256 = createHash('sha256').update(png).digest('hex')
+    const objectPath = `objects/${sha256}.png`
+    mkdirSync(join(corpusRoot, 'objects'), { recursive: true })
+    writeFileSync(join(corpusRoot, objectPath), png)
+    const capturePath = join(captureRoot, 'capture.json')
+    const capture = {
+      schemaVersion: 1,
+      status: 'complete-images',
+      failures: [],
+      chapters: [
+        {
+          id: 'webtoon-unseen-holdout',
+          actualUrl: 'https://reader.test/chapter',
+          title: 'Unseen holdout',
+          readerKind: 'continuous-image',
+          readingDirection: 'ltr',
+          capturedAtUtc: '2026-08-08T00:00:00Z',
+          pageCount: 1,
+          pages: [
+            {
+              order: 0,
+              sourceUrl: 'https://reader.test/page.png',
+              object: {
+                path: objectPath,
+                sha256,
+                bytes: png.length,
+                mimeType: 'image/png',
+                width: 1,
+                height: 1,
+              },
+            },
+          ],
+        },
+      ],
+    }
+    writeFileSync(capturePath, `${JSON.stringify(capture, null, 2)}\n`)
+    const verified = auditCapture({ capturePath, corpusRoot })
+    assert.equal(verified.status, 'passed')
+    assert.equal(verified.verifiedCount, 1)
+    assert.equal(verified.releaseReady, false)
+    assert.equal(verified.annotationsRequired, true)
+    assert.match(verified.remediation.message, /Human annotations are still required/u)
+
+    writeFileSync(join(corpusRoot, objectPath), Buffer.from('corrupt'))
+    const corrupted = auditCapture({ capturePath, corpusRoot })
+    assert.equal(corrupted.status, 'failed')
+    assert.equal(
+      corrupted.failures.some((item) => item.id.endsWith('.sha256')),
+      true,
+    )
+  } finally {
+    rmSync(corpusRoot, { recursive: true, force: true })
+    rmSync(captureRoot, { recursive: true, force: true })
+  }
 })
 
 test('v2 requires all core/stress chapters, ordered pages, and coverage metadata', () => {
@@ -325,16 +392,17 @@ test('v2 corpus validation fails closed for malformed region records', () => {
   }
 })
 
-test('semantic expectations catch missed names and forbidden SFX regions', () => {
+test('semantic expectations require both dialogue and SFX source targets', () => {
   const item = {
     id: 'dense-page',
     expectations: {
-      requiredSourceFragments: ['Seongeun'],
-      preserveNamesWhenDetected: ['Seongeun'],
-      excludedSourceTexts: ['DING'],
+      requiredSourceFragments: ['Seongeun', 'DING'],
     },
   }
-  const passing = assertSemanticExpectations(item, [region()])
+  const passing = assertSemanticExpectations(item, [
+    region(),
+    region({ id: 'region-2', sourceEnglish: 'DING', displayedChinese: '叮' }),
+  ])
   assert.equal(
     passing.every((item) => item.passed),
     true,
@@ -346,7 +414,7 @@ test('semantic expectations catch missed names and forbidden SFX regions', () =>
   ]).filter((item) => !item.passed)
   assert.deepEqual(
     failures.map((item) => item.id),
-    ['semantic.dense-page.required-source.Seongeun', 'semantic.dense-page.excluded-source.DING'],
+    ['semantic.dense-page.required-source.Seongeun'],
   )
 })
 

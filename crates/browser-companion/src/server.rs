@@ -2376,7 +2376,7 @@ async fn cancel_job(
 
 /// Chapter state is owned by the daemon rather than by an individual image
 /// job.  The browser closes that state after the chapter reaches a terminal
-/// seal or is cancelled, so dialogue/entity memory cannot accumulate across
+/// seal or is cancelled, so dialogue context cannot accumulate across
 /// tabs or replacement runs.
 async fn close_chapter(
     State(state): State<Arc<BridgeState>>,

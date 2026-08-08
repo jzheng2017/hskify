@@ -90,6 +90,9 @@ await mkdir(objectRoot, { recursive: true })
 const failures = []
 const chapters = []
 for (const record of records) {
+  if (record.readingDirection !== 'ltr' && record.readingDirection !== 'rtl') {
+    throw new Error(`capture record ${record.id ?? '<unknown>'} requires readingDirection ltr or rtl`)
+  }
   const pages = await mapWithConcurrency(record.images ?? [], 6, async (page, order) => {
     try {
       return await capturePage(record, page, order)
@@ -103,6 +106,7 @@ for (const record of records) {
     actualUrl: record.actualUrl,
     title: record.title,
     readerKind: record.kind,
+    readingDirection: record.readingDirection,
     capturedAtUtc: new Date().toISOString(),
     pageCount: pages.filter(Boolean).length,
     pages: pages.filter(Boolean),

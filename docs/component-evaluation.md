@@ -13,7 +13,7 @@ rendering.
 | --- | --- | --- |
 | `ogkalu/comic-text-and-bubble-detector` RT-DETR-v2 R50 | Retained | CUDA-batched `text_bubble` and `text_free` proposals |
 | PaddlePaddle PP-OCRv6-small detector and recognizer | Retained | CUDA-batched independent text polygons and English recognition |
-| Qwen3.5 4B Q4_K_M | Retained | Resident direct English-to-HSK-Chinese generation |
+| Qwen3.5 4B Q4_K_M + matching projector | Retained | Visual page-role decisions plus text-only faithful/strict Chinese generation |
 
 The detector, Paddle recognizer, and translation model revisions and hashes are
 frozen in `data/model-packs/manifest.v1.json`. Hskify adds viewport scheduling,
@@ -42,7 +42,8 @@ At the production threshold, the retained RT-DETR `text_bubble` plus
 `text_free` proposals and independent PP-OCRv6-small polygons provide the
 structural evidence streams. Raw proposal precision is not a product gate:
 recognition, page understanding, and deterministic geometry checks must reject
-non-English text, SFX, credits, and branding. Authoritative quality and
+non-English text, credits, furniture, and branding while retaining visual SFX
+as translation targets. Authoritative quality and
 performance results come only from the packaged real-reader-v2 browser gate.
 
 Rejected model/runtime directories, superseded detector bundles, superseded

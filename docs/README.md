@@ -16,6 +16,8 @@ It must not be used as Hskify documentation.
   code-level daemon and pipeline behavior.
 - [Real-reader v2 corpus and evidence](real-reader-v2.md): the local,
   content-addressed chapter contract and packaged Firefox release gate.
+- [Manga pipeline audit](manga-pipeline-audit.md): correctness findings,
+  structural corrections, holdout timing, and the remaining verdict.
 - [Model benchmark](model-benchmark.md): the locked translation model and
   quality-evaluation requirements.
 - [External component evaluation](component-evaluation.md): established work

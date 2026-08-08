@@ -1,4 +1,4 @@
-//! Shared compact prompt protocol for direct English-to-HSK Chinese translation.
+//! Shared compact prompt protocol for faithful Chinese HSK realization.
 //!
 //! Product and benchmark callers deliberately use these same builders. The
 //! model sees only temporary one-based positions; application IDs remain with
@@ -6,8 +6,7 @@
 
 use std::fmt::Write as _;
 
-pub const DIRECT_HSK_PROMPT_REVISION: &str =
-    "direct-hsk-en-zh-ordered-connected-regions-v82-2026-08-02";
+pub const DIRECT_HSK_PROMPT_REVISION: &str = "faithful-hsk-realization-v85-2026-08-08";
 
 /// Canonical protocol description whose SHA-256 is
 /// [`DIRECT_HSK_PROMPT_HASH`].
@@ -15,27 +14,21 @@ pub const DIRECT_HSK_PROMPT_REVISION: &str =
 /// Keep this material synchronized with the builders below. The unit test pins
 /// the digest so a prompt-semantic change cannot silently reuse cache entries
 /// or benchmark evidence.
-pub const DIRECT_HSK_PROMPT_FINGERPRINT_MATERIAL: &str = r#"direct-hsk-en-zh-ordered-connected-regions-v82-2026-08-02
-input=ordered English story regions with measured character and line budgets; page roles, OCR transcripts, and typed entities are decided before this prompt
+pub const DIRECT_HSK_PROMPT_FINGERPRINT_MATERIAL: &str = r#"faithful-hsk-realization-v85-2026-08-08
+input=ordered admitted story regions paired with complete faithful Chinese references and measured character and line budgets; page roles and immutable OCR transcripts are decided before this prompt
 chapter-context=daemon-owned preceding Chinese and bounded following English are reference only; preserve canonical page and bubble order and never emit context-only regions
-names=only typed Person, Place, Organization, Event, or CoinedEntity spans approved by page understanding may be protected in keep-original mode; relationships, occupations, ranks, titles, and ordinary descriptive phrases remain translatable
-translation=preserve complete meaning, participant roles, agency, attachment, causality, modality, quantities, negation, tone, ambiguity, and numeric values while simplifying vocabulary and grammar for the selected HSK learning policy
+names=render every name in Chinese, using the faithful reference as authority; no source-language name preservation mode exists
+translation=realize each faithful Chinese reference at the requested HSK level; preserve its complete meaning, participant roles, agency, attachment, causality, modality, quantities, negation, tone, ambiguity, and numeric values while simplifying vocabulary and grammar
 natural-learning=target 90% coverage for levels 1-3, 93% for level 4, and 95% for levels 5-6; retain only indispensable above-level terms and expose them as teaching metadata
-strict-learning=avoid every non-name above-level term unless a required glossary form is unavoidable
+strict-learning=avoid every above-level term unless the faithful Chinese name form makes it unavoidable
 layout=honor the supplied maximum Chinese characters and line count; request concise wording before accepting an unreadable fit
 output=one terminal numbered Chinese line per input region, no labels, explanations, markup, IDs, source-language leakage, or provisional text
-repair=the same ordered context and entity evidence are supplied to one bounded terminal repair; rejected candidates stay hidden until repair or unreadable preservation"#;
+repair=the same ordered context is supplied to one bounded terminal repair; rejected candidates stay hidden until repair or unreadable preservation"#;
 
 // Filled from the exact UTF-8 bytes of
 // DIRECT_HSK_PROMPT_FINGERPRINT_MATERIAL.
 pub const DIRECT_HSK_PROMPT_HASH: &str =
-    "sha256:390586fc0d770d499732dafeec770f384d735921249fa433c003018c4709ec73";
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DirectHskNameStyle {
-    KeepOriginal,
-    Chinese,
-}
+    "sha256:5ca7df4ea4b04091ebb52d4ef92910ae116a2a5af013c46963f5520e0d2500aa";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DirectHskLearningMode {
@@ -45,10 +38,10 @@ pub enum DirectHskLearningMode {
 
 /// Shared identity of numbered-line parsing and deterministic preservation
 /// validation used by production and release evidence.
-pub const DIRECT_HSK_VALIDATOR_FINGERPRINT_MATERIAL: &str = "numbered-output-v2|ordered-region-count-and-id-coverage|source-language-and-Chinese-only-gates|typed-entity-span-boundaries|keep-original-protected-name-occurrence-count|numeric-and-critical-term-preservation|hsk-natural-coverage-and-strict-vocabulary|layout-character-and-line-budget|terminal-only-publication-v2|repair-evidence-is-item-local-and-contextual";
+pub const DIRECT_HSK_VALIDATOR_FINGERPRINT_MATERIAL: &str = "numbered-output-v3|ordered-region-count-and-id-coverage|source-language-and-Chinese-only-gates|numeric-and-critical-term-preservation|role-label-rejection|hsk-natural-teaching-metadata-and-strict-vocabulary|layout-character-and-line-budget|terminal-only-publication-v2|repair-evidence-is-item-local-and-contextual";
 
 pub const DIRECT_HSK_VALIDATOR_HASH: &str =
-    "sha256:887ad273362f1005ff495a74ffa9487a4de524e47c51bcfc210e1b9ced7ab1c9";
+    "sha256:027672d213b9587977201b2b89e5d4610e46a209111c5749d5ba242810f9a4e9";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DirectHskContext<'a> {
@@ -57,70 +50,30 @@ pub struct DirectHskContext<'a> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct DirectHskName<'a> {
+pub struct DirectHskSource<'a> {
     pub source_english: &'a str,
-    pub chinese: &'a str,
+    pub faithful_chinese: &'a str,
 }
 
 #[must_use]
 pub fn primary_system_prompt(level: u8, count: usize) -> String {
-    primary_system_prompt_with_name_style(level, count, DirectHskNameStyle::Chinese)
-}
-
-#[must_use]
-pub fn primary_system_prompt_with_name_style(
-    level: u8,
-    count: usize,
-    name_style: DirectHskNameStyle,
-) -> String {
-    primary_system_prompt_with_policy(level, count, name_style, true)
-}
-
-#[must_use]
-pub fn primary_system_prompt_with_policy(
-    level: u8,
-    count: usize,
-    name_style: DirectHskNameStyle,
-    translate_sound_effects: bool,
-) -> String {
-    primary_system_prompt_with_learning_policy(
-        level,
-        count,
-        name_style,
-        translate_sound_effects,
-        DirectHskLearningMode::Strict,
-    )
+    primary_system_prompt_with_learning_policy(level, count, DirectHskLearningMode::Strict)
 }
 
 #[must_use]
 pub fn primary_system_prompt_with_learning_policy(
     level: u8,
     count: usize,
-    name_style: DirectHskNameStyle,
-    _translate_sound_effects: bool,
     learning_mode: DirectHskLearningMode,
 ) -> String {
     let level_style = level_style_instruction(level);
     let semantic_admission_instruction = "Semantic role classification is already complete: every \
         supplied region is admitted story content that must receive a translation. Do not classify, \
         exclude, skip, merge, or reorder any region.";
-    let name_instruction = match name_style {
-        DirectHskNameStyle::KeepOriginal => {
-            "Pretranslation semantic analysis has already supplied the complete approved proper-name set. Copy \
-            every supplied opaque approved-name placeholder such as `⟦N1⟧` exactly once and unchanged \
-            in its grammatical position; the application restores its exact source spelling. Never \
-            invent another name, name marker, or unsupplied Latin span. Translate every other Latin \
-            word, including capitalized descriptions, relationships, honorifics, occupations, roles, \
-            ranks, titles, species, work or chapter titles, interface or game categories, ordinary noun \
-            phrases, and uncertain OCR tokens."
-        }
-        DirectHskNameStyle::Chinese => {
-            "Treat person, place, organization, and other proper names as names: never translate \
-            their dictionary meaning. Use an approved glossary form when supplied; otherwise use an \
-            established Chinese name only when certain, or a phonetic Chinese transliteration, and \
-            keep it consistent with preceding context."
-        }
-    };
+    let name_instruction = "Treat person, place, organization, and other proper names as names: never translate \
+        their dictionary meaning. Preserve the Chinese form in the faithful reference, or use an established \
+        Chinese name when certain and otherwise a phonetic Chinese transliteration. Keep it consistent with \
+        preceding context. Never emit Latin name spellings.";
     let learning_instruction = match learning_mode {
         DirectHskLearningMode::Natural => natural_learning_instruction(level),
         DirectHskLearningMode::Strict => {
@@ -131,11 +84,11 @@ pub fn primary_system_prompt_with_learning_policy(
         }
     };
     format!(
-        "Translate the {count} numbered OCR regions in their supplied comic reading order. \
+        "Realize the {count} numbered faithful Chinese references in their supplied comic reading order at the requested HSK level. \
 {semantic_admission_instruction} OCR can contain minor recognition errors in letters, spacing, or \
 punctuation. Silently correct an obvious OCR error when grammar, neighboring lines, and story context \
 make the intended English clear; do not carry nonsensical OCR fragments into the Chinese translation, \
-and do not invent content when the source is genuinely ambiguous. Translate each source into concise, \
+and do not invent content when the source is genuinely ambiguous. The faithful Chinese reference is the semantic authority: preserve all of its meaning, add nothing, and omit nothing; use the English only to resolve names and source structure. Rewrite each reference into concise, \
 natural Simplified Chinese for a reader targeting cumulative HSK 2.0 level {level}. \
 Use the supplied preceding translations and neighboring numbered regions to resolve pronouns, omitted \
 subjects, ellipsis, and sentences split across connected bubbles. Adjacent regions are context, not extra \
@@ -152,11 +105,9 @@ modality, certainty, and conditions; quantities and comparisons; negation; quest
 and humour; relationships and pronoun referents; ambiguity as resolved by preceding context, or \
         the ambiguity itself when unresolved; and self-corrections in their original order. Preserve \
         numeric values. Each numbered line also has a supplied layout budget; stay within its maximum \
-        Chinese-character and line counts, choosing a concise equivalent before allowing overflow. {name_instruction} If line-specific approved-glossary notes appear, follow only notes carrying that \
-line's position; never apply a note to another line or output the notes. Your response must start \
+        Chinese-character and line counts, choosing a concise equivalent before allowing overflow. {name_instruction} Your response must start \
 with `1\t` and contain exactly {count} non-empty lines numbered 1 through {count} in order. On \
-        every line, write the position, one tab, and only its Simplified Chinese translation plus \
-        the required temporary name markers when keep-original mode is active. \
+        every line, write the position, one tab, and only its Simplified Chinese translation. \
 Do not write headings, labels, explanations, Markdown, JSON, or application IDs."
     )
 }
@@ -202,18 +153,7 @@ fn natural_learning_instruction(level: u8) -> String {
 #[must_use]
 pub fn primary_user_prompt(
     context: &[DirectHskContext<'_>],
-    names: &[DirectHskName<'_>],
-    sources: &[&str],
-) -> String {
-    primary_user_prompt_with_name_style(context, names, sources, DirectHskNameStyle::Chinese)
-}
-
-#[must_use]
-pub fn primary_user_prompt_with_name_style(
-    context: &[DirectHskContext<'_>],
-    names: &[DirectHskName<'_>],
-    sources: &[&str],
-    name_style: DirectHskNameStyle,
+    sources: &[DirectHskSource<'_>],
 ) -> String {
     let mut prompt = String::new();
     if !context.is_empty() {
@@ -221,170 +161,63 @@ pub fn primary_user_prompt_with_name_style(
         prompt.push_str(&context_budget_text(context));
         prompt.push('\n');
     }
-    let notes = sources
-        .iter()
-        .enumerate()
-        .filter_map(|(index, source)| {
-            let notes = line_specific_notes(source, names);
-            (!notes.is_empty()).then(|| format!("- {}: {}", index + 1, notes.join("; ")))
-        })
-        .collect::<Vec<_>>();
-    if !notes.is_empty() {
-        prompt.push_str("Line-specific translation notes (reference only; do not output):\n");
-        for note in notes {
-            writeln!(&mut prompt, "{note}").expect("writing to String cannot fail");
-        }
-        prompt.push('\n');
-    }
-    prompt.push_str("English lines:\n");
+    prompt.push_str("Faithful Chinese references (semantic authority):\n");
     for (index, source) in sources.iter().enumerate() {
-        let source = match name_style {
-            DirectHskNameStyle::KeepOriginal => mark_approved_names(source, names),
-            DirectHskNameStyle::Chinese => compact(source),
-        };
+        writeln!(
+            &mut prompt,
+            "{}\t{}",
+            index + 1,
+            compact(source.faithful_chinese)
+        )
+        .expect("writing to String cannot fail");
+    }
+    prompt.push_str("\nEnglish source lines (name and structure reference):\n");
+    for (index, source) in sources.iter().enumerate() {
+        let source = compact(source.source_english);
         writeln!(&mut prompt, "{}\t{source}", index + 1).expect("writing to String cannot fail");
     }
     prompt
 }
 
-fn line_specific_notes(source: &str, names: &[DirectHskName<'_>]) -> Vec<String> {
-    let compact_source = compact(source);
-    line_specific_names(&compact_source, names)
-        .into_iter()
-        .map(|name| {
-            format!(
-                "approved glossary \"{}\" => \"{}\" (use this exact form)",
-                compact(name.source_english),
-                compact(name.chinese)
-            )
-        })
-        .collect()
-}
-
-fn line_specific_names<'a>(source: &str, names: &[DirectHskName<'a>]) -> Vec<DirectHskName<'a>> {
-    let lower = source.to_ascii_lowercase();
-    let mut occurrences = names
-        .iter()
-        .filter(|name| !name.source_english.is_empty() && name.source_english.is_ascii())
-        .flat_map(|name| {
-            let needle = name.source_english.to_ascii_lowercase();
-            let needle_len = needle.len();
-            lower
-                .match_indices(&needle)
-                .map(move |(start, _)| (start, start + needle_len, *name))
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>();
-    occurrences.sort_by(|left, right| {
-        (right.1 - right.0)
-            .cmp(&(left.1 - left.0))
-            .then_with(|| left.0.cmp(&right.0))
-            .then_with(|| left.2.source_english.cmp(right.2.source_english))
-    });
-
-    let mut occupied = Vec::<(usize, usize)>::new();
-    let mut selected = Vec::<(usize, DirectHskName<'a>)>::new();
-    for (start, end, name) in occurrences {
-        if occupied
-            .iter()
-            .any(|(used_start, used_end)| start < *used_end && *used_start < end)
-        {
-            continue;
-        }
-        occupied.push((start, end));
-        if !selected
-            .iter()
-            .any(|(_, existing)| existing.source_english == name.source_english)
-        {
-            selected.push((start, name));
-        }
-    }
-    selected.sort_by_key(|(start, _)| *start);
-    selected.into_iter().map(|(_, name)| name).collect()
-}
-
 #[must_use]
 pub fn repair_system_prompt(level: u8) -> String {
-    repair_system_prompt_with_name_style(level, DirectHskNameStyle::Chinese)
-}
-
-#[must_use]
-pub fn repair_system_prompt_with_name_style(level: u8, name_style: DirectHskNameStyle) -> String {
-    repair_system_prompt_with_policy(level, name_style, true)
-}
-
-#[must_use]
-pub fn repair_system_prompt_with_policy(
-    level: u8,
-    name_style: DirectHskNameStyle,
-    translate_sound_effects: bool,
-) -> String {
-    repair_system_prompt_with_learning_policy(
-        level,
-        name_style,
-        translate_sound_effects,
-        DirectHskLearningMode::Strict,
-    )
+    repair_system_prompt_with_learning_policy(level, DirectHskLearningMode::Strict)
 }
 
 #[must_use]
 pub fn repair_system_prompt_with_learning_policy(
     level: u8,
-    name_style: DirectHskNameStyle,
-    translate_sound_effects: bool,
     learning_mode: DirectHskLearningMode,
 ) -> String {
-    repair_system_prompt_for_count(level, 1, name_style, translate_sound_effects, learning_mode)
+    repair_system_prompt_for_count(level, 1, learning_mode)
 }
 
 #[must_use]
 pub fn repair_batch_system_prompt_with_learning_policy(
     level: u8,
     count: usize,
-    name_style: DirectHskNameStyle,
-    translate_sound_effects: bool,
     learning_mode: DirectHskLearningMode,
 ) -> String {
     assert!(count > 0, "repair batch must not be empty");
-    repair_system_prompt_for_count(
-        level,
-        count,
-        name_style,
-        translate_sound_effects,
-        learning_mode,
-    )
+    repair_system_prompt_for_count(level, count, learning_mode)
 }
 
 fn repair_system_prompt_for_count(
     level: u8,
     count: usize,
-    name_style: DirectHskNameStyle,
-    _translate_sound_effects: bool,
     learning_mode: DirectHskLearningMode,
 ) -> String {
     let level_style = level_style_instruction(level);
-    let name_instruction = match name_style {
-        DirectHskNameStyle::KeepOriginal => {
-            "Pretranslation semantic analysis already supplied the complete approved proper-name set. Keep every \
-            opaque approved-name placeholder such as `⟦N1⟧` exactly once and unchanged in its \
-            grammatical position; the application restores the exact source spelling. Do not invent \
-            additional names, markers, or unsupplied Latin spans. Translate every other Latin word, \
-            including descriptions, relationships, honorifics, occupations, roles, ranks, titles, \
-            species, work or chapter titles, interface or game categories, noun phrases, clauses, and \
-            uncertain OCR tokens."
-        }
-        DirectHskNameStyle::Chinese => {
-            "Never translate proper names by dictionary meaning; use approved or established forms \
-            and otherwise a phonetic Chinese transliteration."
-        }
-    };
+    let name_instruction = "Never translate proper names by dictionary meaning. Preserve their Chinese form from the \
+        faithful reference, or use an established Chinese form when certain and otherwise a phonetic Chinese \
+        transliteration. Never emit Latin name spellings.";
     let learning_instruction = match learning_mode {
         DirectHskLearningMode::Natural => natural_learning_instruction(level),
         DirectHskLearningMode::Strict => {
             "Replace every listed above-level term and grammar pattern with level-appropriate wording. \
             Treat every exact term in the Validator avoid-list as a forbidden Chinese substring: \
-            check the completed answer and emit none of them. Only protected names and required \
-            glossary forms are exceptions."
+            check the completed answer and emit none of them. A name form required to preserve the \
+            faithful reference is the only exception."
                 .to_owned()
         }
     };
@@ -407,11 +240,11 @@ fn repair_system_prompt_for_count(
         "{scope_instruction} for a reader targeting \
         cumulative HSK 2.0 level {level}. OCR can contain minor recognition errors in letters, spacing, or \
 punctuation. Silently correct an obvious OCR error when grammar and context make the intended English \
-clear; do not carry nonsensical OCR fragments into Chinese. Fix every listed problem. Actively rewrite vocabulary, grammar, \
+clear; do not carry nonsensical OCR fragments into Chinese. Fix every listed problem. The faithful Chinese reference is the semantic authority: preserve all of its meaning, add nothing, and omit nothing. Actively rewrite vocabulary, grammar, \
         clause structure, and idioms for the requested level—not vocabulary alone. {level_style} {learning_instruction} Preserve \
         every clause and detail, participant roles, \
 agency, cause and result, modality, quantities and comparisons, negation, question intent, tone \
-        and humour, ambiguity, pronoun referents, self-corrections, approved glossary forms \
+        and humour, ambiguity, pronoun referents, self-corrections, Chinese name forms \
         already present in the source, and numeric values. {output_instruction} \
 Semantic role classification is already complete; always return a translation. {name_instruction} Write no headings, labels, explanations, Markdown, \
 JSON, or application IDs."
@@ -421,33 +254,15 @@ JSON, or application IDs."
 #[must_use]
 pub fn repair_user_prompt(
     source_english: &str,
+    faithful_chinese: &str,
     rejected_chinese: Option<&str>,
     problems: &[&str],
-    names: &[DirectHskName<'_>],
-) -> String {
-    repair_user_prompt_with_name_style(
-        source_english,
-        rejected_chinese,
-        problems,
-        names,
-        DirectHskNameStyle::Chinese,
-    )
-}
-
-#[must_use]
-pub fn repair_user_prompt_with_name_style(
-    source_english: &str,
-    rejected_chinese: Option<&str>,
-    problems: &[&str],
-    names: &[DirectHskName<'_>],
-    name_style: DirectHskNameStyle,
 ) -> String {
     repair_user_prompt_with_constraints(
         source_english,
+        faithful_chinese,
         rejected_chinese,
         problems,
-        names,
-        name_style,
         &[],
     )
 }
@@ -455,20 +270,18 @@ pub fn repair_user_prompt_with_name_style(
 #[must_use]
 pub fn repair_user_prompt_with_constraints(
     source_english: &str,
+    faithful_chinese: &str,
     rejected_chinese: Option<&str>,
     problems: &[&str],
-    names: &[DirectHskName<'_>],
-    name_style: DirectHskNameStyle,
     avoid_chinese: &[String],
 ) -> String {
     format!(
         "{}\nAnswer:",
         repair_item_constraints(
             source_english,
+            faithful_chinese,
             rejected_chinese,
             problems,
-            names,
-            name_style,
             avoid_chinese,
         )
     )
@@ -477,10 +290,9 @@ pub fn repair_user_prompt_with_constraints(
 #[must_use]
 pub fn repair_item_constraints(
     source_english: &str,
+    faithful_chinese: &str,
     rejected_chinese: Option<&str>,
     problems: &[&str],
-    names: &[DirectHskName<'_>],
-    name_style: DirectHskNameStyle,
     avoid_chinese: &[String],
 ) -> String {
     let rejected = rejected_chinese
@@ -491,10 +303,7 @@ pub fn repair_item_constraints(
         .map(|problem| compact(problem))
         .collect::<Vec<_>>()
         .join(" | ");
-    let source = match name_style {
-        DirectHskNameStyle::KeepOriginal => mark_approved_names(source_english, names),
-        DirectHskNameStyle::Chinese => substitute_approved_names(source_english, names),
-    };
+    let source = compact(source_english);
     let avoid = if avoid_chinese.is_empty() {
         "<none>".to_owned()
     } else {
@@ -505,31 +314,10 @@ pub fn repair_item_constraints(
             .join(", ")
     };
     format!(
-        "Source: {}\nRejected: {rejected}\nValidator avoid-list: {avoid}\nProblems: {problems}",
+        "English source: {}\nFaithful Chinese reference: {}\nRejected: {rejected}\nValidator avoid-list: {avoid}\nProblems: {problems}",
         source,
+        compact(faithful_chinese),
     )
-}
-
-#[must_use]
-pub fn mark_approved_names(source: &str, names: &[DirectHskName<'_>]) -> String {
-    replace_approved_name_occurrences(source, names, |_, _, ordinal| {
-        format!("\u{27e6}N{ordinal}\u{27e7}")
-    })
-}
-
-#[must_use]
-pub fn restore_approved_name_placeholders(
-    source: &str,
-    translation: &str,
-    names: &[DirectHskName<'_>],
-) -> String {
-    let mut restored = translation.to_owned();
-    let _ = replace_approved_name_occurrences(source, names, |matched, _, ordinal| {
-        let placeholder = format!("\u{27e6}N{ordinal}\u{27e7}");
-        restored = restored.replace(&placeholder, &format!("\u{27e6}{matched}\u{27e7}"));
-        String::new()
-    });
-    restored
 }
 
 /// Render exactly the context records included in the primary user prompt.
@@ -552,65 +340,6 @@ pub fn context_budget_text(context: &[DirectHskContext<'_>]) -> String {
 }
 
 #[must_use]
-pub fn substitute_approved_names(source: &str, names: &[DirectHskName<'_>]) -> String {
-    replace_approved_name_occurrences(source, names, |_, name, _| name.chinese.to_owned())
-}
-
-fn replace_approved_name_occurrences(
-    source: &str,
-    names: &[DirectHskName<'_>],
-    mut render: impl FnMut(&str, DirectHskName<'_>, usize) -> String,
-) -> String {
-    let source = compact(source);
-    let source_ref = source.as_str();
-    let lower = source.to_ascii_lowercase();
-    let mut occurrences = names
-        .iter()
-        .filter(|name| !name.source_english.is_empty() && name.source_english.is_ascii())
-        .flat_map(|name| {
-            let needle = name.source_english.to_ascii_lowercase();
-            lower
-                .match_indices(&needle)
-                .filter_map(move |(start, matched)| {
-                    let end = start + matched.len();
-                    let starts_at_boundary =
-                        start == 0 || !source_ref.as_bytes()[start - 1].is_ascii_alphanumeric();
-                    let ends_at_boundary = end == source_ref.len()
-                        || !source_ref.as_bytes()[end].is_ascii_alphanumeric();
-                    (starts_at_boundary && ends_at_boundary).then_some((start, end, *name))
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>();
-    occurrences.sort_by(|left, right| {
-        (right.1 - right.0)
-            .cmp(&(left.1 - left.0))
-            .then_with(|| left.0.cmp(&right.0))
-    });
-    let mut selected = Vec::<(usize, usize, DirectHskName<'_>)>::new();
-    for occurrence in occurrences {
-        if selected
-            .iter()
-            .any(|used| occurrence.0 < used.1 && used.0 < occurrence.1)
-        {
-            continue;
-        }
-        selected.push(occurrence);
-    }
-    selected.sort_by_key(|occurrence| occurrence.0);
-
-    let mut output = String::with_capacity(source.len());
-    let mut cursor = 0;
-    for (ordinal, (start, end, name)) in selected.into_iter().enumerate() {
-        output.push_str(&source[cursor..start]);
-        output.push_str(&render(&source[start..end], name, ordinal + 1));
-        cursor = end;
-    }
-    output.push_str(&source[cursor..]);
-    output
-}
-
-#[must_use]
 pub fn compact(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -620,64 +349,45 @@ mod tests {
     use super::*;
 
     #[test]
-    fn primary_protocol_starts_at_one_and_has_exact_readable_input_lines() {
+    fn primary_protocol_has_exact_numbered_input_and_chinese_name_policy() {
         let context = [DirectHskContext {
             source_english: "Earlier English",
             chinese: "之前的中文",
         }];
-        let names = [
-            DirectHskName {
-                source_english: "Captain Rowan Finch",
-                chinese: "罗文·芬奇队长",
-            },
-            DirectHskName {
-                source_english: "Rowan Finch",
-                chinese: "罗文·芬奇",
-            },
-        ];
         let sources = [
-            "Captain Rowan Finch is here.",
-            "ROWAN FINCH has 2 questions.",
+            DirectHskSource {
+                source_english: "Captain Rowan Finch is here.",
+                faithful_chinese: "罗文·芬奇队长在这里。",
+            },
+            DirectHskSource {
+                source_english: "ROWAN FINCH has 2 questions.",
+                faithful_chinese: "罗文·芬奇有两个问题。",
+            },
         ];
 
         let system = primary_system_prompt(5, sources.len());
-        let user = primary_user_prompt(&context, &names, &sources);
+        let user = primary_user_prompt(&context, &sources);
 
         assert!(system.contains("start with `1\t`"));
         assert!(system.contains("exactly 2 non-empty lines"));
         assert!(system.contains("numbered 1 through 2 in order"));
-        assert!(system.contains("Translate the 2 numbered OCR regions"));
         assert!(system.contains("Semantic role classification is already complete"));
-        assert!(!system.contains("[NON-STORY]"));
-        assert!(!system.contains("[SFX]"));
+        assert!(system.contains("Never emit Latin name spellings"));
+        assert!(!system.contains("keep-original"));
+        assert!(!system.contains("placeholder"));
         assert_eq!(
             user,
             "Previous translations (reference only; do not output):\n\
 - Earlier English => 之前的中文\n\
 \n\
-Line-specific translation notes (reference only; do not output):\n\
-- 1: approved glossary \"Captain Rowan Finch\" => \"罗文·芬奇队长\" (use this exact form)\n\
-- 2: approved glossary \"Rowan Finch\" => \"罗文·芬奇\" (use this exact form)\n\
+Faithful Chinese references (semantic authority):\n\
+1\t罗文·芬奇队长在这里。\n\
+2\t罗文·芬奇有两个问题。\n\
 \n\
-English lines:\n\
+English source lines (name and structure reference):\n\
 1\tCaptain Rowan Finch is here.\n\
 2\tROWAN FINCH has 2 questions.\n"
         );
-        assert!(!user.contains("INPUT\t"));
-        assert!(!user.contains("\nC\t"));
-        assert!(!user.contains("\nN\t"));
-        assert!(!user.contains("Approved Chinese names"));
-        assert!(system.contains("supplied comic reading order"));
-        assert!(system.contains("sentences split across connected bubbles"));
-        assert!(system.contains("each numbered output"));
-        assert!(system.contains("genuinely standalone fragment"));
-        assert!(system.contains("simplest natural wording"));
-        assert!(system.contains("speaker, addressee, and participant roles"));
-        assert!(system.contains("agency is intentional or accidental"));
-        assert!(system.contains("quantities and comparisons"));
-        assert!(system.contains("tone and humour"));
-        assert!(system.contains("self-corrections in their original order"));
-        assert!(system.contains("never translate their dictionary meaning"));
     }
 
     #[test]
@@ -695,213 +405,44 @@ English lines:\n\
     }
 
     #[test]
-    fn arbitrary_sources_receive_no_special_phrase_notes() {
-        let sources = [
-            "The telescope is beside my neighbor's red cart.",
-            "If I might have arrived earlier, would the result differ?",
-            "No, wait—I meant the eastern entrance.",
-        ];
-        let prompt = primary_user_prompt(&[], &[], &sources);
-
-        assert!(!prompt.contains("Line-specific translation notes"));
-        assert!(!prompt.lines().any(|line| line.starts_with("- ")));
-    }
-
-    #[test]
-    fn only_matching_supplied_glossary_forms_receive_line_local_notes() {
-        let names = [
-            DirectHskName {
-                source_english: "River",
-                chinese: "河",
-            },
-            DirectHskName {
-                source_english: "River Stone",
-                chinese: "河石",
-            },
-            DirectHskName {
-                source_english: "Never Present",
-                chinese: "不会出现",
-            },
-        ];
-        let sources = [
-            "River Stone met River.",
-            "No approved glossary form occurs here.",
-        ];
-        let prompt = primary_user_prompt(&[], &names, &sources);
-
-        assert!(prompt.contains(
-            "- 1: approved glossary \"River Stone\" => \"河石\" (use this exact form); approved glossary \"River\" => \"河\" (use this exact form)"
-        ));
-        assert!(!prompt.contains("\"Never Present\""));
-        assert!(!prompt.contains("- 2:"));
-    }
-
-    #[test]
-    fn system_prompt_and_fingerprint_material_are_generic() {
-        let system = primary_system_prompt(5, 3);
-        let material = DIRECT_HSK_PROMPT_FINGERPRINT_MATERIAL;
-        assert!(system.contains("Preserve complete meaning"));
-        assert!(system.contains("ambiguity itself when unresolved"));
-        assert!(material.contains("typed Person, Place, Organization, Event, or CoinedEntity"));
-        assert!(material.contains("bounded following English"));
-        assert!(material.contains("one terminal numbered Chinese line"));
-        assert!(material.contains("unreadable preservation"));
-        assert!(!material.contains("semantic-analysis"));
-        assert!(!material.contains("wordlist"));
-        assert!(!material.contains("crop probe"));
-        assert!(!system.contains("chapter"));
-        assert!(!material.to_ascii_lowercase().contains("asura"));
-        assert!(!material.to_ascii_lowercase().contains("webtoon"));
-        assert!(!material.contains("Maysa"));
-    }
-
-    #[test]
     fn learning_modes_have_distinct_controlled_vocabulary_policies() {
-        let natural = primary_system_prompt_with_learning_policy(
-            3,
-            1,
-            DirectHskNameStyle::KeepOriginal,
-            false,
-            DirectHskLearningMode::Natural,
-        );
-        let strict = primary_system_prompt_with_learning_policy(
-            3,
-            1,
-            DirectHskNameStyle::KeepOriginal,
-            false,
-            DirectHskLearningMode::Strict,
-        );
-        let natural_repair = repair_system_prompt_with_learning_policy(
-            3,
-            DirectHskNameStyle::KeepOriginal,
-            false,
-            DirectHskLearningMode::Natural,
-        );
+        let natural =
+            primary_system_prompt_with_learning_policy(3, 1, DirectHskLearningMode::Natural);
+        let strict =
+            primary_system_prompt_with_learning_policy(3, 1, DirectHskLearningMode::Strict);
+        let natural_repair =
+            repair_system_prompt_with_learning_policy(3, DirectHskLearningMode::Natural);
 
         assert!(natural.contains("simplify-preserve-teach"));
         assert!(natural.contains("90% level-appropriate lexical occurrences"));
         assert!(natural.contains("no more than 1 above-level occurrence"));
-        assert!(natural.contains("application will identify and teach"));
         assert!(strict.contains("strict HSK policy"));
         assert!(strict.contains("Rewrite every avoidable above-level word"));
         assert!(natural_repair.contains("90% level-appropriate lexical occurrences"));
-        assert!(natural_repair.contains("no more than 1 above-level occurrence"));
         assert_ne!(natural, strict);
     }
 
     #[test]
-    fn name_style_explicitly_switches_between_original_and_chinese_forms() {
-        let original =
-            primary_system_prompt_with_name_style(3, 1, DirectHskNameStyle::KeepOriginal);
-        let chinese = primary_system_prompt_with_name_style(3, 1, DirectHskNameStyle::Chinese);
-        let original_repair =
-            repair_system_prompt_with_name_style(3, DirectHskNameStyle::KeepOriginal);
-
-        assert!(original.contains("complete approved proper-name set"));
-        assert!(original.contains("Never invent another name"));
-        assert!(original.contains("Translate every other Latin word"));
-        assert!(original.contains("⟦N1⟧"));
-        assert!(original.contains("Translate every other Latin word"));
-        assert!(original_repair.contains("complete approved proper-name set"));
-        assert!(original_repair.contains("opaque approved-name placeholder"));
-        assert!(original_repair.contains("complete approved proper-name set"));
-        assert!(chinese.contains("phonetic Chinese transliteration"));
-        assert!(!chinese.contains("including its original Latin spelling"));
-    }
-
-    #[test]
-    fn keep_original_marks_only_model_approved_boundary_aligned_source_spans() {
-        let names = [
-            DirectHskName {
-                source_english: "Maysa",
-                chinese: "Maysa",
-            },
-            DirectHskName {
-                source_english: "Ann",
-                chinese: "Ann",
-            },
-        ];
-        let sources = ["Ann met MAYSA near Annette."];
-        let primary = primary_user_prompt_with_name_style(
-            &[],
-            &names,
-            &sources,
-            DirectHskNameStyle::KeepOriginal,
-        );
-        let repair = repair_user_prompt_with_name_style(
-            sources[0],
-            Some("玛莎来了。"),
-            &["preserve approved names"],
-            &names,
-            DirectHskNameStyle::KeepOriginal,
-        );
-
-        assert!(primary.contains("1\t⟦N1⟧ met ⟦N2⟧ near Annette."));
-        assert!(repair.contains("Source: ⟦N1⟧ met ⟦N2⟧ near Annette."));
-        assert!(!primary.contains("⟦N1⟧ette"));
-        assert_eq!(
-            restore_approved_name_placeholders(sources[0], "⟦N2⟧见到了⟦N1⟧。", &names),
-            "⟦MAYSA⟧见到了⟦Ann⟧。"
-        );
-    }
-
-    #[test]
-    fn longer_overlapping_names_are_substituted_first_without_application_ids() {
-        let names = [
-            DirectHskName {
-                source_english: "Mira",
-                chinese: "米拉",
-            },
-            DirectHskName {
-                source_english: "Professor Mira",
-                chinese: "米拉教授",
-            },
-        ];
-
-        assert_eq!(
-            substitute_approved_names("Professor Mira met Mira.", &names),
-            "米拉教授 met 米拉."
-        );
-    }
-
-    #[test]
-    fn repair_protocol_substitutes_names_and_omits_context_and_numbered_framing() {
-        let names = [DirectHskName {
-            source_english: "Alice",
-            chinese: "爱丽丝",
-        }];
-        let prompt = repair_user_prompt(
+    fn repair_protocol_keeps_source_and_constraints_separate() {
+        let prompt = repair_user_prompt_with_constraints(
             "Alice does not have 2 tickets.",
+            "爱丽丝没有两张票。",
             Some("她有票。"),
             &["preserve 2", "preserve negation"],
-            &names,
+            &["女神".to_owned(), "注定".to_owned()],
         );
 
         assert_eq!(
             prompt,
-            "Source: 爱丽丝 does not have 2 tickets.\n\
+            "English source: Alice does not have 2 tickets.\n\
+Faithful Chinese reference: 爱丽丝没有两张票。\n\
 Rejected: 她有票。\n\
-Validator avoid-list: <none>\n\
+Validator avoid-list: 女神, 注定\n\
 Problems: preserve 2 | preserve negation\n\
 Answer:"
         );
         assert!(!prompt.contains("Previous translations"));
         assert!(!prompt.lines().any(|line| line.starts_with("1\t")));
-    }
-
-    #[test]
-    fn repair_constraints_render_the_validator_avoid_list_as_a_separate_field() {
-        let prompt = repair_user_prompt_with_constraints(
-            "She is a goddess.",
-            Some("她是女神。"),
-            &["rewrite above-level vocabulary"],
-            &[],
-            DirectHskNameStyle::Chinese,
-            &["女神".to_owned(), "注定".to_owned()],
-        );
-
-        assert!(prompt.contains("Validator avoid-list: 女神, 注定"));
-        assert!(prompt.ends_with("\nAnswer:"));
     }
 
     #[test]

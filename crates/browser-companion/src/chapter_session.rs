@@ -1,9 +1,9 @@
 //! Chapter-owned state shared by page analyses.
 //!
 //! A browser job is an execution unit, not a document.  This module keeps
-//! the immutable page surfaces, ordered region plans, dialogue links, and
-//! entity memory in one chapter session so completion order cannot change the
-//! meaning of a later page.
+//! the immutable page surfaces, ordered region plans, and dialogue links in
+//! one chapter session so completion order cannot change the meaning of a
+//! later page.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -211,50 +211,12 @@ fn resolve_continuation_root(links: &HashMap<String, String>, id: &str) -> Strin
     current
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ChapterEntityType {
-    Person,
-    Place,
-    Organization,
-    CoinedEntity,
-    Relationship,
-    Occupation,
-    Rank,
-    Title,
-    Unknown,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ChapterEntity {
-    pub source_english: String,
-    pub entity_type: ChapterEntityType,
-    pub chinese: Option<String>,
-    pub first_page: u32,
-    pub first_reading_order: u32,
-    pub pages: BTreeSet<u32>,
-}
-
 #[derive(Debug, Default, Clone)]
 pub struct ChapterSession {
     pub id: String,
     pub surfaces: BTreeMap<u32, PageSurface>,
-    /// Canonical page indexes admitted by the browser for this chapter run.
-    /// This barrier is registered with every job request, before any model
-    /// work starts, so concurrent jobs cannot make context depend on which
-    /// upload happened to reach the daemon first.
-    pub expected_pages: BTreeSet<u32>,
-    /// Pages whose detector/OCR/page-understanding frontier is available.
-    /// This is intentionally separate from `analyses`: a page can expose a
-    /// partial analysis while its ordered language stream is still waiting on
-    /// cleanup or translation.
-    pub analysis_ready_pages: BTreeSet<u32>,
     pub analyses: BTreeMap<u32, PageAnalysis>,
-    /// A language stream is committed in document order. Future pages may
-    /// analyze ahead, but they must not translate until every earlier page has
-    /// reached a terminal language state (success or explicit failure).
-    pub language_complete_pages: BTreeSet<u32>,
     pub dialogue: DialogueGraph,
-    pub entities: HashMap<String, ChapterEntity>,
 }
 
 impl ChapterSession {
@@ -269,10 +231,6 @@ impl ChapterSession {
         self.surfaces.insert(surface.page_index, surface);
     }
 
-    pub fn register_expected_pages(&mut self, page_indexes: &[u32]) {
-        self.expected_pages.extend(page_indexes.iter().copied());
-    }
-
     pub fn record_analysis(&mut self, analysis: PageAnalysis) {
         let PageAnalysis {
             surface,
@@ -281,7 +239,6 @@ impl ChapterSession {
         } = analysis;
         let page_index = surface.page_index;
         self.register_surface(surface.clone());
-        self.analysis_ready_pages.insert(page_index);
         let entry = self
             .analyses
             .entry(page_index)
@@ -308,73 +265,15 @@ impl ChapterSession {
         entry.complete |= complete;
     }
 
-    pub fn mark_language_complete(&mut self, page_index: u32) {
-        self.language_complete_pages.insert(page_index);
-    }
-
-    pub fn analysis_ready(&self, page_index: u32) -> bool {
-        self.analysis_ready_pages.contains(&page_index)
-    }
-
-    /// A partial detector/OCR frontier is useful for the page that is
-    /// currently visible, but it is not a safe context boundary for a later
-    /// page.  Ordered translation waits for the immutable page analysis to
-    /// be complete so no continuation/entity decision can be omitted merely
-    /// because one concurrent job finished its first viewport batch.
-    pub fn analysis_complete(&self, page_index: u32) -> bool {
-        self.analyses
-            .get(&page_index)
-            .is_some_and(|analysis| analysis.complete)
-    }
-
-    pub fn language_complete(&self, page_index: u32) -> bool {
-        self.language_complete_pages.contains(&page_index)
-    }
-
     pub fn record_dialogue(&mut self, page_index: u32, nodes: Vec<DialogueNode>) {
         self.dialogue.record_page(page_index, nodes);
-    }
-
-    pub fn remember_entity(&mut self, mut entity: ChapterEntity) {
-        let key = entity.source_english.to_ascii_lowercase();
-        if let Some(existing) = self.entities.get_mut(&key) {
-            existing.pages.extend(entity.pages);
-            let incoming_position = (entity.first_page, entity.first_reading_order);
-            let existing_position = (existing.first_page, existing.first_reading_order);
-            let incoming_is_earlier = incoming_position < existing_position;
-            if incoming_is_earlier {
-                existing.first_page = entity.first_page;
-                existing.first_reading_order = entity.first_reading_order;
-            }
-            if existing.chinese.is_none() || incoming_is_earlier {
-                existing.chinese = entity.chinese.take();
-            }
-            if existing.entity_type == ChapterEntityType::Unknown {
-                existing.entity_type = entity.entity_type;
-            }
-        } else {
-            self.entities.insert(key, entity);
-        }
-    }
-
-    /// Return only entity decisions that are earlier than a translation
-    /// window. A page job may finish ahead of an earlier page, so exposing the
-    /// whole hash map would leak future names into the current prompt.
-    pub fn entities_before_position(
-        &self,
-        page_index: u32,
-        reading_order: u32,
-    ) -> impl Iterator<Item = &ChapterEntity> {
-        self.entities.values().filter(move |entity| {
-            (entity.first_page, entity.first_reading_order) < (page_index, reading_order)
-        })
     }
 
     /// Return source-language regions that follow a translation window in the
     /// immutable chapter analysis. These are intentionally untranslated source
     /// lines: they give the language model a bounded look-ahead for pronouns,
     /// sentence continuations, and connected bubbles without exposing future
-    /// Chinese/entity decisions.
+    /// Chinese decisions.
     pub fn following_source(
         &self,
         page_index: u32,
@@ -478,65 +377,8 @@ mod tests {
     }
 
     #[test]
-    fn entity_memory_merges_occurrences_without_changing_type() {
+    fn page_analysis_merges_incremental_regions_without_a_chapter_barrier() {
         let mut session = ChapterSession::new("chapter");
-        session.remember_entity(ChapterEntity {
-            source_english: "Wife".to_owned(),
-            entity_type: ChapterEntityType::Relationship,
-            chinese: Some("妻子".to_owned()),
-            first_page: 4,
-            first_reading_order: 0,
-            pages: [4].into_iter().collect(),
-        });
-        session.remember_entity(ChapterEntity {
-            source_english: "Wife".to_owned(),
-            entity_type: ChapterEntityType::Unknown,
-            chinese: None,
-            first_page: 2,
-            first_reading_order: 0,
-            pages: [2].into_iter().collect(),
-        });
-        let entity = session.entities.get("wife").unwrap();
-        assert_eq!(entity.first_page, 2);
-        assert_eq!(entity.pages, [2, 4].into_iter().collect());
-        assert_eq!(entity.entity_type, ChapterEntityType::Relationship);
-    }
-
-    #[test]
-    fn entity_context_never_exposes_a_future_document_position() {
-        let mut session = ChapterSession::new("chapter");
-        for (source, page, order) in [("Earlier", 1, 0), ("Later", 3, 0)] {
-            session.remember_entity(ChapterEntity {
-                source_english: source.to_owned(),
-                entity_type: ChapterEntityType::Person,
-                chinese: Some(source.to_owned()),
-                first_page: page,
-                first_reading_order: order,
-                pages: [page].into_iter().collect(),
-            });
-        }
-        let visible = session
-            .entities_before_position(2, 0)
-            .map(|entity| entity.source_english.as_str())
-            .collect::<Vec<_>>();
-        assert_eq!(visible, vec!["Earlier"]);
-    }
-
-    #[test]
-    fn expected_page_barrier_is_registered_before_concurrent_analysis() {
-        let mut session = ChapterSession::new("chapter");
-        session.register_expected_pages(&[0, 1, 4]);
-        session.register_expected_pages(&[2, 3]);
-        assert_eq!(
-            session.expected_pages,
-            [0, 1, 2, 3, 4].into_iter().collect()
-        );
-    }
-
-    #[test]
-    fn analysis_frontier_and_language_frontier_are_independent() {
-        let mut session = ChapterSession::new("chapter");
-        session.register_expected_pages(&[0, 1]);
         session.record_analysis(PageAnalysis {
             surface: PageSurface {
                 session_id: "chapter".to_owned(),
@@ -555,17 +397,14 @@ mod tests {
             }],
             complete: false,
         });
-        assert!(session.analysis_ready(0));
-        assert!(!session.analysis_complete(0));
-        assert!(!session.language_complete(0));
+        assert!(!session.analyses[&0].complete);
         session.record_analysis(PageAnalysis {
             surface: session.analyses.get(&0).unwrap().surface.clone(),
             regions: session.analyses.get(&0).unwrap().regions.clone(),
             complete: true,
         });
-        assert!(session.analysis_complete(0));
-        session.mark_language_complete(0);
-        assert!(session.language_complete(0));
+        assert!(session.analyses[&0].complete);
+        assert_eq!(session.analyses[&0].regions.len(), 1);
     }
 
     #[test]

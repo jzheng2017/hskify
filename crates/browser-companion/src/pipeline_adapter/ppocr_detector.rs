@@ -22,6 +22,8 @@ const INPUT_NAME: &str = "x";
 const OUTPUT_NAME: &str = "fetch_name_0";
 const BATCH_LIMIT: usize = 6;
 const MODEL_SIDE: usize = 736;
+const WINDOW_SIDE: u32 = 960;
+const WINDOW_OVERLAP: u32 = 192;
 const MAP_THRESHOLD: f32 = 0.20;
 const BOX_THRESHOLD: f32 = 0.45;
 const UNCLIP_RATIO: f32 = 1.40;
@@ -38,6 +40,21 @@ struct DetectorTransform {
     /// become text boxes.
     content_width: f32,
     content_height: f32,
+}
+
+#[derive(Debug)]
+struct DetectorWindow {
+    source_index: usize,
+    x: u32,
+    y: u32,
+    image: DynamicImage,
+    /// Non-overlapping ownership rectangle in source-image coordinates. A
+    /// detection is emitted only by the window that owns its centre, while
+    /// the surrounding overlap gives the detector enough visual context.
+    core_left: f32,
+    core_top: f32,
+    core_right: f32,
+    core_bottom: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -142,9 +159,10 @@ impl PpOcrSmallDetector {
         })
     }
 
-    /// Detect text components in one bounded tile batch.  The ONNX graph is
-    /// run once for the whole batch; DB post-processing is CPU-side and
-    /// independent per tile, so it does not serialize the CUDA language path.
+    /// Detect text components in one bounded source-tile batch. Tall source
+    /// tiles are divided into overlapping, near-square detector windows before
+    /// inference. This keeps small lettering near native resolution instead
+    /// of squeezing an entire webtoon strip into the 736px model canvas.
     pub(super) fn detect_tiles(
         &mut self,
         tiles: &[DynamicImage],
@@ -158,8 +176,44 @@ impl PpOcrSmallDetector {
                 tiles.len()
             );
         }
-        let transforms = preprocess_batch(tiles, &mut self.input_buffer);
-        let batch = tiles.len();
+        let windows = detector_windows(tiles);
+        let mut result = vec![Vec::new(); tiles.len()];
+        for window_batch in windows.chunks(BATCH_LIMIT) {
+            let detections = self.detect_window_batch(window_batch)?;
+            for (window, detections) in window_batch.iter().zip(detections) {
+                for mut detection in detections {
+                    let centre_x = window.x as f32 + (detection.left + detection.right) * 0.5;
+                    let centre_y = window.y as f32 + (detection.top + detection.bottom) * 0.5;
+                    if centre_x < window.core_left
+                        || centre_x >= window.core_right
+                        || centre_y < window.core_top
+                        || centre_y >= window.core_bottom
+                    {
+                        continue;
+                    }
+                    detection.left += window.x as f32;
+                    detection.right += window.x as f32;
+                    detection.top += window.y as f32;
+                    detection.bottom += window.y as f32;
+                    result[window.source_index].push(detection);
+                }
+            }
+        }
+        for detections in &mut result {
+            *detections = suppress_overlapping(std::mem::take(detections));
+        }
+        Ok(result)
+    }
+
+    fn detect_window_batch(
+        &mut self,
+        windows: &[DetectorWindow],
+    ) -> Result<Vec<Vec<PpOcrTextDetection>>> {
+        let transforms = preprocess_batch(
+            windows.iter().map(|window| &window.image),
+            &mut self.input_buffer,
+        );
+        let batch = windows.len();
         let input = TensorRef::from_array_view((
             [batch, 3, MODEL_SIDE, MODEL_SIDE],
             self.input_buffer.as_slice(),
@@ -178,7 +232,7 @@ impl PpOcrSmallDetector {
             .checked_mul(map_width)
             .context("PP-OCR detector probability map size overflowed")?;
         let mut result = Vec::with_capacity(batch);
-        for (sample, tile) in tiles.iter().enumerate() {
+        for (sample, window) in windows.iter().enumerate() {
             let start = sample
                 .checked_mul(per_sample)
                 .context("PP-OCR detector output offset overflowed")?;
@@ -187,12 +241,78 @@ impl PpOcrSmallDetector {
                 &values[start..end],
                 map_width,
                 map_height,
-                tile.dimensions(),
+                window.image.dimensions(),
                 transforms[sample],
             ));
         }
         Ok(result)
     }
+}
+
+fn detector_windows(tiles: &[DynamicImage]) -> Vec<DetectorWindow> {
+    let mut windows = Vec::new();
+    for (source_index, tile) in tiles.iter().enumerate() {
+        let (width, height) = tile.dimensions();
+        let x_origins = window_origins(width);
+        let y_origins = window_origins(height);
+        for (y_index, &y) in y_origins.iter().enumerate() {
+            for (x_index, &x) in x_origins.iter().enumerate() {
+                let right = (x + WINDOW_SIDE).min(width);
+                let bottom = (y + WINDOW_SIDE).min(height);
+                let (core_left, core_right) =
+                    ownership_interval(&x_origins, x_index, WINDOW_SIDE, width);
+                let (core_top, core_bottom) =
+                    ownership_interval(&y_origins, y_index, WINDOW_SIDE, height);
+                windows.push(DetectorWindow {
+                    source_index,
+                    x,
+                    y,
+                    image: tile.crop_imm(x, y, right - x, bottom - y),
+                    core_left,
+                    core_top,
+                    core_right,
+                    core_bottom,
+                });
+            }
+        }
+    }
+    windows
+}
+
+fn window_origins(extent: u32) -> Vec<u32> {
+    if extent <= WINDOW_SIDE {
+        return vec![0];
+    }
+    let step = WINDOW_SIDE - WINDOW_OVERLAP;
+    let final_origin = extent - WINDOW_SIDE;
+    let mut origins = vec![0];
+    while *origins.last().expect("window origin exists") < final_origin {
+        let next = (origins.last().copied().unwrap_or_default() + step).min(final_origin);
+        origins.push(next);
+    }
+    origins
+}
+
+fn ownership_interval(
+    origins: &[u32],
+    index: usize,
+    window_extent: u32,
+    source_extent: u32,
+) -> (f32, f32) {
+    let start = origins[index];
+    let end = (start + window_extent).min(source_extent);
+    let core_start = if index == 0 {
+        0.0
+    } else {
+        let previous_end = (origins[index - 1] + window_extent).min(source_extent);
+        (previous_end + start) as f32 * 0.5
+    };
+    let core_end = if index + 1 == origins.len() {
+        source_extent as f32
+    } else {
+        (end + origins[index + 1]) as f32 * 0.5
+    };
+    (core_start, core_end)
 }
 
 fn validate_config(path: &Path) -> Result<()> {
@@ -212,7 +332,11 @@ fn validate_config(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn preprocess_batch(tiles: &[DynamicImage], buffer: &mut Vec<f32>) -> Vec<DetectorTransform> {
+fn preprocess_batch<'a>(
+    tiles: impl IntoIterator<Item = &'a DynamicImage>,
+    buffer: &mut Vec<f32>,
+) -> Vec<DetectorTransform> {
+    let tiles = tiles.into_iter().collect::<Vec<_>>();
     let channels = 3 * MODEL_SIDE * MODEL_SIDE;
     buffer.clear();
     buffer.resize(tiles.len() * channels, 0.0);
@@ -340,6 +464,16 @@ fn db_components(
             .total_cmp(&left.confidence)
             .then_with(|| left.top.total_cmp(&right.top))
             .then_with(|| left.left.total_cmp(&right.left))
+    });
+    suppress_overlapping(detections)
+}
+
+fn suppress_overlapping(mut detections: Vec<PpOcrTextDetection>) -> Vec<PpOcrTextDetection> {
+    detections.sort_by(|left, right| {
+        right
+            .confidence
+            .total_cmp(&left.confidence)
+            .then_with(|| right.area().total_cmp(&left.area()))
     });
     let mut kept = Vec::with_capacity(detections.len());
     for detection in detections {
@@ -545,7 +679,7 @@ mod tests {
             DynamicImage::new_rgb8(736, 736),
         ];
         let mut buffer = Vec::new();
-        let transforms = preprocess_batch(&tiles, &mut buffer);
+        let transforms = preprocess_batch(tiles.iter(), &mut buffer);
         assert_eq!(transforms.len(), 2);
         assert_eq!(transforms[0].scale, 1.0);
         assert!(transforms[0].pad_x > 0.0);
@@ -582,5 +716,22 @@ mod tests {
             },
         );
         assert!(detections.is_empty());
+    }
+
+    #[test]
+    fn tall_source_tiles_are_detected_in_overlapping_near_native_windows() {
+        let tiles = vec![DynamicImage::new_rgb8(900, 2_048)];
+        let windows = detector_windows(&tiles);
+        assert_eq!(windows.len(), 3);
+        assert_eq!(windows[0].image.dimensions(), (900, 960));
+        assert_eq!(windows[1].image.dimensions(), (900, 960));
+        assert_eq!(windows[2].image.dimensions(), (900, 960));
+        assert_eq!(windows[0].y, 0);
+        assert_eq!(windows[1].y, 768);
+        assert_eq!(windows[2].y, 1_088);
+        assert_eq!(windows[0].core_top, 0.0);
+        assert_eq!(windows[2].core_bottom, 2_048.0);
+        assert_eq!(windows[0].core_bottom, windows[1].core_top);
+        assert_eq!(windows[1].core_bottom, windows[2].core_top);
     }
 }

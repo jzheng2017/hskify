@@ -14,8 +14,8 @@ flowchart LR
     Host["One-shot native host"]
     Daemon["Loopback daemon"]
     Scheduler["Viewport-first tile scheduler"]
-    Vision["Resident CUDA detector and OCR"]
-    Translator["Resident Qwen3.5 4B direct HSK translator"]
+    Vision["Resident CUDA detection, OCR, and visual role model"]
+    Translator["Resident Qwen3.5 4B faithful/strict text translator"]
     Control["HSK validation, pinyin, dictionary"]
     Patch["Region-local transparent PNG patch"]
     Overlay["Patch-first selectable overlay"]
@@ -91,40 +91,32 @@ credential, or remote translation path is mounted.
    verified semantic mask. Layout uses the measured, eroded bubble contour
    rather than a fixed detector-box inset. A proposal that fails two distinct
    OCR views becomes an `UnreadableRegion` and stays pixel-identical.
-6. Visible accepted regions jump ahead of off-screen work at every batch
-   boundary. Translation batches contain up to six regions and normally flush
-   once three are pending; an undersized visible tail waits no longer than
-   75 ms so visibility changes do not create one-item GPU calls.
-7. Before cleanup, Qwen3.5 4B makes one contextual semantic decision per
-   accepted OCR region: translate story text, preserve decorative story
-   lettering as artwork, or exclude unrelated page furniture and disabled
-   sound effects. Preserved and excluded regions retain their original pixels
-   and never enter segmentation, inpainting, translation, or repair. The
-   protocol forbids exclusion for story dialogue, narration, thoughts,
-   captions, in-story text, names, roles, fragments, and emphasis.
-   `hsk-control` validates vocabulary; the direct
-   protocol validator checks protected names, standalone numbers, question
-   intent, and output structure. Digits embedded in Latin OCR tokens such as
-   `IDENTIT4` are not treated as semantic numbers. Only rejected items may
-   enter one bounded terminal repair batch, with at most one new-evidence
-   attempt per item. Each rejected candidate supplies a typed validator
-   avoid-list that strict repair must remove. Natural repair
-   remains Natural so it cannot discard an indispensable
-   story concept merely to achieve a strict score. Natural learning accepts a bounded number
-   of indispensable advanced terms after simplification and publishes their
-   exact offsets, pinyin, definitions, and required level for hover teaching;
-   strict mode accepts only level-valid non-name vocabulary. Explicit
-   higher-HSK headwords stay atomic, while ordinary dictionary phrases made
-   entirely from selected-level HSK headwords are counted by
-   those surface words instead of being misclassified as advanced vocabulary.
-   This is not a page-wide faithful pass followed by an HSK rewrite.
-8. For each completed region, the daemon stores the patch blob first and then
+6. Qwen3.5 4B sees one bounded page/evidence viewport and immutable numbered
+   OCR polygons. It returns only `story`, `sfx`, `furniture`, or `artwork` plus
+   an optional story continuation. Furniture and artwork remain pixel-identical;
+   story and SFX continue. Malformed records fail per region instead of
+   discarding valid siblings.
+7. Only admitted story/SFX regions enter glyph segmentation. One page cleanup
+   task acquires the serialized Vision lane while a text-only faithful batch of
+   at most six regions acquires the separate Language lane. The role-position
+   index is separate from numbered source lines, and deterministic validation
+   rejects label leakage, Latin output, punctuation-only output, source echo,
+   and malformed/missing positions. Chapter context is refreshed at language
+   dispatch rather than snapshotted when the page job starts.
+8. Natural mode publishes the faithful Chinese after deterministic HSK
+   annotation. Strict mode performs a bounded HSK rewrite and allows at most
+   one terminal repair for invalid items. `hsk-control` owns vocabulary,
+   pinyin, and teaching-term ranges; names must be rendered in Chinese and
+   standalone numbers/question intent remain preservation requirements.
+   Digits embedded in Latin OCR tokens such as `IDENTIT4` are not treated as
+   semantic numbers.
+9. For each completed region, the daemon stores the patch blob first and then
    appends `regionReady`, which carries the patch descriptor, geometry, source
    text, base/direct Chinese, displayed Chinese, pinyin, style, layout, and HSK
    status. The contract rejects pending state, so this is the only visible
    version of the translation. Ordered color bands preserve real foreground/outline changes between
    source lines, and Firefox keeps that band count while fitting the translation.
-9. Firefox fetches and validates the PNG, decodes it, inserts it in the patch
+10. Firefox fetches and validates the PNG, decodes it, inserts it in the patch
    layer, and only then inserts the selectable final text.
 
 Completion is a terminal event in the same log. It does not unlock a separate
@@ -151,17 +143,26 @@ viewport, and dismissed on scroll, resize, or pointer departure.
 ## Scheduling and cache identity
 
 The daemon stays warm for a 30-minute idle window and uses four Tokio workers,
-at most eight general blocking threads, one serialized priority CUDA
-scheduler, and one dedicated six-thread Rayon pool for browser image
-preprocessing. The comic detector, OCR recognizer, local LLM
+at most eight general blocking threads, separate serialized priority CUDA
+lanes for Vision and Language, and one dedicated six-thread Rayon pool for
+browser image preprocessing. Queue membership is cancellation-safe: dropping
+an acquiring future removes its waiter, so an aborted cleanup cannot orphan a
+lane. The comic detector, OCR recognizer, local LLM
 application state, and HSK control data are lazy `OnceCell` residents, so later
 jobs reuse loaded state.
+
+Firefox immediately admits at most two page jobs subject to a two-page decoded
+pixel budget. It does not serialize startup, impose page-completion barriers,
+or cancel/restart admitted off-screen pages. Pending work is continuously
+reprioritized from the current viewport; this keeps both CUDA lanes supplied
+while allowing newly visible queued work to overtake off-screen work.
 
 The 64 MiB byte-bounded in-memory translation cache is keyed by:
 
 - normalized OCR text;
+- the complete faithful Chinese reference and utterance role;
 - the canonical chapter context preceding the region;
-- ordered typed chapter entity memory;
+- bounded following English context;
 - requested HSK level;
 - natural or strict learning mode;
 - model ID and exact model revision;

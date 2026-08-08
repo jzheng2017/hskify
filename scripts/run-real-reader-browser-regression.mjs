@@ -38,6 +38,10 @@ import {
 const REPOSITORY_ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)))
 const DEFAULT_OUTPUT = resolve(REPOSITORY_ROOT, '.cache/real-reader-browser-regression')
 const DEFAULT_TIMEOUT_MS = 5 * 60_000
+const DEFAULT_MODEL_MANIFEST_PATH = resolve(
+  REPOSITORY_ROOT,
+  'data/model-packs/manifest.v1.json',
+)
 
 function jsonError(message, extra = {}) {
   return {
@@ -214,12 +218,7 @@ export function annotationCoverage(chapter, manifestPath, route) {
   }
 }
 
-/**
- * Check semantic evidence that cannot be reduced to OCR geometry alone. The
- * page annotations provide reviewed entity spans and continuation groups;
- * the browser route must preserve those typed decisions without relying on
- * capitalization, title wordlists, or completion order.
- */
+/** Check model-provided continuation groups against reviewed page evidence. */
 export function semanticConsistency(chapter, manifestPath, route) {
   const observedByPage = new Map(
     (route?.jobs ?? []).map((job) => [
@@ -234,9 +233,6 @@ export function semanticConsistency(chapter, manifestPath, route) {
         overlap: overlapOverSmaller(polygonBounds(polygon), polygonBounds(region.textPolygon)),
       }))
       .sort((left, right) => right.overlap - left.overlap)[0]
-  const missingEntities = []
-  const nameViolations = []
-  const translatedDescriptionViolations = []
   const continuationViolations = []
   const expectedContinuationGroups = new Map()
   for (const page of chapter.pages) {
@@ -245,27 +241,6 @@ export function semanticConsistency(chapter, manifestPath, route) {
       const observed = findObserved(page.order + 1, expected.polygon)
       if (!observed || observed.overlap < 0.5) continue
       const actual = observed.region
-      const actualEntities = Array.isArray(actual.entities) ? actual.entities : []
-      for (const entity of expected.entities ?? []) {
-        const expectedSource =
-          entity.source ?? [...expected.sourceEnglish].slice(entity.start, entity.end).join('')
-        const match = actualEntities.find(
-          (candidate) =>
-            candidate.startChar === entity.start &&
-            candidate.endChar === entity.end &&
-            candidate.entityType === entity.type &&
-            String(candidate.source ?? '').toLocaleLowerCase() === expectedSource.toLocaleLowerCase(),
-        )
-        if (!match) {
-          missingEntities.push({ page: page.order + 1, id: expected.id, source: expectedSource, type: entity.type })
-          continue
-        }
-        const opaque = ['person', 'place', 'organization', 'coined'].includes(entity.type)
-        if (opaque && match.translated !== expectedSource)
-          nameViolations.push({ page: page.order + 1, id: expected.id, source: expectedSource, translated: match.translated })
-        if (!opaque && match.translated === expectedSource)
-          translatedDescriptionViolations.push({ page: page.order + 1, id: expected.id, source: expectedSource, type: entity.type })
-      }
       if (expected.continuationGroup) {
         const values = expectedContinuationGroups.get(expected.continuationGroup) ?? []
         values.push({ id: expected.id, actual: actual.contextGroup })
@@ -279,9 +254,6 @@ export function semanticConsistency(chapter, manifestPath, route) {
       continuationViolations.push({ group, members })
   }
   return {
-    missingEntities,
-    nameViolations,
-    translatedDescriptionViolations,
     continuationViolations,
   }
 }
@@ -303,6 +275,13 @@ export function publicationConsistency(dom, route) {
   for (const [id, entry] of published) {
     const region = entry.region
     const actual = rendered.get(id)
+    if (entry.type === 'artworkPreserved') {
+      // Preserved furniture/artwork is a daemon evidence event, not a DOM
+      // product. Rendering a transparent or visible node would still modify
+      // the reader's interaction surface and must fail this gate.
+      if (actual) mismatched.push(id)
+      continue
+    }
     if (!actual) {
       missing.push(id)
       continue
@@ -329,32 +308,12 @@ export function publicationConsistency(dom, route) {
     .filter((region) => {
       const displayed = String(region.displayedChinese ?? '')
       const chars = [...displayed]
-      const entitySpans = Array.isArray(region.entities) ? region.entities : []
-      const protectedSpans = entitySpans
-        .filter(
-          (entity) =>
-            ['person', 'place', 'organization', 'coined'].includes(entity.entityType) &&
-            entity.translated === entity.source,
-        )
-        .flatMap((entity) => {
-          const sourceChars = [...String(entity.source ?? '')]
-          if (sourceChars.length === 0) return []
-          const spans = []
-          for (let index = 0; index <= chars.length - sourceChars.length; index += 1) {
-            if (sourceChars.every((character, offset) => chars[index + offset] === character))
-              spans.push([index, index + sourceChars.length])
-          }
-          return spans
-        })
       let start = -1
       for (let index = 0; index <= chars.length; index += 1) {
         const alphabetic = index < chars.length && /[A-Za-z]/u.test(chars[index])
         if (alphabetic && start < 0) start = index
         if (!alphabetic && start >= 0) {
-          const end = index
-          const covered = protectedSpans.some(([spanStart, spanEnd]) => spanStart <= start && spanEnd >= end)
-          if (!covered) return true
-          start = -1
+          return true
         }
       }
       return false
@@ -374,7 +333,9 @@ export function publicationConsistency(dom, route) {
     })
     .map((region) => region.id)
   return {
-    publishedCount: published.size,
+    publishedCount: [...published.values()].filter(
+      (entry) => entry.type !== 'artworkPreserved',
+    ).length,
     renderedCount: rendered.size,
     missing,
     mismatched,
@@ -394,13 +355,15 @@ export function routeJobConsistency(records, route) {
     jobId: job.jobId,
     pageIndex: job.pageIndex,
     sourceSha256: job.sourceSha256,
+    terminalType: job.terminal?.type,
   }))
   const exact = expected.length === actual.length && expected.every((item, index) => {
     const candidate = actual[index]
     return (
       candidate?.jobId === item.jobId &&
       candidate?.pageIndex === item.pageIndex &&
-      candidate?.sourceSha256 === item.sourceSha256
+      candidate?.sourceSha256 === item.sourceSha256 &&
+      candidate?.terminalType === 'complete'
     )
   })
   return { exact, expected, actual }
@@ -543,15 +506,26 @@ export function requiredBrowserConfig(config) {
   }
   if (!existsSync(resolve(config.playwrightModule, 'package.json')))
     return `Packaged Playwright module is unavailable: ${config.playwrightModule}.`
-  if (
-    !Array.isArray(config.expectedResourceIdentities) ||
-    config.expectedResourceIdentities.length === 0
-  )
-    return 'Packaged Firefox config must pin expected resource identities.'
   return undefined
 }
 
-async function waitForPackagedSetup(extensionPage, timeoutMs) {
+export function committedResourceIdentities(
+  manifestPath = DEFAULT_MODEL_MANIFEST_PATH,
+) {
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
+  if (!Array.isArray(manifest.resourceIdentities) || manifest.resourceIdentities.length === 0)
+    throw new Error('The committed model manifest contains no resource identities.')
+  return manifest.resourceIdentities.map((identity) => ({
+    id: identity.id,
+    repository: identity.repository,
+    repositoryRevision: identity.repositoryRevision,
+    filename: identity.filename,
+    bytes: identity.bytes,
+    sha256: identity.sha256,
+  }))
+}
+
+export async function waitForPackagedSetup(extensionPage, timeoutMs) {
   let status = await extensionMessage(extensionPage, { type: 'setup:status' })
   if (status.state === 'ready') return status
   await extensionMessage(extensionPage, { type: 'setup:start' })
@@ -623,6 +597,7 @@ export async function runBrowserRegression(options) {
       captureRequired: false,
       integrity,
     })
+  const expectedResourceIdentities = committedResourceIdentities()
   const manifest = JSON.parse(readFileSync(options.manifestPath, 'utf8'))
   process.env.HSK_MANGA_STATE_DIR = resolve(config.stateDirectory)
   const allCases = selectedCases(manifest, options.selection)
@@ -676,7 +651,7 @@ export async function runBrowserRegression(options) {
             launched.extensionPage,
             hskLevel,
             pageUrl,
-            'keep-original',
+            chapter.reader.direction,
           )
           const state = await waitForPageState(
             launched.extensionPage,
@@ -691,9 +666,10 @@ export async function runBrowserRegression(options) {
           const orderedPages = records.map((record) => record.pageIndex)
           const jobsComplete =
             records.length === expectedPages &&
-            orderedPages.every((value, index) => value === index) &&
-            records.every((record) => record.terminalType === 'complete')
+            orderedPages.every((value, index) => value === index)
           const regionCount = dom.regionCount
+          const translatedRegions = dom.regions.filter((region) => !region.sourcePreserving)
+          const translatedRegionCount = translatedRegions.length
           const textCommitEvents = dom.events.filter(
             (event) => event.type === 'selectableTextDomCommitted',
           )
@@ -711,7 +687,8 @@ export async function runBrowserRegression(options) {
             return sum + annotation.regions.length
           }, 0)
           const firstTextEvent = dom.events.find(
-            (event) => event.type === 'selectableTextDomCommitted',
+            (event) =>
+              event.type === 'selectableTextDomCommitted' && event.sourcePreserving !== true,
           )
           const firstFinalVisibleTextMs = firstTextEvent
             ? firstTextEvent.epochMs - action.issuedAtEpochMs
@@ -728,6 +705,7 @@ export async function runBrowserRegression(options) {
             orderedPages,
             terminalState: state.state,
             regionCount,
+            translatedRegionCount,
             duplicateTextCommitCount,
             firstActionLatencyMs: action.responseAtEpochMs - action.issuedAtEpochMs,
             firstFinalVisibleTextMs,
@@ -744,13 +722,12 @@ export async function runBrowserRegression(options) {
                 actual: state.state,
               },
               {
-                id: `${chapter.id}.hsk-${hskLevel}.ordered-complete-pages`,
+                id: `${chapter.id}.hsk-${hskLevel}.ordered-submitted-pages`,
                 passed: jobsComplete,
-                expected: `pageIndex 0..${expectedPages - 1}, all complete`,
+                expected: `one submitted job for every pageIndex 0..${expectedPages - 1}`,
                 actual: {
                   records: records.length,
                   orderedPages,
-                  terminalTypes: records.map((record) => record.terminalType),
                 },
               },
               {
@@ -761,9 +738,9 @@ export async function runBrowserRegression(options) {
               },
               {
                 id: `${chapter.id}.hsk-${hskLevel}.story-target-coverage`,
-                passed: regionCount >= expectedTargets,
-                expected: `>= ${expectedTargets} final regions`,
-                actual: regionCount,
+                passed: translatedRegionCount >= expectedTargets,
+                expected: `>= ${expectedTargets} translated story regions`,
+                actual: translatedRegionCount,
               },
               {
                 id: `${chapter.id}.hsk-${hskLevel}.single-final-publication`,
@@ -786,12 +763,13 @@ export async function runBrowserRegression(options) {
               {
                 id: `${chapter.id}.hsk-${hskLevel}.readable-fit`,
                 passed:
-                  dom.degradedFitCount === 0 && dom.regions.every((region) => !region.overflows),
+                  dom.degradedFitCount === 0 &&
+                  translatedRegions.every((region) => !region.overflows),
                 expected: 'all final glyphs readable without degraded fit or overflow',
                 actual: {
                   degradedFitCount: dom.degradedFitCount,
                   overflowRegions: dom.regions
-                    .filter((region) => region.overflows)
+                    .filter((region) => !region.sourcePreserving && region.overflows)
                     .map((region) => region.regionId),
                 },
               },
@@ -813,12 +791,12 @@ export async function runBrowserRegression(options) {
               },
             ],
           }
-          if (config.expectedResourceIdentities) {
+          if (expectedResourceIdentities.length > 0) {
             run.route = await routeEvidence(
               launched.extensionPage,
               records,
               true,
-              config.expectedResourceIdentities,
+              expectedResourceIdentities,
             )
             run.assertions.push({
               id: `${chapter.id}.hsk-${hskLevel}.resource-identities`,
@@ -878,12 +856,8 @@ export async function runBrowserRegression(options) {
             })
             run.assertions.push({
               id: `${chapter.id}.hsk-${hskLevel}.semantic-evidence`,
-              passed:
-                run.semantic.missingEntities.length === 0 &&
-                run.semantic.nameViolations.length === 0 &&
-                run.semantic.translatedDescriptionViolations.length === 0 &&
-                run.semantic.continuationViolations.length === 0,
-              expected: 'typed entities and continuation groups match reviewed chapter evidence',
+              passed: run.semantic.continuationViolations.length === 0,
+              expected: 'continuation groups match reviewed chapter evidence',
               actual: run.semantic,
             })
           }

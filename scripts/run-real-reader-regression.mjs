@@ -113,20 +113,6 @@ export function assertSemanticExpectations(item, regions, preserved = []) {
       ),
     )
   }
-  for (const sourceText of item.expectations?.excludedSourceTexts ?? []) {
-    const matches = regions.filter(
-      (region) => region.sourceEnglish?.trim().toLocaleUpperCase() === sourceText.toUpperCase(),
-    )
-    assertions.push(
-      check(
-        `semantic.${item.id}.excluded-source.${sourceText}`,
-        matches.length === 0,
-        0,
-        matches.length,
-        'translateSoundEffects=false must keep excluded SFX out of the translation regions.',
-      ),
-    )
-  }
   const preservedTexts = preserved.map((region) => region.sourceEnglish ?? '').filter(Boolean)
   const translatedTexts = regions.map((region) => region.sourceEnglish ?? '').filter(Boolean)
   const preservedSource = preservedTexts.join('\n')
@@ -157,28 +143,6 @@ export function assertSemanticExpectations(item, regions, preserved = []) {
         'Illustrated technique lettering must remain source artwork instead of receiving a cleanup patch and standard-font overlay.',
       ),
     )
-  }
-  for (const name of item.expectations?.preserveNamesWhenDetected ?? []) {
-    const detected = regions.flatMap((region) => {
-      const source = region.sourceEnglish ?? ''
-      const start = source.toLocaleLowerCase().indexOf(name.toLocaleLowerCase())
-      return start < 0
-        ? []
-        : [{ region, exactSourceSpelling: source.slice(start, start + name.length) }]
-    })
-    const preserved = detected.filter(({ region, exactSourceSpelling }) =>
-      region.displayedChinese?.includes(exactSourceSpelling),
-    )
-    assertions.push({
-      ...check(
-        `semantic.${item.id}.preserve-name.${name}`,
-        detected.length === 0 || preserved.length === detected.length,
-        detected.length,
-        preserved.length,
-        'When OCR detects an annotated name, keep-original must preserve it in every corresponding Chinese region.',
-      ),
-      skipped: detected.length === 0,
-    })
   }
   return assertions
 }

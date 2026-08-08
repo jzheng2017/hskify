@@ -8,7 +8,7 @@ use image::{
 use imageproc::{
     contours::{BorderType, find_contours},
     distance_transform::Norm,
-    morphology::{dilate, erode},
+    morphology::erode,
 };
 use koharu_ml::{
     probability_map::ProbabilityMap, speech_bubble_segmentation::SpeechBubbleSegmentationResult,
@@ -40,14 +40,6 @@ pub(super) struct PatchPng {
 pub(super) struct CleanupMask {
     pub bounds: PixelBounds,
     pub mask: GrayImage,
-}
-
-/// Produce the bounded second-stage cleanup evidence.  It is deliberately a
-/// one-pixel dilation of the verified glyph mask, not a re-run of OCR or a
-/// rectangle fill: a failed first inpaint gets one genuinely different halo
-/// hypothesis while the protected-pixel and boundary gates remain unchanged.
-pub(super) fn broaden_cleanup_mask(mask: &GrayImage) -> GrayImage {
-    dilate(mask, Norm::LInf, 1)
 }
 
 #[cfg(test)]
@@ -777,25 +769,21 @@ pub(super) fn make_inpainted_patch(
 /// every reader and every artwork style follows the same fail-closed rule.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct CleanupQuality {
-    pub mask_ratio: f32,
     pub changed_ratio: f32,
     pub residual_edge_ratio: f32,
-    /// Remaining glyph-like edge energy inside the erase mask, normalized to
-    /// the source evidence. This is an explicit residual-text gate rather
-    /// than assuming that a model-produced patch is clean.
-    pub residual_text_ratio: f32,
+    /// Mean seam mismatch between restored pixels and adjacent protected
+    /// source pixels. This directly catches a mask that cuts through a glyph:
+    /// the erased half becomes background while the protected half remains a
+    /// high-contrast fragment.
     pub boundary_error: f32,
     pub protected_delta_ratio: f32,
 }
 
 impl CleanupQuality {
     pub(super) fn passes(self) -> bool {
-        self.mask_ratio > 0.0
-            && self.mask_ratio <= 0.65
-            && self.changed_ratio >= 0.01
+        self.changed_ratio >= 0.01
             && self.residual_edge_ratio <= 1.05
-            && self.residual_text_ratio <= 0.95
-            && self.boundary_error <= 0.45
+            && self.boundary_error <= 0.08
             && self.protected_delta_ratio <= f32::EPSILON
     }
 
@@ -806,13 +794,10 @@ impl CleanupQuality {
     /// hover diagnostics when comparing restoration candidates.
     pub(super) fn score(self) -> f32 {
         let residual_edge = (1.0 - self.residual_edge_ratio.min(1.0)).clamp(0.0, 1.0);
-        let residual_text = (1.0 - self.residual_text_ratio.min(1.0)).clamp(0.0, 1.0);
-        let boundary = (1.0 - (self.boundary_error / 0.45)).clamp(0.0, 1.0);
+        let boundary = (1.0 - (self.boundary_error / 0.08)).clamp(0.0, 1.0);
         let changed = self.changed_ratio.clamp(0.0, 1.0);
         let protected = (1.0 - self.protected_delta_ratio).clamp(0.0, 1.0);
-        (residual_edge * residual_text * boundary * changed * protected)
-            .cbrt()
-            .clamp(0.0, 1.0)
+        residual_edge.min(boundary).min(changed).min(protected)
     }
 }
 
@@ -867,12 +852,8 @@ fn score_cleanup_candidate_impl(
     let mut selected = 0_u64;
     let mut changed = 0_u64;
     let mut protected_delta = 0_u64;
-    let total = u64::from(cleanup.bounds.width) * u64::from(cleanup.bounds.height);
     let mut source_edge = 0.0_f32;
     let mut candidate_edge = 0.0_f32;
-    let mut source_boundary_text = 0.0_f32;
-    let mut candidate_boundary_text = 0.0_f32;
-    let mut text_boundary_samples = 0_u64;
     let mut boundary_error = 0.0_f32;
     let mut boundary_samples = 0_u64;
 
@@ -956,35 +937,19 @@ fn score_cleanup_candidate_impl(
                 if !neighbour_selected {
                     boundary_error += colour_distance(candidate_pixel, source_neighbour);
                     boundary_samples = boundary_samples.saturating_add(1);
-                    // A residual glyph is visible at the edge of the erase
-                    // mask even when the inpainted interior has a smooth
-                    // gradient. Compare the source and candidate contrast
-                    // against the same protected neighbour; this is a
-                    // separate text-residue signal from the interior edge
-                    // energy above.
-                    source_boundary_text += (source_luma - luminance(source_neighbour)).abs();
-                    candidate_boundary_text +=
-                        (candidate_luma - luminance(candidate_neighbour)).abs();
-                    text_boundary_samples = text_boundary_samples.saturating_add(1);
                 }
             }
         }
     }
-    if selected == 0 || total == 0 {
+    if selected == 0 {
         return None;
     }
     Some(CleanupQuality {
-        mask_ratio: selected as f32 / total as f32,
         changed_ratio: changed as f32 / selected as f32,
         residual_edge_ratio: if source_edge <= f32::EPSILON {
             0.0
         } else {
             candidate_edge / source_edge
-        },
-        residual_text_ratio: if source_boundary_text <= f32::EPSILON || text_boundary_samples == 0 {
-            0.0
-        } else {
-            (candidate_boundary_text / source_boundary_text).max(0.0)
         },
         boundary_error: if boundary_samples == 0 {
             0.0
@@ -1920,5 +1885,50 @@ mod tests {
         let quality = score_cleanup_candidate(&source, &candidate, &cleanup).unwrap();
         assert!(quality.protected_delta_ratio > 0.0);
         assert!(!quality.passes());
+    }
+
+    #[test]
+    fn cleanup_quality_rejects_a_mask_that_leaves_half_a_glyph_protected() {
+        let mut source = RgbImage::from_pixel(16, 16, image::Rgb([240, 240, 240]));
+        for y in 4..12 {
+            source.put_pixel(6, y, image::Rgb([20, 20, 20]));
+            source.put_pixel(7, y, image::Rgb([20, 20, 20]));
+        }
+
+        let mut clipped_mask = GrayImage::new(16, 16);
+        for y in 4..12 {
+            clipped_mask.put_pixel(6, y, Luma([255]));
+        }
+        let clipped =
+            compact_cleanup_mask(&clipped_mask, PixelRect::new(0.0, 0.0, 16.0, 16.0).unwrap())
+                .unwrap();
+        let mut clipped_candidate = source.clone();
+        for y in 4..12 {
+            clipped_candidate.put_pixel(6, y, image::Rgb([240, 240, 240]));
+        }
+        let clipped_quality =
+            score_cleanup_candidate(&source, &clipped_candidate, &clipped).unwrap();
+        assert!(clipped_quality.boundary_error > 0.08);
+        assert!(!clipped_quality.passes());
+
+        let mut complete_mask = clipped_mask;
+        for y in 4..12 {
+            complete_mask.put_pixel(7, y, Luma([255]));
+        }
+        let complete = compact_cleanup_mask(
+            &complete_mask,
+            PixelRect::new(0.0, 0.0, 16.0, 16.0).unwrap(),
+        )
+        .unwrap();
+        let mut complete_candidate = source.clone();
+        for y in 4..12 {
+            complete_candidate.put_pixel(6, y, image::Rgb([240, 240, 240]));
+            complete_candidate.put_pixel(7, y, image::Rgb([240, 240, 240]));
+        }
+        assert!(
+            score_cleanup_candidate(&source, &complete_candidate, &complete)
+                .unwrap()
+                .passes()
+        );
     }
 }

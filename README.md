@@ -20,8 +20,8 @@ dictionary lookup, and local Mandarin speech.
 4. Hskify cleans only the original text areas and places the Chinese text over
    the page as it becomes ready.
 
-Sound effects, credits, branding, promotion, artwork, and non-English text are
-left alone.
+Story sound effects are translated. Credits, device/interface furniture,
+branding, promotion, artwork, and non-English text are left alone.
 
 ## Supported setup
 

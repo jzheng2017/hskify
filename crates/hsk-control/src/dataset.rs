@@ -32,7 +32,7 @@ impl HskDataset {
     pub(crate) fn from_artifact(
         mut artifact: HskArtifact,
         policy: LoadPolicy,
-        _normalizer: &TextNormalizer,
+        normalizer: &TextNormalizer,
     ) -> Result<Self> {
         validate_header(
             artifact.schema_version,
@@ -69,6 +69,13 @@ impl HskDataset {
         let mut actual_level_counts = [0usize; 6];
         for (index, entry) in artifact.entries.iter().enumerate() {
             validate_entry(entry)?;
+            let normalized = normalizer.normalize(&entry.simplified);
+            if normalized != entry.simplified {
+                return Err(HskControlError::InvalidData(format!(
+                    "HSK entry {:?} is not normalized by the current runtime (expected {:?})",
+                    entry.simplified, normalized
+                )));
+            }
             if by_word.insert(entry.simplified.clone(), index).is_some() {
                 return Err(HskControlError::InvalidData(format!(
                     "duplicate HSK word {:?}",

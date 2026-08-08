@@ -19,19 +19,25 @@ are broader.
 - One append-only chapter job log; no status/result dual model.
 - Region-local PNG patches; no reconstructed cleaned page.
 - Patch installed before selectable text.
-- Confirmed English dialogue, thought, and eligible story narration only;
-  sound effects, credits, promotion, branding, non-English text, and ambiguous
-  OCR remain excluded.
+- Confirmed English dialogue, thought, eligible story narration, and visual
+  story sound effects are translated; credits, promotion, branding,
+  device/interface furniture, non-English text, and ambiguous OCR remain
+  source-preserving.
 - Color-agnostic local cleanup; no chapter, phrase, coordinate, URL, hash, hue,
   foreground-color, or background-color allowlists.
 - Proposal and OCR acceptance must work for arbitrary foreground/background
   colors; cleanup must preserve the accepted region's local color, texture,
   gradients, contours, and styling outside the erase mask.
-- Direct English-to-HSK Chinese primary generation, with one bounded invalid-
+- One text-only faithful Chinese generation follows visual role filtering.
+  Natural mode publishes that text; strict mode may use one bounded invalid-
   item repair batch whose rejected regions remain hidden until terminal.
-- Qwen page understanding owns role, transcript, continuation, entity, and
-  style decisions; deterministic code validates the typed response and HSK
-  control validates the final Chinese.
+- OCR owns the immutable transcript. Qwen page understanding owns only visual
+  role and continuation; the text translator owns Chinese meaning;
+  deterministic code validates both typed boundaries and HSK control validates
+  final vocabulary.
+- Firefox admits at most two pages immediately. Vision and language use
+  separate serialized, cancellation-safe CUDA lanes, and visible queued work
+  wins within each lane.
 - Viewport priority controls processing and publication only. Stable
   `readingOrder` remains document order followed by within-image reading order.
 - No browser projects, history, page-level pipeline markers, or level-change

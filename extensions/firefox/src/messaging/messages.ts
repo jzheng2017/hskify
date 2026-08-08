@@ -11,9 +11,9 @@ import {
   type LearningMode,
   type LookupRequest,
   type LookupResult,
-  type NameTranslation,
   type NormalizedRect,
   type PageSurfaceKind,
+  type ReadingDirection,
 } from '../contracts/browser'
 import { DEFAULT_IMAGE_LIMITS } from '../acquisition/image-format'
 
@@ -29,7 +29,7 @@ export type PopupStartMessage = {
   scope: TranslationScope
   hskLevel: HskLevel
   learningMode: LearningMode
-  nameTranslation: NameTranslation
+  readingDirection: ReadingDirection
 }
 export type PopupCancelMessage = { type: 'popup:cancel' }
 export type PopupStateMessage = { type: 'popup:state' }
@@ -44,7 +44,7 @@ export type ChapterStartMessage = {
   scope: TranslationScope
   hskLevel: HskLevel
   learningMode: LearningMode
-  nameTranslation: NameTranslation
+  readingDirection: ReadingDirection
 }
 export type ChapterPageMessage = {
   type: 'chapterPage'
@@ -68,7 +68,7 @@ export type ContentStartMessage = {
   scope: TranslationScope
   hskLevel: HskLevel
   learningMode: LearningMode
-  nameTranslation: NameTranslation
+  readingDirection: ReadingDirection
 }
 export type ContentCancelMessage = { type: 'content:cancel' }
 export type ContentStateMessage = { type: 'content:state' }
@@ -87,7 +87,7 @@ export type SubmitImageMessage = {
   sourceBytes?: ArrayBuffer
   hskLevel: HskLevel
   learningMode: LearningMode
-  nameTranslation: NameTranslation
+  readingDirection: ReadingDirection
   visibleRects: NormalizedRect[]
 }
 
@@ -241,7 +241,7 @@ export type RecoveredJob = {
 export type PopupState = PageState & {
   hskLevel: HskLevel
   learningMode: LearningMode
-  nameTranslation: NameTranslation
+  readingDirection: ReadingDirection
 }
 
 export type MessageError = {
@@ -372,18 +372,16 @@ function translationScope(value: unknown, path: string): TranslationScope {
   return value
 }
 
-function nameTranslation(value: unknown, path: string): NameTranslation {
-  if (value !== 'keep-original' && value !== 'chinese') {
-    throw new RuntimeMessageValidationError(
-      `${path} must be "keep-original" or "chinese".`,
-    )
+function learningMode(value: unknown, path: string): LearningMode {
+  if (value !== 'natural' && value !== 'strict') {
+    throw new RuntimeMessageValidationError(`${path} must be "natural" or "strict".`)
   }
   return value
 }
 
-function learningMode(value: unknown, path: string): LearningMode {
-  if (value !== 'natural' && value !== 'strict') {
-    throw new RuntimeMessageValidationError(`${path} must be "natural" or "strict".`)
+function readingDirection(value: unknown, path: string): ReadingDirection {
+  if (value !== 'ltr' && value !== 'rtl') {
+    throw new RuntimeMessageValidationError(`${path} must be "ltr" or "rtl".`)
   }
   return value
 }
@@ -491,7 +489,7 @@ function pageState(value: unknown, includeHsk = false): PopupState | PageState {
           'message',
           'hskLevel',
           'learningMode',
-          'nameTranslation',
+          'readingDirection',
         ]
       : ['state', 'current', 'total', 'stage', 'message'],
   )
@@ -516,7 +514,7 @@ function pageState(value: unknown, includeHsk = false): PopupState | PageState {
         ...parsed,
         hskLevel: hskLevel(item.hskLevel, '$.hskLevel'),
         learningMode: learningMode(item.learningMode, '$.learningMode'),
-        nameTranslation: nameTranslation(item.nameTranslation, '$.nameTranslation'),
+        readingDirection: readingDirection(item.readingDirection, '$.readingDirection'),
       }
     : parsed
 }
@@ -565,7 +563,7 @@ export function parseBackgroundRequest(value: unknown): BackgroundRequest {
         'scope',
         'hskLevel',
         'learningMode',
-        'nameTranslation',
+        'readingDirection',
       ])
       return {
         type,
@@ -574,7 +572,7 @@ export function parseBackgroundRequest(value: unknown): BackgroundRequest {
         scope: translationScope(item.scope, '$.scope'),
         hskLevel: hskLevel(item.hskLevel, '$.hskLevel'),
         learningMode: learningMode(item.learningMode, '$.learningMode'),
-        nameTranslation: nameTranslation(item.nameTranslation, '$.nameTranslation'),
+        readingDirection: readingDirection(item.readingDirection, '$.readingDirection'),
       }
     case 'chapterPage':
       exact(item, ['type', 'pageSessionId', 'pageUrl', 'pageIndex'])
@@ -610,13 +608,19 @@ export function parseBackgroundRequest(value: unknown): BackgroundRequest {
         pageUrl: string(item.pageUrl, '$.pageUrl', 8_192),
       }
     case 'popup:start':
-      exact(item, ['type', 'scope', 'hskLevel', 'learningMode', 'nameTranslation'])
+      exact(item, [
+        'type',
+        'scope',
+        'hskLevel',
+        'learningMode',
+        'readingDirection',
+      ])
       return {
         type,
         scope: translationScope(item.scope, '$.scope'),
         hskLevel: hskLevel(item.hskLevel, '$.hskLevel'),
         learningMode: learningMode(item.learningMode, '$.learningMode'),
-        nameTranslation: nameTranslation(item.nameTranslation, '$.nameTranslation'),
+        readingDirection: readingDirection(item.readingDirection, '$.readingDirection'),
       }
     case 'image:prefetch':
       exact(item, [
@@ -669,7 +673,7 @@ export function parseBackgroundRequest(value: unknown): BackgroundRequest {
         'sourceBytes',
         'hskLevel',
         'learningMode',
-        'nameTranslation',
+        'readingDirection',
         'visibleRects',
       ])
       const sourceBytes =
@@ -716,7 +720,7 @@ export function parseBackgroundRequest(value: unknown): BackgroundRequest {
         ...(sourceBytes === undefined ? {} : { sourceBytes }),
         hskLevel: hskLevel(item.hskLevel, '$.hskLevel'),
         learningMode: learningMode(item.learningMode, '$.learningMode'),
-        nameTranslation: nameTranslation(item.nameTranslation, '$.nameTranslation'),
+        readingDirection: readingDirection(item.readingDirection, '$.readingDirection'),
         visibleRects: normalizedRects(item.visibleRects, '$.visibleRects'),
       }
     }
@@ -816,14 +820,14 @@ export function parseContentRequest(value: unknown): ContentRequest {
         'scope',
         'hskLevel',
         'learningMode',
-        'nameTranslation',
+        'readingDirection',
       ])
       return {
         type,
         scope: translationScope(item.scope, '$.scope'),
         hskLevel: hskLevel(item.hskLevel, '$.hskLevel'),
         learningMode: learningMode(item.learningMode, '$.learningMode'),
-        nameTranslation: nameTranslation(item.nameTranslation, '$.nameTranslation'),
+        readingDirection: readingDirection(item.readingDirection, '$.readingDirection'),
       }
     default:
       throw new RuntimeMessageValidationError(`$.type "${type}" is not supported.`)

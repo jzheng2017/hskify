@@ -6,8 +6,8 @@ export const TARGET_LANGUAGE = 'zh-CN' as const
 export const MAX_CHAPTER_PAGE_ORDER = 100_000
 
 export type HskLevel = 1 | 2 | 3 | 4 | 5 | 6
-export type NameTranslation = 'keep-original' | 'chinese'
 export type LearningMode = 'natural' | 'strict'
+export type ReadingDirection = 'ltr' | 'rtl'
 export type Point = { x: number; y: number }
 
 export type NormalizedRect = {
@@ -73,9 +73,7 @@ export type BrowserJobRequest = {
     targetLanguage: 'zh-CN'
     hskStandard: '2.0'
     hskLevel: HskLevel
-    readingDirection: 'auto' | 'ltr' | 'rtl'
-    translateSoundEffects: false
-    nameTranslation: NameTranslation
+    readingDirection: ReadingDirection
     learningMode: LearningMode
   }
 }
@@ -139,22 +137,6 @@ export type RegionLayout = {
 }
 
 export type TranslatedRegionRole = 'dialogue' | 'narration' | 'system'
-export type RegionEntityType =
-  | 'person'
-  | 'place'
-  | 'organization'
-  | 'coined'
-  | 'relationship'
-  | 'occupation'
-  | 'rank'
-  | 'title'
-export type RegionEntitySpan = {
-  source: string
-  startChar: number
-  endChar: number
-  entityType: RegionEntityType
-  translated?: string
-}
 export type RegionConfidenceEvidence = {
   ocrConsensus: number
   geometryCoverage: number
@@ -180,7 +162,6 @@ export type BrowserRegion = {
   role?: TranslatedRegionRole
   contextGroup?: string
   confidenceEvidence?: RegionConfidenceEvidence
-  entities?: RegionEntitySpan[]
   style: RegionStyle
   layout: RegionLayout
   hsk: RegionHsk
@@ -793,7 +774,6 @@ function parseRegion(value: unknown, path: string): BrowserRegion {
       'role',
       'contextGroup',
       'confidenceEvidence',
-      'entities',
       'style',
       'layout',
       'hsk',
@@ -857,40 +837,6 @@ function parseRegion(value: unknown, path: string): BrowserRegion {
       }
     },
   )
-  const entities = optional(item.entities, `${path}.entities`, (value, entitiesPath) => {
-    const entries = array(value, entitiesPath, 128)
-    let previousEnd = 0
-    return entries.map((entry, index) => {
-      const entityPath = `${entitiesPath}[${index}]`
-      const entity = record(entry, entityPath)
-      exact(entity, ['source', 'startChar', 'endChar', 'entityType', 'translated'], entityPath)
-      const startChar = integer(entity.startChar, `${entityPath}.startChar`)
-      const endChar = integer(entity.endChar, `${entityPath}.endChar`)
-      if (startChar >= endChar || (index > 0 && startChar < previousEnd)) {
-        fail(`${entityPath}.endChar`, 'entity spans must be ordered and non-overlapping')
-      }
-      previousEnd = endChar
-      const translated = optional(entity.translated, `${entityPath}.translated`, (value, path) =>
-        string(value, path, false, 512),
-      )
-      return {
-        source: string(entity.source, `${entityPath}.source`, false, 512),
-        startChar,
-        endChar,
-        entityType: oneOf(entity.entityType, `${entityPath}.entityType`, [
-          'person',
-          'place',
-          'organization',
-          'coined',
-          'relationship',
-          'occupation',
-          'rank',
-          'title',
-        ] as const),
-        ...(translated === undefined ? {} : { translated }),
-      }
-    })
-  })
   return {
     id: string(item.id, `${path}.id`, false, 512),
     textPolygon,
@@ -909,7 +855,6 @@ function parseRegion(value: unknown, path: string): BrowserRegion {
     ...(role === undefined ? {} : { role }),
     ...(contextGroup === undefined ? {} : { contextGroup }),
     ...(confidenceEvidence === undefined ? {} : { confidenceEvidence }),
-    ...(entities === undefined ? {} : { entities }),
     style: parseStyle(item.style, `${path}.style`),
     layout: parseLayout(item.layout, `${path}.layout`),
     hsk: parseHsk(item.hsk, `${path}.hsk`),
@@ -1091,8 +1036,6 @@ export function parseBrowserJobRequest(value: unknown): BrowserJobRequest {
       'hskStandard',
       'hskLevel',
       'readingDirection',
-      'translateSoundEffects',
-      'nameTranslation',
       'learningMode',
     ],
     'settings',
@@ -1126,18 +1069,8 @@ export function parseBrowserJobRequest(value: unknown): BrowserJobRequest {
       hskStandard: oneOf(settings.hskStandard, 'settings.hskStandard', ['2.0'] as const),
       hskLevel: hskLevel(settings.hskLevel, 'settings.hskLevel'),
       readingDirection: oneOf(settings.readingDirection, 'settings.readingDirection', [
-        'auto',
         'ltr',
         'rtl',
-      ] as const),
-      translateSoundEffects: oneOf(
-        settings.translateSoundEffects,
-        'settings.translateSoundEffects',
-        [false] as const,
-      ),
-      nameTranslation: oneOf(settings.nameTranslation, 'settings.nameTranslation', [
-        'keep-original',
-        'chinese',
       ] as const),
       learningMode: oneOf(settings.learningMode, 'settings.learningMode', [
         'natural',

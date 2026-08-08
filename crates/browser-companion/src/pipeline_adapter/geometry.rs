@@ -377,10 +377,6 @@ pub(super) fn take_finalized_lines(
     let mut finalized = Vec::new();
     let mut pending = Vec::with_capacity(lines.len());
     for line in lines.drain(..) {
-        if !line.candidate.has_detector_core {
-            pending.push(line);
-            continue;
-        }
         let bubble = line.candidate.confirmed_bubble_rect;
         let margin = (line.candidate.text_rect.height() * 2.0).clamp(32.0, 128.0);
         let support =
@@ -398,6 +394,89 @@ pub(super) fn take_finalized_lines(
     }
     *lines = pending;
     finalized
+}
+
+pub(super) fn take_finalized_rejected_lines(
+    lines: &mut Vec<super::RejectedOcrLine>,
+    unprocessed_tiles: &[Tile],
+    image_width: u32,
+    image_height: u32,
+) -> Vec<super::RejectedOcrLine> {
+    let mut finalized = Vec::new();
+    let mut pending = Vec::with_capacity(lines.len());
+    for line in lines.drain(..) {
+        let margin = (line.candidate.text_rect.height() * 2.0).clamp(32.0, 128.0);
+        let support = line
+            .candidate
+            .confirmed_bubble_rect
+            .union(line.candidate.text_rect)
+            .expand(margin, image_width, image_height);
+        if unprocessed_tiles
+            .iter()
+            .any(|tile| tile.ownership_rect().intersection(support).is_some())
+        {
+            pending.push(line);
+        } else {
+            finalized.push(line);
+        }
+    }
+    *lines = pending;
+    finalized
+}
+
+/// Convert the comic detector's text classes into recovery OCR proposals.
+///
+/// PP-OCR remains the preferred source of line geometry. These object boxes
+/// are admitted only after the caller has removed boxes already covered by a
+/// PP-OCR proposal, so the second detector adds recall without replacing the
+/// more precise line evidence.
+pub(super) fn candidates_for_comic_text_boxes(
+    detection: &ComicTextBubbleDetection,
+    bubbles: &[DetectedBubble],
+    tile: &Tile,
+    image_width: u32,
+    image_height: u32,
+) -> Vec<Candidate> {
+    detection
+        .detections
+        .iter()
+        .filter(|region| region.is_text())
+        .filter(|region| region.score.is_finite() && region.score >= MIN_DETECTOR_SCORE)
+        .filter_map(|region| {
+            let text_rect = PixelRect::from_local_bounds(region.bbox, tile)?;
+            let (center_x, center_y) = text_rect.center();
+            if !tile.owns(center_x, center_y) {
+                return None;
+            }
+            let containing_bubble = bubbles
+                .iter()
+                .map(|bubble| bubble.rect)
+                .filter(|bubble| {
+                    bubble.contains_point((center_x, center_y))
+                        || text_rect.overlap_over_smaller(*bubble) >= 0.10
+                })
+                .min_by(|left, right| {
+                    (left.width() * left.height()).total_cmp(&(right.width() * right.height()))
+                });
+            let layout_padding =
+                (text_rect.height().min(text_rect.width()) * 0.22).clamp(6.0, 28.0);
+            let layout_rect = text_rect.expand(layout_padding, image_width, image_height);
+            let confirmed_bubble_rect = containing_bubble.unwrap_or(layout_rect);
+            Some(Candidate {
+                kind: if region.is_dialogue_text() || containing_bubble.is_some() {
+                    CandidateKind::StoryText
+                } else {
+                    CandidateKind::FreeText
+                },
+                text_rect,
+                bubble_rect: confirmed_bubble_rect.union(layout_rect),
+                confirmed_bubble_rect,
+                detector_confidence: region.score,
+                has_detector_core: containing_bubble.is_some(),
+                rotation_radians: 0.0,
+            })
+        })
+        .collect()
 }
 
 /// Convert independent PP-OCR text-line detections into pipeline candidates.
@@ -552,13 +631,82 @@ pub(super) fn reading_order_key(
     let y = center_y.max(0.0).round() as u64;
     let x = match reading_direction {
         ReadingDirection::Rtl => image_width as f32 - center_x,
-        ReadingDirection::Auto | ReadingDirection::Ltr => center_x,
+        ReadingDirection::Ltr => center_x,
     }
     .max(0.0)
     .round() as u64;
     y.saturating_mul(image_width.max(1) as u64)
         .saturating_add(x)
         .min(u32::MAX as u64) as u32
+}
+
+/// Assign a stable, consecutive reading rank to every rectangle. Regions
+/// whose vertical spans substantially overlap are one visual row; rows are
+/// top-to-bottom and members are ordered in the selected horizontal reading
+/// direction. A centre-Y scalar cannot express this and reverses slightly
+/// staggered speech bubbles on the same row.
+pub(super) fn reading_order_ranks(
+    rects: &[PixelRect],
+    reading_direction: ReadingDirection,
+) -> Vec<u32> {
+    #[derive(Debug)]
+    struct Row {
+        members: Vec<usize>,
+        top: f32,
+        bottom: f32,
+    }
+
+    let mut by_vertical_position = (0..rects.len()).collect::<Vec<_>>();
+    by_vertical_position.sort_by(|&left, &right| {
+        rects[left]
+            .y0
+            .total_cmp(&rects[right].y0)
+            .then_with(|| rects[left].x0.total_cmp(&rects[right].x0))
+    });
+    let mut rows = Vec::<Row>::new();
+    for index in by_vertical_position {
+        let rect = rects[index];
+        let best_row = rows
+            .iter()
+            .enumerate()
+            .filter_map(|(row_index, row)| {
+                let overlap = (rect.y1.min(row.bottom) - rect.y0.max(row.top)).max(0.0);
+                let smaller_height = rect.height().min((row.bottom - row.top).max(0.0));
+                let ratio = overlap / smaller_height.max(f32::EPSILON);
+                (ratio >= 0.35).then_some((row_index, ratio))
+            })
+            .max_by(|left, right| left.1.total_cmp(&right.1))
+            .map(|(row_index, _)| row_index);
+        if let Some(row_index) = best_row {
+            let row = &mut rows[row_index];
+            row.members.push(index);
+            row.top = row.top.min(rect.y0);
+            row.bottom = row.bottom.max(rect.y1);
+        } else {
+            rows.push(Row {
+                members: vec![index],
+                top: rect.y0,
+                bottom: rect.y1,
+            });
+        }
+    }
+    rows.sort_by(|left, right| left.top.total_cmp(&right.top));
+    let mut ranks = vec![0; rects.len()];
+    let mut next_rank = 0_u32;
+    for row in &mut rows {
+        row.members.sort_by(|&left, &right| {
+            let horizontal = match reading_direction {
+                ReadingDirection::Rtl => rects[right].x0.total_cmp(&rects[left].x0),
+                ReadingDirection::Ltr => rects[left].x0.total_cmp(&rects[right].x0),
+            };
+            horizontal.then_with(|| rects[left].y0.total_cmp(&rects[right].y0))
+        });
+        for &index in &row.members {
+            ranks[index] = next_rank;
+            next_rank = next_rank.saturating_add(1);
+        }
+    }
+    ranks
 }
 
 fn normalized_rects_intersect(left: &NormalizedRect, right: &NormalizedRect) -> bool {
@@ -617,7 +765,7 @@ mod tests {
             true,
             900,
             16_000,
-            ReadingDirection::Auto,
+            ReadingDirection::Ltr,
         );
 
         let count = next_detector_batch_count(&tiles, &viewport, true, 900, 16_000, 6);
@@ -738,6 +886,21 @@ mod tests {
         assert!(
             reading_order_key(right, 900, 2_000, ReadingDirection::Rtl)
                 < reading_order_key(left, 900, 2_000, ReadingDirection::Rtl)
+        );
+    }
+
+    #[test]
+    fn reading_order_clusters_staggered_regions_into_visual_rows() {
+        let left = PixelRect::new(100.0, 112.0, 250.0, 170.0).unwrap();
+        let right = PixelRect::new(600.0, 100.0, 750.0, 165.0).unwrap();
+        let lower = PixelRect::new(50.0, 240.0, 200.0, 290.0).unwrap();
+        assert_eq!(
+            reading_order_ranks(&[left, right, lower], ReadingDirection::Ltr),
+            vec![0, 1, 2]
+        );
+        assert_eq!(
+            reading_order_ranks(&[left, right, lower], ReadingDirection::Rtl),
+            vec![1, 0, 2]
         );
     }
 }

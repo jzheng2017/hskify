@@ -12,7 +12,7 @@ pub const UNICODE_NORMALIZATION_TABLES_SHA256: &str =
     "177d5f08019cc8e335444fcab61aabb7f6309f158f6ebbd7525c73c0e532ec44";
 
 /// Bump whenever normalization order or mappings change.
-pub const NORMALIZATION_REVISION: &str = "nfkc17-zero-width-opencc-tw2sp-hk2s-surface-v3";
+pub const NORMALIZATION_REVISION: &str = "nfkc17-zero-width-opencc-script-aware-surface-v6";
 
 /// Unicode/OpenCC-compatible normalizer used by import, validation, and lookup.
 pub struct TextNormalizer {
@@ -27,18 +27,24 @@ impl TextNormalizer {
     }
 
     /// Produces NFKC, removes zero-width controls, converts Traditional
-    /// variants with OpenCC-compatible Taiwan/Hong Kong-to-mainland Simplified
+    /// variants with OpenCC-compatible Taiwan-to-mainland Simplified
     /// conversion, and canonicalizes punctuation and whitespace.
     pub fn normalize(&self, input: &str) -> String {
         let unicode = input
             .nfkc()
             .filter(|character| !is_zero_width(*character))
             .collect::<String>();
-        // `tw2sp` includes general Traditional-to-Simplified conversion plus
-        // mainland phrase mappings (for example 軟體 -> 软件). A following
-        // `hk2s` covers Hong Kong variants that are not in the Taiwan config.
-        let taiwan_simplified = self.opencc.tw2sp(&unicode, false);
-        let simplified = self.opencc.hk2s(&taiwan_simplified, false);
+        // Locale reverse dictionaries are only valid for Traditional input.
+        // Applying `tw2sp` to already-Simplified text rewrites correct 什么 as
+        // 什幺. Detect explicit Simplified evidence with the inverse mapping;
+        // mixed/Simplified text takes the idempotent general T2S path, while
+        // genuinely Traditional text receives Taiwan phrase normalization.
+        let has_simplified_evidence = self.opencc.s2t(&unicode, false) != unicode;
+        let simplified = if has_simplified_evidence {
+            self.opencc.t2s(&unicode, false)
+        } else {
+            self.opencc.tw2sp(&unicode, false)
+        };
         normalize_surface(&simplified)
     }
 }
@@ -68,15 +74,35 @@ fn normalize_surface(input: &str) -> String {
     let characters = input.chars().collect::<Vec<_>>();
     let mut output = String::with_capacity(input.len());
     let mut pending_space = false;
+    let mut index = 0;
 
-    for (index, character) in characters.iter().copied().enumerate() {
+    while let Some(&character) = characters.get(index) {
         if character.is_whitespace() {
             pending_space = !output.is_empty();
+            index += 1;
             continue;
         }
         if pending_space {
             output.push(' ');
             pending_space = false;
+        }
+
+        // Generative models commonly spell an ellipsis as three or six ASCII
+        // periods. Converting each period independently creates six full-width
+        // stops, which changes the punctuation and can make short balloon text
+        // impossible to fit. Treat a contiguous run as the single Chinese
+        // ellipsis it represents.
+        if is_ellipsis_dot(character) {
+            let end = characters[index..]
+                .iter()
+                .take_while(|candidate| is_ellipsis_dot(**candidate))
+                .count()
+                + index;
+            if end - index >= 3 {
+                output.push_str("……");
+                index = end;
+                continue;
+            }
         }
 
         let previous = index
@@ -85,9 +111,14 @@ fn normalize_surface(input: &str) -> String {
             .copied();
         let next = characters.get(index + 1).copied();
         output.push(canonical_punctuation(character, previous, next));
+        index += 1;
     }
 
     output
+}
+
+fn is_ellipsis_dot(character: char) -> bool {
+    matches!(character, '.' | '\u{3002}' | '\u{fe52}' | '\u{ff61}')
 }
 
 fn canonical_punctuation(character: char, previous: Option<char>, next: Option<char>) -> char {

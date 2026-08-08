@@ -16,7 +16,7 @@ fixtures/real-reader-corpus/annotations/<chapter-id>/0001.json
 three stress chapters, cover the continuous, paged, iframe, canvas, and WebGL
 reader adapters, and declare `completeness.state` as `complete`. Each
 page annotation records every story target and exclusion, exact source
-English, geometry/reading order, continuation groups, typed entities, style
+English, geometry/reading order, continuation groups, style
 runs, protected artwork, normalized cleanup-allowance polygons, and reviewed
 natural/strict alternatives. The verifier checks annotation bytes, SHA-256, page order,
 dimensions, coverage totals, and annotation shape before a daemon is started.

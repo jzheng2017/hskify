@@ -116,7 +116,7 @@ describe('rectangle and polygon-aware text fitting', () => {
       expect(horizontalPolygonSpan(polygon, 0.5)).toBeGreaterThan(0)
       expect(new RectangleTextFitter().fit(region, 100, 100).fontSize).toBeGreaterThan(36)
       const fit = new PolygonTextFitter().fit(region, 100, 100)
-      expect(fit.fontSize).toBeGreaterThanOrEqual(minimumReadableFontSize(region, 100))
+      expect(fit.fontSize).toBeGreaterThanOrEqual(minimumReadableFontSize(100))
       expect(fit.degraded).toBe(true)
     }
   })
@@ -193,8 +193,37 @@ describe('rectangle and polygon-aware text fitting', () => {
     }
 
     const fit = new RectangleTextFitter().fit(region, 160, 160)
-    expect(fit.fontSize).toBeGreaterThanOrEqual(minimumReadableFontSize(region, 160))
+    expect(fit.fontSize).toBeGreaterThanOrEqual(minimumReadableFontSize(160))
     expect(fit.fontSize).toBeGreaterThanOrEqual(minimumFontSizeForImage(160))
+  })
+
+  it('fits compact Chinese at the viewport legibility floor instead of retaining source size', () => {
+    const polygon = [
+      { x: 0, y: 0 },
+      { x: 0.18, y: 0 },
+      { x: 0.18, y: 0.06 },
+      { x: 0, y: 0.06 },
+    ]
+    const region: BrowserRegion = {
+      ...fixtureRegion(),
+      sourceEnglish: 'NEXT...',
+      displayedChinese: '下一个……',
+      textPolygon: polygon,
+      bubblePolygon: polygon,
+      style: { ...fixtureRegion().style, lineHeight: 1 },
+      layout: {
+        ...fixtureRegion().layout,
+        safePolygon: polygon,
+        suggestedLines: ['下一个……'],
+        fontSizeToImageWidth: 0.045,
+      },
+    }
+
+    const fit = new PolygonTextFitter().fit(region, 640, 1024)
+
+    expect(fit.degraded).toBe(false)
+    expect(fit.fontSize).toBeGreaterThanOrEqual(minimumReadableFontSize(640))
+    expect(fit.fontSize).toBeLessThan(region.layout.fontSizeToImageWidth * 640)
   })
 
   it('reserves an inner margin instead of fitting against the bubble outline', () => {
@@ -231,7 +260,7 @@ describe('rectangle and polygon-aware text fitting', () => {
     }
 
     const fit = new PolygonTextFitter().fit(region, 100, 100)
-    expect(fit.fontSize).toBeGreaterThanOrEqual(minimumReadableFontSize(region, 100))
+    expect(fit.fontSize).toBeGreaterThanOrEqual(minimumReadableFontSize(100))
     expect(fit.degraded).toBe(true)
   })
 

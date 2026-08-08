@@ -28,7 +28,7 @@ const SANS_FONT_FILE: &str = "NotoSansSC-VF.ttf";
 const SERIF_FONT_FILE: &str = "NotoSerifSC-VF.ttf";
 pub(crate) const HSK_RESOURCE_BYTES: u64 = 1_219_917;
 pub(crate) const HSK_RESOURCE_SHA256: &str =
-    "e603244c49d6a231426e9696574e98bd1e76fbea68f56e76ea98695d26ce478f";
+    "35134ec9a0e61ab520c9737bf57dbb10cda25d54ac80144033f51eaa7df59fd6";
 pub(crate) const DICTIONARY_RESOURCE_BYTES: u64 = 28_604_488;
 pub(crate) const DICTIONARY_RESOURCE_SHA256: &str =
     "4011f023d27e576559ae0f2afe6fd0cc4458f96d225baa80f0ddbc9bb0344f33";

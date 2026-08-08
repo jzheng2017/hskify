@@ -32,41 +32,21 @@ describe('chapter image run state', () => {
     })
   })
 
-  it('keeps automatic retry attempts bounded across queue cycles', () => {
+  it('allows an explicit retry only after an image has failed', () => {
     const state = new ChapterRunState<string>()
     state.register('image')
-    state.start('image')
-    expect(state.automaticRetryQueued('image')).toBe(1)
-    state.start('image')
-    expect(state.automaticRetryQueued('image')).toBe(2)
+    expect(state.manualRetryQueued('image')).toBe(false)
     state.start('image')
     state.fail('image')
 
-    expect(state.automaticRetries('image')).toBe(2)
     expect(state.manualRetryQueued('image')).toBe(true)
-    expect(state.automaticRetries('image')).toBe(0)
     expect(state.phase('image')).toBe('queued')
-  })
-
-  it('returns viewport-preempted work to the queue without consuming a retry', () => {
-    const state = new ChapterRunState<string>()
-    state.register('image')
-    state.start('image')
-
-    state.preempt('image')
-
-    expect(state.phase('image')).toBe('queued')
-    expect(state.automaticRetries('image')).toBe(0)
-    state.start('image')
-    state.complete('image')
-    expect(state.snapshot().allResolved).toBe(true)
   })
 
   it('rejects contradictory lifecycle transitions instead of corrupting counters', () => {
     const state = new ChapterRunState<string>()
     state.register('image')
     expect(() => state.complete('image')).toThrow(/queued/u)
-    expect(() => state.preempt('image')).toThrow(/queued/u)
     state.start('image')
     expect(() => state.start('image')).toThrow(/running/u)
     state.complete('image')
