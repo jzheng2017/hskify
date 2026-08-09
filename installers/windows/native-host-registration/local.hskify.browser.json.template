@@ -1,9 +1,9 @@
 {
-  "name": "local.hskify.hsk_manga",
+  "name": "local.hskify.browser",
   "description": "Hskify local browser companion",
   "path": "__ABSOLUTE_NATIVE_HOST_PATH__",
   "type": "stdio",
   "allowed_extensions": [
-    "hsk-manga-translator@local.hskify"
+    "hskify@local.hskify"
   ]
 }

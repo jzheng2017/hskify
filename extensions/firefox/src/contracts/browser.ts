@@ -1,13 +1,21 @@
 export const BUILD_FINGERPRINT =
-  'hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-07-28-r7' as const
+  'hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-08-09-r8' as const
 export const HSK_STANDARD = '2.0' as const
 export const SOURCE_LANGUAGE = 'en' as const
 export const TARGET_LANGUAGE = 'zh-CN' as const
-export const MAX_CHAPTER_PAGE_ORDER = 100_000
+export const MAX_CHAPTER_SOURCE_ORDER = 100_000
+export const MAX_DOCUMENT_UTF8_BYTES = 1024 * 1024
+export const MAX_DOCUMENT_BLOCKS = 2_000
+export const MAX_DOCUMENT_BLOCK_UTF8_BYTES = 16 * 1024
+export const MAX_VISIBLE_BLOCK_IDS = 64
+const MAX_U32 = 0xffff_ffff
 
 export type HskLevel = 1 | 2 | 3 | 4 | 5 | 6
 export type LearningMode = 'natural' | 'strict'
 export type ReadingDirection = 'ltr' | 'rtl'
+export type ChapterKind = 'image' | 'document' | 'unsupported'
+export type SourceSpanKind = 'prose' | 'heading' | 'dialogue' | 'caption' | 'thought' | 'sfx'
+export type SourceProvenance = 'dom' | 'ocr'
 export type Point = { x: number; y: number }
 
 export type NormalizedRect = {
@@ -56,7 +64,17 @@ export type HealthResponse = {
   resourceIdentities: ResourceIdentity[]
 }
 
-export type BrowserJobRequest = {
+export type TranslationSettings = {
+  sourceLanguage: 'en'
+  targetLanguage: 'zh-CN'
+  hskStandard: '2.0'
+  hskLevel: HskLevel
+  learningMode: LearningMode
+}
+
+export type PageSurfaceKind = 'image' | 'background' | 'canvas' | 'webgl' | 'frame'
+
+export type ImageJobRequest = {
   buildFingerprint: typeof BUILD_FINGERPRINT
   clientImageId: string
   sourceSha256: string
@@ -64,48 +82,66 @@ export type BrowserJobRequest = {
   naturalWidth: number
   naturalHeight: number
   pageSessionId: string
-  pageIndex: number
-  chapterPageOrder: number[]
+  sourceIndex: number
+  chapterSourceOrder: number[]
   surfaceKind: PageSurfaceKind
   visibleRects: NormalizedRect[]
-  settings: {
-    sourceLanguage: 'en'
-    targetLanguage: 'zh-CN'
-    hskStandard: '2.0'
-    hskLevel: HskLevel
-    readingDirection: ReadingDirection
-    learningMode: LearningMode
-  }
+  readingDirection: ReadingDirection
+  settings: TranslationSettings
 }
 
-export type PageSurfaceKind = 'image' | 'background' | 'canvas' | 'webgl' | 'frame'
+export type DocumentSourceBlock = {
+  itemId: string
+  sourceIndex: number
+  itemOrder: number
+  kind: SourceSpanKind
+  provenance: 'dom'
+  text: string
+}
 
-export type BrowserJobCreated = {
+export type DocumentJobRequest = {
+  buildFingerprint: typeof BUILD_FINGERPRINT
+  pageSessionId: string
+  sourceSha256: string
+  settings: TranslationSettings
+  blocks: DocumentSourceBlock[]
+}
+
+export type JobCreated = {
   buildFingerprint: typeof BUILD_FINGERPRINT
   jobId: string
 }
 
-export type ViewportUpdate = {
-  visibleRects: NormalizedRect[]
-  active: boolean
+export type JobFocus =
+  | { kind: 'image'; visibleRects: NormalizedRect[]; active: boolean }
+  | { kind: 'document'; visibleBlockIds: string[]; active: boolean }
+
+export type TeachingTerm = {
+  text: string
+  startChar: number
+  endChar: number
+  pinyin: string
+  definitions: string[]
+  requiredLevel?: HskLevel
+  reason: 'above-level' | 'outside-list'
 }
 
-export type RegionHsk = {
+export type HskState = {
   requestedLevel: HskLevel
   learningMode: LearningMode
   strictlyValid: boolean
   levelCoverage: number
   aboveLevelTokens: string[]
-  teachingTerms: Array<{
-    text: string
-    startChar: number
-    endChar: number
-    pinyin: string
-    definitions: string[]
-    requiredLevel?: HskLevel
-    reason: 'above-level' | 'outside-list'
-  }>
-  repairState: 'not-needed' | 'pending' | 'accepted' | 'rejected'
+  teachingTerms: TeachingTerm[]
+  repairState: 'not-needed' | 'accepted' | 'rejected'
+}
+
+export type TranslatedText = {
+  sourceText: string
+  baseChinese: string
+  displayedChinese: string
+  pinyin: string
+  hsk: HskState
 }
 
 export type RegionStyle = {
@@ -136,7 +172,6 @@ export type RegionLayout = {
   safePolygon: Point[]
 }
 
-export type TranslatedRegionRole = 'dialogue' | 'narration' | 'system'
 export type RegionConfidenceEvidence = {
   ocrConsensus: number
   geometryCoverage: number
@@ -144,31 +179,52 @@ export type RegionConfidenceEvidence = {
   cleanupScore: number
 }
 
-export type BrowserRegion = {
-  id: string
+export type ImageRegion = {
+  itemId: string
+  itemOrder: number
+  kind: SourceSpanKind
+  provenance: 'ocr'
   textPolygon: Point[]
   bubblePolygon?: Point[]
-  patch: {
-    blobId: string
-    mimeType: 'image/png'
-    rect: NormalizedRect
-  }
-  sourceEnglish: string
-  baseChinese: string
-  displayedChinese: string
-  pinyin: string
-  ocrConfidence: number
-  readingOrder: number
-  role?: TranslatedRegionRole
+  patch: { blobId: string; mimeType: 'image/png'; rect: NormalizedRect }
+  text: TranslatedText
+  confidence: number
   contextGroup?: string
   confidenceEvidence?: RegionConfidenceEvidence
   style: RegionStyle
   layout: RegionLayout
-  hsk: RegionHsk
 }
 
-export type BrowserJobStage =
+export type PreservedImageRegion = {
+  itemId: string
+  itemOrder: number
+  textPolygon: Point[]
+  sourceText: string
+  confidence: number
+  reason: string
+}
+
+export type ReadyDocumentBlock = {
+  itemId: string
+  sourceIndex: number
+  itemOrder: number
+  kind: SourceSpanKind
+  text: TranslatedText
+}
+
+export type PreservedDocumentBlock = {
+  itemId: string
+  sourceIndex: number
+  itemOrder: number
+  kind: SourceSpanKind
+  sourceText: string
+  reason: string
+}
+
+export type JobStage =
   | 'queued'
+  | 'warming'
+  | 'registering'
   | 'decoding'
   | 'detecting'
   | 'ocr'
@@ -181,7 +237,7 @@ export type BrowserJobStage =
 export type ProgressJobUpdate = {
   sequence: number
   type: 'progress'
-  stage: BrowserJobStage
+  stage: JobStage
   stageProgress?: number
   overallProgress?: number
   current?: number
@@ -189,47 +245,35 @@ export type ProgressJobUpdate = {
   message: string
 }
 
-export type RegionReadyJobUpdate = {
+export type ImageRegionReadyJobUpdate = {
   sequence: number
-  type: 'regionReady'
-  region: BrowserRegion
+  type: 'imageRegionReady'
+  region: ImageRegion
 }
 
-export type PreservedArtworkRegion = {
-  id: string
-  textPolygon: Point[]
-  sourceEnglish: string
-  ocrConfidence: number
-  readingOrder: number
-  translatedChinese?: string
-  pinyin?: string
-  teachingTerms?: RegionHsk['teachingTerms']
-}
-
-export type UnreadableRegion = {
-  id: string
-  textPolygon: Point[]
-  sourceEnglish: string
-  ocrConfidence: number
-  readingOrder: number
-  reason: string
-}
-
-export type UnreadableJobUpdate = {
+export type ImageRegionPreservedJobUpdate = {
   sequence: number
-  type: 'unreadable'
-  region: UnreadableRegion
+  type: 'imageRegionPreserved'
+  region: PreservedImageRegion
 }
 
-export type ArtworkPreservedJobUpdate = {
+export type DocumentBlockReadyJobUpdate = {
   sequence: number
-  type: 'artworkPreserved'
-  region: PreservedArtworkRegion
+  type: 'documentBlockReady'
+  block: ReadyDocumentBlock
+}
+
+export type DocumentBlockPreservedJobUpdate = {
+  sequence: number
+  type: 'documentBlockPreserved'
+  block: PreservedDocumentBlock
 }
 
 export type CompleteJobUpdate = {
   sequence: number
   type: 'complete'
+  translatedCount: number
+  preservedCount: number
   message?: string
 }
 
@@ -249,9 +293,10 @@ export type CancelledJobUpdate = {
 
 export type JobUpdate =
   | ProgressJobUpdate
-  | RegionReadyJobUpdate
-  | ArtworkPreservedJobUpdate
-  | UnreadableJobUpdate
+  | ImageRegionReadyJobUpdate
+  | ImageRegionPreservedJobUpdate
+  | DocumentBlockReadyJobUpdate
+  | DocumentBlockPreservedJobUpdate
   | CompleteJobUpdate
   | FailedJobUpdate
   | CancelledJobUpdate
@@ -274,18 +319,8 @@ export type BrowserSetupStatus = {
 }
 
 export type LookupRequest =
-  | {
-      interaction: 'selection'
-      selectedText: string
-      jobId?: string
-      regionId?: string
-    }
-  | {
-      interaction: 'hover'
-      characterOffset: number
-      jobId: string
-      regionId: string
-    }
+  | { interaction: 'selection'; selectedText: string; jobId?: string; itemId?: string }
+  | { interaction: 'hover'; characterOffset: number; jobId: string; itemId: string }
 
 export type LookupResult = {
   selectedText: string
@@ -296,24 +331,13 @@ export type LookupResult = {
     hskLevel?: HskLevel
     properName: boolean
   }>
-  region?: {
-    displayedChinese: string
-    baseChinese: string
-    sourceEnglish: string
-  }
+  item?: { displayedChinese: string; baseChinese: string; sourceText: string }
 }
 
-export type ErrorResponse = {
-  code: string
-  message: string
-  retryable: boolean
-}
+export type ErrorResponse = { code: string; message: string; retryable: boolean }
 
 export class ContractValidationError extends Error {
-  constructor(
-    readonly path: string,
-    message: string,
-  ) {
+  constructor(readonly path: string, message: string) {
     super(`${path}: ${message}`)
     this.name = 'ContractValidationError'
   }
@@ -321,16 +345,13 @@ export class ContractValidationError extends Error {
 
 type UnknownRecord = Record<string, unknown>
 
-const jobStages: readonly BrowserJobStage[] = [
-  'queued',
-  'decoding',
-  'detecting',
-  'ocr',
-  'inpainting',
-  'translating',
-  'hsk-validating',
-  'styling',
-  'packaging',
+const utf8 = new TextEncoder()
+const jobStages: readonly JobStage[] = [
+  'queued', 'warming', 'registering', 'decoding', 'detecting', 'ocr', 'inpainting',
+  'translating', 'hsk-validating', 'styling', 'packaging',
+]
+const spanKinds: readonly SourceSpanKind[] = [
+  'prose', 'heading', 'dialogue', 'caption', 'thought', 'sfx',
 ]
 
 function fail(path: string, message: string): never {
@@ -338,9 +359,7 @@ function fail(path: string, message: string): never {
 }
 
 function record(value: unknown, path: string): UnknownRecord {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    fail(path, 'must be an object')
-  }
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) fail(path, 'must be an object')
   return value as UnknownRecord
 }
 
@@ -357,33 +376,36 @@ function array(value: unknown, path: string, maximum = 10_000): unknown[] {
 }
 
 function string(value: unknown, path: string, allowEmpty = false, maximum = 8_192): string {
-  if (typeof value !== 'string' || (!allowEmpty && value.trim() === '') || value.length > maximum) {
-    fail(
-      path,
-      allowEmpty
-        ? `must be a string no longer than ${maximum} characters`
-        : `must be a non-empty string no longer than ${maximum} characters`,
-    )
+  if (
+    typeof value !== 'string' ||
+    (!allowEmpty && value.trim() === '') ||
+    (typeof value === 'string' && [...value].length > maximum)
+  ) {
+    fail(path, allowEmpty ? `must be a string no longer than ${maximum} characters` : `must be a non-empty string no longer than ${maximum} characters`)
   }
   return value
 }
 
-function boolean(value: unknown, path: string): boolean {
+function utf8String(value: unknown, path: string, maximumBytes: number): string {
+  const parsed = string(value, path, false, maximumBytes)
+  if (utf8.encode(parsed).byteLength > maximumBytes) fail(path, `must be at most ${maximumBytes} UTF-8 bytes`)
+  return parsed
+}
+
+function bool(value: unknown, path: string): boolean {
   if (typeof value !== 'boolean') fail(path, 'must be a boolean')
   return value
 }
 
 function finite(value: unknown, path: string): number {
-  if (typeof value !== 'number' || !Number.isFinite(value)) {
-    fail(path, 'must be a finite number')
-  }
+  if (typeof value !== 'number' || !Number.isFinite(value)) fail(path, 'must be a finite number')
   return value
 }
 
-function integer(value: unknown, path: string, minimum = 0): number {
+function integer(value: unknown, path: string, minimum = 0, maximum = Number.MAX_SAFE_INTEGER): number {
   const parsed = finite(value, path)
-  if (!Number.isSafeInteger(parsed) || parsed < minimum) {
-    fail(path, `must be an integer greater than or equal to ${minimum}`)
+  if (!Number.isSafeInteger(parsed) || parsed < minimum || parsed > maximum) {
+    fail(path, `must be an integer from ${minimum} to ${maximum}`)
   }
   return parsed
 }
@@ -394,27 +416,17 @@ function unit(value: unknown, path: string): number {
   return parsed
 }
 
-function optional<T>(
-  value: unknown,
-  path: string,
-  parser: (value: unknown, path: string) => T,
-): T | undefined {
+function optional<T>(value: unknown, path: string, parser: (value: unknown, path: string) => T): T | undefined {
   return value === undefined ? undefined : parser(value, path)
 }
 
-function oneOf<const T extends readonly (string | number | boolean)[]>(
-  value: unknown,
-  path: string,
-  values: T,
-): T[number] {
+function oneOf<const T extends readonly (string | number | boolean)[]>(value: unknown, path: string, values: T): T[number] {
   if (!values.includes(value as never)) fail(path, `must be one of ${values.join(', ')}`)
   return value as T[number]
 }
 
 function buildFingerprint(value: unknown, path = 'buildFingerprint'): typeof BUILD_FINGERPRINT {
-  if (value !== BUILD_FINGERPRINT) {
-    fail(path, `must equal the running extension build ${BUILD_FINGERPRINT}`)
-  }
+  if (value !== BUILD_FINGERPRINT) fail(path, `must equal ${BUILD_FINGERPRINT}`)
   return BUILD_FINGERPRINT
 }
 
@@ -424,18 +436,12 @@ function hskLevel(value: unknown, path: string): HskLevel {
 
 function sha256(value: unknown, path: string): string {
   const parsed = string(value, path, false, 64)
-  if (!/^[a-f0-9]{64}$/u.test(parsed)) {
-    fail(path, 'must be a lowercase 64-character hexadecimal SHA-256')
-  }
+  if (!/^[a-f0-9]{64}$/u.test(parsed)) fail(path, 'must be a lowercase SHA-256')
   return parsed
 }
 
-function cssColor(value: unknown, path: string): string {
-  const parsed = string(value, path, false, 9)
-  if (!/^#(?:[\da-f]{3}|[\da-f]{4}|[\da-f]{6}|[\da-f]{8})$/iu.test(parsed)) {
-    fail(path, 'must be a hexadecimal CSS color')
-  }
-  return parsed
+function stringArray(value: unknown, path: string, maximum = 10_000, itemMaximum = 4_096): string[] {
+  return array(value, path, maximum).map((item, index) => string(item, `${path}[${index}]`, false, itemMaximum))
 }
 
 function point(value: unknown, path: string): Point {
@@ -453,21 +459,9 @@ function polygon(value: unknown, path: string): Point[] {
 function normalizedRect(value: unknown, path: string): NormalizedRect {
   const item = record(value, path)
   exact(item, ['x', 'y', 'width', 'height'], path)
-  const parsed = {
-    x: unit(item.x, `${path}.x`),
-    y: unit(item.y, `${path}.y`),
-    width: unit(item.width, `${path}.width`),
-    height: unit(item.height, `${path}.height`),
-  }
-  if (parsed.width <= 0 || parsed.height <= 0) {
-    fail(path, 'must have positive width and height')
-  }
-  if (parsed.x + parsed.width > 1 + Number.EPSILON) {
-    fail(path, 'must not extend past the image width')
-  }
-  if (parsed.y + parsed.height > 1 + Number.EPSILON) {
-    fail(path, 'must not extend past the image height')
-  }
+  const parsed = { x: unit(item.x, `${path}.x`), y: unit(item.y, `${path}.y`), width: unit(item.width, `${path}.width`), height: unit(item.height, `${path}.height`) }
+  if (parsed.width <= 0 || parsed.height <= 0) fail(path, 'must have positive size')
+  if (parsed.x + parsed.width > 1 + Number.EPSILON || parsed.y + parsed.height > 1 + Number.EPSILON) fail(path, 'must stay inside its source')
   return parsed
 }
 
@@ -475,442 +469,148 @@ function visibleRects(value: unknown, path: string): NormalizedRect[] {
   return array(value, path, 64).map((item, index) => normalizedRect(item, `${path}[${index}]`))
 }
 
-function chapterPageOrder(value: unknown, path: string, pageIndex: number): number[] {
-  const values = array(value, path, MAX_CHAPTER_PAGE_ORDER).map((item, index) =>
-    integer(item, `${path}[${index}]`),
-  )
-  if (values.length === 0 || !values.includes(pageIndex)) {
-    fail(path, 'must contain the submitted pageIndex')
-  }
-  for (let index = 1; index < values.length; index += 1) {
-    if (values[index - 1]! >= values[index]!) {
-      fail(path, 'must be strictly increasing')
-    }
-  }
+function sourceOrder(value: unknown, path: string, sourceIndex: number): number[] {
+  const values = array(value, path, MAX_CHAPTER_SOURCE_ORDER).map((item, index) => integer(item, `${path}[${index}]`, 0, MAX_U32))
+  if (values.length === 0 || !values.includes(sourceIndex)) fail(path, 'must include sourceIndex')
+  for (let index = 1; index < values.length; index += 1) if (values[index - 1]! >= values[index]!) fail(path, 'must be strictly increasing')
   return values
 }
 
-function resourceIdentity(value: unknown, path: string): ResourceIdentity {
-  const item = record(value, path)
-  exact(item, ['id', 'repository', 'repositoryRevision', 'filename', 'bytes', 'sha256'], path)
-  const id = string(item.id, `${path}.id`, false, 128)
-  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/u.test(id)) {
-    fail(`${path}.id`, 'must be a lowercase kebab-case identifier')
-  }
-  const repository = string(item.repository, `${path}.repository`, false, 256)
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(repository)) {
-    fail(`${path}.repository`, 'must contain exactly one owner/name repository')
-  }
-  const repositoryRevision = string(
-    item.repositoryRevision,
-    `${path}.repositoryRevision`,
-    false,
-    40,
-  )
-  if (!/^[0-9a-f]{40}$/u.test(repositoryRevision)) {
-    fail(`${path}.repositoryRevision`, 'must be a lowercase 40-character hexadecimal revision')
-  }
-  const filename = string(item.filename, `${path}.filename`, false, 255)
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(filename)) {
-    fail(`${path}.filename`, 'must be a safe ASCII filename')
-  }
-  const sha256 = string(item.sha256, `${path}.sha256`, false, 64)
-  if (!/^[0-9a-f]{64}$/u.test(sha256)) {
-    fail(`${path}.sha256`, 'must be a lowercase 64-character hexadecimal SHA-256')
-  }
-  return {
-    id,
-    repository,
-    repositoryRevision,
-    filename,
-    bytes: integer(item.bytes, `${path}.bytes`, 1),
-    sha256,
-  }
-}
-
-function resourceIdentities(value: unknown, path: string): ResourceIdentity[] {
-  const identities = array(value, path, 256).map((item, index) =>
-    resourceIdentity(item, `${path}[${index}]`),
-  )
-  if (identities.length === 0) fail(path, 'must not be empty')
-  for (let index = 1; index < identities.length; index += 1) {
-    if (identities[index - 1]!.id >= identities[index]!.id) {
-      fail(`${path}[${index}].id`, 'must be unique and sorted in ascending ordinal order')
-    }
-  }
-  return identities
-}
-
-function stringArray(
+export function parseTranslationSettings(
   value: unknown,
-  path: string,
-  allowEmptyItems = false,
-  maximumItems = 10_000,
-): string[] {
-  return array(value, path, maximumItems).map((item, index) =>
-    string(item, `${path}[${index}]`, allowEmptyItems, 4_096),
-  )
-}
-
-function parseHsk(value: unknown, path: string): RegionHsk {
+  path = 'settings',
+): TranslationSettings {
   const item = record(value, path)
-  exact(
-    item,
-    [
-      'requestedLevel',
-      'learningMode',
-      'strictlyValid',
-      'levelCoverage',
-      'aboveLevelTokens',
-      'teachingTerms',
-      'repairState',
-    ],
-    path,
-  )
-  const aboveLevelTokens = stringArray(
-    item.aboveLevelTokens,
-    `${path}.aboveLevelTokens`,
-    false,
-    512,
-  )
-  const teachingTerms = array(item.teachingTerms, `${path}.teachingTerms`, 512).map(
-    (value, index) => {
-      const termPath = `${path}.teachingTerms[${index}]`
-      const term = record(value, termPath)
-      exact(
-        term,
-        ['text', 'startChar', 'endChar', 'pinyin', 'definitions', 'requiredLevel', 'reason'],
-        termPath,
-      )
-      const startChar = integer(term.startChar, `${termPath}.startChar`)
-      const endChar = integer(term.endChar, `${termPath}.endChar`, 1)
-      if (endChar <= startChar) {
-        fail(`${termPath}.endChar`, 'must be greater than startChar')
-      }
-      const requiredLevel = optional(term.requiredLevel, `${termPath}.requiredLevel`, hskLevel)
-      return {
-        text: string(term.text, `${termPath}.text`, false, 256),
-        startChar,
-        endChar,
-        pinyin: string(term.pinyin, `${termPath}.pinyin`, false, 512),
-        definitions: stringArray(term.definitions, `${termPath}.definitions`, false, 32),
-        ...(requiredLevel === undefined ? {} : { requiredLevel }),
-        reason: oneOf(term.reason, `${termPath}.reason`, [
-          'above-level',
-          'outside-list',
-        ] as const),
-      }
-    },
-  )
-  const strictlyValid = boolean(item.strictlyValid, `${path}.strictlyValid`)
-  if (strictlyValid && aboveLevelTokens.length > 0) {
-    fail(`${path}.strictlyValid`, 'cannot be true when above-level tokens are present')
-  }
-  if (strictlyValid && teachingTerms.length > 0) {
-    fail(`${path}.strictlyValid`, 'cannot be true when teaching terms are present')
-  }
+  exact(item, ['sourceLanguage', 'targetLanguage', 'hskStandard', 'hskLevel', 'learningMode'], path)
   return {
-    requestedLevel: hskLevel(item.requestedLevel, `${path}.requestedLevel`),
-    learningMode: oneOf(item.learningMode, `${path}.learningMode`, [
-      'natural',
-      'strict',
-    ] as const),
-    strictlyValid,
-    levelCoverage: unit(item.levelCoverage, `${path}.levelCoverage`),
-    aboveLevelTokens,
-    teachingTerms,
-    repairState: oneOf(item.repairState, `${path}.repairState`, [
-      'not-needed',
-      'pending',
-      'accepted',
-      'rejected',
-    ] as const),
+    sourceLanguage: oneOf(item.sourceLanguage, `${path}.sourceLanguage`, ['en'] as const),
+    targetLanguage: oneOf(item.targetLanguage, `${path}.targetLanguage`, ['zh-CN'] as const),
+    hskStandard: oneOf(item.hskStandard, `${path}.hskStandard`, ['2.0'] as const),
+    hskLevel: hskLevel(item.hskLevel, `${path}.hskLevel`),
+    learningMode: oneOf(item.learningMode, `${path}.learningMode`, ['natural', 'strict'] as const),
   }
 }
 
-function parseTeachingTerms(value: unknown, path: string): RegionHsk['teachingTerms'] {
-  return array(value, path, 512).map((entry, index) => {
-    const termPath = `${path}[${index}]`
-    const term = record(entry, termPath)
-    exact(
-      term,
-      ['text', 'startChar', 'endChar', 'pinyin', 'definitions', 'requiredLevel', 'reason'],
-      termPath,
-    )
-    const startChar = integer(term.startChar, `${termPath}.startChar`)
-    const endChar = integer(term.endChar, `${termPath}.endChar`, 1)
-    if (endChar <= startChar) fail(`${termPath}.endChar`, 'must be greater than startChar')
-    const requiredLevel = optional(term.requiredLevel, `${termPath}.requiredLevel`, hskLevel)
+function parseTeachingTerms(value: unknown, path: string): TeachingTerm[] {
+  const terms = array(value, path, 512).map((candidate, index) => {
+    const childPath = `${path}[${index}]`
+    const item = record(candidate, childPath)
+    exact(item, ['text', 'startChar', 'endChar', 'pinyin', 'definitions', 'requiredLevel', 'reason'], childPath)
+    const startChar = integer(item.startChar, `${childPath}.startChar`)
+    const endChar = integer(item.endChar, `${childPath}.endChar`, 1)
+    if (endChar <= startChar) fail(`${childPath}.endChar`, 'must exceed startChar')
+    const requiredLevel = optional(item.requiredLevel, `${childPath}.requiredLevel`, hskLevel)
+    const definitions = stringArray(item.definitions, `${childPath}.definitions`, 32, 2_048)
+    if (definitions.length === 0) fail(`${childPath}.definitions`, 'must not be empty')
     return {
-      text: string(term.text, `${termPath}.text`, false, 256),
-      startChar,
-      endChar,
-      pinyin: string(term.pinyin, `${termPath}.pinyin`, false, 512),
-      definitions: stringArray(term.definitions, `${termPath}.definitions`, false, 32),
+      text: string(item.text, `${childPath}.text`, false, 256), startChar, endChar,
+      pinyin: string(item.pinyin, `${childPath}.pinyin`, false, 512),
+      definitions,
       ...(requiredLevel === undefined ? {} : { requiredLevel }),
-      reason: oneOf(term.reason, `${termPath}.reason`, ['above-level', 'outside-list'] as const),
+      reason: oneOf(item.reason, `${childPath}.reason`, ['above-level', 'outside-list'] as const),
     }
   })
+  for (let index = 1; index < terms.length; index += 1) {
+    if (terms[index]!.startChar < terms[index - 1]!.endChar) {
+      fail(`${path}[${index}].startChar`, 'teaching terms must be ordered and non-overlapping')
+    }
+  }
+  return terms
+}
+
+function parseHsk(value: unknown, path: string): HskState {
+  const item = record(value, path)
+  exact(item, ['requestedLevel', 'learningMode', 'strictlyValid', 'levelCoverage', 'aboveLevelTokens', 'teachingTerms', 'repairState'], path)
+  const aboveLevelTokens = stringArray(item.aboveLevelTokens, `${path}.aboveLevelTokens`, 512, 256)
+  if (new Set(aboveLevelTokens).size !== aboveLevelTokens.length) {
+    fail(`${path}.aboveLevelTokens`, 'must not contain duplicates')
+  }
+  const teachingTerms = parseTeachingTerms(item.teachingTerms, `${path}.teachingTerms`)
+  const strictlyValid = bool(item.strictlyValid, `${path}.strictlyValid`)
+  if (strictlyValid && (aboveLevelTokens.length > 0 || teachingTerms.length > 0)) fail(`${path}.strictlyValid`, 'cannot accompany unresolved terms')
+  return {
+    requestedLevel: hskLevel(item.requestedLevel, `${path}.requestedLevel`),
+    learningMode: oneOf(item.learningMode, `${path}.learningMode`, ['natural', 'strict'] as const),
+    strictlyValid, levelCoverage: unit(item.levelCoverage, `${path}.levelCoverage`),
+    aboveLevelTokens, teachingTerms,
+    repairState: oneOf(item.repairState, `${path}.repairState`, ['not-needed', 'accepted', 'rejected'] as const),
+  }
+}
+
+function parseTranslatedText(value: unknown, path: string): TranslatedText {
+  const item = record(value, path)
+  exact(item, ['sourceText', 'baseChinese', 'displayedChinese', 'pinyin', 'hsk'], path)
+  const parsed = {
+    sourceText: string(item.sourceText, `${path}.sourceText`, false, MAX_DOCUMENT_BLOCK_UTF8_BYTES),
+    baseChinese: string(item.baseChinese, `${path}.baseChinese`, false, MAX_DOCUMENT_BLOCK_UTF8_BYTES),
+    displayedChinese: string(item.displayedChinese, `${path}.displayedChinese`, false, MAX_DOCUMENT_BLOCK_UTF8_BYTES),
+    pinyin: string(item.pinyin, `${path}.pinyin`, false, MAX_DOCUMENT_BLOCK_UTF8_BYTES * 2),
+    hsk: parseHsk(item.hsk, `${path}.hsk`),
+  }
+  if (parsed.hsk.repairState === 'rejected') fail(`${path}.hsk.repairState`, 'terminal translated text cannot contain a rejected repair')
+  return parsed
+}
+
+function cssColor(value: unknown, path: string): string {
+  const parsed = string(value, path, false, 9)
+  if (!/^#(?:[\da-f]{3}|[\da-f]{4}|[\da-f]{6}|[\da-f]{8})$/iu.test(parsed)) fail(path, 'must be a hexadecimal CSS color')
+  return parsed
 }
 
 function parseStyle(value: unknown, path: string): RegionStyle {
   const item = record(value, path)
-  exact(
-    item,
-    [
-      'fontId',
-      'category',
-      'foreground',
-      'weight',
-      'italicDegrees',
-      'outlineColor',
-      'outlineWidthRatio',
-      'shadowColor',
-      'shadowXRatio',
-      'shadowYRatio',
-      'alignment',
-      'writingMode',
-      'lineHeight',
-      'letterSpacingEm',
-      'colorBands',
-    ],
-    path,
-  )
-  const weight = integer(item.weight, `${path}.weight`, 1)
-  if (weight > 1_000) fail(`${path}.weight`, 'must be at most 1000')
-  const outlineWidthRatio = finite(item.outlineWidthRatio, `${path}.outlineWidthRatio`)
-  if (outlineWidthRatio < 0) fail(`${path}.outlineWidthRatio`, 'must not be negative')
-  const lineHeight = finite(item.lineHeight, `${path}.lineHeight`)
-  if (lineHeight <= 0) fail(`${path}.lineHeight`, 'must be positive')
+  exact(item, ['fontId', 'category', 'foreground', 'weight', 'italicDegrees', 'outlineColor', 'outlineWidthRatio', 'shadowColor', 'shadowXRatio', 'shadowYRatio', 'alignment', 'writingMode', 'lineHeight', 'letterSpacingEm', 'colorBands'], path)
   const outlineColor = optional(item.outlineColor, `${path}.outlineColor`, cssColor)
   const shadowColor = optional(item.shadowColor, `${path}.shadowColor`, cssColor)
-  const colorBands =
-    item.colorBands === undefined
-      ? []
-      : array(item.colorBands, `${path}.colorBands`, 512).map((value, index) => {
-          const bandPath = `${path}.colorBands[${index}]`
-          const band = record(value, bandPath)
-          exact(band, ['position', 'foreground', 'outlineColor'], bandPath)
-          const position = finite(band.position, `${bandPath}.position`)
-          if (position < 0 || position > 1) {
-            fail(`${bandPath}.position`, 'must be from 0 through 1')
-          }
-          const outlineColor = optional(
-            band.outlineColor,
-            `${bandPath}.outlineColor`,
-            cssColor,
-          )
-          return {
-            position,
-            foreground: cssColor(band.foreground, `${bandPath}.foreground`),
-            ...(outlineColor === undefined ? {} : { outlineColor }),
-          }
-        })
-  if (
-    colorBands.some(
-      (band, index) => index > 0 && band.position <= (colorBands[index - 1]?.position ?? 1),
-    )
-  ) {
-    fail(`${path}.colorBands`, 'positions must be strictly increasing')
-  }
+  const bands = item.colorBands === undefined ? undefined : array(item.colorBands, `${path}.colorBands`, 512).map((candidate, index) => {
+    const bandPath = `${path}.colorBands[${index}]`
+    const band = record(candidate, bandPath)
+    exact(band, ['position', 'foreground', 'outlineColor'], bandPath)
+    const bandOutline = optional(band.outlineColor, `${bandPath}.outlineColor`, cssColor)
+    return { position: unit(band.position, `${bandPath}.position`), foreground: cssColor(band.foreground, `${bandPath}.foreground`), ...(bandOutline === undefined ? {} : { outlineColor: bandOutline }) }
+  })
+  const weight = integer(item.weight, `${path}.weight`, 1, 1_000)
+  const outlineWidthRatio = finite(item.outlineWidthRatio, `${path}.outlineWidthRatio`)
+  const lineHeight = finite(item.lineHeight, `${path}.lineHeight`)
+  if (outlineWidthRatio < 0 || lineHeight <= 0) fail(path, 'contains invalid style metrics')
   return {
     fontId: string(item.fontId, `${path}.fontId`, false, 512),
-    category: oneOf(item.category, `${path}.category`, [
-      'sans',
-      'serif',
-      'handwritten',
-      'display',
-      'brush',
-    ] as const),
-    foreground: cssColor(item.foreground, `${path}.foreground`),
-    weight,
+    category: oneOf(item.category, `${path}.category`, ['sans', 'serif', 'handwritten', 'display', 'brush'] as const),
+    foreground: cssColor(item.foreground, `${path}.foreground`), weight,
     italicDegrees: finite(item.italicDegrees, `${path}.italicDegrees`),
-    ...(outlineColor === undefined ? {} : { outlineColor }),
-    outlineWidthRatio,
+    ...(outlineColor === undefined ? {} : { outlineColor }), outlineWidthRatio,
     ...(shadowColor === undefined ? {} : { shadowColor }),
     shadowXRatio: finite(item.shadowXRatio, `${path}.shadowXRatio`),
     shadowYRatio: finite(item.shadowYRatio, `${path}.shadowYRatio`),
     alignment: oneOf(item.alignment, `${path}.alignment`, ['left', 'center', 'right'] as const),
-    writingMode: oneOf(item.writingMode, `${path}.writingMode`, [
-      'horizontal-tb',
-      'vertical-rl',
-    ] as const),
-    lineHeight,
-    letterSpacingEm: finite(item.letterSpacingEm, `${path}.letterSpacingEm`),
-    ...(colorBands.length === 0 ? {} : { colorBands }),
+    writingMode: oneOf(item.writingMode, `${path}.writingMode`, ['horizontal-tb', 'vertical-rl'] as const),
+    lineHeight, letterSpacingEm: finite(item.letterSpacingEm, `${path}.letterSpacingEm`),
+    ...(bands === undefined ? {} : { colorBands: bands }),
   }
 }
 
 function parseLayout(value: unknown, path: string): RegionLayout {
   const item = record(value, path)
   exact(item, ['suggestedLines', 'fontSizeToImageWidth', 'safePolygon'], path)
-  const fontSizeToImageWidth = finite(item.fontSizeToImageWidth, `${path}.fontSizeToImageWidth`)
-  if (fontSizeToImageWidth <= 0) {
-    fail(`${path}.fontSizeToImageWidth`, 'must be positive')
-  }
-  const safePolygon = polygon(item.safePolygon, `${path}.safePolygon`)
-  return {
-    suggestedLines: stringArray(item.suggestedLines, `${path}.suggestedLines`, true, 256),
-    fontSizeToImageWidth,
-    safePolygon,
-  }
+  const size = unit(item.fontSizeToImageWidth, `${path}.fontSizeToImageWidth`)
+  if (size <= 0) fail(`${path}.fontSizeToImageWidth`, 'must be positive')
+  return { suggestedLines: stringArray(item.suggestedLines, `${path}.suggestedLines`, 512, 4_096), fontSizeToImageWidth: size, safePolygon: polygon(item.safePolygon, `${path}.safePolygon`) }
 }
 
-function parseRegion(value: unknown, path: string): BrowserRegion {
+function parseDocumentBlock(value: unknown, path: string): DocumentSourceBlock {
   const item = record(value, path)
-  exact(
-    item,
-    [
-      'id',
-      'textPolygon',
-      'bubblePolygon',
-      'patch',
-      'sourceEnglish',
-      'baseChinese',
-      'displayedChinese',
-      'pinyin',
-      'ocrConfidence',
-      'readingOrder',
-      'role',
-      'contextGroup',
-      'confidenceEvidence',
-      'style',
-      'layout',
-      'hsk',
-    ],
-    path,
-  )
-  const patch = record(item.patch, `${path}.patch`)
-  exact(patch, ['blobId', 'mimeType', 'rect'], `${path}.patch`)
-  const textPolygon = polygon(item.textPolygon, `${path}.textPolygon`)
-  const patchRect = normalizedRect(patch.rect, `${path}.patch.rect`)
-  const firstTextPoint = textPolygon[0]
-  if (!firstTextPoint) fail(`${path}.textPolygon`, 'must contain at least one point')
-  const textBounds = textPolygon.reduce(
-    (bounds, point) => ({
-      x0: Math.min(bounds.x0, point.x),
-      y0: Math.min(bounds.y0, point.y),
-      x1: Math.max(bounds.x1, point.x),
-      y1: Math.max(bounds.y1, point.y),
-    }),
-    {
-      x0: firstTextPoint.x,
-      y0: firstTextPoint.y,
-      x1: firstTextPoint.x,
-      y1: firstTextPoint.y,
-    },
-  )
-  const overlapWidth =
-    Math.min(textBounds.x1, patchRect.x + patchRect.width) - Math.max(textBounds.x0, patchRect.x)
-  const overlapHeight =
-    Math.min(textBounds.y1, patchRect.y + patchRect.height) - Math.max(textBounds.y0, patchRect.y)
-  if (overlapWidth <= Number.EPSILON || overlapHeight <= Number.EPSILON) {
-    fail(`${path}.patch.rect`, 'must overlap the source text polygon')
+  exact(item, ['itemId', 'sourceIndex', 'itemOrder', 'kind', 'provenance', 'text'], path)
+  const text = utf8String(item.text, `${path}.text`, MAX_DOCUMENT_BLOCK_UTF8_BYTES)
+  if (text.includes('\r') || text.includes('\0') || text.trim() !== text) {
+    fail(`${path}.text`, 'must be normalized, trimmed text using LF line breaks')
   }
-  const bubblePolygon = optional(item.bubblePolygon, `${path}.bubblePolygon`, polygon)
-  const role = optional(
-    item.role,
-    `${path}.role`,
-    (value, rolePath) => oneOf(value, rolePath, ['dialogue', 'narration', 'system'] as const),
-  )
-  const contextGroup = optional(item.contextGroup, `${path}.contextGroup`, (value, contextPath) =>
-    string(value, contextPath, false, 512),
-  )
-  const confidenceEvidence = optional(
-    item.confidenceEvidence,
-    `${path}.confidenceEvidence`,
-    (value, evidencePath) => {
-      const evidence = record(value, evidencePath)
-      exact(
-        evidence,
-        ['ocrConsensus', 'geometryCoverage', 'contextConsistency', 'cleanupScore'],
-        evidencePath,
-      )
-      return {
-        ocrConsensus: unit(evidence.ocrConsensus, `${evidencePath}.ocrConsensus`),
-        geometryCoverage: unit(evidence.geometryCoverage, `${evidencePath}.geometryCoverage`),
-        contextConsistency: unit(
-          evidence.contextConsistency,
-          `${evidencePath}.contextConsistency`,
-        ),
-        cleanupScore: unit(evidence.cleanupScore, `${evidencePath}.cleanupScore`),
-      }
-    },
-  )
   return {
-    id: string(item.id, `${path}.id`, false, 512),
-    textPolygon,
-    ...(bubblePolygon === undefined ? {} : { bubblePolygon }),
-    patch: {
-      blobId: string(patch.blobId, `${path}.patch.blobId`, false, 512),
-      mimeType: oneOf(patch.mimeType, `${path}.patch.mimeType`, ['image/png'] as const),
-      rect: patchRect,
-    },
-    sourceEnglish: string(item.sourceEnglish, `${path}.sourceEnglish`, false, 4_096),
-    baseChinese: string(item.baseChinese, `${path}.baseChinese`, false, 4_096),
-    displayedChinese: string(item.displayedChinese, `${path}.displayedChinese`, false, 4_096),
-    pinyin: string(item.pinyin, `${path}.pinyin`, false, 8_192),
-    ocrConfidence: unit(item.ocrConfidence, `${path}.ocrConfidence`),
-    readingOrder: integer(item.readingOrder, `${path}.readingOrder`),
-    ...(role === undefined ? {} : { role }),
-    ...(contextGroup === undefined ? {} : { contextGroup }),
-    ...(confidenceEvidence === undefined ? {} : { confidenceEvidence }),
-    style: parseStyle(item.style, `${path}.style`),
-    layout: parseLayout(item.layout, `${path}.layout`),
-    hsk: parseHsk(item.hsk, `${path}.hsk`),
-  }
-}
-
-function parsePreservedArtworkRegion(
-  value: unknown,
-  path: string,
-): PreservedArtworkRegion {
-  const item = record(value, path)
-  exact(
-    item,
-    [
-      'id',
-      'textPolygon',
-      'sourceEnglish',
-      'ocrConfidence',
-      'readingOrder',
-      'translatedChinese',
-      'pinyin',
-      'teachingTerms',
-    ],
-    path,
-  )
-  const translatedChinese = optional(item.translatedChinese, `${path}.translatedChinese`, (value, childPath) =>
-    string(value, childPath, false, 4_096),
-  )
-  const pinyin = optional(item.pinyin, `${path}.pinyin`, (value, childPath) =>
-    string(value, childPath, false, 8_192),
-  )
-  const teachingTerms = optional(item.teachingTerms, `${path}.teachingTerms`, (value, childPath) =>
-    parseTeachingTerms(value, childPath),
-  )
-  return {
-    id: string(item.id, `${path}.id`, false, 512),
-    textPolygon: polygon(item.textPolygon, `${path}.textPolygon`),
-    sourceEnglish: string(item.sourceEnglish, `${path}.sourceEnglish`, false, 4_096),
-    ocrConfidence: unit(item.ocrConfidence, `${path}.ocrConfidence`),
-    readingOrder: integer(item.readingOrder, `${path}.readingOrder`),
-    ...(translatedChinese === undefined ? {} : { translatedChinese }),
-    ...(pinyin === undefined ? {} : { pinyin }),
-    ...(teachingTerms === undefined ? {} : { teachingTerms }),
-  }
-}
-
-function parseUnreadableRegion(value: unknown, path: string): UnreadableRegion {
-  const item = record(value, path)
-  exact(item, ['id', 'textPolygon', 'sourceEnglish', 'ocrConfidence', 'readingOrder', 'reason'], path)
-  return {
-    id: string(item.id, `${path}.id`, false, 512),
-    textPolygon: polygon(item.textPolygon, `${path}.textPolygon`),
-    sourceEnglish: string(item.sourceEnglish, `${path}.sourceEnglish`, false, 4_096),
-    ocrConfidence: unit(item.ocrConfidence, `${path}.ocrConfidence`),
-    readingOrder: integer(item.readingOrder, `${path}.readingOrder`),
-    reason: string(item.reason, `${path}.reason`, false, 2_048),
+    itemId: string(item.itemId, `${path}.itemId`, false, 256),
+    sourceIndex: integer(item.sourceIndex, `${path}.sourceIndex`, 0, MAX_U32),
+    itemOrder: integer(item.itemOrder, `${path}.itemOrder`, 0, MAX_U32),
+    kind: oneOf(item.kind, `${path}.kind`, spanKinds),
+    provenance: oneOf(item.provenance, `${path}.provenance`, ['dom'] as const),
+    text,
   }
 }
 
@@ -918,290 +618,175 @@ export function parseNativeHandshakeRequest(value: unknown): NativeHandshakeRequ
   const item = record(value, '$')
   exact(item, ['type', 'buildFingerprint', 'extensionVersion', 'extensionOrigin'], '$')
   const extensionOrigin = string(item.extensionOrigin, 'extensionOrigin')
-  if (!extensionOrigin.startsWith('moz-extension://') || extensionOrigin.endsWith('/')) {
-    fail('extensionOrigin', 'must be a moz-extension origin without a trailing slash')
-  }
-  return {
-    type: oneOf(item.type, 'type', ['start-or-discover-daemon'] as const),
-    buildFingerprint: buildFingerprint(item.buildFingerprint),
-    extensionVersion: string(item.extensionVersion, 'extensionVersion', false, 128),
-    extensionOrigin,
-  }
+  if (!extensionOrigin.startsWith('moz-extension://') || extensionOrigin.endsWith('/')) fail('extensionOrigin', 'must be a Firefox extension origin without a trailing slash')
+  return { type: oneOf(item.type, 'type', ['start-or-discover-daemon'] as const), buildFingerprint: buildFingerprint(item.buildFingerprint), extensionVersion: string(item.extensionVersion, 'extensionVersion', false, 128), extensionOrigin }
 }
 
 export function parseNativeReadyResponse(value: unknown): NativeReadyResponse {
   const item = record(value, '$')
-  exact(
-    item,
-    [
-      'type',
-      'buildFingerprint',
-      'engineVersion',
-      'port',
-      'token',
-      'sessionExpiresAtUnixMs',
-      'capabilities',
-    ],
-    '$',
-  )
+  exact(item, ['type', 'buildFingerprint', 'engineVersion', 'port', 'token', 'sessionExpiresAtUnixMs', 'capabilities'], '$')
   const capabilities = record(item.capabilities, 'capabilities')
-  exact(
-    capabilities,
-    ['sourceLanguages', 'targetLanguages', 'hskLevels', 'modelsReady'],
-    'capabilities',
-  )
-  const sourceLanguages = stringArray(capabilities.sourceLanguages, 'capabilities.sourceLanguages')
-  const targetLanguages = stringArray(capabilities.targetLanguages, 'capabilities.targetLanguages')
-  const hskLevels = array(capabilities.hskLevels, 'capabilities.hskLevels', 6).map((level, index) =>
-    hskLevel(level, `capabilities.hskLevels[${index}]`),
-  )
-  if (
-    sourceLanguages.length !== 1 ||
-    sourceLanguages[0] !== SOURCE_LANGUAGE ||
-    targetLanguages.length !== 1 ||
-    targetLanguages[0] !== TARGET_LANGUAGE ||
-    hskLevels.join(',') !== '1,2,3,4,5,6'
-  ) {
-    fail('capabilities', 'must advertise exactly the required translation capabilities')
-  }
-  const port = integer(item.port, 'port', 1)
-  if (port > 65_535) fail('port', 'must be at most 65535')
+  exact(capabilities, ['sourceLanguages', 'targetLanguages', 'hskLevels', 'modelsReady'], 'capabilities')
+  const sources = stringArray(capabilities.sourceLanguages, 'capabilities.sourceLanguages', 1)
+  const targets = stringArray(capabilities.targetLanguages, 'capabilities.targetLanguages', 1)
+  const levels = array(capabilities.hskLevels, 'capabilities.hskLevels', 6).map((level, index) => hskLevel(level, `capabilities.hskLevels[${index}]`))
+  if (sources.join() !== 'en' || targets.join() !== 'zh-CN' || levels.join() !== '1,2,3,4,5,6') fail('capabilities', 'must advertise the required capabilities exactly')
+  const port = integer(item.port, 'port', 1, 65_535)
   const token = string(item.token, 'token')
   if (!/^[\w-]{43,}$/u.test(token)) fail('token', 'must be a base64url session token')
-  return {
-    type: oneOf(item.type, 'type', ['ready'] as const),
-    buildFingerprint: buildFingerprint(item.buildFingerprint),
-    engineVersion: string(item.engineVersion, 'engineVersion', false, 128),
-    port,
-    token,
-    sessionExpiresAtUnixMs: integer(item.sessionExpiresAtUnixMs, 'sessionExpiresAtUnixMs', 1),
-    capabilities: {
-      sourceLanguages: ['en'],
-      targetLanguages: ['zh-CN'],
-      hskLevels: [1, 2, 3, 4, 5, 6],
-      modelsReady: boolean(capabilities.modelsReady, 'capabilities.modelsReady'),
-    },
+  return { type: oneOf(item.type, 'type', ['ready'] as const), buildFingerprint: buildFingerprint(item.buildFingerprint), engineVersion: string(item.engineVersion, 'engineVersion', false, 128), port, token, sessionExpiresAtUnixMs: integer(item.sessionExpiresAtUnixMs, 'sessionExpiresAtUnixMs', 1), capabilities: { sourceLanguages: ['en'], targetLanguages: ['zh-CN'], hskLevels: [1, 2, 3, 4, 5, 6], modelsReady: bool(capabilities.modelsReady, 'capabilities.modelsReady') } }
+}
+
+function parseResourceIdentity(value: unknown, path: string): ResourceIdentity {
+  const item = record(value, path)
+  exact(item, ['id', 'repository', 'repositoryRevision', 'filename', 'bytes', 'sha256'], path)
+  const id = string(item.id, `${path}.id`, false, 128)
+  const repository = string(item.repository, `${path}.repository`, false, 256)
+  const repositoryRevision = string(item.repositoryRevision, `${path}.repositoryRevision`, false, 40)
+  const filename = string(item.filename, `${path}.filename`, false, 255)
+  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/u.test(id)) fail(`${path}.id`, 'must be lowercase kebab-case')
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(repository)) {
+    fail(`${path}.repository`, 'must contain exactly one owner/name repository')
   }
+  if (!/^[a-f0-9]{40}$/u.test(repositoryRevision)) {
+    fail(`${path}.repositoryRevision`, 'must be a lowercase 40-character hexadecimal revision')
+  }
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(filename) || filename === '.' || filename === '..') {
+    fail(`${path}.filename`, 'must be a safe ASCII filename')
+  }
+  return { id, repository, repositoryRevision, filename, bytes: integer(item.bytes, `${path}.bytes`, 1), sha256: sha256(item.sha256, `${path}.sha256`) }
 }
 
 export function parseHealthResponse(value: unknown): HealthResponse {
   const item = record(value, '$')
-  exact(
-    item,
-    ['buildFingerprint', 'engineVersion', 'status', 'setupState', 'resourceIdentities'],
-    '$',
-  )
-  return {
-    buildFingerprint: buildFingerprint(item.buildFingerprint),
-    engineVersion: string(item.engineVersion, 'engineVersion', false, 128),
-    status: oneOf(item.status, 'status', ['ready'] as const),
-    setupState: oneOf(item.setupState, 'setupState', [
-      'missing-models',
-      'downloading',
-      'verifying',
-      'warming',
-      'ready',
-      'failed',
-    ] as const),
-    resourceIdentities: resourceIdentities(item.resourceIdentities, 'resourceIdentities'),
+  exact(item, ['buildFingerprint', 'engineVersion', 'status', 'setupState', 'resourceIdentities'], '$')
+  const resourceIdentities = array(item.resourceIdentities, 'resourceIdentities', 256).map((entry, index) => parseResourceIdentity(entry, `resourceIdentities[${index}]`))
+  if (resourceIdentities.length === 0) fail('resourceIdentities', 'must not be empty')
+  for (let index = 1; index < resourceIdentities.length; index += 1) {
+    if (resourceIdentities[index - 1]!.id >= resourceIdentities[index]!.id) {
+      fail(`resourceIdentities[${index}].id`, 'must be unique and sorted')
+    }
   }
+  return { buildFingerprint: buildFingerprint(item.buildFingerprint), engineVersion: string(item.engineVersion, 'engineVersion', false, 128), status: oneOf(item.status, 'status', ['ready'] as const), setupState: oneOf(item.setupState, 'setupState', ['missing-models', 'downloading', 'verifying', 'warming', 'ready', 'failed'] as const), resourceIdentities }
 }
 
-export function parseBrowserJobRequest(value: unknown): BrowserJobRequest {
+export function parseImageJobRequest(value: unknown): ImageJobRequest {
   const item = record(value, '$')
-  exact(
-    item,
-    [
-      'buildFingerprint',
-      'clientImageId',
-      'sourceSha256',
-      'sourceMimeType',
-      'naturalWidth',
-      'naturalHeight',
-      'pageSessionId',
-      'pageIndex',
-      'chapterPageOrder',
-      'surfaceKind',
-      'visibleRects',
-      'settings',
-    ],
-    '$',
-  )
-  const settings = record(item.settings, 'settings')
-  exact(
-    settings,
-    [
-      'sourceLanguage',
-      'targetLanguage',
-      'hskStandard',
-      'hskLevel',
-      'readingDirection',
-      'learningMode',
-    ],
-    'settings',
-  )
+  exact(item, ['buildFingerprint', 'clientImageId', 'sourceSha256', 'sourceMimeType', 'naturalWidth', 'naturalHeight', 'pageSessionId', 'sourceIndex', 'chapterSourceOrder', 'surfaceKind', 'visibleRects', 'readingDirection', 'settings'], '$')
+  const sourceIndex = integer(item.sourceIndex, 'sourceIndex', 0, MAX_U32)
   return {
-    buildFingerprint: buildFingerprint(item.buildFingerprint),
-    clientImageId: string(item.clientImageId, 'clientImageId', false, 512),
-    sourceSha256: sha256(item.sourceSha256, 'sourceSha256'),
-    sourceMimeType: oneOf(item.sourceMimeType, 'sourceMimeType', [
-      'image/png',
-      'image/jpeg',
-      'image/webp',
-      'image/gif',
-    ] as const),
-    naturalWidth: integer(item.naturalWidth, 'naturalWidth', 1),
-    naturalHeight: integer(item.naturalHeight, 'naturalHeight', 1),
-    pageSessionId: string(item.pageSessionId, 'pageSessionId', false, 256),
-    pageIndex: integer(item.pageIndex, 'pageIndex'),
-    chapterPageOrder: chapterPageOrder(item.chapterPageOrder, 'chapterPageOrder', integer(item.pageIndex, 'pageIndex')),
-    surfaceKind: oneOf(item.surfaceKind, 'surfaceKind', [
-      'image',
-      'background',
-      'canvas',
-      'webgl',
-      'frame',
-    ] as const),
-    visibleRects: visibleRects(item.visibleRects, 'visibleRects'),
-    settings: {
-      sourceLanguage: oneOf(settings.sourceLanguage, 'settings.sourceLanguage', ['en'] as const),
-      targetLanguage: oneOf(settings.targetLanguage, 'settings.targetLanguage', ['zh-CN'] as const),
-      hskStandard: oneOf(settings.hskStandard, 'settings.hskStandard', ['2.0'] as const),
-      hskLevel: hskLevel(settings.hskLevel, 'settings.hskLevel'),
-      readingDirection: oneOf(settings.readingDirection, 'settings.readingDirection', [
-        'ltr',
-        'rtl',
-      ] as const),
-      learningMode: oneOf(settings.learningMode, 'settings.learningMode', [
-        'natural',
-        'strict',
-      ] as const),
-    },
+    buildFingerprint: buildFingerprint(item.buildFingerprint), clientImageId: string(item.clientImageId, 'clientImageId', false, 512), sourceSha256: sha256(item.sourceSha256, 'sourceSha256'),
+    sourceMimeType: oneOf(item.sourceMimeType, 'sourceMimeType', ['image/png', 'image/jpeg', 'image/webp', 'image/gif'] as const),
+    naturalWidth: integer(item.naturalWidth, 'naturalWidth', 1), naturalHeight: integer(item.naturalHeight, 'naturalHeight', 1), pageSessionId: string(item.pageSessionId, 'pageSessionId', false, 256), sourceIndex,
+    chapterSourceOrder: sourceOrder(item.chapterSourceOrder, 'chapterSourceOrder', sourceIndex),
+    surfaceKind: oneOf(item.surfaceKind, 'surfaceKind', ['image', 'background', 'canvas', 'webgl', 'frame'] as const), visibleRects: visibleRects(item.visibleRects, 'visibleRects'),
+    readingDirection: oneOf(item.readingDirection, 'readingDirection', ['ltr', 'rtl'] as const),
+    settings: parseTranslationSettings(item.settings, 'settings'),
   }
 }
 
-export function parseBrowserJobCreated(value: unknown): BrowserJobCreated {
+export function parseDocumentJobRequest(value: unknown): DocumentJobRequest {
+  const item = record(value, '$')
+  exact(item, ['buildFingerprint', 'pageSessionId', 'sourceSha256', 'settings', 'blocks'], '$')
+  const blocks = array(item.blocks, 'blocks', MAX_DOCUMENT_BLOCKS).map((block, index) => parseDocumentBlock(block, `blocks[${index}]`))
+  if (blocks.length === 0) fail('blocks', 'must not be empty')
+  const identities = new Set<string>()
+  for (let index = 0; index < blocks.length; index += 1) {
+    const block = blocks[index]!
+    if (identities.has(block.itemId)) fail(`blocks[${index}].itemId`, 'must be unique')
+    identities.add(block.itemId)
+    if (index > 0) {
+      const previous = blocks[index - 1]!
+      if (previous.sourceIndex > block.sourceIndex || (previous.sourceIndex === block.sourceIndex && previous.itemOrder >= block.itemOrder)) fail(`blocks[${index}]`, 'must be ordered by sourceIndex and itemOrder')
+    }
+  }
+  const parsed: DocumentJobRequest = { buildFingerprint: buildFingerprint(item.buildFingerprint), pageSessionId: string(item.pageSessionId, 'pageSessionId', false, 256), sourceSha256: sha256(item.sourceSha256, 'sourceSha256'), settings: parseTranslationSettings(item.settings, 'settings'), blocks }
+  if (utf8.encode(JSON.stringify(parsed)).byteLength > MAX_DOCUMENT_UTF8_BYTES) fail('$', `must be at most ${MAX_DOCUMENT_UTF8_BYTES} UTF-8 bytes`)
+  return parsed
+}
+
+export function parseJobCreated(value: unknown): JobCreated {
   const item = record(value, '$')
   exact(item, ['buildFingerprint', 'jobId'], '$')
+  return { buildFingerprint: buildFingerprint(item.buildFingerprint), jobId: string(item.jobId, 'jobId', false, 512) }
+}
+
+export function parseJobFocus(value: unknown): JobFocus {
+  const item = record(value, '$')
+  const kind = oneOf(item.kind, 'kind', ['image', 'document'] as const)
+  if (kind === 'image') {
+    exact(item, ['kind', 'visibleRects', 'active'], '$')
+    return { kind, visibleRects: visibleRects(item.visibleRects, 'visibleRects'), active: bool(item.active, 'active') }
+  }
+  exact(item, ['kind', 'visibleBlockIds', 'active'], '$')
+  const visibleBlockIds = stringArray(item.visibleBlockIds, 'visibleBlockIds', MAX_VISIBLE_BLOCK_IDS, 256)
+  if (new Set(visibleBlockIds).size !== visibleBlockIds.length) fail('visibleBlockIds', 'must be unique')
+  return { kind, visibleBlockIds, active: bool(item.active, 'active') }
+}
+
+function parseImageRegion(value: unknown, path: string): ImageRegion {
+  const item = record(value, path)
+  exact(item, ['itemId', 'itemOrder', 'kind', 'provenance', 'textPolygon', 'bubblePolygon', 'patch', 'text', 'confidence', 'contextGroup', 'confidenceEvidence', 'style', 'layout'], path)
+  const patch = record(item.patch, `${path}.patch`)
+  exact(patch, ['blobId', 'mimeType', 'rect'], `${path}.patch`)
+  const bubblePolygon = optional(item.bubblePolygon, `${path}.bubblePolygon`, polygon)
+  const contextGroup = optional(item.contextGroup, `${path}.contextGroup`, string)
+  const evidence = item.confidenceEvidence === undefined ? undefined : (() => {
+    const parsed = record(item.confidenceEvidence, `${path}.confidenceEvidence`)
+    exact(parsed, ['ocrConsensus', 'geometryCoverage', 'contextConsistency', 'cleanupScore'], `${path}.confidenceEvidence`)
+    return { ocrConsensus: unit(parsed.ocrConsensus, `${path}.confidenceEvidence.ocrConsensus`), geometryCoverage: unit(parsed.geometryCoverage, `${path}.confidenceEvidence.geometryCoverage`), contextConsistency: unit(parsed.contextConsistency, `${path}.confidenceEvidence.contextConsistency`), cleanupScore: unit(parsed.cleanupScore, `${path}.confidenceEvidence.cleanupScore`) }
+  })()
   return {
-    buildFingerprint: buildFingerprint(item.buildFingerprint),
-    jobId: string(item.jobId, 'jobId', false, 512),
+    itemId: string(item.itemId, `${path}.itemId`, false, 512), itemOrder: integer(item.itemOrder, `${path}.itemOrder`), kind: oneOf(item.kind, `${path}.kind`, spanKinds), provenance: oneOf(item.provenance, `${path}.provenance`, ['ocr'] as const), textPolygon: polygon(item.textPolygon, `${path}.textPolygon`), ...(bubblePolygon === undefined ? {} : { bubblePolygon }),
+    patch: { blobId: string(patch.blobId, `${path}.patch.blobId`, false, 512), mimeType: oneOf(patch.mimeType, `${path}.patch.mimeType`, ['image/png'] as const), rect: normalizedRect(patch.rect, `${path}.patch.rect`) },
+    text: parseTranslatedText(item.text, `${path}.text`), confidence: unit(item.confidence, `${path}.confidence`), ...(contextGroup === undefined ? {} : { contextGroup }), ...(evidence === undefined ? {} : { confidenceEvidence: evidence }), style: parseStyle(item.style, `${path}.style`), layout: parseLayout(item.layout, `${path}.layout`),
   }
 }
 
-export function parseViewportUpdate(value: unknown): ViewportUpdate {
-  const item = record(value, '$')
-  exact(item, ['visibleRects', 'active'], '$')
-  return {
-    visibleRects: visibleRects(item.visibleRects, 'visibleRects'),
-    active: boolean(item.active, 'active'),
-  }
+function parsePreservedImageRegion(value: unknown, path: string): PreservedImageRegion {
+  const item = record(value, path)
+  exact(item, ['itemId', 'itemOrder', 'textPolygon', 'sourceText', 'confidence', 'reason'], path)
+  return { itemId: string(item.itemId, `${path}.itemId`, false, 512), itemOrder: integer(item.itemOrder, `${path}.itemOrder`), textPolygon: polygon(item.textPolygon, `${path}.textPolygon`), sourceText: string(item.sourceText, `${path}.sourceText`, true, MAX_DOCUMENT_BLOCK_UTF8_BYTES), confidence: unit(item.confidence, `${path}.confidence`), reason: string(item.reason, `${path}.reason`, false, 2_048) }
+}
+
+function parseReadyDocumentBlock(value: unknown, path: string): ReadyDocumentBlock {
+  const item = record(value, path)
+  exact(item, ['itemId', 'sourceIndex', 'itemOrder', 'kind', 'text'], path)
+  return { itemId: string(item.itemId, `${path}.itemId`, false, 512), sourceIndex: integer(item.sourceIndex, `${path}.sourceIndex`), itemOrder: integer(item.itemOrder, `${path}.itemOrder`), kind: oneOf(item.kind, `${path}.kind`, spanKinds), text: parseTranslatedText(item.text, `${path}.text`) }
+}
+
+function parsePreservedDocumentBlock(value: unknown, path: string): PreservedDocumentBlock {
+  const item = record(value, path)
+  exact(item, ['itemId', 'sourceIndex', 'itemOrder', 'kind', 'sourceText', 'reason'], path)
+  return { itemId: string(item.itemId, `${path}.itemId`, false, 512), sourceIndex: integer(item.sourceIndex, `${path}.sourceIndex`), itemOrder: integer(item.itemOrder, `${path}.itemOrder`), kind: oneOf(item.kind, `${path}.kind`, spanKinds), sourceText: utf8String(item.sourceText, `${path}.sourceText`, MAX_DOCUMENT_BLOCK_UTF8_BYTES), reason: string(item.reason, `${path}.reason`, false, 2_048) }
 }
 
 export function parseJobUpdate(value: unknown, path = '$'): JobUpdate {
   const item = record(value, path)
   const sequence = integer(item.sequence, `${path}.sequence`, 1)
-  const type = oneOf(item.type, `${path}.type`, [
-    'progress',
-    'regionReady',
-    'artworkPreserved',
-    'unreadable',
-    'complete',
-    'failed',
-    'cancelled',
-  ] as const)
-  switch (type) {
-    case 'progress': {
-      exact(
-        item,
-        [
-          'sequence',
-          'type',
-          'stage',
-          'stageProgress',
-          'overallProgress',
-          'current',
-          'total',
-          'message',
-        ],
-        path,
-      )
-      const current = optional(item.current, `${path}.current`, integer)
-      const total = optional(item.total, `${path}.total`, (candidate, itemPath) =>
-        integer(candidate, itemPath, 1),
-      )
-      if ((current === undefined) !== (total === undefined)) {
-        fail(`${path}.current`, 'current and total must be present together')
-      }
-      if (current !== undefined && total !== undefined && current > total) {
-        fail(`${path}.current`, 'must not exceed total')
-      }
-      const stageProgress = optional(item.stageProgress, `${path}.stageProgress`, unit)
-      const overallProgress = optional(item.overallProgress, `${path}.overallProgress`, unit)
-      return {
-        sequence,
-        type,
-        stage: oneOf(item.stage, `${path}.stage`, jobStages),
-        ...(stageProgress === undefined ? {} : { stageProgress }),
-        ...(overallProgress === undefined ? {} : { overallProgress }),
-        ...(current === undefined ? {} : { current }),
-        ...(total === undefined ? {} : { total }),
-        message: string(item.message, `${path}.message`, false, 2_048),
-      }
-    }
-    case 'regionReady': {
-      exact(item, ['sequence', 'type', 'region'], path)
-      const region = parseRegion(item.region, `${path}.region`)
-      if (region.hsk.repairState === 'pending') {
-        fail(
-          `${path}.region.hsk.repairState`,
-          'regionReady may publish only a terminal translation',
-        )
-      }
-      return {
-        sequence,
-        type,
-        region,
-      }
-    }
-    case 'artworkPreserved':
-      exact(item, ['sequence', 'type', 'region'], path)
-      return {
-        sequence,
-        type,
-        region: parsePreservedArtworkRegion(item.region, `${path}.region`),
-      }
-    case 'unreadable':
-      exact(item, ['sequence', 'type', 'region'], path)
-      return {
-        sequence,
-        type,
-        region: parseUnreadableRegion(item.region, `${path}.region`),
-      }
-    case 'complete': {
-      exact(item, ['sequence', 'type', 'message'], path)
-      const message = optional(item.message, `${path}.message`, (candidate, itemPath) =>
-        string(candidate, itemPath, false, 2_048),
-      )
-      return { sequence, type, ...(message === undefined ? {} : { message }) }
-    }
-    case 'failed':
-      exact(item, ['sequence', 'type', 'code', 'message', 'retryable'], path)
-      return {
-        sequence,
-        type,
-        code: string(item.code, `${path}.code`, false, 256),
-        message: string(item.message, `${path}.message`, false, 2_048),
-        retryable: boolean(item.retryable, `${path}.retryable`),
-      }
-    case 'cancelled': {
-      exact(item, ['sequence', 'type', 'message'], path)
-      const message = optional(item.message, `${path}.message`, (candidate, itemPath) =>
-        string(candidate, itemPath, false, 2_048),
-      )
-      return { sequence, type, ...(message === undefined ? {} : { message }) }
-    }
+  const type = oneOf(item.type, `${path}.type`, ['progress', 'imageRegionReady', 'imageRegionPreserved', 'documentBlockReady', 'documentBlockPreserved', 'complete', 'failed', 'cancelled'] as const)
+  if (type === 'progress') {
+    exact(item, ['sequence', 'type', 'stage', 'stageProgress', 'overallProgress', 'current', 'total', 'message'], path)
+    const current = optional(item.current, `${path}.current`, integer)
+    const total = optional(item.total, `${path}.total`, (candidate, childPath) => integer(candidate, childPath, 1))
+    if ((current === undefined) !== (total === undefined) || (current !== undefined && total !== undefined && current > total)) fail(`${path}.current`, 'must be paired with and not exceed total')
+    const stageProgress = optional(item.stageProgress, `${path}.stageProgress`, unit)
+    const overallProgress = optional(item.overallProgress, `${path}.overallProgress`, unit)
+    return { sequence, type, stage: oneOf(item.stage, `${path}.stage`, jobStages), ...(stageProgress === undefined ? {} : { stageProgress }), ...(overallProgress === undefined ? {} : { overallProgress }), ...(current === undefined ? {} : { current }), ...(total === undefined ? {} : { total }), message: string(item.message, `${path}.message`, false, 2_048) }
   }
+  if (type === 'imageRegionReady') { exact(item, ['sequence', 'type', 'region'], path); return { sequence, type, region: parseImageRegion(item.region, `${path}.region`) } }
+  if (type === 'imageRegionPreserved') { exact(item, ['sequence', 'type', 'region'], path); return { sequence, type, region: parsePreservedImageRegion(item.region, `${path}.region`) } }
+  if (type === 'documentBlockReady') { exact(item, ['sequence', 'type', 'block'], path); return { sequence, type, block: parseReadyDocumentBlock(item.block, `${path}.block`) } }
+  if (type === 'documentBlockPreserved') { exact(item, ['sequence', 'type', 'block'], path); return { sequence, type, block: parsePreservedDocumentBlock(item.block, `${path}.block`) } }
+  if (type === 'complete') {
+    exact(item, ['sequence', 'type', 'translatedCount', 'preservedCount', 'message'], path)
+    const message = optional(item.message, `${path}.message`, (candidate, childPath) => string(candidate, childPath, false, 2_048))
+    return { sequence, type, translatedCount: integer(item.translatedCount, `${path}.translatedCount`), preservedCount: integer(item.preservedCount, `${path}.preservedCount`), ...(message === undefined ? {} : { message }) }
+  }
+  if (type === 'failed') { exact(item, ['sequence', 'type', 'code', 'message', 'retryable'], path); return { sequence, type, code: string(item.code, `${path}.code`, false, 256), message: string(item.message, `${path}.message`, false, 2_048), retryable: bool(item.retryable, `${path}.retryable`) } }
+  exact(item, ['sequence', 'type', 'message'], path)
+  const message = optional(item.message, `${path}.message`, (candidate, childPath) => string(candidate, childPath, false, 2_048))
+  return { sequence, type, ...(message === undefined ? {} : { message }) }
 }
 
 export function parseJobUpdateBatch(value: unknown, after = 0): JobUpdateBatch {
@@ -1209,170 +794,66 @@ export function parseJobUpdateBatch(value: unknown, after = 0): JobUpdateBatch {
   exact(item, ['jobId', 'nextSequence', 'updates'], '$')
   const nextSequence = integer(item.nextSequence, 'nextSequence')
   if (nextSequence < after) fail('nextSequence', 'must not move backwards')
-  const updates = array(item.updates, 'updates', 2_048).map((update, index) =>
-    parseJobUpdate(update, `updates[${index}]`),
-  )
+  const updates = array(item.updates, 'updates', 1_024).map((entry, index) => parseJobUpdate(entry, `updates[${index}]`))
   let previous = after
   for (const [index, update] of updates.entries()) {
-    if (update.sequence <= previous) {
-      fail(`updates[${index}].sequence`, 'must increase beyond the requested sequence')
-    }
-    if (update.sequence > nextSequence) {
-      fail(`updates[${index}].sequence`, 'must not exceed nextSequence')
-    }
-    if (
-      (update.type === 'complete' || update.type === 'failed' || update.type === 'cancelled') &&
-      index !== updates.length - 1
-    ) {
-      fail(`updates[${index}].type`, 'terminal updates must be last')
-    }
+    if (update.sequence !== previous + 1 || update.sequence > nextSequence) fail(`updates[${index}].sequence`, 'must be contiguous after the requested cursor')
+    if (['complete', 'failed', 'cancelled'].includes(update.type) && index !== updates.length - 1) fail(`updates[${index}].type`, 'terminal updates must be last')
     previous = update.sequence
   }
-  if (updates.length > 0 && previous !== nextSequence) {
-    fail('nextSequence', 'must equal the final update sequence')
-  }
-  if (updates.length === 0 && nextSequence !== after) {
-    fail('nextSequence', 'must equal the requested sequence when no updates are returned')
-  }
-  return {
-    jobId: string(item.jobId, 'jobId', false, 512),
-    nextSequence,
-    updates,
-  }
+  if ((updates.length > 0 && previous !== nextSequence) || (updates.length === 0 && nextSequence !== after)) fail('nextSequence', 'must equal the last returned sequence')
+  return { jobId: string(item.jobId, 'jobId', false, 512), nextSequence, updates }
 }
 
 export function parseBrowserSetupStatus(value: unknown): BrowserSetupStatus {
   const item = record(value, '$')
-  exact(
-    item,
-    [
-      'state',
-      'modelId',
-      'currentFile',
-      'completedBytes',
-      'totalBytes',
-      'requiredDiskBytes',
-      'message',
-      'errorCode',
-    ],
-    '$',
-  )
-  const state = oneOf(item.state, 'state', [
-    'missing-models',
-    'downloading',
-    'verifying',
-    'warming',
-    'ready',
-    'failed',
-  ] as const)
+  exact(item, ['state', 'modelId', 'currentFile', 'completedBytes', 'totalBytes', 'requiredDiskBytes', 'message', 'errorCode'], '$')
+  const state = oneOf(item.state, 'state', ['missing-models', 'downloading', 'verifying', 'warming', 'ready', 'failed'] as const)
+  const currentFile = optional(item.currentFile, 'currentFile', string)
   const completedBytes = optional(item.completedBytes, 'completedBytes', integer)
   const totalBytes = optional(item.totalBytes, 'totalBytes', integer)
-  if ((completedBytes === undefined) !== (totalBytes === undefined)) {
-    fail('completedBytes', 'completed and total bytes must be present together')
-  }
-  if (completedBytes !== undefined && totalBytes !== undefined && completedBytes > totalBytes) {
-    fail('completedBytes', 'must not exceed total bytes')
-  }
-  const errorCode = optional(item.errorCode, 'errorCode', string)
-  if (state === 'failed' && !errorCode) fail('errorCode', 'failed setup requires an error code')
-  const modelId = string(item.modelId, 'modelId', false, 128)
-  if (modelId !== 'qwen3.5-4b') fail('modelId', 'must identify the mandatory qwen3.5-4b model')
-  const currentFile = optional(item.currentFile, 'currentFile', string)
   const requiredDiskBytes = optional(item.requiredDiskBytes, 'requiredDiskBytes', integer)
-  return {
-    state,
-    modelId,
-    ...(currentFile === undefined ? {} : { currentFile }),
-    ...(completedBytes === undefined ? {} : { completedBytes }),
-    ...(totalBytes === undefined ? {} : { totalBytes }),
-    ...(requiredDiskBytes === undefined ? {} : { requiredDiskBytes }),
-    message: string(item.message, 'message', false, 2_048),
-    ...(errorCode === undefined ? {} : { errorCode }),
-  }
+  const errorCode = optional(item.errorCode, 'errorCode', string)
+  if ((completedBytes === undefined) !== (totalBytes === undefined) || (completedBytes !== undefined && totalBytes !== undefined && completedBytes > totalBytes)) fail('completedBytes', 'must be paired with and not exceed totalBytes')
+  if (state === 'failed' && !errorCode) fail('errorCode', 'is required for failed setup')
+  return { state, modelId: string(item.modelId, 'modelId', false, 128), ...(currentFile === undefined ? {} : { currentFile }), ...(completedBytes === undefined ? {} : { completedBytes }), ...(totalBytes === undefined ? {} : { totalBytes }), ...(requiredDiskBytes === undefined ? {} : { requiredDiskBytes }), message: string(item.message, 'message', false, 2_048), ...(errorCode === undefined ? {} : { errorCode }) }
 }
 
 export function parseLookupRequest(value: unknown): LookupRequest {
   const item = record(value, '$')
-  const interaction = oneOf(
-    item.interaction,
-    'interaction',
-    ['selection', 'hover'] as const,
-  )
+  const interaction = oneOf(item.interaction, 'interaction', ['selection', 'hover'] as const)
   const jobId = optional(item.jobId, 'jobId', string)
-  const regionId = optional(item.regionId, 'regionId', string)
-  if ((jobId === undefined) !== (regionId === undefined)) {
-    fail('regionId', 'jobId and regionId must be present together')
-  }
+  const itemId = optional(item.itemId, 'itemId', string)
+  if ((jobId === undefined) !== (itemId === undefined)) fail('itemId', 'must be paired with jobId')
   if (interaction === 'selection') {
-    exact(item, ['interaction', 'selectedText', 'jobId', 'regionId'], '$')
-    const selectedText = string(item.selectedText, 'selectedText', false, 256)
-    if ([...selectedText].length > 256) {
-      fail('selectedText', 'must contain at most 256 characters')
-    }
-    return {
-      interaction,
-      selectedText,
-      ...(jobId === undefined ? {} : { jobId }),
-      ...(regionId === undefined ? {} : { regionId }),
-    }
+    exact(item, ['interaction', 'selectedText', 'jobId', 'itemId'], '$')
+    return { interaction, selectedText: string(item.selectedText, 'selectedText', false, 256), ...(jobId === undefined ? {} : { jobId }), ...(itemId === undefined ? {} : { itemId }) }
   }
-  exact(item, ['interaction', 'characterOffset', 'jobId', 'regionId'], '$')
-  if (jobId === undefined || regionId === undefined) {
-    fail('jobId', 'hover lookup requires a translated job and region')
-  }
-  return {
-    interaction,
-    characterOffset: integer(item.characterOffset, 'characterOffset', 0),
-    jobId,
-    regionId,
-  }
+  exact(item, ['interaction', 'characterOffset', 'jobId', 'itemId'], '$')
+  if (!jobId || !itemId) fail('jobId', 'hover lookup requires jobId and itemId')
+  return { interaction, characterOffset: integer(item.characterOffset, 'characterOffset'), jobId, itemId }
 }
 
 export function parseLookupResult(value: unknown): LookupResult {
   const item = record(value, '$')
-  exact(item, ['selectedText', 'tokens', 'region'], '$')
-  const tokens = array(item.tokens, 'tokens', 512).map((token, index) => {
-    const parsed = record(token, `tokens[${index}]`)
-    exact(
-      parsed,
-      ['simplified', 'pinyin', 'definitions', 'hskLevel', 'properName'],
-      `tokens[${index}]`,
-    )
-    const properName = boolean(parsed.properName, `tokens[${index}].properName`)
-    const parsedHskLevel = optional(parsed.hskLevel, `tokens[${index}].hskLevel`, hskLevel)
-    return {
-      simplified: string(parsed.simplified, `tokens[${index}].simplified`),
-      pinyin: string(parsed.pinyin, `tokens[${index}].pinyin`, properName),
-      definitions: stringArray(parsed.definitions, `tokens[${index}].definitions`),
-      ...(parsedHskLevel === undefined ? {} : { hskLevel: parsedHskLevel }),
-      properName,
-    }
+  exact(item, ['selectedText', 'tokens', 'item'], '$')
+  const tokens = array(item.tokens, 'tokens', 512).map((candidate, index) => {
+    const path = `tokens[${index}]`
+    const token = record(candidate, path)
+    exact(token, ['simplified', 'pinyin', 'definitions', 'hskLevel', 'properName'], path)
+    const level = optional(token.hskLevel, `${path}.hskLevel`, hskLevel)
+    return { simplified: string(token.simplified, `${path}.simplified`), pinyin: string(token.pinyin, `${path}.pinyin`, true), definitions: stringArray(token.definitions, `${path}.definitions`, 32, 2_048), ...(level === undefined ? {} : { hskLevel: level }), properName: bool(token.properName, `${path}.properName`) }
   })
-  const region =
-    item.region === undefined
-      ? undefined
-      : (() => {
-          const parsed = record(item.region, 'region')
-          exact(parsed, ['displayedChinese', 'baseChinese', 'sourceEnglish'], 'region')
-          return {
-            displayedChinese: string(parsed.displayedChinese, 'region.displayedChinese', true),
-            baseChinese: string(parsed.baseChinese, 'region.baseChinese', true),
-            sourceEnglish: string(parsed.sourceEnglish, 'region.sourceEnglish', true),
-          }
-        })()
-  return {
-    selectedText: string(item.selectedText, 'selectedText'),
-    tokens,
-    ...(region === undefined ? {} : { region }),
-  }
+  const context = item.item === undefined ? undefined : (() => {
+    const parsed = record(item.item, 'item')
+    exact(parsed, ['displayedChinese', 'baseChinese', 'sourceText'], 'item')
+    return { displayedChinese: string(parsed.displayedChinese, 'item.displayedChinese', true, MAX_DOCUMENT_BLOCK_UTF8_BYTES), baseChinese: string(parsed.baseChinese, 'item.baseChinese', true, MAX_DOCUMENT_BLOCK_UTF8_BYTES), sourceText: string(parsed.sourceText, 'item.sourceText', true, MAX_DOCUMENT_BLOCK_UTF8_BYTES) }
+  })()
+  return { selectedText: string(item.selectedText, 'selectedText'), tokens, ...(context === undefined ? {} : { item: context }) }
 }
 
 export function parseErrorResponse(value: unknown): ErrorResponse {
   const item = record(value, '$')
   exact(item, ['code', 'message', 'retryable'], '$')
-  return {
-    code: string(item.code, 'code', false, 256),
-    message: string(item.message, 'message', false, 2_048),
-    retryable: boolean(item.retryable, 'retryable'),
-  }
+  return { code: string(item.code, 'code', false, 256), message: string(item.message, 'message', false, 2_048), retryable: bool(item.retryable, 'retryable') }
 }

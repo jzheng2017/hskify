@@ -1,23 +1,24 @@
 import {
-  parseBrowserJobCreated,
+  parseJobCreated,
   parseBrowserSetupStatus,
   parseErrorResponse,
   parseHealthResponse,
   parseJobUpdateBatch,
   parseLookupResult,
-  type BrowserJobRequest,
+  type DocumentJobRequest,
+  type ImageJobRequest,
+  type JobFocus,
   type JobUpdateBatch,
   type BrowserSetupStatus,
   type LookupRequest,
   type LookupResult,
   type NativeReadyResponse,
-  type ViewportUpdate,
 } from '../contracts/browser'
 import { NativeSessionManager } from './native-session'
 
 const MAX_PATCH_BYTES = 25 * 1024 * 1024
 const MAX_FONT_BYTES = 32 * 1024 * 1024
-const EXTENSION_ORIGIN_HEADER = 'X-HSK-Manga-Extension-Origin'
+const EXTENSION_ORIGIN_HEADER = 'X-Hskify-Extension-Origin'
 export const UPDATE_WAIT_MS = 20_000
 export const REQUEST_TIMEOUT_MS = 30_000
 export const UPDATE_TIMEOUT_GRACE_MS = 5_000
@@ -241,7 +242,7 @@ export class CompanionClient {
     return response
   }
 
-  async createJob(bytes: ArrayBuffer, request: BrowserJobRequest): Promise<string> {
+  async createImageJob(bytes: ArrayBuffer, request: ImageJobRequest): Promise<string> {
     const form = new FormData()
     form.append('image', new Blob([bytes], { type: request.sourceMimeType }), 'source-image')
     form.append(
@@ -249,15 +250,24 @@ export class CompanionClient {
       new Blob([JSON.stringify(request)], { type: 'application/json' }),
       'request.json',
     )
-    const response = await this.request('/jobs', { method: 'POST', body: form })
-    return parseBrowserJobCreated(await parseJsonResponse(response)).jobId
+    const response = await this.request('/jobs/image', { method: 'POST', body: form })
+    return parseJobCreated(await parseJsonResponse(response)).jobId
   }
 
-  async updateViewport(jobId: string, viewport: ViewportUpdate): Promise<void> {
-    await this.request(`/jobs/${encodeURIComponent(jobId)}/viewport`, {
+  async createDocumentJob(request: DocumentJobRequest): Promise<string> {
+    const response = await this.request('/jobs/document', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(request),
+    })
+    return parseJobCreated(await parseJsonResponse(response)).jobId
+  }
+
+  async updateFocus(jobId: string, focus: JobFocus): Promise<void> {
+    await this.request(`/jobs/${encodeURIComponent(jobId)}/focus`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(viewport),
+      body: JSON.stringify(focus),
     })
   }
 
@@ -295,6 +305,15 @@ export class CompanionClient {
 
   async startModelSetup(): Promise<BrowserSetupStatus> {
     const response = await this.request('/setup/models', { method: 'POST' })
+    return parseBrowserSetupStatus(await parseJsonResponse(response))
+  }
+
+  async warmup(kind: 'image' | 'document'): Promise<BrowserSetupStatus> {
+    const response = await this.request('/warmup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ kind }),
+    })
     return parseBrowserSetupStatus(await parseJsonResponse(response))
   }
 

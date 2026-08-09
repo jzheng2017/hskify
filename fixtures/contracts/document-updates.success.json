@@ -1,0 +1,50 @@
+{
+  "jobId": "fixture-document-job-0001",
+  "nextSequence": 3,
+  "updates": [
+    {
+      "sequence": 1,
+      "type": "documentBlockReady",
+      "block": {
+        "itemId": "block-0",
+        "sourceIndex": 0,
+        "itemOrder": 0,
+        "kind": "heading",
+        "text": {
+          "sourceText": "Chapter One",
+          "baseChinese": "第一章",
+          "displayedChinese": "第一章",
+          "pinyin": "dì yī zhāng",
+          "hsk": {
+            "requestedLevel": 2,
+            "learningMode": "natural",
+            "strictlyValid": true,
+            "levelCoverage": 1,
+            "aboveLevelTokens": [],
+            "teachingTerms": [],
+            "repairState": "not-needed"
+          }
+        }
+      }
+    },
+    {
+      "sequence": 2,
+      "type": "documentBlockPreserved",
+      "block": {
+        "itemId": "block-1",
+        "sourceIndex": 1,
+        "itemOrder": 0,
+        "kind": "prose",
+        "sourceText": "The rain had stopped before dawn.",
+        "reason": "fixture preservation"
+      }
+    },
+    {
+      "sequence": 3,
+      "type": "complete",
+      "translatedCount": 1,
+      "preservedCount": 1,
+      "message": "Document translation complete"
+    }
+  ]
+}

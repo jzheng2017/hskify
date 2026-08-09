@@ -3,7 +3,7 @@ param(
     [string] $BundleRoot,
     [string] $ProductRoot = (Join-Path $env:LOCALAPPDATA 'Hskify'),
     [Parameter(DontShow = $true)]
-    [string] $RegistryPath = 'HKCU:\Software\Mozilla\NativeMessagingHosts\local.hskify.hsk_manga'
+    [string] $RegistryPath = 'HKCU:\Software\Mozilla\NativeMessagingHosts\local.hskify.browser'
 )
 
 Set-StrictMode -Version Latest
@@ -108,7 +108,7 @@ function Stop-InstalledHskifyProcesses {
     $companionRoot = [IO.Path]::GetFullPath(
         (Join-Path $InstalledAppRoot 'companion')
     ).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
-    foreach ($name in @('hsk-manga-native-host', 'hsk-manga-browser-daemon')) {
+    foreach ($name in @('hskify-native-host', 'hskify-browser-daemon')) {
         foreach ($process in @(Get-Process -Name $name -ErrorAction SilentlyContinue)) {
             $path = try { $process.Path } catch { $null }
             if (
@@ -134,8 +134,8 @@ $bundleManifest = Get-Content -LiteralPath $bundleManifestPath -Raw | ConvertFro
 if (
     $bundleManifest.bundleFormatVersion -ne 1 -or
     $bundleManifest.product -ne 'Hskify' -or
-    $bundleManifest.nativeHostName -ne 'local.hskify.hsk_manga' -or
-    $bundleManifest.firefoxExtensionId -ne 'hsk-manga-translator@local.hskify'
+    $bundleManifest.nativeHostName -ne 'local.hskify.browser' -or
+    $bundleManifest.firefoxExtensionId -ne 'hskify@local.hskify'
 ) {
     throw 'the bundle manifest does not identify Hskify'
 }
@@ -149,6 +149,17 @@ if (
     $bundleManifest.resources.residentRuntimeFileCount -ne 39
 ) {
     throw 'the bundle is missing mandatory HSK, dictionary, detector, OCR, translation, CUDA, or llama resources'
+}
+if (
+    @(
+        $bundleManifest.files |
+            Where-Object {
+                $_.role -eq 'licence-inventory' -and
+                $_.path -eq 'provenance\licence-inventory.md'
+            }
+    ).Count -ne 1
+) {
+    throw 'the bundle is missing the exact licence inventory'
 }
 foreach ($entry in @($bundleManifest.files)) {
     Assert-BundleFile -Root $resolvedBundleRoot -Entry $entry
@@ -224,7 +235,7 @@ try {
     }
 
     $registerScript = Join-Path $appRoot 'native-host-registration\Register-NativeHost.ps1'
-    $nativeHostPath = Join-Path $appRoot 'companion\hsk-manga-native-host.exe'
+    $nativeHostPath = Join-Path $appRoot 'companion\hskify-native-host.exe'
     & $registerScript -NativeHostPath $nativeHostPath -RegistryPath $RegistryPath | Out-Null
 
     Remove-Item -LiteralPath $backupRoot -Recurse -Force -ErrorAction SilentlyContinue

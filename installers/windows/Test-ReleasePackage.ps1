@@ -28,7 +28,7 @@ foreach ($requiredArtifact in @($HskArtifactPath, $DictionaryArtifactPath, $Sans
         throw "exact packaging-test artifact is missing: $requiredArtifact"
     }
 }
-$temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) ('hsk-manga-package-' + [Guid]::NewGuid().ToString('N'))
+$temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) ('hskify-package-' + [Guid]::NewGuid().ToString('N'))
 $testRegistryPath = 'HKCU:\Software\Hskify\Tests\' + [Guid]::NewGuid().ToString('N')
 $previousLocalAppData = $env:LOCALAPPDATA
 
@@ -53,8 +53,8 @@ try {
     $extensionRoot = Join-Path $fixtureRoot 'extension'
     [IO.Directory]::CreateDirectory($extensionRoot) | Out-Null
 
-    $nativeHostPath = Join-Path $fixtureRoot 'hsk-manga-native-host.exe'
-    $browserDaemonPath = Join-Path $fixtureRoot 'hsk-manga-browser-daemon.exe'
+    $nativeHostPath = Join-Path $fixtureRoot 'hskify-native-host.exe'
+    $browserDaemonPath = Join-Path $fixtureRoot 'hskify-browser-daemon.exe'
     [IO.File]::WriteAllBytes($nativeHostPath, [byte[]](77, 90, 1, 2, 3))
     [IO.File]::WriteAllBytes($browserDaemonPath, [byte[]](77, 90, 4, 5, 6))
     [IO.File]::WriteAllBytes(
@@ -93,7 +93,7 @@ try {
         version = '0.1.0'
         browser_specific_settings = [ordered]@{
             gecko = [ordered]@{
-                id = 'hsk-manga-translator@local.hskify'
+                id = 'hskify@local.hskify'
             }
         }
     }
@@ -326,7 +326,7 @@ try {
         -Mutate { param($claim) $claim.hardware.memoryTotalMiB = 16000 } `
         -ExpectedMessage 'requires CUDA device 0'
 
-    $tamperedDaemonPath = Join-Path $fixtureRoot 'tampered\hsk-manga-browser-daemon.exe'
+    $tamperedDaemonPath = Join-Path $fixtureRoot 'tampered\hskify-browser-daemon.exe'
     [IO.Directory]::CreateDirectory((Split-Path -Parent $tamperedDaemonPath)) | Out-Null
     [IO.File]::WriteAllBytes($tamperedDaemonPath, [byte[]](77, 90, 9, 9, 9))
     try {
@@ -427,8 +427,8 @@ try {
         -ModelManifestPath $modelManifestPath | Out-Null
 
     foreach ($relativePath in @(
-        'companion\hsk-manga-native-host.exe',
-        'companion\hsk-manga-browser-daemon.exe',
+        'companion\hskify-native-host.exe',
+        'companion\hskify-browser-daemon.exe',
         'companion\msvcp140.dll',
         'companion\msvcp140_1.dll',
         'companion\vcruntime140.dll',
@@ -436,6 +436,7 @@ try {
         'companion\onnxruntime_providers_shared.dll',
         'companion\onnxruntime_providers_cuda.dll',
         'provenance\performance-build-attestation.json',
+        'provenance\licence-inventory.md',
         'extension\hskify-firefox.zip',
         'resources\hsk-2.0.normalized.json',
         'resources\cc-cedict.normalized.json',
@@ -479,6 +480,9 @@ try {
         -Condition (@($bundleManifest.files | Where-Object role -eq 'resident-runtime').Count -eq 39) `
         -Message 'bundle manifest did not hash every CUDA/llama runtime file'
     Assert-True `
+        -Condition (@($bundleManifest.files | Where-Object role -eq 'licence-inventory').Count -eq 1) `
+        -Message 'bundle manifest did not hash the licence inventory'
+    Assert-True `
         -Condition ($bundleManifest.resources.expectedModelSha256 -eq $modelHash) `
         -Message 'bundle recorded the wrong mandatory model SHA-256'
     Assert-True `
@@ -499,8 +503,8 @@ try {
         -Message 'bundle recorded the wrong performance-build attestation hash'
     $bundledAttestation = Assert-HskifyPerformanceBuildAttestation `
         -AttestationPath $bundledAttestationPath `
-        -NativeHostPath (Join-Path $bundleRoot 'companion\hsk-manga-native-host.exe') `
-        -BrowserDaemonPath (Join-Path $bundleRoot 'companion\hsk-manga-browser-daemon.exe') `
+        -NativeHostPath (Join-Path $bundleRoot 'companion\hskify-native-host.exe') `
+        -BrowserDaemonPath (Join-Path $bundleRoot 'companion\hskify-browser-daemon.exe') `
         -VerifyCurrentHardware `
         -VerifyCurrentToolchain
 
@@ -515,7 +519,7 @@ try {
         throw "documented install command failed with exit code $LASTEXITCODE"
     }
 
-    $installedNativeHost = Join-Path $productRoot 'app\companion\hsk-manga-native-host.exe'
+    $installedNativeHost = Join-Path $productRoot 'app\companion\hskify-native-host.exe'
     $installedVcRuntime = @(
         'msvcp140.dll',
         'msvcp140_1.dll',
@@ -542,8 +546,9 @@ try {
     $installedSansFont = Join-Path $productRoot 'resources\fonts\NotoSansSC-VF.ttf'
     $installedSerifFont = Join-Path $productRoot 'resources\fonts\NotoSerifSC-VF.ttf'
     $installedAttestation = Join-Path $productRoot 'app\provenance\performance-build-attestation.json'
+    $installedLicenceInventory = Join-Path $productRoot 'app\provenance\licence-inventory.md'
     $installedReadinessMarker = Join-Path $productRoot 'browser-companion\browser-cache\browser-runtime\models.ready'
-    foreach ($installedPath in @($installedNativeHost) + $installedVcRuntime + $installedOnnxRuntimeProviders + @($installedHsk, $installedDictionary, $installedModel, $installedProjector) + $installedResidentModels + $installedRuntimeFiles + @($installedSansFont, $installedSerifFont, $installedAttestation, $installedReadinessMarker)) {
+    foreach ($installedPath in @($installedNativeHost) + $installedVcRuntime + $installedOnnxRuntimeProviders + @($installedHsk, $installedDictionary, $installedModel, $installedProjector) + $installedResidentModels + $installedRuntimeFiles + @($installedSansFont, $installedSerifFont, $installedAttestation, $installedLicenceInventory, $installedReadinessMarker)) {
         Assert-True -Condition (Test-Path -LiteralPath $installedPath -PathType Leaf) -Message "installed file missing: $installedPath"
     }
     $readinessMarker = Get-Content -LiteralPath $installedReadinessMarker -Raw | ConvertFrom-Json
@@ -560,10 +565,10 @@ try {
         -Condition (Test-Path -LiteralPath $nativeManifestPath -PathType Leaf) `
         -Message 'install did not create the native-host manifest'
     $nativeManifest = Get-Content -LiteralPath $nativeManifestPath -Raw | ConvertFrom-Json
-    Assert-True -Condition ($nativeManifest.name -eq 'local.hskify.hsk_manga') -Message 'wrong native-host name'
+    Assert-True -Condition ($nativeManifest.name -eq 'local.hskify.browser') -Message 'wrong native-host name'
     Assert-True -Condition ($nativeManifest.path -eq $installedNativeHost) -Message 'native manifest does not point at the installed host'
     Assert-True `
-        -Condition (@($nativeManifest.allowed_extensions).Count -eq 1 -and $nativeManifest.allowed_extensions[0] -eq 'hsk-manga-translator@local.hskify') `
+        -Condition (@($nativeManifest.allowed_extensions).Count -eq 1 -and $nativeManifest.allowed_extensions[0] -eq 'hskify@local.hskify') `
         -Message 'native manifest allows the wrong Firefox extension'
 
     $obsoleteAppFile = Join-Path $productRoot 'app\obsolete-from-previous-build'

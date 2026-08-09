@@ -2,6 +2,10 @@
 
 Audit date: 2026-08-08
 
+This record applies to the `image` pipeline and its pre-rebuild local baseline.
+It does not qualify document extraction or the light-novel reader. Contract
+names in current code follow the generic image/document API.
+
 ## Verdict
 
 The former pipeline had several structural correctness and latency failures,

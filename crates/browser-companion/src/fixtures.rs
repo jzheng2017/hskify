@@ -6,13 +6,20 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 
 use crate::contracts::{
-    BrowserSetupStatus, HealthResponse, JobUpdatesResponse, LookupResult, Validate,
+    BrowserSetupStatus, DocumentJobRequest, FocusUpdateRequest, HealthResponse, JobUpdatesResponse,
+    LookupResult, Validate,
 };
 
 const HEALTH: &str = include_str!("../../../fixtures/contracts/health.ready.json");
 const SETUP: &str = include_str!("../../../fixtures/contracts/setup.ready.json");
 const UPDATES: &str = include_str!("../../../fixtures/contracts/job-updates.success.json");
 const LOOKUP: &str = include_str!("../../../fixtures/contracts/lookup.valid.json");
+const DOCUMENT_REQUEST: &str =
+    include_str!("../../../fixtures/contracts/document-job-request.valid.json");
+const DOCUMENT_UPDATES: &str =
+    include_str!("../../../fixtures/contracts/document-updates.success.json");
+const IMAGE_FOCUS: &str = include_str!("../../../fixtures/contracts/focus-image.valid.json");
+const DOCUMENT_FOCUS: &str = include_str!("../../../fixtures/contracts/focus-document.valid.json");
 
 fn parse_valid<T>(json: &str, name: &str) -> T
 where
@@ -58,6 +65,25 @@ pub fn lookup(selected_text: &str) -> LookupResult {
     value
 }
 
+pub fn document_request() -> DocumentJobRequest {
+    parse_valid(DOCUMENT_REQUEST, "document-job-request.valid.json")
+}
+
+pub fn document_updates(job_id: &str) -> JobUpdatesResponse {
+    let mut value: JobUpdatesResponse =
+        parse_valid(DOCUMENT_UPDATES, "document-updates.success.json");
+    value.job_id = job_id.to_owned();
+    value
+}
+
+pub fn image_focus() -> FocusUpdateRequest {
+    parse_valid(IMAGE_FOCUS, "focus-image.valid.json")
+}
+
+pub fn document_focus() -> FocusUpdateRequest {
+    parse_valid(DOCUMENT_FOCUS, "focus-document.valid.json")
+}
+
 // Generated specifically for this project with fontTools. It contains only a
 // `.notdef` glyph and space, so browsers load a valid fixture font and then use
 // normal CJK fallback for Chinese. A licensed CJK bank replaces it at Gate 6.
@@ -93,6 +119,10 @@ mod tests {
         setup().validate().unwrap();
         updates("job").validate().unwrap();
         lookup("selected").validate().unwrap();
+        document_request().validate().unwrap();
+        document_updates("document-job").validate().unwrap();
+        image_focus().validate().unwrap();
+        document_focus().validate().unwrap();
         assert_eq!(&font_bytes("fixture-sans").unwrap()[..4], &[0, 1, 0, 0]);
     }
 }

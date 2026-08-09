@@ -56,18 +56,18 @@ function rectOverlapsPolygon(rect, polygon) {
 function finalRegions(updates) {
   const regions = new Map()
   for (const update of updates) {
-    if (update.type === 'regionReady' && update.region?.id) {
-      regions.set(update.region.id, structuredClone(update.region))
+    if (update.type === 'imageRegionReady' && update.region?.itemId) {
+      regions.set(update.region.itemId, structuredClone(update.region))
     }
   }
   return [...regions.values()]
 }
 
-function preservedArtwork(updates) {
+function preservedImageRegions(updates) {
   const regions = new Map()
   for (const update of updates) {
-    if (update.type === 'artworkPreserved' && update.region?.id) {
-      regions.set(update.region.id, structuredClone(update.region))
+    if (update.type === 'imageRegionPreserved' && update.region?.itemId) {
+      regions.set(update.region.itemId, structuredClone(update.region))
     }
   }
   return [...regions.values()]
@@ -101,20 +101,20 @@ function orderedCharacterCoverage(expected, actual) {
 
 export function assertSemanticExpectations(item, regions, preserved = []) {
   const assertions = []
-  const combinedSource = regions.map((region) => region.sourceEnglish ?? '').join('\n')
+  const combinedSource = regions.map((region) => region.text?.sourceText ?? '').join('\n')
   for (const fragment of item.expectations?.requiredSourceFragments ?? []) {
     assertions.push(
       check(
         `semantic.${item.id}.required-source.${fragment}`,
         combinedSource.toLocaleLowerCase().includes(fragment.toLocaleLowerCase()),
-        `sourceEnglish contains ${fragment}`,
+        `sourceText contains ${fragment}`,
         combinedSource,
         'Required OCR fragments make missed-text and partial-translation regressions terminal failures.',
       ),
     )
   }
-  const preservedTexts = preserved.map((region) => region.sourceEnglish ?? '').filter(Boolean)
-  const translatedTexts = regions.map((region) => region.sourceEnglish ?? '').filter(Boolean)
+  const preservedTexts = preserved.map((region) => region.sourceText ?? '').filter(Boolean)
+  const translatedTexts = regions.map((region) => region.text?.sourceText ?? '').filter(Boolean)
   const preservedSource = preservedTexts.join('\n')
   for (const fragment of item.expectations?.preservedArtworkSourceFragments ?? []) {
     const preservedCoverage = Math.max(
@@ -149,7 +149,7 @@ export function assertSemanticExpectations(item, regions, preserved = []) {
 
 export function assertCompletedJob(item, hskLevel, terminal, updates, patchRecords) {
   const regions = finalRegions(updates)
-  const preserved = preservedArtwork(updates)
+  const preserved = preservedImageRegions(updates)
   const exactRegionCount = item.expectations?.exactRegionCount
   const expectedRegionCount =
     exactRegionCount === undefined
@@ -175,31 +175,31 @@ export function assertCompletedJob(item, hskLevel, terminal, updates, patchRecor
   ]
   const patchById = new Map(patchRecords.map((record) => [record.blobId, record]))
   for (const region of regions) {
-    const prefix = `job.${item.id}.hsk-${hskLevel}.region.${region.id}`
+    const prefix = `job.${item.id}.hsk-${hskLevel}.region.${region.itemId}`
     assertions.push(
       check(
         `${prefix}.source`,
-        Boolean(region.sourceEnglish?.trim()),
+        Boolean(region.text?.sourceText?.trim()),
         'non-empty',
-        region.sourceEnglish,
+        region.text?.sourceText,
       ),
       check(
         `${prefix}.translation`,
-        Boolean(region.displayedChinese?.trim()),
+        Boolean(region.text?.displayedChinese?.trim()),
         'non-empty',
-        region.displayedChinese,
+        region.text?.displayedChinese,
       ),
       check(
         `${prefix}.repair-terminal`,
-        Boolean(region.hsk?.repairState) && region.hsk.repairState !== 'pending',
+        Boolean(region.text?.hsk?.repairState) && region.text.hsk.repairState !== 'pending',
         'accepted or exhausted',
-        region.hsk?.repairState,
+        region.text?.hsk?.repairState,
       ),
       check(
         `${prefix}.requested-level`,
-        region.hsk?.requestedLevel === hskLevel,
+        region.text?.hsk?.requestedLevel === hskLevel,
         hskLevel,
-        region.hsk?.requestedLevel,
+        region.text?.hsk?.requestedLevel,
       ),
       check(
         `${prefix}.patch-rect`,
@@ -230,8 +230,8 @@ export function assertCompletedJob(item, hskLevel, terminal, updates, patchRecor
     const overlapping = regions
       .filter((region) => rectsOverlap(region.patch?.rect, protectedRect))
       .map((region) => ({
-        id: region.id,
-        sourceEnglish: region.sourceEnglish,
+        itemId: region.itemId,
+        sourceText: region.text?.sourceText,
         patchRect: region.patch?.rect,
       }))
     assertions.push(
@@ -249,7 +249,7 @@ export function assertCompletedJob(item, hskLevel, terminal, updates, patchRecor
 }
 
 function regionComparisonKey(region) {
-  return `${region.readingOrder ?? ''}\u0000${region.sourceEnglish?.trim() ?? ''}`
+  return `${region.itemOrder ?? ''}\u0000${region.text?.sourceText?.trim() ?? ''}`
 }
 
 export function assertHskDifferential(lowRun, highRun) {
@@ -258,7 +258,7 @@ export function assertHskDifferential(lowRun, highRun) {
     .map((region) => [region, highByKey.get(regionComparisonKey(region))])
     .filter((pair) => pair[1])
   const changed = shared.filter(
-    ([low, high]) => low.displayedChinese?.trim() !== high.displayedChinese?.trim(),
+    ([low, high]) => low.text?.displayedChinese?.trim() !== high.text?.displayedChinese?.trim(),
   )
   return [
     check('differential.hsk-2-vs-5.shared-regions', shared.length > 0, '> 0', shared.length),
@@ -273,15 +273,15 @@ export function assertHskDifferential(lowRun, highRun) {
       lowRun.regions.length > 0 &&
         lowRun.regions.every(
           (region) =>
-            region.hsk?.requestedLevel === 2 &&
-            region.hsk?.repairState &&
-            region.hsk.repairState !== 'pending',
+            region.text?.hsk?.requestedLevel === 2 &&
+            Boolean(region.text?.hsk?.repairState) &&
+            region.text.hsk.repairState !== 'pending',
         ),
       'every HSK2 region used requestedLevel=2 and reached terminal repair state',
       lowRun.regions.map((region) => ({
-        id: region.id,
-        requestedLevel: region.hsk?.requestedLevel,
-        repairState: region.hsk?.repairState,
+        itemId: region.itemId,
+        requestedLevel: region.text?.hsk?.requestedLevel,
+        repairState: region.text?.hsk?.repairState,
       })),
     ),
   ]

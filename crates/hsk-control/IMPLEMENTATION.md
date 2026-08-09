@@ -86,7 +86,7 @@ At engine construction, every HSK word from levels 1–6 and every local
 dictionary headword is added to `jieba-rs`'s mature default lexicon. The
 selected HSK level does not bias primary segmentation.
 
-For each normalized region not occupied by an explicit protected name:
+For each normalized text segment not occupied by an explicit protected name:
 
 1. Jieba produces the primary segmentation.
 2. A conservative full-lexicon guard scans from every Unicode character
@@ -133,9 +133,9 @@ dictionary pinyin/definitions with HSK pinyin/gloss/level metadata. Proper names
 are marked only when the caller explicitly protects them; dictionary wording
 never silently creates an HSK exception.
 
-`lookup_with_region_context()` is an additive pure API that carries an optional
-`LookupRegionContext` (`displayedChinese`, `baseChinese`, and
-`sourceEnglish`) alongside the lookup. It gives the adapter everything needed
+`lookup_with_item_context()` is a pure API that carries an optional
+`LookupItemContext` (`displayedChinese`, `baseChinese`, and
+`sourceText`) alongside the lookup. It gives the adapter everything needed
 to populate the already-frozen browser response without importing or changing
 the shared protocol definitions.
 

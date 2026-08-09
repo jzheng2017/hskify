@@ -3,7 +3,7 @@ $ErrorActionPreference = 'Stop'
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $registerScript = Join-Path $repositoryRoot 'installers\windows\native-host-registration\Register-NativeHost.ps1'
 $unregisterScript = Join-Path $repositoryRoot 'installers\windows\native-host-registration\Unregister-NativeHost.ps1'
-$temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) ('hsk-manga-registration-' + [Guid]::NewGuid().ToString('N'))
+$temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) ('hskify-registration-' + [Guid]::NewGuid().ToString('N'))
 $testRegistryPath = 'HKCU:\Software\Hskify\Tests\' + [Guid]::NewGuid().ToString('N')
 $previousLocalAppData = $env:LOCALAPPDATA
 
@@ -12,7 +12,7 @@ try {
     $env:LOCALAPPDATA = Join-Path $temporaryRoot 'local-app-data'
     $hostDirectory = Join-Path $temporaryRoot 'host'
     [IO.Directory]::CreateDirectory($hostDirectory) | Out-Null
-    $hostPath = Join-Path $hostDirectory 'hsk-manga-native-host.exe'
+    $hostPath = Join-Path $hostDirectory 'hskify-native-host.exe'
     [IO.File]::WriteAllBytes($hostPath, [byte[]](77, 90))
 
     $manifestPath = & $registerScript -NativeHostPath $hostPath -RegistryPath $testRegistryPath
@@ -28,7 +28,7 @@ try {
         throw 'Windows unregistration did not remove the isolated manifest and registry key'
     }
 
-    $directoryHost = Join-Path $temporaryRoot 'directory\hsk-manga-native-host.exe'
+    $directoryHost = Join-Path $temporaryRoot 'directory\hskify-native-host.exe'
     [IO.Directory]::CreateDirectory($directoryHost) | Out-Null
     try {
         & $registerScript -NativeHostPath $directoryHost -RegistryPath $testRegistryPath

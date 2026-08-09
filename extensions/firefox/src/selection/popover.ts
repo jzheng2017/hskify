@@ -12,9 +12,8 @@ export type PrimaryClickForwarder = (event: MouseEvent) => void
 type SelectionRegion = {
   element: HTMLElement
   jobId: string
-  regionId: string
+  itemId: string
 }
-
 export type HoverTextHit = {
   characterOffset: number
   range: Range
@@ -175,8 +174,8 @@ export class ExplanationController {
     )
   }
 
-  register(element: HTMLElement, jobId: string, regionId: string): void {
-    this.regions.set(element, { element, jobId, regionId })
+  register(element: HTMLElement, jobId: string, itemId: string): void {
+    this.regions.set(element, { element, jobId, itemId })
     element.addEventListener('keydown', this.onRegionKeyDown)
   }
 
@@ -430,7 +429,7 @@ export class ExplanationController {
       this.scheduleHoverDismiss()
       return
     }
-    const key = `${region.jobId}\0${region.regionId}\0${hit.characterOffset}`
+    const key = `${region.jobId}\0${region.itemId}\0${hit.characterOffset}`
     if (key === this.activeHoverKey || key === this.pendingHoverKey) return
     if (this.hoverLookupTimer !== undefined) clearTimeout(this.hoverLookupTimer)
     this.pendingHoverKey = key
@@ -458,7 +457,7 @@ export class ExplanationController {
         interaction: 'selection',
         selectedText,
         jobId: selected.region.jobId,
-        regionId: selected.region.regionId,
+        itemId: selected.region.itemId,
       },
       selectedText,
       selected.range,
@@ -480,7 +479,7 @@ export class ExplanationController {
         interaction: 'hover',
         characterOffset: hit.characterOffset,
         jobId: region.jobId,
-        regionId: region.regionId,
+        itemId: region.itemId,
       },
       character,
       hit.range,
@@ -512,7 +511,7 @@ export class ExplanationController {
     try {
       const result = await this.lookup(request)
       if (revision !== this.requestRevision || this.destroyed) return
-      if (result.tokens.length === 0 && !result.region) {
+      if (result.tokens.length === 0 && !result.item) {
         this.dismiss()
         return
       }
@@ -524,7 +523,7 @@ export class ExplanationController {
       this.positionPopover(region.element, resolvedRange)
     } catch {
       if (revision !== this.requestRevision || this.destroyed) return
-      const heading = this.popover.querySelector<HTMLElement>('.hmt-lookup-heading')
+      const heading = this.popover.querySelector<HTMLElement>('.hskify-lookup-heading')
       this.popover.replaceChildren()
       if (heading) this.popover.append(heading)
       const message = documentRef.createElement('span')
@@ -605,12 +604,12 @@ export class ExplanationController {
   private createSpeechHeading(spokenText: string): HTMLElement {
     const documentRef = this.popover.ownerDocument
     const heading = documentRef.createElement('div')
-    heading.className = 'hmt-lookup-heading'
+    heading.className = 'hskify-lookup-heading'
     const selectedText = documentRef.createElement('strong')
     selectedText.textContent = spokenText
     const speak = documentRef.createElement('button')
     speak.type = 'button'
-    speak.className = 'hmt-speak'
+    speak.className = 'hskify-speak'
     const available = this.speaker.isAvailable()
     speak.textContent = available ? 'Listen' : 'Voice unavailable'
     speak.disabled = !available
@@ -626,13 +625,13 @@ export class ExplanationController {
     const updateSpeechState: SpeechStateListener = (state, voice): void => {
       if (!speak.isConnected) return
       if (voice) {
-        speak.dataset.hmtVoiceName = voice.name
-        speak.dataset.hmtVoiceLang = voice.lang
-        speak.dataset.hmtVoiceLocalService = String(voice.localService)
+        speak.dataset.hskifyVoiceName = voice.name
+        speak.dataset.hskifyVoiceLang = voice.lang
+        speak.dataset.hskifyVoiceLocalService = String(voice.localService)
       } else if (state === 'unavailable' || state === 'error') {
-        delete speak.dataset.hmtVoiceName
-        delete speak.dataset.hmtVoiceLang
-        delete speak.dataset.hmtVoiceLocalService
+        delete speak.dataset.hskifyVoiceName
+        delete speak.dataset.hskifyVoiceLang
+        delete speak.dataset.hskifyVoiceLocalService
       }
       const active = state === 'loading' || state === 'speaking'
       const runtimeAvailable = this.speaker.isAvailable()
@@ -688,12 +687,12 @@ export class ExplanationController {
     const documentRef = this.popover.ownerDocument
     for (const token of result.tokens) {
       const entry = documentRef.createElement('div')
-      entry.className = 'hmt-lookup-entry'
+      entry.className = 'hskify-lookup-entry'
       const word = documentRef.createElement('b')
       word.textContent = token.simplified
       const detail = documentRef.createElement('span')
       const hsk = token.properName
-        ? 'Proper name · outside HSK list'
+          ? 'Proper name · outside HSK list'
         : token.hskLevel
           ? `HSK ${token.hskLevel}`
           : 'Outside HSK list'
@@ -703,16 +702,16 @@ export class ExplanationController {
       entry.append(word, detail, definitions)
       this.popover.append(entry)
     }
-    if (result.region) {
+    if (result.item) {
       const context = documentRef.createElement('div')
-      context.className = 'hmt-lookup-context'
+      context.className = 'hskify-lookup-context'
       const base = documentRef.createElement('span')
       base.textContent =
         result.tokens.length === 0
           ? 'Original text kept; no reliable translation was available.'
-          : result.region.baseChinese
+          : result.item.baseChinese
       const source = documentRef.createElement('span')
-      source.textContent = result.region.sourceEnglish
+      source.textContent = result.item.sourceText
       context.append(base, source)
       this.popover.append(context)
     }

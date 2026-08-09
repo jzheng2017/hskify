@@ -9,7 +9,7 @@ use jieba_rs::{Jieba, TokenizeMode};
 use crate::{
     DictionaryArtifact, HSK_STANDARD, HskArtifact, HskDataset, HskException, HskLevel,
     HskViolation, JIEBA_CRATE_VERSION, JIEBA_EMBEDDED_DICTIONARY_SHA256, LOOKUP_REVISION,
-    LoadPolicy, LocalDictionary, LookupRegionContext, LookupResult, LookupToken,
+    LoadPolicy, LocalDictionary, LookupItemContext, LookupResult, LookupToken,
     NORMALIZATION_REVISION, ProperName, ProperNameReason, Result, SEGMENTATION_REVISION,
     TextNormalizer, UNICODE_NORMALIZATION_CRATE_VERSION, UNICODE_NORMALIZATION_TABLES_SHA256,
     ValidationReport, ViolationReason,
@@ -520,17 +520,17 @@ impl HskControl {
     /// Longest-match local lookup with HSK metadata and explicit proper-name
     /// labels. Punctuation/whitespace are omitted from token results.
     pub fn lookup(&self, selected_text: &str, proper_names: &[ProperName]) -> LookupResult {
-        self.lookup_with_region_context(selected_text, proper_names, None)
+        self.lookup_with_item_context(selected_text, proper_names, None)
     }
 
-    /// Adds optional immutable region context to the pure lookup result. The
+    /// Adds optional immutable item context to the pure lookup result. The
     /// Chinese/English context is carried verbatim; only `selected_text` is
     /// normalized for dictionary lookup.
-    pub fn lookup_with_region_context(
+    pub fn lookup_with_item_context(
         &self,
         selected_text: &str,
         proper_names: &[ProperName],
-        region: Option<LookupRegionContext>,
+        item: Option<LookupItemContext>,
     ) -> LookupResult {
         let selected_text = self.normalizer.normalize(selected_text);
         let characters = selected_text.chars().collect::<Vec<_>>();
@@ -567,7 +567,7 @@ impl HskControl {
         LookupResult {
             selected_text,
             tokens,
-            region,
+            item,
         }
     }
 
@@ -576,12 +576,12 @@ impl HskControl {
     /// hovered character: hovering the first character of a compound returns
     /// the compound, while hovering a later component starts a fresh lookup
     /// from that component.
-    pub fn lookup_at_with_region_context(
+    pub fn lookup_at_with_item_context(
         &self,
         displayed_text: &str,
         character_offset: usize,
         proper_names: &[ProperName],
-        region: Option<LookupRegionContext>,
+        item: Option<LookupItemContext>,
     ) -> Option<LookupResult> {
         let characters = displayed_text.chars().collect::<Vec<_>>();
         let first = *characters.get(character_offset)?;
@@ -591,7 +591,7 @@ impl HskControl {
         }
 
         let suffix = characters[character_offset..].iter().collect::<String>();
-        let mut result = self.lookup_with_region_context(&suffix, proper_names, region);
+        let mut result = self.lookup_with_item_context(&suffix, proper_names, item);
         let token = result.tokens.into_iter().next()?;
         result.selected_text.clone_from(&token.simplified);
         result.tokens = vec![token];

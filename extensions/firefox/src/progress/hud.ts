@@ -1,4 +1,4 @@
-import type { ProgressJobUpdate } from '../contracts/browser'
+import type { ChapterKind, ProgressJobUpdate } from '../contracts/browser'
 import type { PageState } from '../messaging/messages'
 
 const HUD_CSS = `
@@ -80,7 +80,6 @@ export type HudProgress = {
   status?: ProgressJobUpdate
   message?: string
 }
-
 export type ChapterProgressPhase =
   | 'starting'
   | 'reading'
@@ -113,6 +112,8 @@ const CHAPTER_PHASE_MESSAGES: Record<ChapterProgressPhase, string> = {
 
 const CHAPTER_STAGE_PHASE: Record<ProgressJobUpdate['stage'], ChapterProgressPhase> = {
   queued: 'starting',
+  warming: 'starting',
+  registering: 'reading',
   decoding: 'reading',
   detecting: 'reading',
   ocr: 'reading',
@@ -207,6 +208,10 @@ export function friendlyProgressMessage(
   switch (status.stage) {
     case 'queued':
       return 'Waiting to start'
+    case 'warming':
+      return 'Starting the language model'
+    case 'registering':
+      return 'Preparing the chapter text'
     case 'decoding':
     case 'detecting':
     case 'ocr':
@@ -233,6 +238,7 @@ export class PageHud {
   private readonly chapterProgress = new ChapterProgressReducer()
   private state: PageState = {
     state: 'idle',
+    contentKind: 'unsupported',
     current: 0,
     total: 0,
     message: 'Ready',
@@ -241,9 +247,11 @@ export class PageHud {
   constructor(
     onCancel: () => void,
     private readonly root: HTMLElement = document.documentElement,
+    private readonly contentKind: Exclude<ChapterKind, 'unsupported'> = 'image',
   ) {
+    this.state = { ...this.state, contentKind }
     this.host = document.createElement('aside')
-    this.host.dataset.hmtOwned = 'true'
+    this.host.dataset.hskifyOwned = 'true'
     this.host.setAttribute('aria-live', 'polite')
     const shadow = this.host.attachShadow({ mode: 'open' })
     const style = document.createElement('style')
@@ -279,6 +287,7 @@ export class PageHud {
     const message = status ? progress.message : input.message ?? progress.message
     this.state = {
       state,
+      contentKind: this.contentKind,
       current: input.current,
       total: input.total,
       stage: progress.phase,
@@ -300,9 +309,10 @@ export class PageHud {
   complete(completed: number, total: number): void {
     this.state = {
       state: 'complete',
+      contentKind: this.contentKind,
       current: completed,
       total,
-      message: `${completed} of ${total} images ready`,
+      message: `${completed} of ${total} items ready`,
     }
     this.title.textContent = 'Translation complete'
     this.detail.textContent = this.state.message
@@ -319,7 +329,7 @@ export class PageHud {
   }
 
   fail(message: string, current: number, total: number): void {
-    this.state = { state: 'failed', current, total, message }
+    this.state = { state: 'failed', contentKind: this.contentKind, current, total, message }
     this.title.textContent = 'Translation needs attention'
     this.detail.textContent = message
     this.progress.removeAttribute('value')
@@ -329,6 +339,7 @@ export class PageHud {
   cancelled(current: number, total: number): void {
     this.state = {
       state: 'cancelled',
+      contentKind: this.contentKind,
       current,
       total,
       message: 'Anything unfinished was left unchanged',
@@ -347,7 +358,6 @@ export class PageHud {
     this.host.remove()
   }
 }
-
 export class ImageStatusBadge {
   private readonly host: HTMLElement
   private readonly message: HTMLElement
@@ -363,7 +373,7 @@ export class ImageStatusBadge {
     const documentRef = image.ownerDocument
     this.root = root ?? documentRef.documentElement
     this.host = documentRef.createElement('span')
-    this.host.dataset.hmtOwned = 'true'
+    this.host.dataset.hskifyOwned = 'true'
     this.host.style.position = 'absolute'
     const shadow = this.host.attachShadow({ mode: 'open' })
     const style = documentRef.createElement('style')

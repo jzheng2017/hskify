@@ -1,69 +1,68 @@
 # Hskify
 
-> Read English manga in Chinese — locally in Firefox.
+> Read English manga, webtoons, and light novels in Chinese — locally in Firefox.
 
-Hskify is a Firefox reading companion for learning Mandarin with manga and
-comic pages. It finds English dialogue, thoughts, and narration, translates
-them into selectable Simplified Chinese, and restores the artwork behind the
-original lettering.
+Hskify is a Firefox reading companion for learning Mandarin. It automatically
+recognizes the current chapter as either a prose document or sequential art,
+then renders selectable Simplified Chinese with the requested HSK 2.0 learning
+mode. Pages that cannot be classified confidently are left unchanged.
 
-The page updates progressively, starting with the regions currently visible
-in the browser. Hskify also supports pinyin, original/Chinese comparison,
-dictionary lookup, and local Mandarin speech.
+Both readers share pinyin, teaching-term highlighting, local dictionary lookup,
+Original/Chinese/hold-to-compare controls, and local Mandarin speech.
 
-## How it works
+## Reading modes
 
-1. Firefox sends a selected page image to the local Hskify companion.
-2. Local vision models find text and identify which regions are story text.
-3. A local language model translates the accepted regions to the requested
-   HSK 2.0 level.
-4. Hskify cleans only the original text areas and places the Chinese text over
-   the page as it becomes ready.
+For light-novel chapters, Hskify runs Mozilla Readability on a cloned document,
+maps accepted story blocks back to the live page, and mounts a safe inline
+Shadow DOM reader next to the original chapter. The complete story structure
+appears immediately with English placeholders; each block changes only when
+its final Chinese result is ready. The source DOM remains connected and is
+restored exactly on Original mode, cancellation, mutation, or navigation.
 
-Story sound effects are translated. Credits, device/interface furniture,
-branding, promotion, artwork, and non-English text are left alone.
+For manga and webtoons, local vision models detect and recognize story text,
+restore only the original lettering areas, and place selectable Chinese over
+the untouched source images. Illustrations inside prose chapters are preserved
+as illustrations and are never sent through OCR.
+
+One shared local language service owns faithful translation, HSK validation
+and repair, pinyin, teaching metadata, dictionary context, and caching for both
+modes. Natural mode publishes faithful Chinese; strict mode applies the bounded
+HSK realization policy before anything becomes visible.
 
 ## Supported setup
 
-This is an intentionally focused Windows performance build, not a
-cross-platform release. The supported target is:
+This is an intentionally focused Windows performance build:
 
 - Windows x86-64;
-- an NVIDIA GeForce RTX 4080 SUPER with 16 GB of VRAM;
-- the CUDA 13.1 toolchain and a compatible NVIDIA driver.
+- NVIDIA GeForce RTX 4080 SUPER with 16 GB VRAM;
+- CUDA 13.1 and a compatible NVIDIA driver.
 
-CPU-only, macOS, Linux, Vulkan, Metal, and remote-provider operation are
-outside the current product scope. Model and production resource files are
-not included in this repository.
+CPU-only, macOS, Linux, Vulkan, Metal, and remote-provider operation are out of
+scope. Model and production resource files are not included in this repository.
 
 ## Build
 
-From a Windows PowerShell prompt with the Rust MSVC toolchain, Visual Studio C++
-tools, Python, and the supported NVIDIA setup:
+From Windows PowerShell with the Rust MSVC toolchain, Visual Studio C++ tools,
+Python, and the supported NVIDIA setup:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\Invoke-PerformanceBuild.ps1
 ```
 
-The build script checks the hardware and provisions the pinned build tools. See
-[the companion implementation guide](crates/browser-companion/IMPLEMENTATION.md)
-for model resources and environment configuration.
-
-## Project status
-
-Hskify is an experimental, hardware-specific performance build. The repository
-contains the browser extension, native companion, local inference pipeline, HSK
-validation, and benchmark harness, but it does not ship a ready-made model
-bundle or claim published latency and quality results.
+The build produces `hskify-native-host.exe` and
+`hskify-browser-daemon.exe`. See the
+[companion implementation guide](crates/browser-companion/IMPLEMENTATION.md)
+for local resource requirements.
 
 ## Repository map
 
-- `extensions/firefox` — Firefox page discovery and progressive rendering
-- `crates/browser-companion` — local daemon and translation pipeline
+- `extensions/firefox` — chapter classification and the two browser renderers
+- `crates/browser-companion` — local daemon and image/document pipelines
 - `crates/hsk-control` — HSK validation, pinyin, and dictionary tools
-- `crates/koharu-ml`, `crates/koharu-app`, `crates/koharu-runtime` — local ML and CUDA runtime code
-- `scripts` — build and benchmark tooling
+- `crates/koharu-ml`, `crates/koharu-app`, `crates/koharu-runtime` — local ML
+  and CUDA runtime code
+- `scripts` — local build and benchmark tooling
 
-For the deeper technical material, start with the [documentation index](docs/README.md),
-then see the [architecture overview](docs/architecture.md) and the
-[real-reader-v2 release corpus guide](docs/real-reader-v2.md).
+Start with the [documentation index](docs/README.md), then read the
+[architecture](docs/architecture.md) and exact
+[browser contract](docs/browser-contract.md).

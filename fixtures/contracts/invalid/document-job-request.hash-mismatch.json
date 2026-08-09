@@ -1,0 +1,22 @@
+{
+  "buildFingerprint": "hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-08-09-r8",
+  "pageSessionId": "fixture-document-0001",
+  "sourceSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "settings": {
+    "sourceLanguage": "en",
+    "targetLanguage": "zh-CN",
+    "hskStandard": "2.0",
+    "hskLevel": 2,
+    "learningMode": "natural"
+  },
+  "blocks": [
+    {
+      "itemId": "block-0",
+      "sourceIndex": 0,
+      "itemOrder": 0,
+      "kind": "heading",
+      "provenance": "dom",
+      "text": "Chapter One"
+    }
+  ]
+}

@@ -2,7 +2,7 @@
 param(
     [string] $ProductRoot = (Join-Path $env:LOCALAPPDATA 'Hskify'),
     [Parameter(DontShow = $true)]
-    [string] $RegistryPath = 'HKCU:\Software\Mozilla\NativeMessagingHosts\local.hskify.hsk_manga',
+    [string] $RegistryPath = 'HKCU:\Software\Mozilla\NativeMessagingHosts\local.hskify.browser',
     [switch] $KeepCache
 )
 
@@ -38,13 +38,13 @@ if ($hasInstalledApp) {
     if (
         $bundleManifest.bundleFormatVersion -ne 1 -or
         $bundleManifest.product -ne 'Hskify' -or
-        $bundleManifest.nativeHostName -ne 'local.hskify.hsk_manga'
+        $bundleManifest.nativeHostName -ne 'local.hskify.browser'
     ) {
         throw "refusing to remove an application directory with an unexpected marker: $appRoot"
     }
 }
 
-$daemonPath = Join-Path $appRoot 'companion\hsk-manga-browser-daemon.exe'
+$daemonPath = Join-Path $appRoot 'companion\hskify-browser-daemon.exe'
 $daemonRecordPath = Join-Path $stateRoot 'daemon-state.json'
 if (
     (Test-Path -LiteralPath $daemonPath -PathType Leaf) -and

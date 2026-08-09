@@ -154,7 +154,7 @@ function Assert-ReplaceableOutputDirectory {
     if (
         $marker.bundleFormatVersion -ne 1 -or
         $marker.product -ne 'Hskify' -or
-        $marker.nativeHostName -ne 'local.hskify.hsk_manga'
+        $marker.nativeHostName -ne 'local.hskify.browser'
     ) {
         throw "refusing to replace a populated directory with an invalid HSK bundle marker: $Path"
     }
@@ -409,17 +409,17 @@ if ([string]::IsNullOrWhiteSpace($NativeHostPath)) {
     if (-not $?) {
         throw 'the exact performance-build wrapper failed'
     }
-    $NativeHostPath = Join-Path $releaseDirectory 'hsk-manga-native-host.exe'
-    $BrowserDaemonPath = Join-Path $releaseDirectory 'hsk-manga-browser-daemon.exe'
+    $NativeHostPath = Join-Path $releaseDirectory 'hskify-native-host.exe'
+    $BrowserDaemonPath = Join-Path $releaseDirectory 'hskify-browser-daemon.exe'
 }
 $resolvedNativeHost = Resolve-LeafFile -Path $NativeHostPath -Label 'NativeHostPath'
 $resolvedBrowserDaemon = Resolve-LeafFile -Path $BrowserDaemonPath -Label 'BrowserDaemonPath'
 $resolvedBuildAttestation = Resolve-LeafFile -Path $BuildAttestationPath -Label 'BuildAttestationPath'
-if ([IO.Path]::GetFileName($resolvedNativeHost) -ne 'hsk-manga-native-host.exe') {
-    throw 'NativeHostPath must name hsk-manga-native-host.exe'
+if ([IO.Path]::GetFileName($resolvedNativeHost) -ne 'hskify-native-host.exe') {
+    throw 'NativeHostPath must name hskify-native-host.exe'
 }
-if ([IO.Path]::GetFileName($resolvedBrowserDaemon) -ne 'hsk-manga-browser-daemon.exe') {
-    throw 'BrowserDaemonPath must name hsk-manga-browser-daemon.exe'
+if ([IO.Path]::GetFileName($resolvedBrowserDaemon) -ne 'hskify-browser-daemon.exe') {
+    throw 'BrowserDaemonPath must name hskify-browser-daemon.exe'
 }
 $buildAttestation = Assert-HskifyPerformanceBuildAttestation `
     -AttestationPath $resolvedBuildAttestation `
@@ -490,7 +490,7 @@ if ($firefoxManifest.manifest_version -ne 3) {
     throw 'Firefox extension archive must use Manifest V3'
 }
 $extensionId = [string] $firefoxManifest.browser_specific_settings.gecko.id
-if ($extensionId -ne 'hsk-manga-translator@local.hskify') {
+if ($extensionId -ne 'hskify@local.hskify') {
     throw "Firefox extension archive has the wrong permanent ID: $extensionId"
 }
 
@@ -518,14 +518,16 @@ $provenanceDirectory = Join-Path $resolvedOutput 'provenance'
 [IO.Directory]::CreateDirectory($fontDirectory) | Out-Null
 [IO.Directory]::CreateDirectory($provenanceDirectory) | Out-Null
 
-$stagedNativeHost = Join-Path $companionDirectory 'hsk-manga-native-host.exe'
-$stagedBrowserDaemon = Join-Path $companionDirectory 'hsk-manga-browser-daemon.exe'
+$stagedNativeHost = Join-Path $companionDirectory 'hskify-native-host.exe'
+$stagedBrowserDaemon = Join-Path $companionDirectory 'hskify-browser-daemon.exe'
 $stagedExtension = Join-Path $extensionDirectory 'hskify-firefox.zip'
 $stagedBuildAttestation = Join-Path $provenanceDirectory 'performance-build-attestation.json'
+$stagedLicenceInventory = Join-Path $provenanceDirectory 'licence-inventory.md'
 Copy-Item -LiteralPath $resolvedNativeHost -Destination $stagedNativeHost
 Copy-Item -LiteralPath $resolvedBrowserDaemon -Destination $stagedBrowserDaemon
 Copy-Item -LiteralPath $resolvedExtensionZip -Destination $stagedExtension
 Copy-Item -LiteralPath $resolvedBuildAttestation -Destination $stagedBuildAttestation
+Copy-Item -LiteralPath (Join-Path $repositoryRoot 'docs\licence-inventory.md') -Destination $stagedLicenceInventory
 Copy-Item -LiteralPath $resolvedModelManifest -Destination (Join-Path $modelManifestDirectory 'manifest.v1.json')
 $stagedVcRuntimeFiles = @($vcRuntimeFiles | ForEach-Object {
     $destination = Join-Path $companionDirectory ([IO.Path]::GetFileName($_))
@@ -545,12 +547,12 @@ Copy-Item -LiteralPath $resolvedSerifFont -Destination $stagedSerifFont
 $fileEntries = @(
     [ordered]@{
         role = 'native-host'
-        path = 'companion\hsk-manga-native-host.exe'
+        path = 'companion\hskify-native-host.exe'
         sha256 = Get-Sha256 -Path $stagedNativeHost
     },
     [ordered]@{
         role = 'browser-daemon'
-        path = 'companion\hsk-manga-browser-daemon.exe'
+        path = 'companion\hskify-browser-daemon.exe'
         sha256 = Get-Sha256 -Path $stagedBrowserDaemon
     },
     [ordered]@{
@@ -558,6 +560,12 @@ $fileEntries = @(
         path = 'provenance\performance-build-attestation.json'
         bytes = [int64] (Get-Item -LiteralPath $stagedBuildAttestation).Length
         sha256 = Get-Sha256 -Path $stagedBuildAttestation
+    },
+    [ordered]@{
+        role = 'licence-inventory'
+        path = 'provenance\licence-inventory.md'
+        bytes = [int64] (Get-Item -LiteralPath $stagedLicenceInventory).Length
+        sha256 = Get-Sha256 -Path $stagedLicenceInventory
     },
     [ordered]@{
         role = 'firefox-extension'
@@ -657,8 +665,8 @@ $bundleManifest = [ordered]@{
     bundleFormatVersion = 1
     product = 'Hskify'
     version = [string] $firefoxManifest.version
-    nativeHostName = 'local.hskify.hsk_manga'
-    firefoxExtensionId = 'hsk-manga-translator@local.hskify'
+    nativeHostName = 'local.hskify.browser'
+    firefoxExtensionId = 'hskify@local.hskify'
     buildFingerprint = [string] $buildAttestation.buildFingerprint
     performanceBuildAttestation = [ordered]@{
         schema = [string] $buildAttestation.schema

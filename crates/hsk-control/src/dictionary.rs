@@ -23,17 +23,17 @@ pub struct LookupResult {
     pub selected_text: String,
     pub tokens: Vec<LookupToken>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub region: Option<LookupRegionContext>,
+    pub item: Option<LookupItemContext>,
 }
 
-/// Optional region context carried by the pure lookup result so callers can
+/// Optional item context carried by the pure lookup result so callers can
 /// populate the frozen browser response without coupling this crate to it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct LookupRegionContext {
+pub struct LookupItemContext {
     pub displayed_chinese: String,
     pub base_chinese: String,
-    pub source_english: String,
+    pub source_text: String,
 }
 
 /// Parsed CC-CEDICT-compatible entries and a deterministic longest-match trie.

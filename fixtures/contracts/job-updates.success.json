@@ -12,9 +12,9 @@
     },
     {
       "sequence": 2,
-      "type": "regionReady",
+      "type": "imageRegionReady",
       "region": {
-        "id": "aaaaaaaa-region-0001",
+        "itemId": "aaaaaaaa-region-0001",
         "textPolygon": [
           { "x": 0.19, "y": 0.12 },
           { "x": 0.46, "y": 0.12 },
@@ -30,19 +30,27 @@
         "patch": {
           "blobId": "patch-fixture-0001",
           "mimeType": "image/png",
-          "rect": {
-            "x": 0.18,
-            "y": 0.11,
-            "width": 0.29,
-            "height": 0.15
+          "rect": { "x": 0.18, "y": 0.11, "width": 0.29, "height": 0.15 }
+        },
+        "text": {
+          "sourceText": "We have to leave now!",
+          "baseChinese": "我们现在要走！",
+          "displayedChinese": "我们现在要走！",
+          "pinyin": "wǒ men xiàn zài yào zǒu",
+          "hsk": {
+            "requestedLevel": 2,
+            "learningMode": "strict",
+            "strictlyValid": true,
+            "levelCoverage": 1,
+            "aboveLevelTokens": [],
+            "teachingTerms": [],
+            "repairState": "accepted"
           }
         },
-        "sourceEnglish": "We have to leave now!",
-        "baseChinese": "我们现在要走！",
-        "displayedChinese": "我们现在要走！",
-        "pinyin": "wǒ men xiàn zài yào zǒu",
-        "ocrConfidence": 0.97,
-        "readingOrder": 0,
+        "provenance": "ocr",
+        "kind": "dialogue",
+        "confidence": 0.97,
+        "itemOrder": 0,
         "style": {
           "fontId": "fixture-sans",
           "category": "sans",
@@ -68,22 +76,15 @@
             { "x": 0.48, "y": 0.26 },
             { "x": 0.18, "y": 0.26 }
           ]
-        },
-        "hsk": {
-          "requestedLevel": 2,
-          "learningMode": "strict",
-          "strictlyValid": true,
-          "levelCoverage": 1,
-          "aboveLevelTokens": [],
-          "teachingTerms": [],
-          "repairState": "accepted"
         }
       }
     },
     {
       "sequence": 3,
       "type": "complete",
-      "message": "Local cleaning and HSK translation complete"
+      "translatedCount": 1,
+      "preservedCount": 0,
+      "message": "Local image and HSK translation complete"
     }
   ]
 }

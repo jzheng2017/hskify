@@ -1,7 +1,7 @@
 use hsk_control::{
     DatasetCompleteness, DatasetKind, Delimiter, DictionaryArtifact, DictionaryEntry, HSK_STANDARD,
     HskArtifact, HskControl, HskControlError, HskEntry, HskLevel, ImportMetadata, LicenceAudit,
-    LookupRegionContext, SourceAudit, TextNormalizer, UNICODE_NORMALIZATION_CRATE_VERSION,
+    LookupItemContext, SourceAudit, TextNormalizer, UNICODE_NORMALIZATION_CRATE_VERSION,
     UNICODE_NORMALIZATION_TABLES_SHA256, UNICODE_NORMALIZATION_UNICODE_VERSION, ViolationReason,
     generate_hsk_artifact, sha256_hex,
 };
@@ -165,26 +165,26 @@ fn test_seed_import_without_independent_use_column_defaults_false() {
 }
 
 #[test]
-fn lookup_can_carry_optional_frozen_region_context_without_protocol_dependency() {
+fn lookup_can_carry_optional_frozen_item_context_without_protocol_dependency() {
     let control = control(
-        "lookup-region",
+        "lookup-item",
         vec![hsk_entry("离开", HskLevel::TWO)],
         vec![dictionary_entry("离开")],
     );
-    let region = LookupRegionContext {
+    let item = LookupItemContext {
         displayed_chinese: "我们现在要走！".into(),
         base_chinese: "我们得马上离开！".into(),
-        source_english: "We have to leave now!".into(),
+        source_text: "We have to leave now!".into(),
     };
-    let result = control.lookup_with_region_context("离开", &[], Some(region.clone()));
-    assert_eq!(result.region, Some(region));
+    let result = control.lookup_with_item_context("离开", &[], Some(item.clone()));
+    assert_eq!(result.item, Some(item));
     let json = serde_json::to_value(result).unwrap();
-    assert_eq!(json["region"]["displayedChinese"], "我们现在要走！");
-    assert_eq!(json["region"]["baseChinese"], "我们得马上离开！");
-    assert_eq!(json["region"]["sourceEnglish"], "We have to leave now!");
+    assert_eq!(json["item"]["displayedChinese"], "我们现在要走！");
+    assert_eq!(json["item"]["baseChinese"], "我们得马上离开！");
+    assert_eq!(json["item"]["sourceText"], "We have to leave now!");
 
     let plain = serde_json::to_value(control.lookup("离开", &[])).unwrap();
-    assert!(plain.get("region").is_none());
+    assert!(plain.get("item").is_none());
 }
 
 #[test]

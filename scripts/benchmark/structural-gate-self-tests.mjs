@@ -26,23 +26,35 @@ const polygon = [
 ]
 
 function region(overrides = {}) {
-  return {
-    id: 'region-1',
+  const value = {
+    itemId: 'region-1',
     textPolygon: polygon,
-    sourceEnglish: 'The evidence',
-    displayedChinese: '证据',
-    pinyin: 'zhèng jù',
+    text: {
+      sourceText: 'The evidence',
+      displayedChinese: '证据',
+      pinyin: 'zhèng jù',
+    },
     confidenceEvidence: {
       ocrConsensus: 0.95,
       geometryCoverage: 1,
+      contextConsistency: 0.95,
       cleanupScore: 0.95,
     },
     ...overrides,
   }
+  return {
+    ...value,
+    text: {
+      sourceText: 'The evidence',
+      displayedChinese: '证据',
+      pinyin: 'zhèng jù',
+      ...(overrides.text ?? {}),
+    },
+  }
 }
 
 function routeWith(regionValue) {
-  return { jobs: [{ pageIndex: 0, updates: [{ type: 'regionReady', region: regionValue }] }] }
+  return { jobs: [{ pageIndex: 0, updates: [{ type: 'imageRegionReady', region: regionValue }] }] }
 }
 
 function domWith(regionValue, overrides = {}) {
@@ -50,9 +62,9 @@ function domWith(regionValue, overrides = {}) {
     regions: [
       {
         page: 1,
-        regionId: regionValue.id,
-        text: regionValue.displayedChinese,
-        pinyin: regionValue.pinyin,
+        itemId: regionValue.itemId,
+        text: regionValue.text.displayedChinese,
+        pinyin: regionValue.text.pinyin,
         fit: 'normal',
         overflows: false,
       },
@@ -83,15 +95,15 @@ assert.deepEqual(publicationConsistency(domWith(valid), routeWith(valid)), {
   renderedCount: 1,
   missing: [],
   mismatched: [],
-  duplicatePublishedIds: [],
+  duplicatePublishedItemIds: [],
   untranslatedEnglish: [],
   weakEvidence: [],
 })
 
 // Unchanged source English must not pass as a translated terminal region.
 const unchanged = publicationConsistency(
-  domWith(region({ displayedChinese: 'The evidence', pinyin: 'The evidence' })),
-  routeWith(region({ displayedChinese: 'The evidence', pinyin: 'The evidence' })),
+  domWith(region({ text: { displayedChinese: 'The evidence', pinyin: 'The evidence' } })),
+  routeWith(region({ text: { displayedChinese: 'The evidence', pinyin: 'The evidence' } })),
 )
 assert.deepEqual(unchanged.untranslatedEnglish, ['region-1'])
 
@@ -99,15 +111,15 @@ assert.deepEqual(unchanged.untranslatedEnglish, ['region-1'])
 // terminal evidence and must fail before it reaches a release result.
 const opaquePatch = publicationConsistency(
   domWith(valid),
-  routeWith(region({ confidenceEvidence: { ocrConsensus: 0.95, geometryCoverage: 1, cleanupScore: 0.1 } })),
+  routeWith(region({ confidenceEvidence: { ocrConsensus: 0.95, geometryCoverage: 1, contextConsistency: 0.95, cleanupScore: 0.1 } })),
 )
 assert.deepEqual(opaquePatch.weakEvidence, ['region-1'])
 
 // Unreadable OCR is an interactive source notice and must reconcile exactly.
 const unreadable = {
-  id: 'unreadable-1',
+  itemId: 'unreadable-1',
   textPolygon: polygon,
-  sourceEnglish: 'Unrecognized text',
+  sourceText: 'Unrecognized text',
   ocrConfidence: 0.2,
   readingOrder: 1,
   reason: 'OCR consensus failed',
@@ -118,9 +130,9 @@ assert.equal(
       regions: [
         {
           page: 1,
-          regionId: unreadable.id,
-          text: unreadable.sourceEnglish,
-          sourceEnglish: unreadable.sourceEnglish,
+          itemId: unreadable.itemId,
+          text: unreadable.sourceText,
+          sourceText: unreadable.sourceText,
           sourcePreserving: true,
           pinyin: '',
           fit: 'normal',
@@ -128,27 +140,23 @@ assert.equal(
         },
       ],
     },
-    { jobs: [{ pageIndex: 0, updates: [{ type: 'unreadable', region: unreadable }] }] },
+    { jobs: [{ pageIndex: 0, updates: [{ type: 'imageRegionPreserved', region: unreadable }] }] },
   ).missing.length,
   0,
 )
 
-// Known decorative artwork is preserved silently. A route event proves the
-// decision; adding any DOM overlay over it is a publication mismatch.
-const artwork = { ...unreadable, id: 'artwork-1' }
-const silentArtwork = publicationConsistency(
+// Preserved image regions expose only a transparent source-text lookup target.
+const preserved = { ...unreadable, itemId: 'preserved-1' }
+const missingPreserved = publicationConsistency(
   { regions: [] },
-  { jobs: [{ pageIndex: 0, updates: [{ type: 'artworkPreserved', region: artwork }] }] },
+  { jobs: [{ pageIndex: 0, updates: [{ type: 'imageRegionPreserved', region: preserved }] }] },
 )
-assert.equal(silentArtwork.publishedCount, 0)
-assert.equal(silentArtwork.renderedCount, 0)
-assert.deepEqual(silentArtwork.missing, [])
-assert.deepEqual(silentArtwork.mismatched, [])
-const overlaidArtwork = publicationConsistency(
-  { regions: [{ regionId: artwork.id, sourcePreserving: true }] },
-  { jobs: [{ pageIndex: 0, updates: [{ type: 'artworkPreserved', region: artwork }] }] },
+assert.deepEqual(missingPreserved.missing, [preserved.itemId])
+const paintedPreserved = publicationConsistency(
+  { regions: [{ itemId: preserved.itemId, text: '错误', sourcePreserving: false }] },
+  { jobs: [{ pageIndex: 0, updates: [{ type: 'imageRegionPreserved', region: preserved }] }] },
 )
-assert.deepEqual(overlaidArtwork.mismatched, [artwork.id])
+assert.deepEqual(paintedPreserved.mismatched, [preserved.itemId])
 
 // A retained early snapshot or reordered replay is not a complete chapter.
 const stale = routeJobConsistency(
@@ -192,14 +200,14 @@ const chapter = {
 // OCR letter soup is rejected by the independently recomputed CER gate.
 withAnnotation(
   {
-    regions: [{ id: 'target-1', polygon, sourceEnglish: 'The evidence' }],
+    regions: [{ itemId: 'target-1', polygon, sourceText: 'The evidence' }],
     exclusions: [],
   },
   (root) => {
     const coverage = annotationCoverage(
       chapter,
       join(root, 'manifest.json'),
-      routeWith(region({ sourceEnglish: 'qqqq zzzz' })),
+      routeWith(region({ text: { sourceText: 'qqqq zzzz' } })),
     )
     assert.ok(coverage.ocrCer > 0.02)
     assert.ok(coverage.highErrorRegions.length > 0)
@@ -211,11 +219,11 @@ withAnnotation(
 withAnnotation(
   {
     regions: [],
-    exclusions: [{ id: 'artwork-1', polygon, sourceEnglish: 'TECHNIQUE', reason: 'decorative artwork' }],
+    exclusions: [{ itemId: 'artwork-1', polygon, sourceText: 'TECHNIQUE', reason: 'decorative artwork' }],
   },
   (root) => {
     const coverage = annotationCoverage(chapter, join(root, 'manifest.json'), routeWith(valid))
-    assert.deepEqual(coverage.modifiedExclusions, [{ page: 1, id: 'artwork-1' }])
+    assert.deepEqual(coverage.modifiedExclusions, [{ page: 1, itemId: 'artwork-1' }])
   },
 )
 
@@ -224,15 +232,15 @@ withAnnotation(
   {
     regions: [
       {
-        id: 'dialogue-1',
+        itemId: 'dialogue-1',
         polygon,
-        sourceEnglish: 'Alice calls Wife.',
+        sourceText: 'Alice calls Wife.',
         continuationGroup: 'exchange',
       },
       {
-        id: 'dialogue-2',
+        itemId: 'dialogue-2',
         polygon: polygon.map((point) => ({ ...point, y: point.y + 0.3 })),
-        sourceEnglish: 'She answers.',
+        sourceText: 'She answers.',
         continuationGroup: 'exchange',
       },
     ],
@@ -248,16 +256,16 @@ withAnnotation(
             pageIndex: 0,
             updates: [
               {
-                type: 'regionReady',
+                type: 'imageRegionReady',
                 region: {
-                  ...region({ id: 'dialogue-1', sourceEnglish: 'Alice calls Wife.' }),
+                  ...region({ itemId: 'dialogue-1', text: { sourceText: 'Alice calls Wife.' } }),
                   contextGroup: 'ctx',
                 },
               },
               {
-                type: 'regionReady',
+                type: 'imageRegionReady',
                 region: {
-                  ...region({ id: 'dialogue-2', sourceEnglish: 'She answers.' }),
+                  ...region({ itemId: 'dialogue-2', text: { sourceText: 'She answers.' } }),
                   textPolygon: polygon.map((point) => ({ ...point, y: point.y + 0.3 })),
                 },
               },
@@ -274,7 +282,7 @@ withAnnotation(
 // reached a terminal state.
 const degradedDom = domWith(valid, {
   degradedFitCount: 1,
-  regions: [{ page: 1, regionId: 'region-1', text: '证据', pinyin: 'zhèng jù', fit: 'degraded', overflows: true }],
+  regions: [{ page: 1, itemId: 'region-1', text: '证据', pinyin: 'zhèng jù', fit: 'degraded', overflows: true }],
 })
 assert.equal(degradedDom.degradedFitCount === 0 && degradedDom.regions.every((item) => !item.overflows), false)
 

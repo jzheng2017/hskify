@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from 'vitest'
 
-import { BUILD_FINGERPRINT, type BrowserJobRequest } from '../../src/contracts/browser'
+import {
+  BUILD_FINGERPRINT,
+  type DocumentJobRequest,
+  type ImageJobRequest,
+} from '../../src/contracts/browser'
 import {
   CompanionClient,
   UPDATE_TIMEOUT_GRACE_MS,
@@ -37,7 +41,7 @@ function sessionManager() {
   return { manager: new NativeSessionManager(new MemoryStorage(), runtime), runtime }
 }
 
-function request(): BrowserJobRequest {
+function request(): ImageJobRequest {
   return {
     buildFingerprint: BUILD_FINGERPRINT,
     clientImageId: 'page-0-hash',
@@ -46,18 +50,43 @@ function request(): BrowserJobRequest {
     naturalWidth: 1200,
     naturalHeight: 1800,
     pageSessionId: 'page',
-    pageIndex: 0,
-    chapterPageOrder: [0],
+    sourceIndex: 0,
+    chapterSourceOrder: [0],
     surfaceKind: 'image',
     visibleRects: [{ x: 0, y: 0, width: 1, height: 0.5 }],
+    readingDirection: 'ltr',
     settings: {
       sourceLanguage: 'en',
       targetLanguage: 'zh-CN',
       hskStandard: '2.0',
       hskLevel: 5,
       learningMode: 'natural',
-      readingDirection: 'ltr',
     },
+  }
+}
+
+function documentRequest(): DocumentJobRequest {
+  return {
+    buildFingerprint: BUILD_FINGERPRINT,
+    pageSessionId: 'document-page',
+    sourceSha256: 'b'.repeat(64),
+    settings: {
+      sourceLanguage: 'en',
+      targetLanguage: 'zh-CN',
+      hskStandard: '2.0',
+      hskLevel: 3,
+      learningMode: 'strict',
+    },
+    blocks: [
+      {
+        itemId: 'block-0',
+        sourceIndex: 0,
+        itemOrder: 0,
+        kind: 'prose',
+        provenance: 'dom',
+        text: 'The rain stopped before dawn.',
+      },
+    ],
   }
 }
 
@@ -112,8 +141,11 @@ describe('authenticated unversioned companion client', () => {
     expect(authorizations).toEqual([`Bearer ${'A'.repeat(43)}`, `Bearer ${'B'.repeat(43)}`])
     expect(runtime.sendNativeMessage).toHaveBeenCalledTimes(2)
     const headers = new Headers(fetcher.mock.calls[1]?.[1]?.headers)
-    expect(headers.has('X-HSK-Manga-Protocol')).toBe(false)
-    expect(headers.get('X-HSK-Manga-Extension-Origin')).toBe('moz-extension://fixture')
+    expect([...headers.keys()].map((name) => name.toLowerCase()).sort()).toEqual([
+      'authorization',
+      'x-hskify-extension-origin',
+    ])
+    expect(headers.get('X-Hskify-Extension-Origin')).toBe('moz-extension://fixture')
   })
 
   it('health-checks a cached root endpoint and re-handshakes after transport failure', async () => {
@@ -145,7 +177,7 @@ describe('authenticated unversioned companion client', () => {
     const { manager } = sessionManager()
     let body: FormData | undefined
     const client = new CompanionClient(manager, async (input, init) => {
-      expect(String(input)).toBe('http://127.0.0.1:43127/jobs')
+      expect(String(input)).toBe('http://127.0.0.1:43127/jobs/image')
       body = init?.body as FormData
       return new Response(
         JSON.stringify({
@@ -156,14 +188,34 @@ describe('authenticated unversioned companion client', () => {
       )
     })
     const metadata = request()
-    expect(await client.createJob(pngHeader(), metadata)).toBe('fixture-job')
+    expect(await client.createImageJob(pngHeader(), metadata)).toBe('fixture-job')
     expect(body?.get('image')).toBeInstanceOf(Blob)
     const requestPart = body?.get('request')
     expect(requestPart).toBeInstanceOf(Blob)
     expect(JSON.parse(await (requestPart as Blob).text())).toEqual(metadata)
   })
 
-  it('uses only progressive viewport, update, patch, and delete root routes', async () => {
+  it('posts exact document snapshots as JSON without an image payload', async () => {
+    const { manager } = sessionManager()
+    let body: string | undefined
+    let headers: Headers | undefined
+    const client = new CompanionClient(manager, async (input, init) => {
+      expect(String(input)).toBe('http://127.0.0.1:43127/jobs/document')
+      expect(init?.method).toBe('POST')
+      body = init?.body as string
+      headers = new Headers(init?.headers)
+      return new Response(
+        JSON.stringify({ buildFingerprint: BUILD_FINGERPRINT, jobId: 'document-job' }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      )
+    })
+    const metadata = documentRequest()
+    expect(await client.createDocumentJob(metadata)).toBe('document-job')
+    expect(JSON.parse(body ?? '')).toEqual(metadata)
+    expect(headers?.get('Content-Type')).toBe('application/json')
+  })
+
+  it('uses only tagged focus, update, patch, and delete root routes', async () => {
     const { manager } = sessionManager()
     const requests: Array<{ url: string; method: string; body?: string }> = []
     const client = new CompanionClient(manager, async (input, init) => {
@@ -200,7 +252,8 @@ describe('authenticated unversioned companion client', () => {
       return new Response(null, { status: 204 })
     })
 
-    await client.updateViewport('job', {
+    await client.updateFocus('job', {
+      kind: 'image',
       visibleRects: [{ x: 0, y: 0.2, width: 1, height: 0.4 }],
       active: true,
     })
@@ -211,9 +264,10 @@ describe('authenticated unversioned companion client', () => {
 
     expect(requests).toEqual([
       {
-        url: 'http://127.0.0.1:43127/jobs/job/viewport',
+        url: 'http://127.0.0.1:43127/jobs/job/focus',
         method: 'PUT',
         body: JSON.stringify({
+          kind: 'image',
           visibleRects: [{ x: 0, y: 0.2, width: 1, height: 0.4 }],
           active: true,
         }),
@@ -267,14 +321,13 @@ describe('authenticated unversioned companion client', () => {
     })
     expect((await client.getSetupStatus()).state).toBe('ready')
     expect(
-      (await client.lookup({ interaction: 'selection', selectedText: '我' }))
-        .selectedText,
+      (await client.lookup({ interaction: 'selection', selectedText: '我' })).selectedText,
     ).toBe('我')
-    expect([...new Uint8Array(await client.getFont('hmt-sans'))]).toEqual([0, 1, 0, 0])
+    expect([...new Uint8Array(await client.getFont('hskify-sans'))]).toEqual([0, 1, 0, 0])
     expect(requests).toEqual([
       'GET http://127.0.0.1:43127/setup',
       'POST http://127.0.0.1:43127/lookup',
-      'GET http://127.0.0.1:43127/fonts/hmt-sans',
+      'GET http://127.0.0.1:43127/fonts/hskify-sans',
     ])
   })
 })

@@ -1,13 +1,20 @@
 import type {
-  BrowserRegion,
+  ImageRegion,
   LookupRequest,
   LookupResult,
-  PreservedArtworkRegion,
-  UnreadableRegion,
+  PreservedImageRegion,
+  TeachingTerm,
+  TranslatedText,
 } from '../contracts/browser'
 import type { DiscoveredSurface } from '../discovery/surfaces'
+import { attachComparisonControls, type ChapterDisplayMode } from '../document/controls'
 import { ExplanationController } from '../selection/popover'
+import { LOOKUP_CSS } from '../selection/popover-style'
 import { MandarinSpeaker, type TextSpeaker } from '../selection/speech'
+import {
+  buildTeachingTextRange,
+  installTranslatedTextMetadata,
+} from '../language/translated-text'
 import { FontLoader, type FontFetcher } from './font-loader'
 import {
   calculateImageGeometry,
@@ -24,7 +31,6 @@ import { applyRegionColorBands, applyRegionStyle } from './style'
 
 const MEASUREMENT_SEARCH_STEPS = 16
 const FIT_SAFETY_RATIO = 0.98
-type TranslationMode = 'chinese' | 'original'
 
 const RENDERER_CSS = `
 :host {
@@ -34,29 +40,29 @@ const RENDERER_CSS = `
   z-index: 1;
 }
 *, *::before, *::after { box-sizing: border-box; }
-.hmt-viewport {
+.hskify-viewport {
   overflow: hidden;
   pointer-events: none;
   position: absolute;
 }
-.hmt-image-space {
+.hskify-image-space {
   position: absolute;
 }
-.hmt-patch-layer,
-.hmt-text-layer {
+.hskify-patch-layer,
+.hskify-text-layer {
   height: 100%;
   inset: 0;
   pointer-events: none;
   position: absolute;
   width: 100%;
 }
-.hmt-patch {
+.hskify-patch {
   object-fit: fill;
   pointer-events: none;
   position: absolute;
   user-select: none;
 }
-.hmt-region {
+.hskify-region {
   align-items: center;
   cursor: text;
   display: flex;
@@ -72,130 +78,26 @@ const RENDERER_CSS = `
   word-break: normal;
   overflow-wrap: break-word;
 }
-.hmt-region-text { display: block; }
-.hmt-region-line { display: block; }
-.hmt-source-notice {
+.hskify-region-text { display: block; }
+.hskify-region-line { display: block; }
+.hskify-source-notice {
   color: transparent;
   cursor: help;
   font: 600 1em/1.05 system-ui, sans-serif;
   pointer-events: auto;
   text-shadow: none;
 }
-.hmt-learning-term {
+.hskify-learning-term {
   text-decoration-line: underline;
   text-decoration-style: dotted;
   text-decoration-thickness: 0.06em;
   text-underline-offset: 0.12em;
 }
-.hmt-region:focus {
+.hskify-region:focus {
   outline: 2px solid #3b82f6;
   outline-offset: 2px;
 }
-.hmt-lookup {
-  background: #fff;
-  border: 1px solid #d1d5db;
-  border-radius: 9px;
-  box-shadow: 0 8px 28px rgb(0 0 0 / 24%);
-  color: #111827;
-  display: grid;
-  font: 13px/1.4 system-ui, sans-serif;
-  gap: 7px;
-  max-height: calc(100vh - 16px);
-  max-width: min(320px, calc(100% - 8px));
-  min-width: 190px;
-  overflow: auto;
-  padding: 10px 12px;
-  pointer-events: auto;
-  position: absolute;
-  text-align: left;
-  user-select: text;
-  z-index: 6;
-}
-.hmt-lookup[hidden] { display: none; }
-.hmt-lookup-heading {
-  align-items: center;
-  display: flex;
-  gap: 10px;
-  justify-content: space-between;
-}
-.hmt-speak {
-  appearance: none;
-  background: #eff6ff;
-  border: 1px solid #93c5fd;
-  border-radius: 999px;
-  color: #1d4ed8;
-  cursor: pointer;
-  flex: none;
-  font: 600 11px/1 system-ui, sans-serif;
-  padding: 6px 9px;
-}
-.hmt-speak[aria-pressed="true"] {
-  background: #1d4ed8;
-  color: #fff;
-}
-.hmt-speak:focus-visible {
-  outline: 2px solid #2563eb;
-  outline-offset: 2px;
-}
-.hmt-speak:disabled {
-  background: #f3f4f6;
-  border-color: #d1d5db;
-  color: #6b7280;
-  cursor: not-allowed;
-}
-.hmt-lookup-entry,
-.hmt-lookup-context {
-  border-top: 1px solid #e5e7eb;
-  display: grid;
-  gap: 2px;
-  padding-top: 6px;
-}
-.hmt-lookup-entry span:last-child,
-.hmt-lookup-context span:last-child { color: #4b5563; }
-`
-
-const MODE_CONTROLS_CSS = `
-:host {
-  bottom: max(12px, env(safe-area-inset-bottom));
-  display: block;
-  pointer-events: none;
-  position: fixed;
-  right: max(12px, env(safe-area-inset-right));
-  z-index: 2147483646;
-}
-*, *::before, *::after { box-sizing: border-box; }
-.hmt-controls {
-  align-items: center;
-  background: rgb(17 24 39 / 92%);
-  border: 1px solid rgb(255 255 255 / 22%);
-  border-radius: 999px;
-  box-shadow: 0 3px 14px rgb(0 0 0 / 28%);
-  display: flex;
-  gap: 2px;
-  max-width: calc(100vw - 24px);
-  padding: 3px;
-  pointer-events: auto;
-}
-.hmt-controls button {
-  appearance: none;
-  background: transparent;
-  border: 0;
-  border-radius: 999px;
-  color: #e5e7eb;
-  cursor: pointer;
-  font: 600 11px/1 system-ui, sans-serif;
-  padding: 7px 9px;
-  touch-action: none;
-  white-space: nowrap;
-}
-.hmt-controls button[aria-pressed="true"] {
-  background: #f8fafc;
-  color: #111827;
-}
-.hmt-controls button:focus-visible {
-  outline: 2px solid #93c5fd;
-  outline-offset: 1px;
-}
+${LOOKUP_CSS}
 `
 
 export type RenderJob = {
@@ -203,7 +105,6 @@ export type RenderJob = {
   sourceWidth: number
   sourceHeight: number
 }
-
 export type RenderGuard = {
   signal?: AbortSignal
   validate(): void
@@ -215,7 +116,7 @@ export type RendererCallbacks = {
   fetchFont: FontFetcher
   lookup(request: LookupRequest): Promise<LookupResult>
   onRestore?: () => void
-  onFitDegraded?: (regionId: string) => void
+  onFitDegraded?: (itemId: string) => void
 }
 
 export class RendererError extends Error {
@@ -229,7 +130,7 @@ export class RendererError extends Error {
 }
 
 type RegionView = {
-  region: BrowserRegion
+  region: ImageRegion
   patch: HTMLImageElement
   patchUrl: string
   element: HTMLElement
@@ -239,8 +140,13 @@ type RegionView = {
 
 type SourcePreservingView = {
   element: HTMLElement
-  regionId: string
+  itemId: string
 }
+
+type SourcePreservingRegion = Pick<
+  PreservedImageRegion,
+  'itemId' | 'textPolygon' | 'sourceText' | 'itemOrder'
+> & { translatedText?: TranslatedText }
 
 function px(value: number): string {
   return `${Number.isFinite(value) ? value : 0}px`
@@ -361,7 +267,7 @@ function hasTransformedAncestor(element: Element): boolean {
   for (let ancestor = element.parentElement; ancestor; ancestor = ancestor.parentElement) {
     const style = ownerWindow?.getComputedStyle(ancestor)
     // Some DOM realms expose an empty string rather than CSS's explicit
-    // `none`.  Empty means “no declared transform”, not an unsupported one.
+    // `none`. Empty means “no declared transform”, not an unsupported one.
     if (style?.transform && style.transform !== 'none') return true
     if (style?.perspective && style.perspective !== 'none') return true
   }
@@ -456,7 +362,7 @@ function setRect(
   element.style.height = px(rect.height)
 }
 
-function setPercentRegion(element: HTMLElement, region: BrowserRegion): void {
+function setPercentRegion(element: HTMLElement, region: ImageRegion): void {
   const points = fitPolygonForRegion(region)
   const bounds = polygonBounds(points)
   element.style.left = `${bounds.minX * 100}%`
@@ -476,158 +382,12 @@ function setPercentPolygon(
   element.style.height = `${bounds.height * 100}%`
 }
 
-function setPercentPatch(element: HTMLElement, region: BrowserRegion): void {
+function setPercentPatch(element: HTMLElement, region: ImageRegion): void {
   const rect = region.patch.rect
   element.style.left = `${rect.x * 100}%`
   element.style.top = `${rect.y * 100}%`
   element.style.width = `${rect.width * 100}%`
   element.style.height = `${rect.height * 100}%`
-}
-
-function createButton(
-  label: string,
-  documentRef: Document = document,
-): HTMLButtonElement {
-  const button = documentRef.createElement('button')
-  button.type = 'button'
-  button.textContent = label
-  return button
-}
-
-class ModeControls {
-  private mode: TranslationMode = 'chinese'
-  private comparing = false
-  private readonly targets = new Set<RenderedImage>()
-  private readonly host: HTMLElement
-  private readonly originalButton: HTMLButtonElement
-  private readonly chineseButton: HTMLButtonElement
-  private readonly compareButton: HTMLButtonElement
-
-  constructor(
-    private readonly documentRef: Document,
-    private readonly onEmpty: (controls: ModeControls) => void,
-  ) {
-    this.host = documentRef.createElement('span')
-    this.host.dataset.hmtOwned = 'true'
-    this.host.dataset.hmtModeControls = 'true'
-    this.host.setAttribute('aria-label', 'HSK manga translation mode controls')
-    this.host.style.bottom = '12px'
-    this.host.style.pointerEvents = 'none'
-    this.host.style.position = 'fixed'
-    this.host.style.right = '12px'
-    this.host.style.zIndex = '2147483646'
-
-    const shadow = this.host.attachShadow({ mode: 'open' })
-    const style = documentRef.createElement('style')
-    style.textContent = MODE_CONTROLS_CSS
-    const controls = documentRef.createElement('span')
-    controls.className = 'hmt-controls'
-    controls.setAttribute('role', 'group')
-    controls.setAttribute('aria-label', 'Translated image mode')
-    this.originalButton = createButton('Original', documentRef)
-    this.chineseButton = createButton('Chinese', documentRef)
-    this.compareButton = createButton('Hold to compare', documentRef)
-    this.compareButton.title = 'Press and hold to show the original'
-    this.compareButton.setAttribute('aria-pressed', 'false')
-    controls.append(this.originalButton, this.chineseButton, this.compareButton)
-    shadow.append(style, controls)
-
-    this.originalButton.addEventListener('click', this.showOriginal)
-    this.chineseButton.addEventListener('click', this.showChinese)
-    this.compareButton.addEventListener('click', this.suppressControlNavigation)
-    this.compareButton.addEventListener('pointerdown', this.pressCompare)
-    this.compareButton.addEventListener('pointerup', this.releaseCompare)
-    this.compareButton.addEventListener('pointercancel', this.releaseCompare)
-    this.compareButton.addEventListener('blur', this.releaseCompare)
-    this.compareButton.addEventListener('keydown', this.compareKeyDown)
-    this.compareButton.addEventListener('keyup', this.compareKeyUp)
-    documentRef.defaultView?.addEventListener('pointerup', this.releaseCompare)
-    documentRef.defaultView?.addEventListener('pointercancel', this.releaseCompare)
-    documentRef.defaultView?.addEventListener('blur', this.releaseCompare)
-    this.updatePressedState()
-    const mount = documentRef.body ?? documentRef.documentElement
-    mount.append(this.host)
-  }
-
-  attach(target: RenderedImage): void {
-    this.targets.add(target)
-    target.setMode(this.mode)
-    if (this.comparing) target.showOriginalForComparison()
-  }
-
-  detach(target: RenderedImage): void {
-    this.targets.delete(target)
-    if (this.targets.size === 0) this.destroy()
-  }
-
-  private readonly showOriginal = (event: Event): void => {
-    this.suppressControlNavigation(event)
-    this.setMode('original')
-  }
-
-  private readonly showChinese = (event: Event): void => {
-    this.suppressControlNavigation(event)
-    this.setMode('chinese')
-  }
-
-  private readonly suppressControlNavigation = (event: Event): void => {
-    event.preventDefault()
-    event.stopPropagation()
-  }
-
-  private readonly pressCompare = (event: Event): void => {
-    this.suppressControlNavigation(event)
-    this.comparing = true
-    this.compareButton.setAttribute('aria-pressed', 'true')
-    for (const target of this.targets) target.showOriginalForComparison()
-  }
-
-  private readonly releaseCompare = (): void => {
-    if (!this.comparing) return
-    this.comparing = false
-    this.compareButton.setAttribute('aria-pressed', 'false')
-    for (const target of this.targets) target.restoreSelectedMode()
-  }
-
-  private readonly compareKeyDown = (event: KeyboardEvent): void => {
-    if (event.key === ' ' || event.key === 'Enter') this.pressCompare(event)
-  }
-
-  private readonly compareKeyUp = (event: KeyboardEvent): void => {
-    if (event.key === ' ' || event.key === 'Enter') {
-      event.preventDefault()
-      event.stopPropagation()
-      this.releaseCompare()
-    }
-  }
-
-  private setMode(mode: TranslationMode): void {
-    this.mode = mode
-    this.updatePressedState()
-    for (const target of this.targets) target.setMode(mode)
-  }
-
-  private updatePressedState(): void {
-    this.originalButton.setAttribute('aria-pressed', String(this.mode === 'original'))
-    this.chineseButton.setAttribute('aria-pressed', String(this.mode === 'chinese'))
-  }
-
-  private destroy(): void {
-    this.originalButton.removeEventListener('click', this.showOriginal)
-    this.chineseButton.removeEventListener('click', this.showChinese)
-    this.compareButton.removeEventListener('click', this.suppressControlNavigation)
-    this.compareButton.removeEventListener('pointerdown', this.pressCompare)
-    this.compareButton.removeEventListener('pointerup', this.releaseCompare)
-    this.compareButton.removeEventListener('pointercancel', this.releaseCompare)
-    this.compareButton.removeEventListener('blur', this.releaseCompare)
-    this.compareButton.removeEventListener('keydown', this.compareKeyDown)
-    this.compareButton.removeEventListener('keyup', this.compareKeyUp)
-    this.documentRef.defaultView?.removeEventListener('pointerup', this.releaseCompare)
-    this.documentRef.defaultView?.removeEventListener('pointercancel', this.releaseCompare)
-    this.documentRef.defaultView?.removeEventListener('blur', this.releaseCompare)
-    this.host.remove()
-    this.onEmpty(this)
-  }
 }
 
 async function decodePatchImage(image: HTMLImageElement): Promise<void> {
@@ -655,85 +415,42 @@ async function decodePatchImage(image: HTMLImageElement): Promise<void> {
   })
 }
 
-function appendLearningText(
-  documentRef: Document,
-  lineElement: HTMLElement,
-  line: string,
-  lineStart: number,
-  terms: BrowserRegion['hsk']['teachingTerms'],
-): void {
-  const characters = [...line]
-  const lineEnd = lineStart + characters.length
-  let cursor = lineStart
-  for (const term of terms) {
-    const start = Math.max(lineStart, term.startChar)
-    const end = Math.min(lineEnd, term.endChar)
-    if (start >= end || start < cursor) continue
-    if (start > cursor) {
-      lineElement.append(
-        documentRef.createTextNode(
-          characters.slice(cursor - lineStart, start - lineStart).join(''),
-        ),
-      )
-    }
-    const learning = documentRef.createElement('span')
-    learning.className = 'hmt-learning-term'
-    learning.dataset.learningTerm = term.text
-    learning.dataset.learningReason = term.reason
-    learning.textContent = characters.slice(start - lineStart, end - lineStart).join('')
-    lineElement.append(learning)
-    cursor = end
-  }
-  if (cursor < lineEnd) {
-    lineElement.append(
-      documentRef.createTextNode(characters.slice(cursor - lineStart).join('')),
-    )
-  }
-}
-
 function applyChosenLines(
   documentRef: Document,
   element: HTMLElement,
   lines: readonly string[],
   text: string,
-  terms: BrowserRegion['hsk']['teachingTerms'] = [],
+  terms: readonly TeachingTerm[] = [],
 ): void {
   const chosen = lines.length > 0 && lines.join('') === text ? lines : [text]
   const nodes: Node[] = []
   let lineStart = 0
   for (const line of chosen) {
     const lineElement = documentRef.createElement('span')
-    lineElement.className = 'hmt-region-line'
-    appendLearningText(documentRef, lineElement, line, lineStart, terms)
+    lineElement.className = 'hskify-region-line'
+    const lineEnd = lineStart + [...line].length
+    lineElement.append(
+      buildTeachingTextRange(documentRef, text, terms, lineStart, lineEnd),
+    )
     nodes.push(lineElement)
-    lineStart += [...line].length
+    lineStart = lineEnd
   }
   element.replaceChildren(...nodes)
 }
 
-function regionElement(region: BrowserRegion, documentRef: Document): {
+function regionElement(region: ImageRegion, documentRef: Document): {
   element: HTMLElement
   textElement: HTMLElement
 } {
   const element = documentRef.createElement('span')
-  element.className = 'hmt-region'
-  element.lang = 'zh-CN'
+  element.className = 'hskify-region'
   element.tabIndex = 0
-  element.dataset.regionId = region.id
-  element.dataset.pinyin = region.pinyin
-  element.dataset.hskValid = String(region.hsk.strictlyValid)
-  element.dataset.hskRepairState = region.hsk.repairState
-  element.dataset.hskLearningMode = region.hsk.learningMode
-  element.dataset.hskLevelCoverage = String(region.hsk.levelCoverage)
-  element.dataset.hskTeachingTerms = String(region.hsk.teachingTerms.length)
-  element.setAttribute(
-    'aria-label',
-    region.pinyin ? `${region.displayedChinese}; ${region.pinyin}` : region.displayedChinese,
-  )
+  element.dataset.hskifyItemId = region.itemId
+  installTranslatedTextMetadata(element, region.text)
   const textElement = documentRef.createElement('span')
-  textElement.className = 'hmt-region-text'
+  textElement.className = 'hskify-region-text'
   // Companion text always enters the page through text nodes.
-  textElement.textContent = region.displayedChinese
+  textElement.textContent = region.text.displayedChinese
   element.append(textElement)
   setPercentRegion(element, region)
   return { element, textElement }
@@ -758,7 +475,7 @@ function actualOverflow(element: HTMLElement, content?: HTMLElement): boolean {
 }
 
 export class RenderedImage {
-  private mode: TranslationMode = 'chinese'
+  private mode: ChapterDisplayMode = 'chinese'
   private readonly regions = new Map<string, RegionView>()
   private readonly sourcePreserving = new Map<string, SourcePreservingView>()
   private readonly fitter = new PolygonTextFitter()
@@ -768,9 +485,9 @@ export class RenderedImage {
   private transformFrame: SurfaceTransform | undefined = undefined
 
   private markFitDegraded(view: RegionView): void {
-    const alreadyReported = view.element.dataset.fit === 'degraded'
-    view.element.dataset.fit = 'degraded'
-    if (!alreadyReported) this.callbacks.onFitDegraded?.(view.region.id)
+    const alreadyReported = view.element.dataset.hskifyFit === 'degraded'
+    view.element.dataset.hskifyFit = 'degraded'
+    if (!alreadyReported) this.callbacks.onFitDegraded?.(view.region.itemId)
   }
 
   constructor(
@@ -804,7 +521,7 @@ export class RenderedImage {
     this.refit()
   }
 
-  get currentMode(): TranslationMode {
+  get currentMode(): ChapterDisplayMode {
     return this.mode
   }
 
@@ -812,10 +529,10 @@ export class RenderedImage {
     return this.regions.size
   }
 
-  regionsInReadingOrder(): BrowserRegion[] {
+  regionsInReadingOrder(): ImageRegion[] {
     return [...this.regions.values()]
       .map((view) => view.region)
-      .sort((left, right) => left.readingOrder - right.readingOrder)
+      .sort((left, right) => left.itemOrder - right.itemOrder)
   }
 
   private readonly forwardPrimaryClick = (event: MouseEvent): void => {
@@ -840,7 +557,7 @@ export class RenderedImage {
     if (!this.candidate.element.dispatchEvent(forwarded)) event.preventDefault()
   }
 
-  setMode(mode: TranslationMode): void {
+  setMode(mode: ChapterDisplayMode): void {
     if (this.destroyed) return
     this.mode = mode
     if (mode === 'original') this.explanation.dismiss()
@@ -855,29 +572,18 @@ export class RenderedImage {
     if (!this.destroyed) this.applyVisualMode(this.mode)
   }
 
-  private applyVisualMode(mode: TranslationMode): void {
+  private applyVisualMode(mode: ChapterDisplayMode): void {
     // The page's original image remains connected and visible at all times.
     // Comparison only toggles the transparent patch/text overlay.
     this.viewport.hidden = mode === 'original'
   }
 
   private updateRegionMetadata(view: RegionView): void {
-    view.element.dataset.pinyin = view.region.pinyin
-    view.element.dataset.hskValid = String(view.region.hsk.strictlyValid)
-    view.element.dataset.hskRepairState = view.region.hsk.repairState
-    view.element.dataset.hskLearningMode = view.region.hsk.learningMode
-    view.element.dataset.hskLevelCoverage = String(view.region.hsk.levelCoverage)
-    view.element.dataset.hskTeachingTerms = String(view.region.hsk.teachingTerms.length)
-    view.element.setAttribute(
-      'aria-label',
-      view.region.pinyin
-        ? `${view.region.displayedChinese}; ${view.region.pinyin}`
-        : view.region.displayedChinese,
-    )
+    installTranslatedTextMetadata(view.element, view.region.text)
   }
 
   async installRegion(
-    region: BrowserRegion,
+    region: ImageRegion,
     patchBytes: ArrayBuffer,
     guard: RenderGuard = { validate: () => undefined },
   ): Promise<void> {
@@ -889,12 +595,12 @@ export class RenderedImage {
       new Blob([patchBytes], { type: region.patch.mimeType }),
     )
     const patch = this.candidate.element.ownerDocument.createElement('img')
-    patch.className = 'hmt-patch'
+    patch.className = 'hskify-patch'
     patch.alt = ''
     patch.draggable = false
-    patch.dataset.patchId = region.patch.blobId
+    patch.dataset.hskifyPatchId = region.patch.blobId
     patch.src = patchUrl
-    patch.style.zIndex = String(Math.max(0, region.readingOrder))
+    patch.style.zIndex = String(Math.max(0, region.itemOrder))
     setPercentPatch(patch, region)
     let fontFamily: string
     try {
@@ -941,7 +647,7 @@ export class RenderedImage {
     }
 
     const created = regionElement(region, this.candidate.element.ownerDocument)
-    created.element.style.zIndex = String(Math.max(0, region.readingOrder))
+    created.element.style.zIndex = String(Math.max(0, region.itemOrder))
     const next: RegionView = {
       region,
       patch,
@@ -950,7 +656,7 @@ export class RenderedImage {
       textElement: created.textElement,
       fontFamily,
     }
-    const previous = this.regions.get(region.id)
+    const previous = this.regions.get(region.itemId)
 
     // A mathematical fit below the readable floor is a preservation outcome,
     // not a reason to paint an unreadable patch over the source artwork.
@@ -963,21 +669,19 @@ export class RenderedImage {
       URL.revokeObjectURL(patchUrl)
       this.removeTranslatedRegion(previous)
       this.installSourcePreservingRegion({
-        id: region.id,
+        itemId: region.itemId,
         textPolygon: region.textPolygon,
-        sourceEnglish: region.sourceEnglish,
-        readingOrder: region.readingOrder,
-        translatedChinese: region.displayedChinese,
-        pinyin: region.pinyin,
-        teachingTerms: region.hsk.teachingTerms,
+        sourceText: region.text.sourceText,
+        itemOrder: region.itemOrder,
+        translatedText: region.text,
       })
-      this.callbacks.onFitDegraded?.(region.id)
+      this.callbacks.onFitDegraded?.(region.itemId)
       return
     }
 
     // The decoded patch is inserted synchronously before its selectable text.
     // No page state can expose Chinese over an undecoded/absent inpaint.
-    this.removeSourcePreservingRegion(region.id)
+    this.removeSourcePreservingRegion(region.itemId)
     if (previous) {
       previous.patch.replaceWith(patch)
       previous.element.replaceWith(created.element)
@@ -986,8 +690,8 @@ export class RenderedImage {
       this.patchLayer.append(patch)
       this.textLayer.append(created.element)
     }
-    this.regions.set(region.id, next)
-    this.explanation.register(created.element, this.job.jobId, region.id)
+    this.regions.set(region.itemId, next)
+    this.explanation.register(created.element, this.job.jobId, region.itemId)
     this.updateRegionMetadata(next)
     if (!this.refitView(next)) {
       this.explanation.unregister(created.element)
@@ -996,13 +700,11 @@ export class RenderedImage {
       URL.revokeObjectURL(patchUrl)
       this.removeTranslatedRegion(previous)
       this.installSourcePreservingRegion({
-        id: region.id,
+        itemId: region.itemId,
         textPolygon: region.textPolygon,
-        sourceEnglish: region.sourceEnglish,
-        readingOrder: region.readingOrder,
-        translatedChinese: region.displayedChinese,
-        pinyin: region.pinyin,
-        teachingTerms: region.hsk.teachingTerms,
+        sourceText: region.text.sourceText,
+        itemOrder: region.itemOrder,
+        translatedText: region.text,
       })
       return
     }
@@ -1015,15 +717,15 @@ export class RenderedImage {
     view.element.remove()
     view.patch.remove()
     URL.revokeObjectURL(view.patchUrl)
-    if (this.regions.get(view.region.id) === view) this.regions.delete(view.region.id)
+    if (this.regions.get(view.region.itemId) === view) this.regions.delete(view.region.itemId)
   }
 
-  private removeSourcePreservingRegion(regionId: string): void {
-    const previous = this.sourcePreserving.get(regionId)
+  private removeSourcePreservingRegion(itemId: string): void {
+    const previous = this.sourcePreserving.get(itemId)
     if (!previous) return
     this.explanation.unregister(previous.element)
     previous.element.remove()
-    this.sourcePreserving.delete(regionId)
+    this.sourcePreserving.delete(itemId)
   }
 
   /**
@@ -1031,43 +733,37 @@ export class RenderedImage {
    * the recognized source span to the same hover dictionary route. The hit
    * target is transparent and therefore cannot create a guessed overlay.
    */
-  installSourcePreservingRegion(
-    region: Pick<
-      UnreadableRegion | PreservedArtworkRegion,
-      'id' | 'textPolygon' | 'sourceEnglish' | 'readingOrder'
-    > &
-      Partial<Pick<PreservedArtworkRegion, 'translatedChinese' | 'pinyin' | 'teachingTerms'>>,
-  ): void {
-    if (this.destroyed || region.textPolygon.length < 3 || !region.sourceEnglish.trim()) return
-    this.removeSourcePreservingRegion(region.id)
+  installSourcePreservingRegion(region: SourcePreservingRegion): void {
+    if (this.destroyed || region.textPolygon.length < 3 || !region.sourceText.trim()) return
+    this.removeSourcePreservingRegion(region.itemId)
     const documentRef = this.candidate.element.ownerDocument
     const element = documentRef.createElement('span')
-    element.className = 'hmt-region hmt-source-notice'
+    element.className = 'hskify-region hskify-source-notice'
     element.lang = 'en'
     element.tabIndex = 0
-    element.dataset.regionId = region.id
-    element.dataset.sourceEnglish = region.sourceEnglish
-    if (region.translatedChinese) element.dataset.translatedChinese = region.translatedChinese
-    if (region.pinyin) element.dataset.pinyin = region.pinyin
-    if (region.teachingTerms) {
-      element.dataset.hskTeachingTerms = String(region.teachingTerms.length)
+    element.dataset.hskifyItemId = region.itemId
+    element.dataset.hskifySourceText = region.sourceText
+    if (region.translatedText) {
+      installTranslatedTextMetadata(element, region.translatedText)
     }
-    const displayText = region.translatedChinese?.trim() || region.sourceEnglish
+    const displayText = region.translatedText?.displayedChinese.trim() || region.sourceText
     element.setAttribute(
       'aria-label',
-      region.pinyin ? `${displayText}; ${region.pinyin}` : displayText,
+      region.translatedText?.pinyin
+        ? `${displayText}; ${region.translatedText.pinyin}`
+        : displayText,
     )
-    element.style.zIndex = String(Math.max(0, region.readingOrder))
+    element.style.zIndex = String(Math.max(0, region.itemOrder))
     setPercentPolygon(element, region.textPolygon)
     const text = documentRef.createElement('span')
-    text.className = 'hmt-region-text'
+    text.className = 'hskify-region-text'
     // The transparent hit target follows the final hover translation when
     // available. The original artwork remains the only visible pixels.
     text.textContent = displayText
     element.append(text)
     this.textLayer.append(element)
-    this.sourcePreserving.set(region.id, { element, regionId: region.id })
-    this.explanation.register(element, this.job.jobId, region.id)
+    this.sourcePreserving.set(region.itemId, { element, itemId: region.itemId })
+    this.explanation.register(element, this.job.jobId, region.itemId)
   }
 
   private refitView(view: RegionView): boolean {
@@ -1092,9 +788,10 @@ export class RenderedImage {
       this.candidate.element.ownerDocument,
       view.textElement,
       fit.lines,
-      view.region.displayedChinese,
-      view.region.hsk.teachingTerms,
+      view.region.text.displayedChinese,
+      view.region.text.hsk.teachingTerms,
     )
+    this.updateRegionMetadata(view)
     const applyStyle = (fontSize: number): void => {
       applyRegionStyle(view.element, view.region, fontSize, view.fontFamily)
       applyRegionColorBands(view.textElement, view.region, fontSize)
@@ -1131,7 +828,7 @@ export class RenderedImage {
       this.markFitDegraded(view)
       return false
     } else {
-      delete view.element.dataset.fit
+      delete view.element.dataset.hskifyFit
     }
     return true
   }
@@ -1227,13 +924,11 @@ export class RenderedImage {
       const region = view.region
       this.removeTranslatedRegion(view)
       this.installSourcePreservingRegion({
-        id: region.id,
+        itemId: region.itemId,
         textPolygon: region.textPolygon,
-        sourceEnglish: region.sourceEnglish,
-        readingOrder: region.readingOrder,
-        translatedChinese: region.displayedChinese,
-        pinyin: region.pinyin,
-        teachingTerms: region.hsk.teachingTerms,
+        sourceText: region.text.sourceText,
+        itemOrder: region.itemOrder,
+        translatedText: region.text,
       })
     }
   }
@@ -1254,7 +949,7 @@ export class RenderedImage {
       this.refitFrame = null
     }
     this.explanation.destroy()
-    this.candidate.element.removeAttribute('data-hmt-original')
+    this.candidate.element.removeAttribute('data-hskify-original')
     this.wrapper.remove()
     for (const view of this.regions.values()) URL.revokeObjectURL(view.patchUrl)
     this.regions.clear()
@@ -1266,8 +961,6 @@ export class RenderedImage {
 
 export class SelectableRenderer {
   private readonly fontLoader: FontLoader
-  private readonly modeControls = new Map<Document, ModeControls>()
-
   constructor(
     private readonly callbacks: RendererCallbacks,
     private readonly ResizeObserverType:
@@ -1277,22 +970,6 @@ export class SelectableRenderer {
     private readonly speaker: TextSpeaker = new MandarinSpeaker(),
   ) {
     this.fontLoader = new FontLoader(callbacks.fetchFont)
-  }
-
-  private controlsFor(documentRef: Document): ModeControls {
-    const existing = this.modeControls.get(documentRef)
-    if (existing) return existing
-    const controls = new ModeControls(documentRef, (emptyControls) => {
-      if (this.modeControls.get(documentRef) === emptyControls) {
-        this.modeControls.delete(documentRef)
-      }
-    })
-    this.modeControls.set(documentRef, controls)
-    return controls
-  }
-
-  private readonly releaseControls = (rendered: RenderedImage): void => {
-    this.modeControls.get(rendered.candidate.element.ownerDocument)?.detach(rendered)
   }
 
   begin(
@@ -1336,11 +1013,11 @@ export class SelectableRenderer {
       )
     }
     const wrapper = documentRef.createElement('span')
-    wrapper.dataset.hmtOwned = 'true'
+    wrapper.dataset.hskifyOwned = 'true'
     if (candidate.element.dataset.page) {
-      wrapper.dataset.hmtSourcePage = candidate.element.dataset.page
+      wrapper.dataset.hskifySourcePage = candidate.element.dataset.page
     }
-    wrapper.className = 'hmt-wrapper'
+    wrapper.className = 'hskify-wrapper'
     wrapper.style.contain = 'layout style'
     wrapper.style.display = 'block'
     wrapper.style.pointerEvents = 'none'
@@ -1352,27 +1029,27 @@ export class SelectableRenderer {
     guard.validate()
     ;(documentRef.body ?? documentRef.documentElement).append(wrapper)
 
-    candidate.element.setAttribute('data-hmt-original', 'true')
+    candidate.element.setAttribute('data-hskify-original', 'true')
     const host = documentRef.createElement('span')
-    host.dataset.hmtOwned = 'true'
-    host.setAttribute('aria-label', 'HSK manga translation controls')
+    host.dataset.hskifyOwned = 'true'
+    host.setAttribute('aria-label', 'Hskify chapter translation controls')
     wrapper.append(host)
     const shadow = host.attachShadow({ mode: 'open' })
     const style = documentRef.createElement('style')
     style.textContent = RENDERER_CSS
     const viewport = documentRef.createElement('span')
-    viewport.className = 'hmt-viewport'
+    viewport.className = 'hskify-viewport'
     const imageSpace = documentRef.createElement('span')
-    imageSpace.className = 'hmt-image-space'
+    imageSpace.className = 'hskify-image-space'
     const patchLayer = documentRef.createElement('span')
-    patchLayer.className = 'hmt-patch-layer'
+    patchLayer.className = 'hskify-patch-layer'
     const textLayer = documentRef.createElement('span')
-    textLayer.className = 'hmt-text-layer'
+    textLayer.className = 'hskify-text-layer'
     imageSpace.append(patchLayer, textLayer)
     viewport.append(imageSpace)
 
     const popover = documentRef.createElement('span')
-    popover.className = 'hmt-lookup'
+    popover.className = 'hskify-lookup'
     popover.hidden = true
     popover.setAttribute('role', 'dialog')
     popover.setAttribute('aria-label', 'Chinese dictionary')
@@ -1383,6 +1060,7 @@ export class SelectableRenderer {
     shadow.append(style, viewport, popover)
 
     let rendered: RenderedImage | undefined
+    let releaseControls: (() => void) | undefined
     const resizeObserver = this.ResizeObserverType
       ? new this.ResizeObserverType(() => rendered?.refit())
       : undefined
@@ -1404,12 +1082,12 @@ export class SelectableRenderer {
         this.patchImageDecoder,
         surfaceTransform !== null,
         resizeObserver,
-        this.releaseControls,
+        () => releaseControls?.(),
       )
-      this.controlsFor(candidate.element.ownerDocument).attach(rendered)
+      releaseControls = attachComparisonControls(candidate.element.ownerDocument, rendered)
     } catch (error) {
       resizeObserver?.disconnect()
-      candidate.element.removeAttribute('data-hmt-original')
+      candidate.element.removeAttribute('data-hskify-original')
       wrapper.remove()
       throw error
     }

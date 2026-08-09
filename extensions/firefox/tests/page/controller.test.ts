@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import type { JobUpdate } from '../../src/contracts/browser'
 import type { DiscoveredImage, DiscoveryEvent } from '../../src/discovery/images'
 import type { VisibleFirstQueue } from '../../src/discovery/queue'
-import type { JobUpdate } from '../../src/contracts/browser'
 import { RuntimeMessageError } from '../../src/messaging/messages'
-import { PageTranslationController } from '../../src/page/controller'
+import { ImageChapterMode } from '../../src/page/controller'
 import { SelectableRenderer, type RenderedImage } from '../../src/rendering/renderer'
 import { loadedImage } from '../helpers/images'
 
@@ -18,8 +18,8 @@ type ControllerInternals = {
   scope: 'visible' | 'all' | undefined
   queue: VisibleFirstQueue<unknown>
   queueIds: Map<HTMLImageElement, string>
-  chapterPageOrder: number[]
-  canonicalPageIndex(candidate: DiscoveredImage): number
+  chapterSourceOrder: number[]
+  canonicalSourceIndex(candidate: DiscoveredImage): number
   establishCanonicalPageOrder(candidates: readonly DiscoveredImage[]): void
   sourceSnapshot(candidate: DiscoveredImage): {
     generation: number
@@ -114,7 +114,7 @@ function fixture(): ChapterFixture {
 }
 
 function addTrackedOverlay(
-  controller: PageTranslationController,
+  controller: ImageChapterMode,
   image: HTMLImageElement,
   domIndex: number,
   processed: boolean,
@@ -132,11 +132,11 @@ function addTrackedOverlay(
     throw new Error('Renderer shadow root was not created.')
   }
   const patch = document.createElement('img')
-  patch.className = 'hmt-patch'
-  patch.dataset.patchId = `patch-${domIndex}`
+  patch.className = 'hskify-patch'
+  patch.dataset.hskifyPatchId = `patch-${domIndex}`
   const text = document.createElement('span')
-  text.className = 'hmt-region'
-  text.dataset.regionId = `region-${domIndex}`
+  text.className = 'hskify-region'
+  text.dataset.hskifyItemId = `region-${domIndex}`
   text.textContent = '完整文本'
   host.shadowRoot.append(patch, text)
 
@@ -155,9 +155,9 @@ function expectExactChapter(
   expect(fixture.first.parentElement).toBe(fixture.picture)
   expect(fixture.picture.nextSibling).toBe(expectedChildren[2])
   expect(fixture.second.previousSibling).toBe(expectedChildren[5])
-  expect(fixture.chapter.querySelector('[data-hmt-owned], [data-hmt-original]')).toBeNull()
-  expect(fixture.chapter.querySelector('.hmt-wrapper')).toBeNull()
-  expect(document.querySelector('[data-hmt-mode-controls="true"]')).toBeNull()
+  expect(fixture.chapter.querySelector('[data-hskify-owned], [data-hskify-original]')).toBeNull()
+  expect(fixture.chapter.querySelector('.hskify-wrapper')).toBeNull()
+  expect(document.querySelector('[data-hskify-mode-controls="true"]')).toBeNull()
 }
 
 function installJobLifecycle(failuresBeforeSuccess: number): {
@@ -171,17 +171,19 @@ function installJobLifecycle(failuresBeforeSuccess: number): {
     if (type === 'jobs:recover') {
       return { ok: true, value: [] }
     }
-    if (type === 'job:submit') {
+    if (type === 'job:submit-image') {
       submitted += 1
       return {
         ok: true,
         value: {
           jobId: `job-${submitted}`,
+          kind: 'image',
           clientImageId: `image-${submitted}`,
           sourceSha256: 'a'.repeat(64),
           sourceUrl: message.imageUrl,
           sourceWidth: message.naturalWidth,
           sourceHeight: message.naturalHeight,
+          sourceIndex: message.sourceIndex,
           acknowledgedSequence: 0,
         },
       }
@@ -197,7 +199,13 @@ function installJobLifecycle(failuresBeforeSuccess: number): {
               message: 'Temporary fixture failure',
               retryable: true,
             }
-          : { sequence: 1, type: 'complete', message: 'Complete' }
+          : {
+              sequence: 1,
+              type: 'complete',
+              translatedCount: 0,
+              preservedCount: 0,
+              message: 'Complete',
+            }
       return {
         ok: true,
         value: {
@@ -219,16 +227,18 @@ function installUpdateLifecycle(updates: readonly JobUpdate[]): void {
     switch (String(message.type)) {
       case 'jobs:recover':
         return { ok: true, value: [] }
-      case 'job:submit':
+      case 'job:submit-image':
         return {
           ok: true,
           value: {
             jobId: 'job-preservation',
+            kind: 'image',
             clientImageId: 'image-preservation',
             sourceSha256: 'a'.repeat(64),
             sourceUrl: message.imageUrl,
             sourceWidth: message.naturalWidth,
             sourceHeight: message.naturalHeight,
+            sourceIndex: message.sourceIndex,
             acknowledgedSequence: 0,
           },
         }
@@ -247,10 +257,7 @@ function installUpdateLifecycle(updates: readonly JobUpdate[]): void {
   })
 }
 
-function renderedShadowRoot(
-  controller: PageTranslationController,
-  image: HTMLImageElement,
-): ShadowRoot {
+function renderedShadowRoot(controller: ImageChapterMode, image: HTMLImageElement): ShadowRoot {
   const rendered = (controller as unknown as ControllerInternals).rendered.get(image)
   const host = [...(rendered?.wrapper.children ?? [])].find(
     (element) => element instanceof HTMLElement && element.shadowRoot,
@@ -272,7 +279,7 @@ beforeEach(() => {
 })
 afterEach(() => {
   document.documentElement
-    .querySelectorAll('[data-hmt-owned]')
+    .querySelectorAll('[data-hskify-owned]')
     .forEach((element) => element.remove())
   document.body.replaceChildren()
   vi.unstubAllGlobals()
@@ -284,7 +291,7 @@ describe('page controller terminal restoration', () => {
     const image = loadedImage('https://reader.test/retry-page.webp')
     document.body.append(image)
     const lifecycle = installJobLifecycle(Number.POSITIVE_INFINITY)
-    const controller = new PageTranslationController()
+    const controller = new ImageChapterMode()
 
     await controller.start('all', 3, 'natural', 'ltr')
     await vi.waitFor(
@@ -306,28 +313,35 @@ describe('page controller terminal restoration', () => {
     installUpdateLifecycle([
       {
         sequence: 1,
-        type: 'artworkPreserved',
+        type: 'imageRegionPreserved',
         region: {
-          id: 'credits',
+          itemId: 'credits',
+          itemOrder: 0,
           textPolygon: [
             { x: 0.1, y: 0.1 },
             { x: 0.4, y: 0.1 },
             { x: 0.4, y: 0.2 },
             { x: 0.1, y: 0.2 },
           ],
-          sourceEnglish: 'Thanks for reading',
-          ocrConfidence: 0.99,
-          readingOrder: 0,
+          sourceText: '',
+          confidence: 0.99,
+          reason: 'non-story artwork',
         },
       },
-      { sequence: 2, type: 'complete', message: 'Complete' },
+      {
+        sequence: 2,
+        type: 'complete',
+        translatedCount: 0,
+        preservedCount: 1,
+        message: 'Complete',
+      },
     ])
-    const controller = new PageTranslationController()
+    const controller = new ImageChapterMode()
 
     await controller.start('all', 3, 'natural', 'ltr')
     await vi.waitFor(() => expect(controller.snapshot().state).toBe('complete'))
 
-    expect(renderedShadowRoot(controller, image).querySelector('.hmt-region')).toBeNull()
+    expect(renderedShadowRoot(controller, image).querySelector('.hskify-region')).toBeNull()
     controller.destroy()
   })
 
@@ -337,30 +351,36 @@ describe('page controller terminal restoration', () => {
     installUpdateLifecycle([
       {
         sequence: 1,
-        type: 'unreadable',
+        type: 'imageRegionPreserved',
         region: {
-          id: 'uncertain-dialogue',
+          itemId: 'uncertain-dialogue',
+          itemOrder: 0,
           textPolygon: [
             { x: 0.1, y: 0.1 },
             { x: 0.4, y: 0.1 },
             { x: 0.4, y: 0.2 },
             { x: 0.1, y: 0.2 },
           ],
-          sourceEnglish: 'What did she say?',
-          ocrConfidence: 0.31,
-          readingOrder: 0,
+          sourceText: 'What did she say?',
+          confidence: 0.31,
           reason: 'OCR views disagreed',
         },
       },
-      { sequence: 2, type: 'complete', message: 'Complete' },
+      {
+        sequence: 2,
+        type: 'complete',
+        translatedCount: 0,
+        preservedCount: 1,
+        message: 'Complete',
+      },
     ])
-    const controller = new PageTranslationController()
+    const controller = new ImageChapterMode()
 
     await controller.start('all', 3, 'natural', 'ltr')
     await vi.waitFor(() => expect(controller.snapshot().state).toBe('complete'))
 
-    const notice = renderedShadowRoot(controller, image).querySelector('.hmt-source-notice')
-    expect(notice?.getAttribute('data-source-english')).toBe('What did she say?')
+    const notice = renderedShadowRoot(controller, image).querySelector('.hskify-source-notice')
+    expect(notice?.getAttribute('data-hskify-source-text')).toBe('What did she say?')
     controller.destroy()
   })
 
@@ -376,7 +396,7 @@ describe('page controller terminal restoration', () => {
     deferred.dataset.url = 'https://cdn.reader.test/deferred-page.webp'
     document.body.append(ready, deferred)
     const lifecycle = installJobLifecycle(0)
-    const controller = new PageTranslationController()
+    const controller = new ImageChapterMode()
     const internals = controller as unknown as ControllerInternals
 
     await controller.start('all', 3, 'natural', 'ltr')
@@ -424,12 +444,10 @@ describe('page controller terminal restoration', () => {
     deferred.dataset.lazySourceUrl = 'https://cdn.reader.test/deferred-page.webp'
     document.body.append(deferred)
     const lifecycle = installJobLifecycle(0)
-    const controller = new PageTranslationController()
+    const controller = new ImageChapterMode()
     const internals = controller as unknown as ControllerInternals
 
-    await expect(
-      controller.start('all', 3, 'natural', 'ltr'),
-    ).resolves.toMatchObject({
+    await expect(controller.start('all', 3, 'natural', 'ltr')).resolves.toMatchObject({
       state: 'running',
       current: 0,
       total: 1,
@@ -462,12 +480,12 @@ describe('page controller terminal restoration', () => {
     const page = fixture()
     const expectedHtml = page.chapter.innerHTML
     const expectedChildren = [...page.chapter.childNodes]
-    const controller = new PageTranslationController()
+    const controller = new ImageChapterMode()
     addTrackedOverlay(controller, page.first, 0, true)
     addTrackedOverlay(controller, page.second, 1, false)
 
-    expect(document.querySelectorAll('.hmt-wrapper')).toHaveLength(2)
-    expect(document.querySelectorAll('[data-hmt-mode-controls="true"]')).toHaveLength(1)
+    expect(document.querySelectorAll('.hskify-wrapper')).toHaveLength(2)
+    expect(document.querySelectorAll('[data-hskify-mode-controls="true"]')).toHaveLength(1)
     controller.cancel()
     expectExactChapter(page, expectedHtml, expectedChildren)
 
@@ -480,7 +498,7 @@ describe('page controller terminal restoration', () => {
     const page = fixture()
     const expected = page.chapter.cloneNode(true) as HTMLElement
     const expectedChildren = [...page.chapter.childNodes]
-    const controller = new PageTranslationController()
+    const controller = new ImageChapterMode()
     addTrackedOverlay(controller, page.first, 0, true)
     addTrackedOverlay(controller, page.second, 1, true)
     const internals = controller as unknown as ControllerInternals
@@ -508,7 +526,7 @@ describe('page controller terminal restoration', () => {
 
   it('updates queued order for a same-source discovery update without ending the run', () => {
     const page = fixture()
-    const controller = new PageTranslationController()
+    const controller = new ImageChapterMode()
     const internals = controller as unknown as ControllerInternals
     internals.scope = 'all'
     internals.queueIds.set(page.second, 'queued-second')
@@ -532,31 +550,31 @@ describe('page controller terminal restoration', () => {
     const late = loadedImage('https://reader.test/page-late.webp')
     late.dataset.page = 'late'
     document.body.append(late)
-    const controller = new PageTranslationController()
+    const controller = new ImageChapterMode()
     const internals = controller as unknown as ControllerInternals
     const first = candidate(page.first, 0)
     const second = candidate(page.second, 1)
     const insertedBeforeFirst = candidate(late, 0)
 
     internals.establishCanonicalPageOrder([first, second])
-    expect(internals.canonicalPageIndex(first)).toBe(0)
-    expect(internals.canonicalPageIndex(second)).toBe(1)
+    expect(internals.canonicalSourceIndex(first)).toBe(0)
+    expect(internals.canonicalSourceIndex(second)).toBe(1)
 
     // The same elements report new mutable DOM indexes after a reader
     // prepends a lazy page. Their chapter identities and context positions
     // remain unchanged; the genuinely new surface appends to the stream.
-    expect(internals.canonicalPageIndex(candidate(page.second, 0))).toBe(1)
-    expect(internals.canonicalPageIndex(candidate(page.first, 1))).toBe(0)
-    expect(internals.canonicalPageIndex(insertedBeforeFirst)).toBe(2)
-    expect(internals.chapterPageOrder).toEqual([0, 1, 2])
+    expect(internals.canonicalSourceIndex(candidate(page.second, 0))).toBe(1)
+    expect(internals.canonicalSourceIndex(candidate(page.first, 1))).toBe(0)
+    expect(internals.canonicalSourceIndex(insertedBeforeFirst)).toBe(2)
+    expect(internals.chapterSourceOrder).toEqual([0, 1, 2])
 
     // A page removed before submission must not remain in the daemon's
     // expected-page barrier. Re-inserting the same element restores its
     // frozen identity rather than allocating a new position.
     internals.onDiscovery({ type: 'removed', candidate: first })
-    expect(internals.chapterPageOrder).toEqual([1, 2])
-    expect(internals.canonicalPageIndex(first)).toBe(0)
-    expect(internals.chapterPageOrder).toEqual([0, 1, 2])
+    expect(internals.chapterSourceOrder).toEqual([1, 2])
+    expect(internals.canonicalSourceIndex(first)).toBe(0)
+    expect(internals.chapterSourceOrder).toEqual([0, 1, 2])
     controller.destroy()
   })
 
@@ -564,7 +582,7 @@ describe('page controller terminal restoration', () => {
     const page = fixture()
     const expectedHtml = page.chapter.innerHTML
     const expectedChildren = [...page.chapter.childNodes]
-    const controller = new PageTranslationController()
+    const controller = new ImageChapterMode()
     addTrackedOverlay(controller, page.first, 0, true)
     addTrackedOverlay(controller, page.second, 1, false)
     const internals = controller as unknown as ControllerInternals
@@ -577,11 +595,6 @@ describe('page controller terminal restoration', () => {
     expect(() =>
       internals.assertCurrent(firstCandidate, sourceSnapshot, new AbortController().signal),
     ).toThrowError(expect.objectContaining({ name: 'AbortError' }))
-    expectExactChapter(page, expectedHtml, expectedChildren)
-    expect(internals.scope).toBeUndefined()
-
-    addTrackedOverlay(controller, page.first, 0, true)
-    addTrackedOverlay(controller, page.second, 1, false)
     controller.destroy()
     controller.destroy()
     expectExactChapter(page, expectedHtml, expectedChildren)

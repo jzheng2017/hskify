@@ -1,0 +1,32 @@
+{
+  "jobId": "fixture-image-modality",
+  "nextSequence": 1,
+  "updates": [
+    {
+      "sequence": 1,
+      "type": "imageRegionPreserved",
+      "region": {
+        "itemId": "region-0",
+        "itemOrder": 0,
+        "textPolygon": [
+          {
+            "x": 0.1,
+            "y": 0.1
+          },
+          {
+            "x": 0.2,
+            "y": 0.1
+          },
+          {
+            "x": 0.2,
+            "y": 0.2
+          }
+        ],
+        "sourceText": "Wait!",
+        "confidence": 0.9,
+        "reason": "source-preserved"
+      },
+      "block": {}
+    }
+  ]
+}

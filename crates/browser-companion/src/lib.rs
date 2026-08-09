@@ -25,21 +25,21 @@ pub mod server;
 mod setup;
 
 pub use contracts::{
-    BUILD_FINGERPRINT, BrowserJobCreated, BrowserSetupStatus, ContractError, CreateJobRequest,
-    ErrorResponse, HealthResponse, JobUpdate, JobUpdatesResponse, LookupRequest, LookupResult,
-    NativeHandshakeRequest, NativeReadyResponse, NormalizedRect, TranslatedRegion, Validate,
-    ViewportUpdateRequest,
+    BUILD_FINGERPRINT, BrowserJobCreated, BrowserSetupStatus, ChapterKind, ContractError,
+    DocumentJobRequest, ErrorResponse, FocusUpdateRequest, HealthResponse, ImageJobRequest,
+    JobUpdate, JobUpdatesResponse, LookupRequest, LookupResult, NativeHandshakeRequest,
+    NativeReadyResponse, NormalizedRect, TranslatedText, Validate, WarmupRequest,
 };
 
 /// Permanent Firefox add-on ID frozen by ADR 0001.
-pub const FIREFOX_EXTENSION_ID: &str = "hsk-manga-translator@local.hskify";
+pub const FIREFOX_EXTENSION_ID: &str = "hskify@local.hskify";
 
 /// Native host name frozen by ADR 0001.
-pub const NATIVE_HOST_NAME: &str = "local.hskify.hsk_manga";
+pub const NATIVE_HOST_NAME: &str = "local.hskify.browser";
 
 /// Explicit Firefox extension origin used when privileged extension fetches
 /// omit the standard `Origin` header.
-pub const EXTENSION_ORIGIN_HEADER: &str = "x-hsk-manga-extension-origin";
+pub const EXTENSION_ORIGIN_HEADER: &str = "x-hskify-extension-origin";
 
 /// Internal launcher-to-daemon control header. This is never exposed to Firefox.
-pub const CONTROL_HEADER: &str = "x-hsk-manga-control";
+pub const CONTROL_HEADER: &str = "x-hskify-control";

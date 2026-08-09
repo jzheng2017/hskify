@@ -1,0 +1,7 @@
+{
+  "fixtureType": "repeatedDocumentRequest",
+  "pageSessionId": "fixture-document-block-count",
+  "blockCount": 2001,
+  "textSeed": "A bounded source block.",
+  "textRepeat": 1
+}

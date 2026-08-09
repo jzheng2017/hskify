@@ -43,4 +43,40 @@ describe('first-run background routing', () => {
     expect(companion.startModelSetup).toHaveBeenCalledTimes(1)
     expect(create).not.toHaveBeenCalled()
   })
+
+  it.each(['document', 'image'] as const)(
+    'retries a detected %s warmup after resources become installed',
+    async (contentKind) => {
+      let installed = false
+      const companion = {
+        getSetupStatus: vi.fn(async () => installed
+          ? {
+              state: 'warming' as const,
+              modelId: 'qwen3.5-4b',
+              message: 'Resources are installed and a runtime is warming.',
+            }
+          : {
+              state: 'missing-models' as const,
+              modelId: 'qwen3.5-4b',
+              message: 'Models are missing.',
+            }),
+        warmup: vi.fn(async (kind: 'document' | 'image') => ({
+          state: 'ready' as const,
+          modelId: 'qwen3.5-4b',
+          message: `${kind} runtime is ready.`,
+        })),
+      } as unknown as CompanionClient
+      const router = new BackgroundRouter({ companion })
+      const sender = { id: fakeBrowser.runtime.id } as browser.runtime.MessageSender
+
+      await expect(router.route({ type: 'engine:warmup', contentKind }, sender)).resolves
+        .toMatchObject({ state: 'missing-models' })
+      expect(companion.warmup).not.toHaveBeenCalled()
+
+      installed = true
+      await expect(router.route({ type: 'engine:warmup', contentKind }, sender)).resolves
+        .toMatchObject({ state: 'ready' })
+      expect(companion.warmup).toHaveBeenCalledExactlyOnceWith(contentKind)
+    },
+  )
 })

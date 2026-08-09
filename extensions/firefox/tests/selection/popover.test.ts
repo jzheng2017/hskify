@@ -7,12 +7,7 @@ import {
   textRange,
 } from '../../src/selection/popover'
 
-function rect(
-  left: number,
-  top: number,
-  width: number,
-  height: number,
-): DOMRect {
+function rect(left: number, top: number, width: number, height: number): DOMRect {
   return {
     x: left,
     y: top,
@@ -39,9 +34,7 @@ function fixture(hitTest?: HoverHitTester) {
   root.append(region, outside, popover)
   vi.spyOn(host, 'getBoundingClientRect').mockReturnValue(rect(100, 0, 720, 1000))
   vi.spyOn(region, 'getBoundingClientRect').mockReturnValue(rect(220, 100, 520, 300))
-  vi.spyOn(popover, 'getBoundingClientRect').mockReturnValue(
-    rect(0, 0, 320, 220),
-  )
+  vi.spyOn(popover, 'getBoundingClientRect').mockReturnValue(rect(0, 0, 320, 220))
   const lookup = vi.fn(async (request) => {
     const selectedText =
       request.interaction === 'hover'
@@ -50,25 +43,18 @@ function fixture(hitTest?: HoverHitTester) {
           : '生'
         : request.selectedText
     return {
-    selectedText,
-    tokens: [
-      {
-        simplified: selectedText,
-        pinyin: 'fixture',
-        definitions: ['fixture definition'],
-        properName: false,
-      },
-    ],
-  }
+      selectedText,
+      tokens: [
+        {
+          simplified: selectedText,
+          pinyin: 'fixture',
+          definitions: ['fixture definition'],
+          properName: false,
+        },
+      ],
+    }
   })
-  const controller = new ExplanationController(
-    root,
-    popover,
-    lookup,
-    undefined,
-    undefined,
-    hitTest,
-  )
+  const controller = new ExplanationController(root, popover, lookup, undefined, undefined, hitTest)
   controller.register(region, 'job-1', 'region-1')
   const range = document.createRange()
   range.setStart(region.firstChild!, 0)
@@ -129,7 +115,7 @@ describe('selection popover', () => {
       interaction: 'hover',
       characterOffset: 0,
       jobId: 'job-1',
-      regionId: 'region-1',
+      itemId: 'region-1',
     })
     await vi.waitFor(() => expect(item.popover.textContent).toContain('研究生'))
 
@@ -147,12 +133,10 @@ describe('selection popover', () => {
       interaction: 'hover',
       characterOffset: 2,
       jobId: 'job-1',
-      regionId: 'region-1',
+      itemId: 'region-1',
     })
     await vi.waitFor(() =>
-      expect(
-        item.popover.querySelector('.hmt-lookup-heading strong')?.textContent,
-      ).toBe('生'),
+      expect(item.popover.querySelector('.hskify-lookup-heading strong')?.textContent).toBe('生'),
     )
     item.controller.destroy()
     item.host.remove()
@@ -221,9 +205,7 @@ describe('selection popover', () => {
     item.region.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, composed: true }))
     await vi.waitFor(() => expect(item.popover.hidden).toBe(false))
 
-    document.body.dispatchEvent(
-      new Event('pointerdown', { bubbles: true, composed: true }),
-    )
+    document.body.dispatchEvent(new Event('pointerdown', { bubbles: true, composed: true }))
     expect(item.popover.hidden).toBe(true)
     item.controller.destroy()
     item.host.remove()

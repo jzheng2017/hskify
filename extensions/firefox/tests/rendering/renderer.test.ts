@@ -1,10 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { DiscoveredImage } from '../../src/discovery/images'
-import { createFixtureRegions } from '../support/fixture-service'
 import { SelectableRenderer, type RenderedImage } from '../../src/rendering/renderer'
 import type { TextSpeaker } from '../../src/selection/speech'
 import { loadedImage, pngHeader } from '../helpers/images'
+import { createFixtureRegions } from '../support/fixture-service'
+
+const liveRenderings = new Set<RenderedImage>()
 
 class TestResizeObserver {
   static instances: TestResizeObserver[] = []
@@ -51,13 +53,13 @@ function shadowOf(rendered: RenderedImage): ShadowRoot {
 }
 
 function controlsHost(): HTMLElement {
-  const host = document.querySelector<HTMLElement>('[data-hmt-mode-controls="true"]')
+  const host = document.querySelector<HTMLElement>('[data-hskify-mode-controls="true"]')
   if (!host?.shadowRoot) throw new Error('Fixed mode controls were not found.')
   return host
 }
 
 async function decodeFixturePatch(image: HTMLImageElement): Promise<void> {
-  const second = image.dataset.patchId?.endsWith('-2')
+  const second = image.dataset.hskifyPatchId?.endsWith('-2')
   Object.defineProperties(image, {
     complete: { configurable: true, value: true },
     naturalWidth: { configurable: true, value: second ? 432 : 456 },
@@ -66,17 +68,14 @@ async function decodeFixturePatch(image: HTMLImageElement): Promise<void> {
 }
 
 function renderer(
-  lookup: ConstructorParameters<typeof SelectableRenderer>[0]['lookup'] = async (
-    request,
-  ) => ({
-    selectedText:
-      request.interaction === 'selection' ? request.selectedText : '离开',
+  lookup: ConstructorParameters<typeof SelectableRenderer>[0]['lookup'] = async (request) => ({
+    selectedText: request.interaction === 'selection' ? request.selectedText : '离开',
     tokens: [],
   }),
   decoder = decodeFixturePatch,
   speaker?: TextSpeaker,
 ): SelectableRenderer {
-  return new SelectableRenderer(
+  const selected = new SelectableRenderer(
     {
       fetchFont: async () => new ArrayBuffer(1),
       lookup,
@@ -85,6 +84,13 @@ function renderer(
     decoder,
     speaker,
   )
+  const begin = selected.begin.bind(selected)
+  selected.begin = (...args: Parameters<SelectableRenderer['begin']>) => {
+    const rendered = begin(...args)
+    liveRenderings.add(rendered)
+    return rendered
+  }
+  return selected
 }
 
 async function renderAll(
@@ -104,6 +110,7 @@ async function renderAll(
 }
 
 beforeEach(() => {
+  liveRenderings.clear()
   TestResizeObserver.instances = []
   document.body.replaceChildren()
   if (!URL.createObjectURL) {
@@ -137,6 +144,8 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  for (const rendered of liveRenderings) rendered.destroy()
+  liveRenderings.clear()
   window.getSelection()?.removeAllRanges()
   document.body.replaceChildren()
   vi.restoreAllMocks()
@@ -166,13 +175,13 @@ describe('progressive selectable image renderer', () => {
 
     expect(image.isConnected).toBe(true)
     expect(image.style.opacity).toBe('')
-    expect(shadow.querySelector('.hmt-patch')).toBeNull()
-    expect(shadow.querySelector('.hmt-region')).toBeNull()
+    expect(shadow.querySelector('.hskify-patch')).toBeNull()
+    expect(shadow.querySelector('.hskify-region')).toBeNull()
     releaseDecode()
     await installing
     expect(rendered.wrapper.style.position).toBe('absolute')
-    expect(shadow.querySelector('.hmt-patch')).not.toBeNull()
-    expect(shadow.querySelector('.hmt-region')?.textContent).toBe('我们现在要走！')
+    expect(shadow.querySelector('.hskify-patch')).not.toBeNull()
+    expect(shadow.querySelector('.hskify-region')?.textContent).toBe('我们现在要走！')
     image.dispatchEvent(new Event('custom-live-listener'))
     expect(liveListener).toHaveBeenCalledTimes(1)
   })
@@ -185,7 +194,12 @@ describe('progressive selectable image renderer', () => {
       offsetHeight: { configurable: true, value: 900 },
     })
     ;(image as HTMLImageElement & { getBoxQuads: () => unknown[] }).getBoxQuads = () => [
-      { p1: { x: 40, y: 30 }, p2: { x: 40, y: 630 }, p3: { x: -860, y: 630 }, p4: { x: -860, y: 30 } },
+      {
+        p1: { x: 40, y: 30 },
+        p2: { x: 40, y: 630 },
+        p3: { x: -860, y: 630 },
+        p4: { x: -860, y: 30 },
+      },
     ]
     document.body.append(image)
 
@@ -212,7 +226,10 @@ describe('progressive selectable image renderer', () => {
     })
     const region = {
       ...fixtureRegions()[0]!,
-      displayedChinese: '帝国称它为 SILVER HARBOR。',
+      text: {
+        ...fixtureRegions()[0]!.text,
+        displayedChinese: '帝国称它为 SILVER HARBOR。',
+      },
       layout: {
         ...fixtureRegions()[0]!.layout,
         suggestedLines: [],
@@ -221,9 +238,9 @@ describe('progressive selectable image renderer', () => {
 
     await rendered.installRegion(region, pngHeader())
 
-    const translated = shadowOf(rendered).querySelector<HTMLElement>('.hmt-region')
-    expect(translated?.textContent).toBe(region.displayedChinese)
-    expect(translated?.querySelector('.hmt-latin-run')).toBeNull()
+    const translated = shadowOf(rendered).querySelector<HTMLElement>('.hskify-region')
+    expect(translated?.textContent).toBe(region.text.displayedChinese)
+    expect(translated?.querySelector('.hskify-latin-run')).toBeNull()
   })
 
   it('lets document scrolling stay compositor-only without scheduling a refit', async () => {
@@ -244,23 +261,21 @@ describe('progressive selectable image renderer', () => {
     document.body.append(first, second)
     const selectedRenderer = renderer()
     const firstRendered = await renderAll(first, selectedRenderer)
-    const firstViewport = shadowOf(firstRendered).querySelector<HTMLElement>('.hmt-viewport')
+    const firstViewport = shadowOf(firstRendered).querySelector<HTMLElement>('.hskify-viewport')
     const host = controlsHost()
     const controls = host.shadowRoot
     const button = (name: string) =>
-      [...(controls?.querySelectorAll('button') ?? [])].find(
-        (item) => item.textContent === name,
-      )
+      [...(controls?.querySelectorAll('button') ?? [])].find((item) => item.textContent === name)
 
-    expect(document.querySelectorAll('[data-hmt-mode-controls="true"]')).toHaveLength(1)
+    expect(document.querySelectorAll('[data-hskify-mode-controls="true"]')).toHaveLength(1)
     expect(host.style.position).toBe('fixed')
     button('Original')?.click()
     expect(firstRendered.currentMode).toBe('original')
     expect(firstViewport?.hidden).toBe(true)
 
     const secondRendered = await renderAll(second, selectedRenderer)
-    const secondViewport = shadowOf(secondRendered).querySelector<HTMLElement>('.hmt-viewport')
-    expect(document.querySelectorAll('[data-hmt-mode-controls="true"]')).toHaveLength(1)
+    const secondViewport = shadowOf(secondRendered).querySelector<HTMLElement>('.hskify-viewport')
+    expect(document.querySelectorAll('[data-hskify-mode-controls="true"]')).toHaveLength(1)
     expect(secondRendered.currentMode).toBe('original')
     expect(secondViewport?.hidden).toBe(true)
     expect(first.style.opacity).toBe('')
@@ -282,18 +297,18 @@ describe('progressive selectable image renderer', () => {
     expect(second.isConnected).toBe(true)
 
     firstRendered.destroy()
-    expect(document.querySelectorAll('[data-hmt-mode-controls="true"]')).toHaveLength(1)
+    expect(document.querySelectorAll('[data-hskify-mode-controls="true"]')).toHaveLength(1)
     secondRendered.destroy()
-    expect(document.querySelector('[data-hmt-mode-controls="true"]')).toBeNull()
+    expect(document.querySelector('[data-hskify-mode-controls="true"]')).toBeNull()
   })
 
   it('underlines only preserved learning terms without changing selectable text', async () => {
     const image = loadedImage()
     document.body.append(image)
     const region = fixtureRegions()[0]!
-    region.displayedChinese = '我们现在要走！'
-    region.pinyin = 'wǒ men xiàn zài yào zǒu'
-    region.hsk = {
+    region.text.displayedChinese = '我们现在要走！'
+    region.text.pinyin = 'wǒ men xiàn zài yào zǒu'
+    region.text.hsk = {
       requestedLevel: 2,
       learningMode: 'natural',
       strictlyValid: false,
@@ -315,19 +330,18 @@ describe('progressive selectable image renderer', () => {
     const rendered = await renderAll(image, renderer(), [region])
     const shadow = shadowOf(rendered)
 
-    const translated = shadow.querySelector<HTMLElement>(`[data-region-id="${region.id}"]`)
+    const translated = shadow.querySelector<HTMLElement>(`[data-hskify-item-id="${region.itemId}"]`)
     expect(translated?.textContent).toBe('我们现在要走！')
-    expect(translated?.querySelector('.hmt-learning-term')?.textContent).toBe('现在')
-    expect(translated?.dataset.hskLearningMode).toBe('natural')
-    expect(translated?.dataset.hskTeachingTerms).toBe('1')
+    expect(translated?.querySelector('.hskify-learning-term')?.textContent).toBe('现在')
+    expect(translated?.dataset.hskifyHskLearningMode).toBe('natural')
+    expect(translated?.dataset.hskifyHskTeachingTerms).toBe('1')
   })
 
   it('keeps selection, dictionary pinyin, and Mandarin speech wired to progressive text', async () => {
     const image = loadedImage()
     document.body.append(image)
     const lookup = vi.fn(async (request) => ({
-      selectedText:
-        request.interaction === 'selection' ? request.selectedText : '离开',
+      selectedText: request.interaction === 'selection' ? request.selectedText : '离开',
       tokens: [
         {
           simplified: '离开',
@@ -337,10 +351,10 @@ describe('progressive selectable image renderer', () => {
           properName: false,
         },
       ],
-      region: {
+      item: {
         displayedChinese: '我们现在要走！',
         baseChinese: '我们得马上离开！',
-        sourceEnglish: 'We have to leave now!',
+        sourceText: 'We have to leave now!',
       },
     }))
     let speaking = false
@@ -365,7 +379,7 @@ describe('progressive selectable image renderer', () => {
     }
     const rendered = await renderAll(image, renderer(lookup, decodeFixturePatch, speaker))
     const shadow = shadowOf(rendered)
-    const region = shadow.querySelector<HTMLElement>('.hmt-region')
+    const region = shadow.querySelector<HTMLElement>('.hskify-region')
     if (!region) throw new Error('Fixture region missing.')
     const range = document.createRange()
     range.selectNodeContents(region)
@@ -374,16 +388,16 @@ describe('progressive selectable image renderer', () => {
     region.dispatchEvent(new Event('mouseup', { bubbles: true, composed: true }))
 
     await vi.waitFor(() => expect(lookup).toHaveBeenCalled())
-    const popover = shadow.querySelector<HTMLElement>('.hmt-lookup')
+    const popover = shadow.querySelector<HTMLElement>('.hskify-lookup')
     await vi.waitFor(() => expect(popover?.textContent).toContain('lí kāi'))
     expect(popover?.textContent).toContain('We have to leave now!')
-    const speak = popover?.querySelector<HTMLButtonElement>('.hmt-speak')
+    const speak = popover?.querySelector<HTMLButtonElement>('.hskify-speak')
     speak?.click()
     expect(speaker.toggle).toHaveBeenCalledWith('我们现在要走！', expect.any(Function))
     expect(speak?.textContent).toBe('Stop')
-    expect(speak?.dataset.hmtVoiceName).toBe('Microsoft Yunxi')
-    expect(speak?.dataset.hmtVoiceLang).toBe('zh-CN')
-    expect(speak?.dataset.hmtVoiceLocalService).toBe('true')
+    expect(speak?.dataset.hskifyVoiceName).toBe('Microsoft Yunxi')
+    expect(speak?.dataset.hskifyVoiceLang).toBe('zh-CN')
+    expect(speak?.dataset.hskifyVoiceLocalService).toBe('true')
   })
 
   it('forwards unselected primary clicks to reader navigation', async () => {
@@ -397,7 +411,7 @@ describe('progressive selectable image renderer', () => {
     link.addEventListener('click', navigated)
     image.addEventListener('click', imageClicked)
     const rendered = await renderAll(image)
-    shadowOf(rendered).querySelector<HTMLElement>('.hmt-region')?.click()
+    shadowOf(rendered).querySelector<HTMLElement>('.hskify-region')?.click()
     expect(navigated).toHaveBeenCalledTimes(1)
     expect(imageClicked).toHaveBeenCalledTimes(1)
   })
@@ -406,7 +420,7 @@ describe('progressive selectable image renderer', () => {
     const image = loadedImage()
     document.body.append(image)
     const rendered = await renderAll(image)
-    const region = shadowOf(rendered).querySelector<HTMLElement>('.hmt-region')
+    const region = shadowOf(rendered).querySelector<HTMLElement>('.hskify-region')
     if (!region) throw new Error('Fixture region missing.')
     Object.defineProperties(region, {
       clientWidth: { configurable: true, value: 100 },
@@ -423,21 +437,22 @@ describe('progressive selectable image renderer', () => {
     rendered.refit()
     expect(region.isConnected).toBe(false)
     expect(
-      shadowOf(rendered).querySelector(`[data-patch-id="${fixtureRegions()[0]!.patch.blobId}"]`),
+      shadowOf(rendered).querySelector(
+        `[data-hskify-patch-id="${fixtureRegions()[0]!.patch.blobId}"]`,
+      ),
     ).toBeNull()
     const preserved = shadowOf(rendered).querySelector<HTMLElement>(
-      `[data-region-id="${fixtureRegions()[0]!.id}"]`,
+      `[data-hskify-item-id="${fixtureRegions()[0]!.itemId}"]`,
     )
     expect(preserved).not.toBeNull()
-    expect(preserved?.classList.contains('hmt-source-notice')).toBe(true)
-    expect(preserved?.dataset.translatedChinese).toBe('我们现在要走！')
+    expect(preserved?.classList.contains('hskify-source-notice')).toBe(true)
+    expect(preserved?.dataset.hskifyDisplayedChinese).toBe('我们现在要走！')
   })
 
   it('never installs text for a corrupt patch and restores the exact original node', async () => {
     const before = document.createElement('span')
     const image = loadedImage()
-    image.srcset =
-      'https://reader.test/panel-small.png 480w, https://reader.test/panel.png 1200w'
+    image.srcset = 'https://reader.test/panel-small.png 480w, https://reader.test/panel.png 1200w'
     image.sizes = '(max-width: 800px) 100vw, 800px'
     image.className = 'webtoon-page preserved-class'
     image.setAttribute('style', 'display: block; width: 100%; height: auto;')
@@ -456,10 +471,10 @@ describe('progressive selectable image renderer', () => {
     expect(image.parentNode).toBe(document.body)
     expect(document.body.children[1]).toBe(image)
     expect(rendered.wrapper.parentNode).toBe(document.body)
-    await expect(
-      rendered.installRegion(fixtureRegions()[0]!, pngHeader()),
-    ).rejects.toMatchObject({ code: 'PATCH_DECODE_FAILED' })
-    expect(shadowOf(rendered).querySelector('.hmt-region')).toBeNull()
+    await expect(rendered.installRegion(fixtureRegions()[0]!, pngHeader())).rejects.toMatchObject({
+      code: 'PATCH_DECODE_FAILED',
+    })
+    expect(shadowOf(rendered).querySelector('.hskify-region')).toBeNull()
     expect(image.style.opacity).toBe('')
     rendered.destroy()
     rendered.destroy()
@@ -474,7 +489,7 @@ describe('progressive selectable image renderer', () => {
     expect(image.getAttribute('sizes')).toBe('(max-width: 800px) 100vw, 800px')
     expect(image.className).toBe('webtoon-page preserved-class')
     expect(image.getAttribute('style')).toBe('display: block; width: 100%; height: auto;')
-    expect(image.hasAttribute('data-hmt-original')).toBe(false)
+    expect(image.hasAttribute('data-hskify-original')).toBe(false)
     expect(URL.revokeObjectURL).toHaveBeenCalled()
   })
 })

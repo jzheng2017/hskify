@@ -15,6 +15,8 @@
         </span>
       </header>
 
+      <small id="content-kind">Detecting chapter content…</small>
+
       <label for="hsk-level">Chinese difficulty</label>
       <select id="hsk-level" aria-describedby="hsk-help">
         <option value="1">HSK 1 · easiest</option>
@@ -35,12 +37,14 @@
         Natural learning keeps a few useful story words and explains them when you hover.
       </small>
 
-      <label for="reading-direction">Reading order</label>
-      <select id="reading-direction" aria-describedby="reading-direction-help">
-        <option value="ltr">Left to right · webtoons and manhwa</option>
-        <option value="rtl">Right to left · manga</option>
-      </select>
-      <small id="reading-direction-help">Controls the order of bubbles on the same row.</small>
+      <section id="image-settings" hidden>
+        <label for="reading-direction">Reading order</label>
+        <select id="reading-direction" aria-describedby="reading-direction-help">
+          <option value="ltr">Left to right · webtoons and manhwa</option>
+          <option value="rtl">Right to left · manga</option>
+        </select>
+        <small id="reading-direction-help">Controls the order of bubbles on the same row.</small>
+      </section>
 
       <section class="actions" aria-label="Translation actions">
         <button id="translate-all" type="button">Translate chapter</button>

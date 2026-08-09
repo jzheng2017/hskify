@@ -1,0 +1,7 @@
+{
+  "fixtureType": "repeatedDocumentRequest",
+  "pageSessionId": "fixture-document-block-bytes",
+  "blockCount": 1,
+  "textSeed": "AA\u00e9",
+  "textRepeat": 4097
+}

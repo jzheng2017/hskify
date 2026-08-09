@@ -20,14 +20,14 @@ $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $extensionRoot = Join-Path $repositoryRoot 'extensions\firefox'
 $performanceBuild = Join-Path $PSScriptRoot 'Invoke-PerformanceBuild.ps1'
 $attestationPath = Join-Path $repositoryRoot 'target\release\hskify-performance-build-attestation.json'
-$nativeHostPath = Join-Path $repositoryRoot 'target\release\hsk-manga-native-host.exe'
-$nativeDaemonPath = Join-Path $repositoryRoot 'target\release\hsk-manga-browser-daemon.exe'
+$nativeHostPath = Join-Path $repositoryRoot 'target\release\hskify-native-host.exe'
+$nativeDaemonPath = Join-Path $repositoryRoot 'target\release\hskify-browser-daemon.exe'
 $registerScript = Join-Path $repositoryRoot 'installers\windows\native-host-registration\Register-NativeHost.ps1'
 $unregisterScript = Join-Path $repositoryRoot 'installers\windows\native-host-registration\Unregister-NativeHost.ps1'
 $installedRoot = Join-Path $env:LOCALAPPDATA 'Hskify'
 $readinessMarker = Join-Path $installedRoot 'browser-companion\browser-cache\browser-runtime\models.ready'
-$nativeManifest = Join-Path $installedRoot 'native-host\local.hskify.hsk_manga.json'
-$productionNativeHost = Join-Path $installedRoot 'app\companion\hsk-manga-native-host.exe'
+$nativeManifest = Join-Path $installedRoot 'native-host\local.hskify.browser.json'
+$productionNativeHost = Join-Path $installedRoot 'app\companion\hskify-native-host.exe'
 $developmentRecoveryRoot = Join-Path $installedRoot 'development-recovery'
 $registrationBackup = Join-Path $developmentRecoveryRoot 'native-host-path.txt'
 $readinessBackup = Join-Path $developmentRecoveryRoot 'models.ready'
@@ -146,7 +146,7 @@ function Stop-HskifyProcessesFrom {
                     [IO.Path]::DirectorySeparatorChar
             }
     )
-    foreach ($name in @('hsk-manga-native-host', 'hsk-manga-browser-daemon')) {
+    foreach ($name in @('hskify-native-host', 'hskify-browser-daemon')) {
         foreach ($process in @(Get-Process -Name $name -ErrorAction SilentlyContinue)) {
             $path = try { $process.Path } catch { $null }
             if ([string]::IsNullOrWhiteSpace($path)) {

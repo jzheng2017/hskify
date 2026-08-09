@@ -1,157 +1,204 @@
 # Unversioned browser contract
 
-The browser daemon mounts routes directly at its random loopback origin. There
-is no `/v1` or `/api` prefix and no separate result resource.
+The browser daemon mounts one exact API at its random IPv4 loopback origin.
+There is no version prefix, content negotiation, compatibility route, result
+download, or legacy parser.
 
 ## Routes
 
 | Method | Route | Purpose |
 | --- | --- | --- |
-| `GET` | `/health` | Exact build fingerprint, engine version, readiness, and sorted resident-resource identities |
-| `GET` | `/setup` | Current local-resource setup state |
-| `POST` | `/setup/models` | Start or report managed resource setup |
-| `POST` | `/jobs` | Validate multipart image + JSON metadata and create a job |
-| `DELETE` | `/jobs/{job_id}` | Cancel the job |
-| `DELETE` | `/chapters/{page_session_id}` | Release chapter dialogue context after seal or cancellation |
-| `PUT` | `/jobs/{job_id}/viewport` | Replace visible normalized rectangles and active state |
-| `GET` | `/jobs/{job_id}/updates` | Replay or long-poll flat updates after a sequence |
-| `POST` | `/lookup` | Local pinyin/dictionary lookup, optionally bound to a job region |
-| `GET` | `/blobs/{patch_id}` | Fetch one job-owned `image/png` cleanup patch |
-| `GET` | `/fonts/{font_id}` | Fetch one permitted installed font |
+| `GET` | `/health` | Exact fingerprint, engine readiness, and sorted resident-resource identities |
+| `GET` | `/setup` | Current installable-resource state |
+| `POST` | `/setup/models` | Start or report resource setup |
+| `POST` | `/warmup` | Initialize exactly the requested `document` or `image` runtime |
+| `POST` | `/jobs/image` | Create an image job from multipart raster bytes and strict metadata |
+| `POST` | `/jobs/document` | Create a document job from one JSON chapter snapshot |
+| `PUT` | `/jobs/{jobId}/focus` | Replace tagged image-rectangle or visible-block focus |
+| `GET` | `/jobs/{jobId}/updates` | Replay or long-poll updates after a sequence |
+| `DELETE` | `/jobs/{jobId}` | Cancel and release one job |
+| `DELETE` | `/chapters/{pageSessionId}` | Release ordered chapter context |
+| `POST` | `/lookup` | Local pinyin/dictionary lookup owned by an `itemId` |
+| `GET` | `/blobs/{blobId}` | Fetch an authorized job-owned image patch |
+| `GET` | `/fonts/{fontId}` | Fetch one permitted installed font |
 
-The launcher alone calls `/browser-internal/session` with the discovery
-control secret. That path is an implementation-private bootstrap endpoint: it
-is not CORS-enabled, is not exposed as the browser API, and does not imply
-protocol negotiation.
+The native launcher alone calls `/browser-internal/session` with
+`X-Hskify-Control`. That endpoint is not CORS-enabled and is not part of the
+browser API.
 
-## Authentication and build identity
+## Authentication and identity
 
-Every browser route requires:
+Every browser route requires the exact loopback `Host`, an active canonical
+extension origin, and `Authorization: Bearer <session-token>`. Privileged
+Firefox fetches that omit standard `Origin` send
+`X-Hskify-Extension-Origin` with the same canonical origin.
 
-- `Host: 127.0.0.1:<actual-port>`;
-- one active canonical extension origin;
-- `Authorization: Bearer <session-token>`; and
-- `X-HSK-Manga-Extension-Origin` when privileged Firefox fetches omit the
-  standard `Origin` header.
+The native handshake, health response, setup readiness, and both job requests
+must agree on:
 
-There is deliberately no protocol header. The exact fingerprint
-`hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-07-28-r7` is validated in the native handshake and job
-request and echoed by native readiness, health, and job creation. Unknown JSON
-fields are rejected by the contracts.
+```text
+hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-08-09-r8
+```
 
-## Job creation
+The registered native host is `local.hskify.browser`; its sole allowed Firefox
+extension is `hskify@local.hskify`. Unknown JSON fields, duplicate security
+headers, modality mismatches, and a different fingerprint are rejected.
 
-`POST /jobs` accepts exactly two multipart fields:
+`GET /setup` reports only verified installable-resource state and never loads a
+model. Once resources are ready, page detection issues `POST /warmup` with the
+detected kind. A document request initializes only the language runtime; an
+image request initializes language and vision. A detected page retains its kind
+and retries through missing/installing/warming states, so finishing first-run
+installation cannot strand that tab without a tagged warm-up.
 
-- `image`: PNG, JPEG, WebP, or GIF bytes whose multipart type, declared type,
-  sniffed type, SHA-256, and decoded dimensions agree;
-- `request`: `application/json` metadata containing the exact build
-  fingerprint, source identity, dimensions, immutable chapter page order,
-  page surface kind, HSK 2.0 level 1–6, learning mode (`natural` or `strict`),
-  reading direction, and visible rectangles.
+## Shared job fields
 
-The browser never supplies dialogue context or a name glossary. The
-`chapterStart`, `chapterPage`, `chapterViewport`, `chapterSeal`, and
-`chapterCancel` messages establish the chapter session; the daemon owns
-canonical ordering, accepted context, and continuation groups.
-
-The only supported language pair is English to Simplified Chinese. Visually
-classified story sound effects are always translated; there is no request
-toggle for them. A successful request returns HTTP 202 with only the build
+Both creation requests identify the exact source, page session, HSK 2.0 level
+1–6, and learning mode (`natural` or `strict`). Image metadata additionally
+identifies canonical chapter source order. The only language pair is English to
+Simplified Chinese. A successful creation returns HTTP 202 with the exact build
 fingerprint and `jobId`.
 
-## Flat chapter updates
+Active-job and page-artifact records have one exact `source.kind` discriminator:
+`image` or `document`. The record keeps `sourceSha256` beside that tagged
+source, and its image variant retains only the image fields required for
+recovery. Output from one kind cannot be replayed into the other.
 
-`GET /jobs/{job_id}/updates?after=N&waitMs=M` returns:
+## Image creation
+
+`POST /jobs/image` accepts exactly two multipart fields:
+
+- `image`: PNG, JPEG, WebP, or GIF bytes;
+- `request`: `application/json` metadata containing exactly
+  `buildFingerprint`, `clientImageId`, `sourceSha256`, `sourceMimeType`,
+  `naturalWidth`, `naturalHeight`, `pageSessionId`, `sourceIndex`,
+  `chapterSourceOrder`, `surfaceKind`, `readingDirection`, `settings`, and
+  `visibleRects`.
+
+The daemon verifies byte count, MIME, sniffed format, SHA-256, declared and
+decoded dimensions, pixel count, and decoder allocation before starting.
+Layout constraints occur only on `ocr` source spans.
+
+## Document creation
+
+`POST /jobs/document` accepts `application/json` with exactly
+`buildFingerprint`, `pageSessionId`, `sourceSha256`, `settings`, and `blocks`.
+Every block has exactly `itemId`, `sourceIndex`, `itemOrder`, `kind`,
+`provenance`, `text`, and an optional `layout`. Document blocks require
+`provenance: "dom"` and reject a present `layout`; DOM text is authoritative.
+
+The daemon applies these limits before registration:
+
+| Input | Limit |
+| --- | ---: |
+| Complete UTF-8 JSON body | 1 MiB |
+| Text blocks | 2,000 |
+| One normalized block | 16 KiB UTF-8 |
+| Visible block IDs in one focus update | 64 |
+
+It repeats deterministic normalization and recomputes the canonical document
+hash over the complete ordered text snapshot. A mismatch or oversized chapter
+is rejected; the daemon never truncates it. Browser extraction measures the
+complete compact `/jobs/document` JSON envelope, not only its block text or
+reader snapshot, before accepting the descriptor.
+
+Every block is registered in canonical `(sourceIndex, itemOrder)` order before
+translation starts. This makes context independent of viewport scheduling.
+
+## Focus
+
+`PUT /jobs/{jobId}/focus` accepts exactly one variant matching the job:
 
 ```json
 {
-  "jobId": "job-id",
-  "nextSequence": 12,
-  "updates": [
-    {
-      "type": "progress",
-      "sequence": 11,
-      "stage": "translating",
-      "overallProgress": 0.42,
-      "message": "Translating visually verified story text into Chinese"
-    },
-    {
-      "type": "regionReady",
-      "sequence": 12,
-      "region": {}
-    }
-  ]
+  "kind": "image",
+  "active": true,
+  "visibleRects": [{ "x": 0, "y": 0, "width": 1, "height": 0.5 }]
 }
 ```
 
-`after` is the last acknowledged sequence. The daemon returns only later
-entries, waits at most 20 seconds, and returns an empty batch on timeout.
-Sequences start at 1 and strictly increase. `nextSequence` is the last returned
-sequence, or the supplied cursor for an empty batch.
+or:
 
-The update union is flat and tagged by `type`:
+```json
+{
+  "kind": "document",
+  "active": true,
+  "visibleBlockIds": ["block-id"]
+}
+```
+
+Normalized image rectangles must be finite and bounded. Document IDs must be
+unique registered blocks and are capped at 64. Sending the wrong variant is a
+modality error.
+
+## Ordered updates
+
+`GET /jobs/{jobId}/updates?after=N&waitMs=M` returns the exact `jobId`, the
+last returned sequence, and later updates. Sequences start at 1 and strictly
+increase without gaps from `after + 1`. An empty long-poll retains the supplied
+cursor. One response contains at most 1,024 updates; the browser advances the
+cursor and immediately requests the next contiguous page when more remain. The
+native log retains at most 10,000 updates. The maximum wait is 20 seconds.
+
+The update union is tagged by `type`:
 
 | Type | Meaning |
 | --- | --- |
-| `progress` | Current stage plus optional stage/overall fraction and count |
-| `regionReady` | Final renderable region and its stored patch descriptor |
-| `artworkPreserved` | Readable decorative story lettering intentionally left in the source artwork |
-| `unreadable` | Terminal source-preserving region whose OCR or visual evidence did not pass |
-| `complete` | Successful terminal event |
-| `failed` | Terminal error code, message, and retryability |
-| `cancelled` | Cancelled terminal event |
+| `progress` | Current stage and bounded progress/count fields |
+| `imageRegionReady` | Final translated image item plus authorized cleanup patch and layout |
+| `documentBlockReady` | Final translated document block |
+| `imageRegionPreserved` | Terminal source-preserving image item; source pixels remain visible |
+| `documentBlockPreserved` | Terminal source-preserving document block; the reader keeps English |
+| `complete` | Terminal translated/preserved counts |
+| `failed` | Terminal code, message, and retryability |
+| `cancelled` | Terminal cancellation |
 
-Stages are `queued`, `decoding`, `detecting`, `ocr`, `inpainting`,
-`translating`, `hsk-validating`, `styling`, and `packaging`. Clients must not
-infer a page-result phase from them. Accurate Chinese is published only after
-deterministic validation and one bounded terminal repair batch; each rejected
-item gets at most one new-evidence attempt. Pending
-drafts are internal pipeline state and never cross the browser contract, so
-visible text is never revised after installation.
+There is no provisional or pending text update. One shared `TranslatedText`
+payload contains:
 
-A `regionReady` contains normalized text and optional bubble polygons, a
-normalized PNG patch rectangle and blob ID, source English, direct/base and
-displayed Chinese, pinyin, OCR confidence, reading order, validated style and
-layout, and HSK status. Style can include ordered `colorBands` sampled from
-learned source-text lines, so an atomic region can preserve multiple foreground
-and outline colors. The status carries requested level, learning mode, strict
-validity, level-appropriate lexical coverage, above-level tokens, exact
-teaching-term character ranges, and one of `not-needed`, `accepted`, or
-`rejected`. `pending` is reserved for internal validation state and is invalid
-on `regionReady`. Each teaching term includes pinyin, local dictionary
-definitions, an optional required HSK level, and an `above-level` or
-`outside-list` reason.
+- authoritative source text;
+- faithful/base Chinese and final displayed Chinese;
+- pinyin; and
+- final HSK state, including teaching-term ranges and repair state.
 
-Natural learning publishes complete faithful Chinese and reports exact
-above-level teaching terms without turning vocabulary coverage into a
-publication gate. Strict mode requires strict vocabulary validity. Names are
-rendered in Chinese and remaining Latin text is rejected; there is no browser
-name preference.
+Each ready wrapper owns its `itemId`. `imageRegionReady` composes
+`TranslatedText` with OCR confidence, reading order, style, layout constraints,
+and a stored PNG patch descriptor.
+`documentBlockReady` composes it with semantic block identity. An
+`imageRegionPreserved` contains only `itemId`, text polygon, source text,
+confidence, item order, and terminal reason; it has no patch or Chinese text. A
+`documentBlockPreserved` contains the item identity, source text, and terminal
+reason but no Chinese candidate.
 
-## Patch-before-text invariant
+Natural mode publishes faithful Chinese with deterministic teaching metadata.
+Strict mode publishes only after HSK realization and at most one terminal
+repair. Joined pieces of an oversized individual document block are validated
+as a whole before its one block update is appended.
 
-The daemon stores a valid PNG blob before appending its `regionReady` event.
-The extension authorizes the blob only after receiving that event, fetches and
-validates it, decodes it, and synchronously inserts the patch image before the
-selectable text node. If patch loading fails, that region is not installed as
-text over uncleaned English.
+## Replay and acknowledgement
 
-The original page image is never replaced with a cleaned-page response. The
-reader result is the original image plus a verified patch layer and a text
-layer.
+`after` is the last page-installed acknowledgement, not merely the last update
+read by the background worker. After MV3 suspension, an unacknowledged update
+can replay; the content controller installs the same `itemId` once and advances
+the acknowledgement only after all associated DOM work succeeds.
 
-## Lookup, comparison, and speech
+Recovery requires the exact source kind, hash, and `TranslationSettings`; image
+recovery additionally requires the exact reading direction. Cancellation,
+mutation, or navigation invalidates ownership and tears down the complete
+render target. Fatal document failure restores the exact original source-root
+attributes.
 
-`POST /lookup` has two explicit interactions. A selection lookup accepts up to
-256 selected characters. A hover lookup accepts a Unicode-scalar offset and
-requires the owning job and region; the daemon resolves against its canonical
-displayed Chinese rather than trusting a browser-supplied substring. Hover
-resolution returns exactly the longest dictionary expression beginning at the
-hovered character, so a later component starts a fresh lookup. Punctuation
-does not jump forward. Results contain Simplified spelling, pinyin,
-definitions, optional HSK level, and explicit proper-name state.
+## Lookup, patches, and speech
 
-Original/Chinese comparison is entirely in the extension's layered renderer.
-Mandarin playback sends no daemon request: Firefox speaks the resolved Chinese
-through the best eligible local Simplified-Chinese voice.
+`POST /lookup` supports bounded selection lookup or a hover offset owned by a
+`jobId` and `itemId`. The daemon resolves the hover against its canonical final
+Chinese and returns the longest dictionary expression beginning at that Unicode
+offset. It never trusts a browser-provided translated substring.
+
+Image patch blobs are authorized only after their `imageRegionReady` update and
+are removed with the owning job. The extension validates and decodes a PNG
+before inserting its Chinese text. Document jobs do not create or fetch blobs
+or fonts.
+
+Original/Chinese comparison is local browser state. Mandarin playback uses an
+eligible local Simplified-Chinese Firefox/OS voice and sends no daemon request.

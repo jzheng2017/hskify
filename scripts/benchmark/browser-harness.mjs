@@ -11,10 +11,10 @@ import { createRequire } from 'node:module'
 import { closeSync, mkdirSync, openSync, writeSync, fsyncSync, readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 
-const EXTENSION_ID = 'hsk-manga-translator@local.hskify'
+const EXTENSION_ID = 'hskify@local.hskify'
 const EXTENSION_UUID = '7e9a74d0-34ad-4ff7-9c2c-1ea555945100'
-const ACTIVE_JOB_PREFIX = 'hmt.activeJob.'
-const SESSION_STORAGE_KEY = 'hmt.nativeSession'
+const ACTIVE_JOB_PREFIX = 'hskify.activeJob.'
+const SESSION_STORAGE_KEY = 'hskify.nativeSession'
 
 export function writeJsonSync(path, value) {
   const bytes = Buffer.from(`${JSON.stringify(value, null, 2)}\n`, 'utf8')
@@ -314,6 +314,36 @@ export async function timedContentStart(extensionPage, hskLevel, expectedPageUrl
   return { issuedAtEpochMs: timed.issuedAtEpochMs, responseAtEpochMs: timed.responseAtEpochMs, value: timed.response }
 }
 
+/** Start a content run without waiting for the chapter's terminal response. */
+export async function beginContentStart(extensionPage, hskLevel, expectedPageUrl, readingDirection) {
+  return extensionPage.evaluate(async ({ level, pageUrl, direction }) => {
+    const tabs = await globalThis.browser.tabs.query({})
+    const tab = tabs.find((candidate) => candidate.url === pageUrl)
+    if (!Number.isInteger(tab?.id)) throw new Error(`No chapter tab for ${pageUrl}.`)
+    const issuedAtEpochMs = Date.now()
+    if (globalThis.__hskifyJobMonitor && globalThis.__hskifyJobMonitor.actionIssuedAtEpochMs === 0) {
+      globalThis.__hskifyJobMonitor.actionIssuedAtEpochMs = issuedAtEpochMs
+    }
+    globalThis.__hskifyPendingContentStart = globalThis.browser.tabs
+      .sendMessage(tab.id, {
+        type: 'content:start',
+        scope: 'all',
+        hskLevel: level,
+        learningMode: 'natural',
+        readingDirection: direction,
+      })
+      .then(
+        (response) => ({ ok: true, responseAtEpochMs: Date.now(), response }),
+        (error) => ({
+          ok: false,
+          responseAtEpochMs: Date.now(),
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      )
+    return { issuedAtEpochMs, tabId: tab.id }
+  }, { level: hskLevel, pageUrl: expectedPageUrl, direction: readingDirection })
+}
+
 export async function startJobMonitor(extensionPage, pageUrl, runId) {
   await extensionPage.evaluate(({ prefix, expectedPageUrl, id }) => {
     if (globalThis.__hskifyJobMonitor?.timer) clearInterval(globalThis.__hskifyJobMonitor.timer)
@@ -325,10 +355,19 @@ export async function startJobMonitor(extensionPage, pageUrl, runId) {
       if (!key.startsWith(prefix) || value?.pageUrl !== expectedPageUrl || typeof value?.createdAtUnixMs !== 'number' || value.createdAtUnixMs < monitor.actionIssuedAtEpochMs) return
       const now = Date.now()
       const previous = monitor.observations.get(value.jobId)
+      const source = value.source
+      if (!source || !['image', 'document'].includes(source.kind)) return
       monitor.observations.set(value.jobId, {
-        jobId: value.jobId, pageIndex: value.pageIndex, sourceSha256: value.sourceSha256, sourceUrl: value.sourceUrl,
-        sourceWidth: value.sourceWidth, sourceHeight: value.sourceHeight, submittedRequest: value.submittedRequest,
-        uploadedImageBytes: value.uploadedImageBytes, submittedAtUnixMs: value.submittedAtUnixMs, createdAtUnixMs: value.createdAtUnixMs,
+        jobId: value.jobId, sourceKind: source.kind,
+        pageIndex: source.kind === 'image' ? source.sourceIndex : 0,
+        sourceSha256: value.sourceSha256,
+        sourceUrl: source.kind === 'image' ? source.sourceUrl : value.pageUrl,
+        sourceWidth: source.kind === 'image' ? source.sourceWidth : undefined,
+        sourceHeight: source.kind === 'image' ? source.sourceHeight : undefined,
+        sourceBlockCount: source.kind === 'document' ? source.blockCount : undefined,
+        submittedRequest: source.kind === 'image' ? source.request : undefined,
+        uploadedBytes: source.uploadedBytes,
+        submittedAtUnixMs: value.submittedAtUnixMs, createdAtUnixMs: value.createdAtUnixMs,
         firstObservedAtEpochMs: previous?.firstObservedAtEpochMs ?? now,
         terminalType: value.terminalType,
         terminalObservedAtEpochMs: previous?.terminalObservedAtEpochMs ?? (value.terminalType ? now : undefined),
@@ -370,6 +409,19 @@ export async function stopJobMonitor(extensionPage) {
   })
 }
 
+export async function jobMonitorSnapshot(extensionPage) {
+  return extensionPage.evaluate(async () => {
+    const monitor = globalThis.__hskifyJobMonitor
+    if (!monitor) return { observations: [], errors: ['job monitor was not installed'] }
+    await monitor.sample()
+    return {
+      actionIssuedAtEpochMs: monitor.actionIssuedAtEpochMs,
+      observations: [...monitor.observations.values()].sort((left, right) => left.pageIndex - right.pageIndex),
+      errors: [...monitor.errors],
+    }
+  })
+}
+
 export async function waitForPageState(extensionPage, chapterPage, expected, timeoutMs) {
   const deadline = Date.now() + timeoutMs
   let last
@@ -385,14 +437,67 @@ export async function waitForPageState(extensionPage, chapterPage, expected, tim
 export async function installDomObserver(page, runId) {
   await page.evaluate((id) => {
     for (const observer of globalThis.__hskifyRuntimeEvidence?.observers ?? []) observer.disconnect()
-    const state = { runId: id, observerInstalledAtEpochMs: Date.now(), nextEventIndex: 1, events: [], observedShadowRoots: 0, observers: [], lastHudState: '' }
+    for (const cleanup of globalThis.__hskifyRuntimeEvidence?.cleanups ?? []) cleanup()
+    const nativeLongTaskSupported = typeof PerformanceObserver === 'function' &&
+      PerformanceObserver.supportedEntryTypes?.includes('longtask') === true
+    const state = {
+      runId: id,
+      observerInstalledAtEpochMs: Date.now(),
+      nextEventIndex: 1,
+      events: [],
+      observedShadowRoots: 0,
+      observers: [],
+      cleanups: [],
+      lastHudState: '',
+      longTaskSupported: true,
+      longTaskObservationMode: nativeLongTaskSupported
+        ? 'performance-observer'
+        : 'event-loop-probe',
+    }
     globalThis.__hskifyRuntimeEvidence = state
     const observed = new WeakSet()
+    const observedDocumentHosts = new WeakSet()
     const emit = (type, details = {}) => state.events.push({ index: state.nextEventIndex++, type, epochMs: Date.now(), performanceMs: performance.now(), ...details })
+    if (nativeLongTaskSupported) {
+      const longTaskObserver = new PerformanceObserver((entries) => {
+        for (const entry of entries.getEntries())
+          emit('longTask', {
+            source: 'performance-observer',
+            startTimeMs: entry.startTime,
+            durationMs: entry.duration,
+          })
+      })
+      longTaskObserver.observe({ type: 'longtask', buffered: true })
+      state.observers.push(longTaskObserver)
+    } else {
+      // Firefox has no Long Tasks API. A continuously pending short timer gives
+      // a conservative upper bound for an uninterrupted main-thread stall.
+      const intervalMs = 4
+      let expectedAt = performance.now() + intervalMs
+      let timeoutId
+      const sampleEventLoop = () => {
+        const observedAt = performance.now()
+        const delayMs = Math.max(0, observedAt - expectedAt)
+        const upperBoundDurationMs = delayMs + intervalMs
+        if (upperBoundDurationMs > 50) {
+          emit('longTask', {
+            source: 'event-loop-probe',
+            startTimeMs: observedAt - upperBoundDurationMs,
+            durationMs: upperBoundDurationMs,
+            eventLoopDelayMs: delayMs,
+            probeIntervalMs: intervalMs,
+          })
+        }
+        expectedAt = performance.now() + intervalMs
+        timeoutId = setTimeout(sampleEventLoop, intervalMs)
+      }
+      timeoutId = setTimeout(sampleEventLoop, intervalMs)
+      state.cleanups.push(() => clearTimeout(timeoutId))
+    }
     const pageFor = (element) => {
       const root = element.getRootNode()
       const host = root instanceof ShadowRoot ? root.host : element
-      return Number(host.closest('.hmt-wrapper')?.dataset.hmtSourcePage ?? 0)
+      return Number(host.closest('.hskify-wrapper')?.dataset.hskifySourcePage ?? 0)
     }
     const visible = (element) => {
       const rect = element.getBoundingClientRect()
@@ -417,21 +522,27 @@ export async function installDomObserver(page, runId) {
       const observer = new MutationObserver((records) => {
         for (const record of records) {
           for (const node of record.addedNodes) recordElement(node)
-          for (const node of record.removedNodes) if (node instanceof Element && node.matches('.hmt-patch, .hmt-region')) emit('translatedNodeRemoved', { className: node.className, page: pageFor(node) })
+          for (const node of record.removedNodes) if (node instanceof Element && node.matches('.hskify-patch, .hskify-region')) emit('translatedNodeRemoved', { className: node.className, page: pageFor(node) })
+          if (record.type === 'attributes') recordElement(record.target)
         }
         recordHud(root)
       })
-      observer.observe(root, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['hidden', 'aria-pressed', 'aria-busy'] })
+      observer.observe(root, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['hidden', 'aria-pressed', 'aria-busy', 'data-hskify-state'] })
       state.observers.push(observer)
       for (const child of root.children) recordElement(child)
       recordHud(root)
     }
     recordElement = (element) => {
       if (!(element instanceof Element)) return
-      for (const patch of [...(element.matches('.hmt-patch') ? [element] : []), ...element.querySelectorAll('.hmt-patch')]) emit('patchDomCommitted', { patchId: patch.dataset.patchId ?? '', complete: patch.complete, naturalWidth: patch.naturalWidth, naturalHeight: patch.naturalHeight, decodedAndInstalled: patch.complete && patch.naturalWidth > 0 && patch.naturalHeight > 0, page: pageFor(patch), visible: visible(patch) })
-      for (const region of [...(element.matches('.hmt-region') ? [element] : []), ...element.querySelectorAll('.hmt-region')]) emit('selectableTextDomCommitted', { regionId: region.dataset.regionId ?? '', sourceEnglish: region.dataset.sourceEnglish ?? '', hskValid: region.dataset.hskValid ?? '', repairState: region.dataset.hskRepairState ?? '', sourcePreserving: region.classList.contains('hmt-source-notice'), text: region.textContent ?? '', pinyin: region.dataset.pinyin ?? '', page: pageFor(region), visible: visible(region) })
-      for (const owned of [...(element.matches('[data-hmt-owned="true"]') ? [element] : []), ...element.querySelectorAll('[data-hmt-owned="true"]')]) {
-        if (owned.classList.contains('hmt-wrapper')) emit('imageWrapperCommitted', { page: Number(owned.querySelector('img[data-page]')?.dataset.page ?? 0) })
+      for (const patch of [...(element.matches('.hskify-patch') ? [element] : []), ...element.querySelectorAll('.hskify-patch')]) emit('patchDomCommitted', { patchId: patch.dataset.hskifyPatchId ?? '', complete: patch.complete, naturalWidth: patch.naturalWidth, naturalHeight: patch.naturalHeight, decodedAndInstalled: patch.complete && patch.naturalWidth > 0 && patch.naturalHeight > 0, page: pageFor(patch), visible: visible(patch) })
+      for (const region of [...(element.matches('.hskify-region') ? [element] : []), ...element.querySelectorAll('.hskify-region')]) emit('selectableTextDomCommitted', { itemId: region.dataset.hskifyItemId ?? '', sourceText: region.dataset.hskifySourceText ?? '', hskValid: region.dataset.hskifyHskValid ?? '', repairState: region.dataset.hskifyHskRepairState ?? '', sourcePreserving: region.classList.contains('hskify-source-notice'), text: region.textContent ?? '', pinyin: region.dataset.hskifyPinyin ?? '', page: pageFor(region), visible: visible(region) })
+      for (const block of [...(element.matches('.hskify-placeholder') ? [element] : []), ...element.querySelectorAll('.hskify-placeholder')]) emit('documentBlockDomCommitted', { itemId: block.dataset.hskifyItemId ?? '', state: block.dataset.hskifyState ?? '', text: block.textContent ?? '' })
+      for (const owned of [...(element.matches('[data-hskify-owned="true"]') ? [element] : []), ...element.querySelectorAll('[data-hskify-owned="true"]')]) {
+        if (owned.classList.contains('hskify-wrapper')) emit('imageWrapperCommitted', { page: Number(owned.querySelector('img[data-page]')?.dataset.page ?? 0) })
+        if (owned.dataset.hskifyDocumentReader === 'true' && !observedDocumentHosts.has(owned)) {
+          observedDocumentHosts.add(owned)
+          emit('documentReaderMounted', { sourceSha256: owned.dataset.hskifySourceSha256 ?? '' })
+        }
         if (owned.shadowRoot) observeShadow(owned.shadowRoot)
       }
     }
@@ -443,27 +554,87 @@ export async function installDomObserver(page, runId) {
   }, runId)
 }
 
+export async function documentDomEvidence(page) {
+  return page.evaluate(() => {
+    const host = document.querySelector('[data-hskify-document-reader="true"]')
+    const root = host?.shadowRoot
+    const blocks = root
+      ? [...root.querySelectorAll('.hskify-placeholder')].map((block) => ({
+          itemId: block.dataset.hskifyItemId ?? '',
+          state: block.dataset.hskifyState ?? '',
+          text: block.textContent ?? '',
+        }))
+      : []
+    const measures = performance
+      .getEntriesByType('measure')
+      .filter((entry) => entry.name.startsWith('hskify-document-'))
+      .reduce((latest, entry) => {
+        // User Timing entries are chronological; assignment intentionally
+        // retains the newest measurement when a page measured the same phase
+        // more than once before evidence collection.
+        latest[entry.name] = entry.duration
+        return latest
+      }, {})
+    const runtimeEvidence = globalThis.__hskifyRuntimeEvidence
+    const events = runtimeEvidence?.events ?? []
+    const scrollStart = performance.getEntriesByName('hskify-document-scroll-start', 'mark').at(-1)?.startTime
+    const scrollEnd = performance.getEntriesByName('hskify-document-scroll-end', 'mark').at(-1)?.startTime
+    const longTasks = events.filter((event) => event.type === 'longTask')
+    const scrollLongTasks = Number.isFinite(scrollStart) && Number.isFinite(scrollEnd)
+      ? longTasks.filter(
+          (event) =>
+            event.startTimeMs < scrollEnd &&
+            event.startTimeMs + event.durationMs > scrollStart,
+        )
+      : []
+    return {
+      mounted: Boolean(root),
+      sourceSha256: host?.dataset.hskifySourceSha256 ?? '',
+      sourceBlockCount: Number(host?.dataset.hskifySourceBlockCount ?? 0),
+      sourceCharacterCount: Number(host?.dataset.hskifySourceCharacterCount ?? 0),
+      blockCount: blocks.length,
+      pendingCount: blocks.filter((block) => block.state === 'pending').length,
+      translatedCount: blocks.filter((block) => block.state === 'translated').length,
+      preservedCount: blocks.filter((block) => block.state === 'preserved').length,
+      blocks,
+      measures,
+      longTaskSupported: runtimeEvidence?.longTaskSupported === true,
+      longTaskObservationMode: runtimeEvidence?.longTaskObservationMode,
+      longTasks,
+      scrollLongTasks,
+      scroll: {
+        completed: Number.isFinite(scrollStart) && Number.isFinite(scrollEnd) && scrollEnd >= scrollStart,
+        startTimeMs: scrollStart,
+        endTimeMs: scrollEnd,
+        durationMs:
+          Number.isFinite(scrollStart) && Number.isFinite(scrollEnd) ? scrollEnd - scrollStart : undefined,
+      },
+      events,
+    }
+  })
+}
+
 export async function chapterDomEvidence(page) {
   return page.evaluate(() => {
-    const hosts = [...document.querySelectorAll('[data-hmt-owned="true"]')].filter((node) => node.shadowRoot)
+    const hosts = [...document.querySelectorAll('[data-hskify-owned="true"]')].filter((node) => node.shadowRoot)
     const patches = []
     const regions = []
-    const wrapperNodes = [...document.querySelectorAll('.hmt-wrapper')]
+    const wrapperNodes = [...document.querySelectorAll('.hskify-wrapper')]
     const wrapperIndexes = new Map(wrapperNodes.map((wrapper, index) => [wrapper, index + 1]))
     const wrapperPage = (wrapper) => {
-      const explicit = Number(wrapper?.dataset.hmtSourcePage ?? 0)
+      const explicit = Number(wrapper?.dataset.hskifySourcePage ?? 0)
       return explicit > 0 ? explicit : wrapperIndexes.get(wrapper) ?? 0
     }
-    const wrappers = wrapperNodes.map((wrapper, index) => ({ index, page: wrapperPage(wrapper), ownedHostCount: wrapper.querySelectorAll('[data-hmt-owned="true"]').length, patchCount: wrapper.querySelectorAll('.hmt-patch').length, regionCount: wrapper.querySelectorAll('.hmt-region').length }))
+    const wrappers = wrapperNodes.map((wrapper, index) => ({ index, page: wrapperPage(wrapper), ownedHostCount: wrapper.querySelectorAll('[data-hskify-owned="true"]').length, patchCount: wrapper.querySelectorAll('.hskify-patch').length, regionCount: wrapper.querySelectorAll('.hskify-region').length }))
     let degradedFitCount = 0
     for (const host of hosts) {
-      const pageNumber = wrapperPage(host.closest('.hmt-wrapper'))
-      for (const patch of host.shadowRoot.querySelectorAll('.hmt-patch')) patches.push({ page: pageNumber, patchId: patch.dataset.patchId ?? '', complete: patch.complete, naturalWidth: patch.naturalWidth, naturalHeight: patch.naturalHeight })
-      for (const region of host.shadowRoot.querySelectorAll('.hmt-region')) {
-        if (region.dataset.fit === 'degraded') degradedFitCount += 1
+      const pageNumber = wrapperPage(host.closest('.hskify-wrapper'))
+      for (const patch of host.shadowRoot.querySelectorAll('.hskify-patch')) patches.push({ page: pageNumber, patchId: patch.dataset.hskifyPatchId ?? '', complete: patch.complete, naturalWidth: patch.naturalWidth, naturalHeight: patch.naturalHeight })
+      for (const region of host.shadowRoot.querySelectorAll('.hskify-region')) {
+        if (region.dataset.hskifyFit === 'degraded') degradedFitCount += 1
         const fontSizePx = Number.parseFloat(getComputedStyle(region).fontSize)
         const shortSidePx = Math.min(region.clientWidth, region.clientHeight)
-        regions.push({ page: pageNumber, regionId: region.dataset.regionId ?? '', text: region.textContent ?? '', sourceEnglish: region.dataset.sourceEnglish ?? '', translatedChinese: region.dataset.translatedChinese ?? '', sourcePreserving: region.classList.contains('hmt-source-notice'), pinyin: region.dataset.pinyin ?? '', hskValid: region.dataset.hskValid ?? '', repairState: region.dataset.hskRepairState ?? '', fit: region.dataset.fit ?? 'normal', fontSizePx, boxWidthPx: region.clientWidth, boxHeightPx: region.clientHeight, fontToBoxShortSide: Number.isFinite(fontSizePx) && shortSidePx > 0 ? fontSizePx / shortSidePx : undefined, overflows: region.scrollWidth > region.clientWidth + 0.5 || region.scrollHeight > region.clientHeight + 0.5 })
+        regions.push({ page: pageNumber, itemId: region.dataset.hskifyItemId ?? '', text: region.textContent ?? '', sourceText: region.dataset.hskifySourceText ?? '', translatedChinese: region.dataset.hskifyDisplayedChinese ?? '', sourcePreserving: region.classList.contains('hskify-source-notice'), pinyin: region.dataset.hskifyPinyin ?? '', hskValid: region.dataset.hskifyHskValid ?? '', repairState: region.dataset.hskifyHskRepairState ?? '', fit: region.dataset.hskifyFit ?? 'normal', fontSizePx, boxWidthPx: region.clientWidth, boxHeightPx: region.clientHeight, fontToBoxShortSide: Number.isFinite(fontSizePx) && shortSidePx > 0 ? fontSizePx / shortSidePx : undefined, overflows: region.scrollWidth > region.clientWidth + 0.5 || region.scrollHeight > region.clientHeight + 0.5 })
       }
     }
     const events = globalThis.__hskifyRuntimeEvidence?.events ?? []
@@ -478,7 +649,7 @@ export async function routeEvidence(extensionPage, records, terminalRequired, ex
     const stored = await globalThis.browser.storage.session.get(sessionKey)
     const session = stored[sessionKey]
     if (!session || typeof session.token !== 'string' || typeof session.port !== 'number') throw new Error('The extension has no authenticated daemon session.')
-    const headers = { Authorization: `Bearer ${session.token}`, 'X-HSK-Manga-Extension-Origin': new URL(globalThis.browser.runtime.getURL('')).origin }
+    const headers = { Authorization: `Bearer ${session.token}`, 'X-Hskify-Extension-Origin': new URL(globalThis.browser.runtime.getURL('')).origin }
     const request = async (path) => {
       const started = performance.now()
       const response = await fetch(`http://127.0.0.1:${session.port}${path}`, { headers, cache: 'no-store', redirect: 'error' })
@@ -502,16 +673,16 @@ export async function routeEvidence(extensionPage, records, terminalRequired, ex
       if (requireTerminal && !terminal) throw new Error(`Job ${job.jobId} has no terminal replay update.`)
       const patches = []
       for (const update of batch.updates) {
-        if (update.type !== 'regionReady') continue
+        if (update.type !== 'imageRegionReady') continue
         const patchId = update.region.patch.blobId
         const patchFetch = await request(`/blobs/${encodeURIComponent(patchId)}`)
         const contentType = patchFetch.response.headers.get('content-type')?.split(';', 1)[0]?.trim() ?? ''
         const bytes = await patchFetch.response.arrayBuffer()
         if (!patchFetch.response.ok || contentType !== 'image/png' || bytes.byteLength === 0) throw new Error(`Patch replay failed for ${patchId}.`)
         const digest = await crypto.subtle.digest('SHA-256', bytes)
-        patches.push({ patchId, regionId: update.region.id, route: `/blobs/${patchId}`, httpStatus: patchFetch.response.status, bytes: bytes.byteLength, sha256: [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, '0')).join(''), rect: update.region.patch.rect, textPolygon: update.region.textPolygon, bubblePolygon: update.region.bubblePolygon })
+        patches.push({ patchId, itemId: update.region.itemId, route: `/blobs/${patchId}`, httpStatus: patchFetch.response.status, bytes: bytes.byteLength, sha256: [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, '0')).join(''), rect: update.region.patch.rect, textPolygon: update.region.textPolygon, bubblePolygon: update.region.bubblePolygon })
       }
-      jobsEvidence.push({ jobId: job.jobId, pageIndex: job.pageIndex, sourceSha256: job.sourceSha256, sourceWidth: job.sourceWidth, sourceHeight: job.sourceHeight, submittedAtUnixMs: job.submittedAtUnixMs, firstObservedAtEpochMs: job.firstObservedAtEpochMs, terminalObservedAtEpochMs: job.terminalObservedAtEpochMs, jobDurationMs: Number.isFinite(job.submittedAtUnixMs) && Number.isFinite(job.terminalObservedAtEpochMs) ? job.terminalObservedAtEpochMs - job.submittedAtUnixMs : undefined, route: `/jobs/${job.jobId}/updates`, updatesHttpStatus: replayFetch.response.status, updatesDurationMs: replayFetch.durationMs, nextSequence: batch.nextSequence, terminal, updates: batch.updates, patches })
+      jobsEvidence.push({ jobId: job.jobId, sourceKind: job.sourceKind, pageIndex: job.pageIndex, sourceSha256: job.sourceSha256, sourceWidth: job.sourceWidth, sourceHeight: job.sourceHeight, sourceBlockCount: job.sourceBlockCount, uploadedBytes: job.uploadedBytes, submittedAtUnixMs: job.submittedAtUnixMs, firstObservedAtEpochMs: job.firstObservedAtEpochMs, terminalObservedAtEpochMs: job.terminalObservedAtEpochMs, jobDurationMs: Number.isFinite(job.submittedAtUnixMs) && Number.isFinite(job.terminalObservedAtEpochMs) ? job.terminalObservedAtEpochMs - job.submittedAtUnixMs : undefined, route: `/jobs/${job.jobId}/updates`, updatesHttpStatus: replayFetch.response.status, updatesDurationMs: replayFetch.durationMs, nextSequence: batch.nextSequence, terminal, updates: batch.updates, patches })
     }
     return {
       session: { buildFingerprint: session.buildFingerprint, engineVersion: session.engineVersion, port: session.port, sessionExpiresAtUnixMs: session.sessionExpiresAtUnixMs, capabilities: session.capabilities, tokenRedacted: true },

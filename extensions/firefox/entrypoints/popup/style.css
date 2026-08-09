@@ -38,6 +38,20 @@ strong {
   font-size: 14px;
 }
 
+#image-settings {
+  display: grid;
+  gap: 10px;
+}
+
+#image-settings[hidden] {
+  display: none;
+}
+
+#content-kind {
+  color: #334155;
+  font-weight: 700;
+}
+
 small {
   color: #64748b;
   font-size: 11px;

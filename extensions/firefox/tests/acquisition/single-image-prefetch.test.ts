@@ -5,14 +5,14 @@ import {
   type ImagePrefetchIdentity,
 } from '../../src/acquisition/single-image-prefetch'
 
-function identity(pageIndex: number): ImagePrefetchIdentity {
+function identity(sourceIndex: number): ImagePrefetchIdentity {
   return {
     tabId: 7,
     frameId: 0,
     pageSessionId: 'chapter',
     pageUrl: 'https://reader.test/chapter',
-    pageIndex,
-    sourceUrl: `https://cdn.test/${pageIndex}.webp`,
+    sourceIndex,
+    sourceUrl: `https://cdn.test/${sourceIndex}.webp`,
     naturalWidth: 900,
     naturalHeight: 16_000,
   }
@@ -62,9 +62,7 @@ describe('single-image acquisition prefetch', () => {
     await prefetch.prefetch(retained, async () => ({
       bytes: new ArrayBuffer(1024),
     }))
-    await prefetch.cancelIf(
-      (candidate) => candidate.pageSessionId === retained.pageSessionId,
-    )
+    await prefetch.cancelIf((candidate) => candidate.pageSessionId === retained.pageSessionId)
     await expect(prefetch.consume(retained)).resolves.toBeUndefined()
 
     let started = false

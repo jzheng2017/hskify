@@ -26,11 +26,16 @@ import {
 } from './run-real-reader-regression.mjs'
 
 function region(overrides = {}) {
-  return {
-    id: 'region-1',
-    sourceEnglish: 'Thanks, Seongeun.',
-    displayedChinese: '谢谢，Seongeun。',
-    readingOrder: 1,
+  const value = {
+    itemId: 'region-1',
+    itemOrder: 1,
+    text: {
+      sourceText: 'Thanks, Seongeun.',
+      baseChinese: '谢谢，成恩。',
+      displayedChinese: '谢谢，成恩。',
+      pinyin: 'xiè xie, chéng ēn.',
+      hsk: { requestedLevel: 2, strictlyValid: true, repairState: 'accepted' },
+    },
     textPolygon: [
       { x: 0.1, y: 0.1 },
       { x: 0.3, y: 0.1 },
@@ -42,8 +47,12 @@ function region(overrides = {}) {
       mimeType: 'image/png',
       rect: { x: 0.09, y: 0.09, width: 0.22, height: 0.12 },
     },
-    hsk: { requestedLevel: 2, strictlyValid: true, repairState: 'accepted' },
+  }
+  const text = { ...value.text, ...(overrides.text ?? {}) }
+  return {
+    ...value,
     ...overrides,
+    text: { ...text, hsk: { ...value.text.hsk, ...(overrides.text?.hsk ?? {}) } },
   }
 }
 
@@ -124,9 +133,9 @@ function writeCompleteCorpus(manifestRoot, corpusRoot) {
     sourceSha256: objectSha,
     regions: [
       {
-        id: 'region-1',
+        itemId: 'region-1',
         role: 'dialogue',
-        sourceEnglish: 'Hello',
+        sourceText: 'Hello',
         polygon: [
           { x: 0.1, y: 0.1 },
           { x: 0.9, y: 0.1 },
@@ -335,7 +344,7 @@ test('v2 corpus validation fails closed for malformed region records', () => {
   const manifest = completeManifest()
   const chapter = manifest.chapters[0]
   // The release gate must report bad annotation evidence, not throw while
-  // trying to spread a missing sourceEnglish value.
+  // trying to spread a missing sourceText value.
   const malformed = {
     schemaVersion: 2,
     chapterId: chapter.id,
@@ -343,7 +352,7 @@ test('v2 corpus validation fails closed for malformed region records', () => {
     sourceSha256: chapter.pages[0].object.sha256,
     regions: [
       {
-        id: 'region-1',
+        itemId: 'region-1',
         role: 'dialogue',
         polygon: [
           { x: 0.1, y: 0.1 },
@@ -401,7 +410,7 @@ test('semantic expectations require both dialogue and SFX source targets', () =>
   }
   const passing = assertSemanticExpectations(item, [
     region(),
-    region({ id: 'region-2', sourceEnglish: 'DING', displayedChinese: '叮' }),
+    region({ itemId: 'region-2', text: { sourceText: 'DING', displayedChinese: '叮' } }),
   ])
   assert.equal(
     passing.every((item) => item.passed),
@@ -409,8 +418,8 @@ test('semantic expectations require both dialogue and SFX source targets', () =>
   )
 
   const failures = assertSemanticExpectations(item, [
-    region({ sourceEnglish: 'Thanks.', displayedChinese: '谢谢。' }),
-    region({ id: 'region-2', sourceEnglish: 'DING', displayedChinese: '叮' }),
+    region({ text: { sourceText: 'Thanks.', displayedChinese: '谢谢。' } }),
+    region({ itemId: 'region-2', text: { sourceText: 'DING', displayedChinese: '叮' } }),
   ]).filter((item) => !item.passed)
   assert.deepEqual(
     failures.map((item) => item.id),
@@ -427,8 +436,8 @@ test('decorative artwork expectations tolerate OCR noise but reject translated o
   }
   const passing = assertSemanticExpectations(
     item,
-    [region({ sourceEnglish: 'Ordinary dialogue.' })],
-    [{ sourceEnglish: 'MyUNGWANG SHORd AUTHORITY' }],
+    [region({ text: { sourceText: 'Ordinary dialogue.' } })],
+    [{ sourceText: 'MyUNGWANG SHORd AUTHORITY' }],
   )
   assert.equal(
     passing.every((assertion) => assertion.passed),
@@ -437,8 +446,8 @@ test('decorative artwork expectations tolerate OCR noise but reject translated o
 
   const translated = assertSemanticExpectations(
     item,
-    [region({ sourceEnglish: 'MYUNGWANG SWORD AUTHORITY' })],
-    [{ sourceEnglish: 'MyUNGWANG SHORd AUTHORITY' }],
+    [region({ text: { sourceText: 'MYUNGWANG SWORD AUTHORITY' } })],
+    [{ sourceText: 'MyUNGWANG SHORd AUTHORITY' }],
   )
   assert.equal(
     translated.some((assertion) => !assertion.passed),
@@ -456,13 +465,13 @@ test('decorative artwork expectations do not match scattered letters across dial
   const evaluated = assertSemanticExpectations(
     item,
     [
-      region({ sourceEnglish: 'THIS FEAR IS IMPRINTED IN MY BLOOD.' }),
+      region({ text: { sourceText: 'THIS FEAR IS IMPRINTED IN MY BLOOD.' } }),
       region({
-        id: 'region-2',
-        sourceEnglish: "THERE'S NO WAY THE WHITE TIGER TRIBE WOULD KNOW THE FEAR OF DEATH.",
+        itemId: 'region-2',
+        text: { sourceText: "THERE'S NO WAY THE WHITE TIGER TRIBE WOULD KNOW THE FEAR OF DEATH." },
       }),
     ],
-    [{ sourceEnglish: 'THIRD SWORD' }],
+    [{ sourceText: 'THIRD SWORD' }],
   )
   assert.equal(
     evaluated.every((assertion) => assertion.passed),
@@ -477,7 +486,7 @@ test('completed job assertions require terminal repairs and real PNG patches', (
     item,
     2,
     { type: 'complete' },
-    [{ type: 'regionReady', region: ready }],
+    [{ type: 'imageRegionReady', region: ready }],
     [{ blobId: 'patch-1', validPng: true }],
   )
   assert.equal(
@@ -491,8 +500,8 @@ test('completed job assertions require terminal repairs and real PNG patches', (
     { type: 'complete' },
     [
       {
-        type: 'regionReady',
-        region: region({ hsk: { requestedLevel: 2, repairState: 'pending' } }),
+        type: 'imageRegionReady',
+        region: region({ text: { hsk: { requestedLevel: 2, repairState: 'pending' } } }),
       },
     ],
     [{ blobId: 'patch-1', validPng: false }],
@@ -521,7 +530,7 @@ test('protected artwork rectangles reject cleanup patches even without readable 
     { type: 'complete' },
     [
       {
-        type: 'regionReady',
+        type: 'imageRegionReady',
         region: region({
           patch: {
             blobId: 'patch-1',
@@ -544,7 +553,7 @@ test('protected artwork rectangles reject cleanup patches even without readable 
     { type: 'complete' },
     [
       {
-        type: 'regionReady',
+        type: 'imageRegionReady',
         region: region({
           patch: {
             blobId: 'patch-1',
@@ -581,7 +590,7 @@ test('completed job assertions support exact zero-region non-story controls', ()
     { id: 'credit-splash', expectations: { exactRegionCount: 0 } },
     3,
     { type: 'complete' },
-    [{ type: 'regionReady', region: region() }],
+    [{ type: 'imageRegionReady', region: region() }],
     [{ blobId: 'patch-1', validPng: true }],
   )
   assert.equal(
@@ -591,12 +600,14 @@ test('completed job assertions support exact zero-region non-story controls', ()
 })
 
 test('HSK2 and HSK5 differential rejects identical output and accepts simpler divergence', () => {
-  const low = { regions: [region({ displayedChinese: '你过来。' })] }
+  const low = { regions: [region({ text: { displayedChinese: '你过来。' } })] }
   const identicalHigh = {
     regions: [
       region({
-        displayedChinese: '你过来。',
-        hsk: { requestedLevel: 5, strictlyValid: true, repairState: 'accepted' },
+        text: {
+          displayedChinese: '你过来。',
+          hsk: { requestedLevel: 5, strictlyValid: true, repairState: 'accepted' },
+        },
       }),
     ],
   }
@@ -610,8 +621,10 @@ test('HSK2 and HSK5 differential rejects identical output and accepts simpler di
   const differentHigh = {
     regions: [
       region({
-        displayedChinese: '请到这里来。',
-        hsk: { requestedLevel: 5, strictlyValid: true, repairState: 'accepted' },
+        text: {
+          displayedChinese: '请到这里来。',
+          hsk: { requestedLevel: 5, strictlyValid: true, repairState: 'accepted' },
+        },
       }),
     ],
   }
@@ -686,9 +699,10 @@ test('packaged browser quality evidence matches accepted polygons to local annot
           pageIndex: 0,
           updates: [
             {
-              type: 'regionReady',
+              type: 'imageRegionReady',
               region: {
-                sourceEnglish: 'Hello',
+                itemId: 'region-1',
+                text: { sourceText: 'Hello' },
                 textPolygon: [
                   { x: 0.1, y: 0.1 },
                   { x: 0.9, y: 0.1 },

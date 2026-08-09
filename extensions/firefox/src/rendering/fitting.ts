@@ -1,4 +1,4 @@
-import type { BrowserRegion, Point } from '../contracts/browser'
+import type { ImageRegion, Point } from '../contracts/browser'
 import { polygonBounds, type Bounds } from './geometry'
 
 const CLOSING_PUNCTUATION = new Set([...'，。！？；：、）》】」』”’…'])
@@ -165,7 +165,7 @@ export function horizontalPolygonSpan(points: readonly Point[], y: number): numb
   )
 }
 
-export function fitPolygonForRegion(region: BrowserRegion): readonly Point[] {
+export function fitPolygonForRegion(region: ImageRegion): readonly Point[] {
   const safe = region.layout.safePolygon
   // Safe polygons are part of the terminal region contract.  They are
   // generated from the bubble distance field on the daemon and never fall
@@ -174,7 +174,7 @@ export function fitPolygonForRegion(region: BrowserRegion): readonly Point[] {
   return safe
 }
 
-function regionBox(region: BrowserRegion, imageWidth: number, imageHeight: number): FitBox {
+function regionBox(region: ImageRegion, imageWidth: number, imageHeight: number): FitBox {
   const points = fitPolygonForRegion(region)
   const bounds = polygonBounds(points)
   return {
@@ -188,7 +188,7 @@ function rectangleFits(
   lines: readonly string[],
   fontSize: number,
   box: FitBox,
-  region: BrowserRegion,
+  region: ImageRegion,
 ): boolean {
   const lineHeight = fontSize * region.style.lineHeight
   if (region.style.writingMode === 'vertical-rl') {
@@ -211,7 +211,7 @@ function polygonFits(
   fontSize: number,
   points: readonly Point[],
   box: FitBox,
-  region: BrowserRegion,
+  region: ImageRegion,
 ): boolean {
   if (region.style.writingMode === 'vertical-rl') {
     return rectangleFits(lines, fontSize, box, region)
@@ -259,12 +259,12 @@ export function minimumReadableFontSize(imageWidth: number): number {
 }
 
 function chooseFit(
-  region: BrowserRegion,
+  region: ImageRegion,
   imageWidth: number,
   imageHeight: number,
   usePolygon: boolean,
 ): TextFit {
-  const text = region.displayedChinese
+  const text = region.text.displayedChinese
   const box = regionBox(region, imageWidth, imageHeight)
   const points = fitPolygonForRegion(region)
   // Color samples describe vertical appearance, not linguistic line breaks.
@@ -275,7 +275,7 @@ function chooseFit(
     region.layout.fontSizeToImageWidth * imageWidth,
   )
   const preferredFontSize =
-    sourceFontSize * sourceDensityScale(region.sourceEnglish, text)
+    sourceFontSize * sourceDensityScale(region.text.sourceText, text)
   const minimumFontSize = minimumReadableFontSize(imageWidth)
   let best: TextFit | undefined
   for (const lines of candidates) {
@@ -329,13 +329,13 @@ function chooseFit(
 }
 
 export class RectangleTextFitter {
-  fit(region: BrowserRegion, imageWidth: number, imageHeight: number): TextFit {
+  fit(region: ImageRegion, imageWidth: number, imageHeight: number): TextFit {
     return chooseFit(region, imageWidth, imageHeight, false)
   }
 }
 
 export class PolygonTextFitter {
-  fit(region: BrowserRegion, imageWidth: number, imageHeight: number): TextFit {
+  fit(region: ImageRegion, imageWidth: number, imageHeight: number): TextFit {
     return chooseFit(region, imageWidth, imageHeight, true)
   }
 }

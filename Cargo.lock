@@ -919,6 +919,7 @@ dependencies = [
  "getrandom 0.3.4",
  "hsk-control",
  "http-body",
+ "icu_segmenter",
  "image",
  "imageproc",
  "koharu-app",

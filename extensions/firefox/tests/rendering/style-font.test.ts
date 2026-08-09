@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 
-import type { BrowserRegion } from '../../src/contracts/browser'
-import { createFixtureRegions } from '../support/fixture-service'
+import type { ImageRegion } from '../../src/contracts/browser'
 import { FontLoader } from '../../src/rendering/font-loader'
 import {
   applyRegionColorBands,
@@ -9,14 +8,15 @@ import {
   safeHexColor,
   validateRegionStyle,
 } from '../../src/rendering/style'
+import { createFixtureRegions } from '../support/fixture-service'
 
-function fixtureRegion(): BrowserRegion {
+function fixtureRegion(): ImageRegion {
   return createFixtureRegions({
     jobId: 'fixture',
     sourceSha256: 'a'.repeat(64),
     sourceWidth: 1200,
     sourceHeight: 1800,
-  })[0] as BrowserRegion
+  })[0] as ImageRegion
 }
 
 describe('validated browser typography', () => {
@@ -31,7 +31,7 @@ describe('validated browser typography', () => {
         weight: 5_000,
         lineHeight: 99,
       },
-    } as BrowserRegion
+    } as ImageRegion
     const validated = validateRegionStyle(unsafe)
     expect(validated.color).toBe('#111111')
     expect(validated.strokeColor).toBe('transparent')
@@ -43,7 +43,7 @@ describe('validated browser typography', () => {
   it('applies horizontal and vertical CSS without inserting HTML', () => {
     const region = fixtureRegion()
     const element = document.createElement('span')
-    element.textContent = region.displayedChinese
+    element.textContent = region.text.displayedChinese
     applyRegionStyle(element, region, 24, '"Fixture Font", sans-serif')
     expect(element.textContent).toBe('我们现在要走！')
     expect(element.style.color).toBe('#151515')
@@ -53,7 +53,7 @@ describe('validated browser typography', () => {
 
   it('applies the ordered source palette to translated lines', () => {
     const base = fixtureRegion()
-    const region: BrowserRegion = {
+    const region: ImageRegion = {
       ...base,
       style: {
         ...base.style,
@@ -67,14 +67,14 @@ describe('validated browser typography', () => {
     const content = document.createElement('span')
     for (const text of ['上', '下']) {
       const line = document.createElement('span')
-      line.className = 'hmt-region-line'
+      line.className = 'hskify-region-line'
       line.textContent = text
       content.append(line)
     }
 
     applyRegionColorBands(content, region, 20)
 
-    const lines = content.querySelectorAll<HTMLElement>('.hmt-region-line')
+    const lines = content.querySelectorAll<HTMLElement>('.hskify-region-line')
     expect(lines[0]?.style.color).toBe('#111111')
     expect(lines[1]?.style.color).toBe('#2580df')
     expect(lines[1]?.style.getPropertyValue('-webkit-text-stroke')).toContain('#000000')
@@ -99,7 +99,7 @@ describe('validated browser typography', () => {
     )
     const first = await loader.load('fixture-sans', 'sans', 'job-1')
     const second = await loader.load('fixture-sans', 'sans', 'job-2')
-    expect(first).toContain('HMT-fixture-sans')
+    expect(first).toContain('Hskify-fixture-sans')
     expect(second).toBe(first)
     expect(fetcher).toHaveBeenCalledTimes(1)
     expect(add).toHaveBeenCalledTimes(1)

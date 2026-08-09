@@ -1,0 +1,7 @@
+{
+  "fixtureType": "repeatedDocumentRequest",
+  "pageSessionId": "fixture-document-total-bytes",
+  "blockCount": 80,
+  "textSeed": "A complete English sentence with stable words and punctuation.",
+  "textRepeat": 250
+}

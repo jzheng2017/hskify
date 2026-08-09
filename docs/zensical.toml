@@ -1,6 +1,6 @@
 [project]
 site_name = "Hskify"
-site_description = "Direct chapter-aware HSK manga translation for Firefox."
+site_description = "Local chapter-aware HSK reading for manga, webtoons, and light novels in Firefox."
 site_author = "Hskify contributors"
 docs_dir = "."
 site_dir = "site"

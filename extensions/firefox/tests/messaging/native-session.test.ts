@@ -1,8 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 
-import {
-  BUILD_FINGERPRINT,
-} from '../../src/contracts/browser'
+import { BUILD_FINGERPRINT } from '../../src/contracts/browser'
 import {
   NATIVE_HOST_NAME,
   NativeSessionError,
@@ -48,12 +46,12 @@ describe('one-shot native session handshake', () => {
       extensionVersion: '0.1.0',
       extensionOrigin: 'moz-extension://fixture-installation',
     })
-    expect(Object.keys(storage.values)).toEqual(['hmt.nativeSession'])
+    expect(Object.keys(storage.values)).toEqual(['hskify.nativeSession'])
   })
 
   it('recovers a valid session without relying on background globals', async () => {
     const storage = new MemoryStorage()
-    storage.values['hmt.nativeSession'] = ready()
+    storage.values['hskify.nativeSession'] = ready()
     const runtime = {
       getManifest: () => ({ version: '0.1.0' }),
       getURL: () => 'moz-extension://fixture/',
@@ -68,7 +66,7 @@ describe('one-shot native session handshake', () => {
 
   it('refreshes expiring sessions and rejects malformed native replies', async () => {
     const storage = new MemoryStorage()
-    storage.values['hmt.nativeSession'] = ready('A'.repeat(43), 5_500)
+    storage.values['hskify.nativeSession'] = ready('A'.repeat(43), 5_500)
     const manager = new NativeSessionManager(
       storage,
       {

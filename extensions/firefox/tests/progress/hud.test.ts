@@ -1,14 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import {
-  ChapterProgressReducer,
-  ImageStatusBadge,
-  PageHud,
-} from '../../src/progress/hud'
+import { ChapterProgressReducer, ImageStatusBadge, PageHud } from '../../src/progress/hud'
 import { loadedImage } from '../helpers/images'
 
 afterEach(() => {
-  document.documentElement.querySelectorAll('[data-hmt-owned]').forEach((item) => item.remove())
+  document.documentElement.querySelectorAll('[data-hskify-owned]').forEach((item) => item.remove())
   document.body.replaceChildren()
 })
 
@@ -71,7 +67,7 @@ describe('page and image progress UI', () => {
     const badge = new ImageStatusBadge(image, retry)
     badge.failure('Image permission denied')
     const button = document.documentElement
-      .querySelector<HTMLElement>('[data-hmt-owned]')
+      .querySelector<HTMLElement>('[data-hskify-owned]')
       ?.shadowRoot?.querySelector('button')
     expect(button?.hidden).toBe(false)
     button?.dispatchEvent(new Event('click'))
@@ -83,9 +79,7 @@ describe('page and image progress UI', () => {
     const reducer = new ChapterProgressReducer()
     expect(reducer.update('page-a', { stage: 'translating' }).phase).toBe('translating')
     expect(reducer.update('page-b', { stage: 'ocr' }).phase).toBe('translating')
-    expect(reducer.update('page-a', { stage: 'styling' }).message).toBe(
-      'Finishing the chapter',
-    )
+    expect(reducer.update('page-a', { stage: 'styling' }).message).toBe('Finishing the chapter')
     // A late update from an image that started later must not make the
     // chapter status flicker backwards.
     expect(reducer.update('page-b', { stage: 'queued' }).phase).toBe('finishing')
@@ -101,7 +95,7 @@ describe('page and image progress UI', () => {
     document.body.append(image, wrapper)
     const retry = vi.fn()
     const badge = new ImageStatusBadge(image, retry, document.documentElement, wrapper)
-    const host = document.documentElement.querySelector<HTMLElement>('[data-hmt-owned]')
+    const host = document.documentElement.querySelector<HTMLElement>('[data-hskify-owned]')
     expect(host?.parentElement).toBe(wrapper)
     expect(host?.style.position).toBe('absolute')
     expect(host?.style.left).toBe('8px')

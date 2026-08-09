@@ -5,11 +5,141 @@
 //! one chapter session so completion order cannot change the meaning of a
 //! later page.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 
 use koharu_app::llm::HskPrecedingUtterance;
+use serde::Serialize;
 
 pub const MAX_CONTEXT_UTTERANCES: usize = 6;
+
+/// One immutable source unit plus its optional terminal translation. Every
+/// modality registers units before language dispatch; execution priority may
+/// change, but context is always read in `(source_index, item_order)` order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChapterContextUnit {
+    pub item_id: String,
+    pub source_index: u32,
+    pub item_order: u32,
+    pub source_text: String,
+    pub displayed_text: Option<String>,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct ChapterContextStore {
+    chapters: HashMap<String, BTreeMap<(u32, u32), ChapterContextUnit>>,
+}
+
+impl ChapterContextStore {
+    pub fn register<I>(&mut self, chapter_id: &str, units: I)
+    where
+        I: IntoIterator<Item = ChapterContextUnit>,
+    {
+        let chapter = self.chapters.entry(chapter_id.to_owned()).or_default();
+        for unit in units {
+            let position = (unit.source_index, unit.item_order);
+            match chapter.get_mut(&position) {
+                Some(existing) if existing.item_id == unit.item_id => {
+                    // Registration is immutable apart from preserving an
+                    // already-published translation during replay/refresh.
+                    let displayed_text = existing.displayed_text.take();
+                    *existing = unit;
+                    existing.displayed_text = displayed_text;
+                }
+                Some(_) => {
+                    // Validated requests cannot contain position collisions.
+                    // Keeping the first registration avoids timing-dependent
+                    // context if a malformed internal caller violates that.
+                }
+                None => {
+                    chapter.insert(position, unit);
+                }
+            }
+        }
+    }
+
+    pub fn publish(
+        &mut self,
+        chapter_id: &str,
+        position: (u32, u32),
+        item_id: &str,
+        displayed_text: String,
+    ) {
+        if let Some(unit) = self
+            .chapters
+            .get_mut(chapter_id)
+            .and_then(|chapter| chapter.get_mut(&position))
+            && unit.item_id == item_id
+        {
+            unit.displayed_text = Some(displayed_text);
+        }
+    }
+
+    pub fn preceding(&self, chapter_id: &str, position: (u32, u32)) -> Vec<HskPrecedingUtterance> {
+        let Some(chapter) = self.chapters.get(chapter_id) else {
+            return Vec::new();
+        };
+        let mut context = chapter
+            .range(..position)
+            .filter_map(|(_, unit)| {
+                let chinese = unit.displayed_text.as_deref()?.trim();
+                let source = unit.source_text.trim();
+                (!source.is_empty() && !chinese.is_empty()).then(|| HskPrecedingUtterance {
+                    source_english: source.to_owned(),
+                    chinese: chinese.to_owned(),
+                })
+            })
+            .collect::<Vec<_>>();
+        if context.len() > MAX_CONTEXT_UTTERANCES {
+            context.drain(..context.len() - MAX_CONTEXT_UTTERANCES);
+        }
+        context
+    }
+
+    pub fn following_source(
+        &self,
+        chapter_id: &str,
+        position: (u32, u32),
+        limit: usize,
+    ) -> Vec<String> {
+        self.chapters
+            .get(chapter_id)
+            .map(|chapter| {
+                chapter
+                    .range((
+                        std::ops::Bound::Excluded(position),
+                        std::ops::Bound::Unbounded,
+                    ))
+                    .map(|(_, unit)| unit.source_text.trim())
+                    .filter(|text| !text.is_empty())
+                    .take(limit)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn snapshot_excluding_source(
+        &self,
+        chapter_id: &str,
+        source_index: u32,
+    ) -> Vec<ChapterContextUnit> {
+        self.chapters
+            .get(chapter_id)
+            .map(|chapter| {
+                chapter
+                    .values()
+                    .filter(|unit| unit.source_index != source_index)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn remove(&mut self, chapter_id: &str) {
+        self.chapters.remove(chapter_id);
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PageSurfaceKind {
@@ -58,165 +188,11 @@ pub struct PageAnalysis {
     pub complete: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DialogueNode {
-    pub page_index: u32,
-    pub reading_order: u32,
-    pub region_id: String,
-    pub source_english: String,
-    pub chinese: String,
-    pub continuation_group: Option<String>,
-}
-
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct DialogueGraph {
-    pages: BTreeMap<u32, Vec<DialogueNode>>,
-}
-
-impl DialogueGraph {
-    pub fn record_page(&mut self, page_index: u32, mut nodes: Vec<DialogueNode>) {
-        // A page can be translated in several bounded language batches. Merge
-        // terminal nodes by region identity instead of replacing an earlier
-        // batch; publication order must never erase context that was already
-        // accepted for the same page.
-        let mut merged = self.pages.remove(&page_index).unwrap_or_default();
-        for node in nodes.drain(..) {
-            if let Some(existing) = merged
-                .iter_mut()
-                .find(|existing| existing.region_id == node.region_id)
-            {
-                *existing = node;
-            } else {
-                merged.push(node);
-            }
-        }
-        nodes = merged;
-        nodes.sort_by(|left, right| {
-            left.reading_order
-                .cmp(&right.reading_order)
-                .then_with(|| left.region_id.cmp(&right.region_id))
-        });
-        self.pages.insert(page_index, nodes);
-        self.normalize_continuation_groups();
-    }
-
-    pub fn before(&self, page_index: u32) -> Vec<HskPrecedingUtterance> {
-        let nodes = self
-            .pages
-            .range(..page_index)
-            .flat_map(|(_, nodes)| nodes.iter())
-            .filter(|node| {
-                !node.source_english.trim().is_empty() && !node.chinese.trim().is_empty()
-            })
-            .collect::<Vec<_>>();
-        self.context_from_nodes(nodes)
-    }
-
-    /// Return accepted dialogue strictly before a page/reading position.  A
-    /// page can be translated in several language batches, so same-page
-    /// terminal nodes are included when they precede the next batch.  The
-    /// graph is already canonicalized by page and reading order; completion
-    /// timing cannot reorder this context.
-    pub fn before_position(
-        &self,
-        page_index: u32,
-        reading_order: u32,
-    ) -> Vec<HskPrecedingUtterance> {
-        let nodes = self
-            .pages
-            .iter()
-            .flat_map(|(page, nodes)| {
-                nodes.iter().filter(move |node| {
-                    *page < page_index
-                        || (*page == page_index && node.reading_order < reading_order)
-                })
-            })
-            .filter(|node| {
-                !node.source_english.trim().is_empty() && !node.chinese.trim().is_empty()
-            })
-            .collect::<Vec<_>>();
-        self.context_from_nodes(nodes)
-    }
-
-    fn context_from_nodes(&self, nodes: Vec<&DialogueNode>) -> Vec<HskPrecedingUtterance> {
-        let mut utterances: Vec<HskPrecedingUtterance> = Vec::with_capacity(nodes.len());
-        let mut last_group: Option<String> = None;
-        for node in nodes {
-            if let Some(group) = node.continuation_group.as_deref()
-                && last_group.as_deref() == Some(group)
-                && let Some(previous) = utterances.last_mut()
-            {
-                previous.source_english.push('\n');
-                previous.source_english.push_str(node.source_english.trim());
-                previous.chinese.push('\n');
-                previous.chinese.push_str(node.chinese.trim());
-                continue;
-            }
-            last_group = node.continuation_group.clone();
-            utterances.push(HskPrecedingUtterance {
-                source_english: node.source_english.trim().to_owned(),
-                chinese: node.chinese.trim().to_owned(),
-            });
-        }
-        if utterances.len() > MAX_CONTEXT_UTTERANCES {
-            utterances.drain(..utterances.len() - MAX_CONTEXT_UTTERANCES);
-        }
-        utterances
-    }
-
-    /// Model continuation links are parent references (`child -> parent`),
-    /// while translation context needs one stable group key for every member.
-    /// Resolve those links after each terminal insertion so completion order
-    /// cannot leave a child detached from its earlier bubble.
-    fn normalize_continuation_groups(&mut self) {
-        let links = self
-            .pages
-            .values()
-            .flat_map(|nodes| nodes.iter())
-            .filter_map(|node| {
-                node.continuation_group
-                    .as_ref()
-                    .map(|parent| (node.region_id.clone(), parent.clone()))
-            })
-            .collect::<HashMap<_, _>>();
-        let referenced = links.values().cloned().collect::<BTreeSet<_>>();
-        for nodes in self.pages.values_mut() {
-            for node in nodes {
-                let root = if links.contains_key(&node.region_id) {
-                    Some(resolve_continuation_root(&links, &node.region_id))
-                } else if referenced.contains(&node.region_id) {
-                    Some(resolve_continuation_root(&links, &node.region_id))
-                } else {
-                    None
-                };
-                node.continuation_group = root;
-            }
-        }
-    }
-
-    pub fn pages(&self) -> &BTreeMap<u32, Vec<DialogueNode>> {
-        &self.pages
-    }
-}
-
-fn resolve_continuation_root(links: &HashMap<String, String>, id: &str) -> String {
-    let mut current = id.to_owned();
-    let mut seen = BTreeSet::new();
-    while let Some(parent) = links.get(&current) {
-        if !seen.insert(current.clone()) {
-            break;
-        }
-        current = parent.clone();
-    }
-    current
-}
-
 #[derive(Debug, Default, Clone)]
 pub struct ChapterSession {
     pub id: String,
     pub surfaces: BTreeMap<u32, PageSurface>,
     pub analyses: BTreeMap<u32, PageAnalysis>,
-    pub dialogue: DialogueGraph,
 }
 
 impl ChapterSession {
@@ -264,48 +240,6 @@ impl ChapterSession {
         entry.regions = regions;
         entry.complete |= complete;
     }
-
-    pub fn record_dialogue(&mut self, page_index: u32, nodes: Vec<DialogueNode>) {
-        self.dialogue.record_page(page_index, nodes);
-    }
-
-    /// Return source-language regions that follow a translation window in the
-    /// immutable chapter analysis. These are intentionally untranslated source
-    /// lines: they give the language model a bounded look-ahead for pronouns,
-    /// sentence continuations, and connected bubbles without exposing future
-    /// Chinese decisions.
-    pub fn following_source(
-        &self,
-        page_index: u32,
-        reading_order: u32,
-        limit: usize,
-    ) -> Vec<String> {
-        let mut values = Vec::new();
-        for (page, analysis) in &self.analyses {
-            for region in &analysis.regions {
-                if *page < page_index
-                    || (*page == page_index && region.reading_order <= reading_order)
-                {
-                    continue;
-                }
-                if matches!(
-                    region.role,
-                    RegionRole::Exclusion | RegionRole::TechniqueArtwork | RegionRole::Unreadable
-                ) {
-                    continue;
-                }
-                let source = region.source_english.trim();
-                if source.is_empty() || values.iter().any(|value| value == source) {
-                    continue;
-                }
-                values.push(source.to_owned());
-                if values.len() >= limit {
-                    return values;
-                }
-            }
-        }
-        values
-    }
 }
 
 #[derive(Debug, Default)]
@@ -324,23 +258,6 @@ impl ChapterSessionStore {
         self.sessions.get(id)
     }
 
-    pub fn before(&self, id: &str, page_index: u32) -> Vec<HskPrecedingUtterance> {
-        self.session(id)
-            .map(|session| session.dialogue.before(page_index))
-            .unwrap_or_default()
-    }
-
-    pub fn before_position(
-        &self,
-        id: &str,
-        page_index: u32,
-        reading_order: u32,
-    ) -> Vec<HskPrecedingUtterance> {
-        self.session(id)
-            .map(|session| session.dialogue.before_position(page_index, reading_order))
-            .unwrap_or_default()
-    }
-
     pub fn remove(&mut self, id: &str) {
         self.sessions.remove(id);
     }
@@ -350,29 +267,56 @@ impl ChapterSessionStore {
 mod tests {
     use super::*;
 
-    fn node(page_index: u32, order: u32, id: &str, source: &str, chinese: &str) -> DialogueNode {
-        DialogueNode {
-            page_index,
-            reading_order: order,
-            region_id: id.to_owned(),
-            source_english: source.to_owned(),
-            chinese: chinese.to_owned(),
-            continuation_group: None,
+    fn unit(index: u32, order: u32, id: &str, source: &str) -> ChapterContextUnit {
+        ChapterContextUnit {
+            item_id: id.to_owned(),
+            source_index: index,
+            item_order: order,
+            source_text: source.to_owned(),
+            displayed_text: None,
         }
     }
 
     #[test]
-    fn dialogue_context_is_document_ordered_not_completion_ordered() {
-        let mut graph = DialogueGraph::default();
-        graph.record_page(2, vec![node(2, 0, "p2", "later", "后面")]);
-        graph.record_page(1, vec![node(1, 0, "p1", "earlier", "前面")]);
-        let context = graph.before(3);
+    fn context_is_ordered_by_source_position_not_completion_time() {
+        let mut store = ChapterContextStore::default();
+        store.register(
+            "chapter",
+            [
+                unit(2, 0, "later", "later source"),
+                unit(1, 0, "earlier", "earlier source"),
+            ],
+        );
+        store.publish("chapter", (2, 0), "later", "later Chinese".to_owned());
+        store.publish("chapter", (1, 0), "earlier", "earlier Chinese".to_owned());
+
+        let context = store.preceding("chapter", (3, 0));
         assert_eq!(
             context
                 .iter()
                 .map(|entry| entry.source_english.as_str())
                 .collect::<Vec<_>>(),
-            ["earlier", "later"]
+            ["earlier source", "later source"]
+        );
+    }
+
+    #[test]
+    fn context_registers_all_source_before_visible_first_publication() {
+        let mut store = ChapterContextStore::default();
+        store.register(
+            "chapter",
+            [
+                unit(0, 0, "first", "first source"),
+                unit(0, 1, "visible", "visible source"),
+                unit(0, 2, "following", "following source"),
+            ],
+        );
+        store.publish("chapter", (0, 1), "visible", "visible Chinese".to_owned());
+
+        assert!(store.preceding("chapter", (0, 1)).is_empty());
+        assert_eq!(
+            store.following_source("chapter", (0, 1), 6),
+            vec!["following source".to_owned()]
         );
     }
 
@@ -399,77 +343,11 @@ mod tests {
         });
         assert!(!session.analyses[&0].complete);
         session.record_analysis(PageAnalysis {
-            surface: session.analyses.get(&0).unwrap().surface.clone(),
-            regions: session.analyses.get(&0).unwrap().regions.clone(),
+            surface: session.analyses[&0].surface.clone(),
+            regions: session.analyses[&0].regions.clone(),
             complete: true,
         });
         assert!(session.analyses[&0].complete);
         assert_eq!(session.analyses[&0].regions.len(), 1);
-    }
-
-    #[test]
-    fn continuation_links_are_canonicalized_and_context_is_joined() {
-        let mut graph = DialogueGraph::default();
-        graph.record_page(
-            1,
-            vec![
-                node(1, 0, "first", "Wait", "等一下"),
-                DialogueNode {
-                    page_index: 1,
-                    reading_order: 1,
-                    region_id: "second".to_owned(),
-                    source_english: "for me.".to_owned(),
-                    chinese: "等我。".to_owned(),
-                    continuation_group: Some("first".to_owned()),
-                },
-            ],
-        );
-        let context = graph.before(2);
-        assert_eq!(context.len(), 1);
-        assert_eq!(context[0].source_english, "Wait\nfor me.");
-        assert_eq!(context[0].chinese, "等一下\n等我。");
-        assert_eq!(
-            graph.pages()[&1]
-                .iter()
-                .map(|node| node.continuation_group.as_deref())
-                .collect::<Vec<_>>(),
-            vec![Some("first"), Some("first")]
-        );
-    }
-
-    #[test]
-    fn following_source_is_canonical_and_excludes_non_language_regions() {
-        let mut session = ChapterSession::new("chapter");
-        session.record_analysis(PageAnalysis {
-            surface: PageSurface {
-                session_id: "chapter".to_owned(),
-                page_index: 2,
-                source_sha256: "c".to_owned(),
-                width: 100,
-                height: 100,
-                kind: PageSurfaceKind::Image,
-            },
-            regions: vec![
-                RegionPlan {
-                    id: "later".to_owned(),
-                    reading_order: 0,
-                    role: RegionRole::Dialogue,
-                    source_english: "Later dialogue".to_owned(),
-                    continuation_group: None,
-                },
-                RegionPlan {
-                    id: "art".to_owned(),
-                    reading_order: 1,
-                    role: RegionRole::TechniqueArtwork,
-                    source_english: "SWORD TECHNIQUE".to_owned(),
-                    continuation_group: None,
-                },
-            ],
-            complete: true,
-        });
-        assert_eq!(
-            session.following_source(1, 0, 4),
-            vec!["Later dialogue".to_owned()]
-        );
     }
 }

@@ -21,6 +21,8 @@ describe('popup permission gesture', () => {
       <select id="hsk-level"><option value="5" selected>5</option></select>
       <select id="learning-mode"><option value="natural" selected>Natural</option></select>
       <select id="reading-direction"><option value="ltr" selected>LTR</option></select>
+      <span id="content-kind"></span>
+      <div id="image-settings"></div>
       <button id="translate-all">All</button>
       <button id="cancel">Cancel</button>
       <span id="status-title"></span>
@@ -32,6 +34,7 @@ describe('popup permission gesture', () => {
       ok: true
       value: {
         state: 'complete'
+        contentKind: 'image'
         current: number
         total: number
         message: string
@@ -51,6 +54,12 @@ describe('popup permission gesture', () => {
       if (message.type === 'popup:prepare') {
         return { ok: true, value: undefined }
       }
+      if (message.type === 'engine:warmup') {
+        return {
+          ok: true,
+          value: { state: 'ready', modelId: 'qwen3.5-4b', message: 'Ready' },
+        }
+      }
       if (message.type === 'popup:state') {
         stateCalls += 1
         if (stateCalls > 1) return blockedState.promise
@@ -58,6 +67,7 @@ describe('popup permission gesture', () => {
           ok: true,
           value: {
             state: 'complete',
+            contentKind: 'image',
             current: 1,
             total: 1,
             message: 'Done',
@@ -97,6 +107,7 @@ describe('popup permission gesture', () => {
       ok: true,
       value: {
         state: 'complete',
+        contentKind: 'image',
         current: 1,
         total: 1,
         message: 'Done',
@@ -112,6 +123,8 @@ describe('popup permission gesture', () => {
       <select id="hsk-level"><option value="5" selected>5</option></select>
       <select id="learning-mode"><option value="natural" selected>Natural</option></select>
       <select id="reading-direction"><option value="ltr" selected>LTR</option></select>
+      <span id="content-kind"></span>
+      <div id="image-settings"></div>
       <button id="translate-all">All</button>
       <button id="cancel">Cancel</button>
       <span id="status-title"></span>
@@ -134,11 +147,19 @@ describe('popup permission gesture', () => {
       if (message.type === 'popup:prepare') {
         return { ok: true, value: undefined }
       }
+      if (message.type === 'engine:warmup') {
+        order.push('warmup')
+        return {
+          ok: true,
+          value: { state: 'ready', modelId: 'qwen3.5-4b', message: 'Ready' },
+        }
+      }
       if (message.type === 'popup:state') {
         return {
           ok: true,
           value: {
             state: 'idle',
+            contentKind: 'image',
             current: 0,
             total: 0,
             message: 'Ready',
@@ -154,6 +175,7 @@ describe('popup permission gesture', () => {
           ok: true,
           value: {
             state: 'running',
+            contentKind: 'image',
             current: 0,
             total: 1,
             message: 'Queued',
@@ -183,7 +205,7 @@ describe('popup permission gesture', () => {
     expect(document.querySelector('#status-title')?.textContent).toBe('Ready')
     chapter?.click()
     chapter?.click()
-    await vi.waitFor(() => expect(order).toEqual(['start']))
+    await vi.waitFor(() => expect(order).toEqual(['warmup', 'start']))
     expect(sendMessage).toHaveBeenCalledWith(
       expect.objectContaining({
         type: 'popup:start',
@@ -199,6 +221,8 @@ describe('popup permission gesture', () => {
       <select id="hsk-level"><option value="5" selected>5</option></select>
       <select id="learning-mode"><option value="natural" selected>Natural</option></select>
       <select id="reading-direction"><option value="ltr" selected>LTR</option></select>
+      <span id="content-kind"></span>
+      <div id="image-settings"></div>
       <button id="translate-all">All</button>
       <button id="cancel">Cancel</button>
       <span id="status-title"></span>
@@ -249,6 +273,8 @@ describe('popup permission gesture', () => {
       <select id="hsk-level"><option value="5" selected>5</option></select>
       <select id="learning-mode"><option value="natural" selected>Natural</option></select>
       <select id="reading-direction"><option value="ltr" selected>LTR</option></select>
+      <span id="content-kind"></span>
+      <div id="image-settings"></div>
       <button id="translate-all">All</button>
       <button id="cancel">Cancel</button>
       <span id="status-title"></span>

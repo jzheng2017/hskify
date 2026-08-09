@@ -6,7 +6,7 @@
 
 use std::fmt::Write as _;
 
-pub const DIRECT_HSK_PROMPT_REVISION: &str = "faithful-hsk-realization-v85-2026-08-08";
+pub const DIRECT_HSK_PROMPT_REVISION: &str = "ordered-span-hsk-realization-v1-2026-08-09";
 
 /// Canonical protocol description whose SHA-256 is
 /// [`DIRECT_HSK_PROMPT_HASH`].
@@ -14,21 +14,22 @@ pub const DIRECT_HSK_PROMPT_REVISION: &str = "faithful-hsk-realization-v85-2026-
 /// Keep this material synchronized with the builders below. The unit test pins
 /// the digest so a prompt-semantic change cannot silently reuse cache entries
 /// or benchmark evidence.
-pub const DIRECT_HSK_PROMPT_FINGERPRINT_MATERIAL: &str = r#"faithful-hsk-realization-v85-2026-08-08
-input=ordered admitted story regions paired with complete faithful Chinese references and measured character and line budgets; page roles and immutable OCR transcripts are decided before this prompt
-chapter-context=daemon-owned preceding Chinese and bounded following English are reference only; preserve canonical page and bubble order and never emit context-only regions
+pub const DIRECT_HSK_PROMPT_FINGERPRINT_MATERIAL: &str = r#"ordered-span-hsk-realization-v1-2026-08-09
+input=generic ordered source spans paired with complete faithful Chinese references; image spans alone may carry measured character and line budgets
+provenance=DOM text is authoritative and must not be corrected; OCR spans alone receive a bounded obvious-recognition-error correction instruction
+chapter-context=daemon-owned preceding Chinese and bounded neighboring English are reference only; preserve canonical sourceIndex and itemOrder and never emit context-only spans
 names=render every name in Chinese, using the faithful reference as authority; no source-language name preservation mode exists
 translation=realize each faithful Chinese reference at the requested HSK level; preserve its complete meaning, participant roles, agency, attachment, causality, modality, quantities, negation, tone, ambiguity, and numeric values while simplifying vocabulary and grammar
 natural-learning=target 90% coverage for levels 1-3, 93% for level 4, and 95% for levels 5-6; retain only indispensable above-level terms and expose them as teaching metadata
 strict-learning=avoid every above-level term unless the faithful Chinese name form makes it unavoidable
-layout=honor the supplied maximum Chinese characters and line count; request concise wording before accepting an unreadable fit
-output=one terminal numbered Chinese line per input region, no labels, explanations, markup, IDs, source-language leakage, or provisional text
-repair=the same ordered context is supplied to one bounded terminal repair; rejected candidates stay hidden until repair or unreadable preservation"#;
+layout=honor maximum Chinese characters and line count only when image constraints are supplied
+output=one terminal numbered Chinese line per input span, no labels, explanations, markup, IDs, source-language leakage, or provisional text
+repair=the same ordered context is supplied to one bounded terminal repair; rejected candidates stay hidden until repair or a source-preserving terminal result"#;
 
 // Filled from the exact UTF-8 bytes of
 // DIRECT_HSK_PROMPT_FINGERPRINT_MATERIAL.
 pub const DIRECT_HSK_PROMPT_HASH: &str =
-    "sha256:5ca7df4ea4b04091ebb52d4ef92910ae116a2a5af013c46963f5520e0d2500aa";
+    "sha256:d65637593d6053dbc9c5bec4428ded02842c34b587d171a43538d8d54b3fd2eb";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DirectHskLearningMode {
@@ -36,12 +37,18 @@ pub enum DirectHskLearningMode {
     Strict,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DirectSourceProvenance {
+    Dom,
+    Ocr,
+}
+
 /// Shared identity of numbered-line parsing and deterministic preservation
 /// validation used by production and release evidence.
-pub const DIRECT_HSK_VALIDATOR_FINGERPRINT_MATERIAL: &str = "numbered-output-v3|ordered-region-count-and-id-coverage|source-language-and-Chinese-only-gates|numeric-and-critical-term-preservation|role-label-rejection|hsk-natural-teaching-metadata-and-strict-vocabulary|layout-character-and-line-budget|terminal-only-publication-v2|repair-evidence-is-item-local-and-contextual";
+pub const DIRECT_HSK_VALIDATOR_FINGERPRINT_MATERIAL: &str = "numbered-output-v4|ordered-span-count-and-id-coverage|source-language-and-Chinese-only-gates|numeric-and-critical-term-preservation|kind-label-rejection|hsk-natural-teaching-metadata-and-strict-vocabulary|optional-image-layout-character-and-line-budget|terminal-only-publication-v3|repair-evidence-is-item-local-and-contextual";
 
 pub const DIRECT_HSK_VALIDATOR_HASH: &str =
-    "sha256:027672d213b9587977201b2b89e5d4610e46a209111c5749d5ba242810f9a4e9";
+    "sha256:729765101be1dcde612cec18613e8a01e8a1b70ae7898a74928ee49d8cfe4e68";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DirectHskContext<'a> {
@@ -56,20 +63,16 @@ pub struct DirectHskSource<'a> {
 }
 
 #[must_use]
-pub fn primary_system_prompt(level: u8, count: usize) -> String {
-    primary_system_prompt_with_learning_policy(level, count, DirectHskLearningMode::Strict)
-}
-
-#[must_use]
-pub fn primary_system_prompt_with_learning_policy(
+pub fn primary_system_prompt_for_source(
     level: u8,
     count: usize,
     learning_mode: DirectHskLearningMode,
+    provenance: DirectSourceProvenance,
 ) -> String {
     let level_style = level_style_instruction(level);
-    let semantic_admission_instruction = "Semantic role classification is already complete: every \
-        supplied region is admitted story content that must receive a translation. Do not classify, \
-        exclude, skip, merge, or reorder any region.";
+    let semantic_admission_instruction = "Source registration is already complete: every supplied \
+        span is admitted content that must receive a translation. Do not classify, exclude, skip, \
+        merge, or reorder any span.";
     let name_instruction = "Treat person, place, organization, and other proper names as names: never translate \
         their dictionary meaning. Preserve the Chinese form in the faithful reference, or use an established \
         Chinese name when certain and otherwise a phonetic Chinese transliteration. Keep it consistent with \
@@ -83,18 +86,23 @@ pub fn primary_system_prompt_with_learning_policy(
                 .to_owned()
         }
     };
+    let provenance_instruction = match provenance {
+        DirectSourceProvenance::Dom => {
+            "The English was extracted directly from the document DOM and is authoritative; preserve it exactly as the source and do not rewrite or correct it before translation."
+        }
+        DirectSourceProvenance::Ocr => {
+            "The English came from OCR and can contain minor recognition errors in letters, spacing, or punctuation. Silently correct only an obvious OCR error when grammar and neighboring context make the intended English clear; do not invent content when it is genuinely ambiguous."
+        }
+    };
     format!(
-        "Realize the {count} numbered faithful Chinese references in their supplied comic reading order at the requested HSK level. \
-{semantic_admission_instruction} OCR can contain minor recognition errors in letters, spacing, or \
-punctuation. Silently correct an obvious OCR error when grammar, neighboring lines, and story context \
-make the intended English clear; do not carry nonsensical OCR fragments into the Chinese translation, \
-and do not invent content when the source is genuinely ambiguous. The faithful Chinese reference is the semantic authority: preserve all of its meaning, add nothing, and omit nothing; use the English only to resolve names and source structure. Rewrite each reference into concise, \
+        "Realize the {count} numbered faithful Chinese references in their supplied source order at the requested HSK level. \
+{semantic_admission_instruction} {provenance_instruction} The faithful Chinese reference is the semantic authority: preserve all of its meaning, add nothing, and omit nothing; use the English only to resolve names and source structure. Rewrite each reference into concise, \
 natural Simplified Chinese for a reader targeting cumulative HSK 2.0 level {level}. \
-Use the supplied preceding translations and neighboring numbered regions to resolve pronouns, omitted \
-subjects, ellipsis, and sentences split across connected bubbles. Adjacent regions are context, not extra \
-content: each numbered output must contain only the meaning carried by its own source region, while using \
+Use the supplied preceding translations and neighboring numbered spans to resolve pronouns, omitted \
+subjects, ellipsis, and sentences split across source spans. Adjacent spans are context, not extra \
+content: each numbered output must contain only the meaning carried by its own source span, while using \
 the surrounding sequence to make that portion coherent. Preserve a genuinely standalone fragment as a \
-fragment; when several regions form one sentence, translate each region as its corresponding portion of \
+fragment; when several spans form one sentence, translate each span as its corresponding portion of \
 that sentence without duplicating or inventing meaning. Actively rewrite vocabulary, grammar, clause structure, and idioms to \
         suit the requested level—not vocabulary alone. {level_style} {learning_instruction} Prefer the simplest natural wording \
         that preserves the complete meaning; do not keep advanced grammar merely because its vocabulary \
@@ -104,7 +112,7 @@ who acts on whom and whether agency is intentional or accidental; attachment, ca
 modality, certainty, and conditions; quantities and comparisons; negation; question intent; tone \
 and humour; relationships and pronoun referents; ambiguity as resolved by preceding context, or \
         the ambiguity itself when unresolved; and self-corrections in their original order. Preserve \
-        numeric values. Each numbered line also has a supplied layout budget; stay within its maximum \
+        numeric values. When a numbered line has an image layout budget, stay within its maximum \
         Chinese-character and line counts, choosing a concise equivalent before allowing overflow. {name_instruction} Your response must start \
 with `1\t` and contain exactly {count} non-empty lines numbered 1 through {count} in order. On \
         every line, write the position, one tab, and only its Simplified Chinese translation. \
@@ -180,32 +188,11 @@ pub fn primary_user_prompt(
 }
 
 #[must_use]
-pub fn repair_system_prompt(level: u8) -> String {
-    repair_system_prompt_with_learning_policy(level, DirectHskLearningMode::Strict)
-}
-
-#[must_use]
-pub fn repair_system_prompt_with_learning_policy(
-    level: u8,
-    learning_mode: DirectHskLearningMode,
-) -> String {
-    repair_system_prompt_for_count(level, 1, learning_mode)
-}
-
-#[must_use]
-pub fn repair_batch_system_prompt_with_learning_policy(
+pub fn repair_system_prompt_for_source(
     level: u8,
     count: usize,
     learning_mode: DirectHskLearningMode,
-) -> String {
-    assert!(count > 0, "repair batch must not be empty");
-    repair_system_prompt_for_count(level, count, learning_mode)
-}
-
-fn repair_system_prompt_for_count(
-    level: u8,
-    count: usize,
-    learning_mode: DirectHskLearningMode,
+    provenance: DirectSourceProvenance,
 ) -> String {
     let level_style = level_style_instruction(level);
     let name_instruction = "Never translate proper names by dictionary meaning. Preserve their Chinese form from the \
@@ -236,11 +223,17 @@ fn repair_system_prompt_for_count(
             "Return exactly {count} non-empty lines numbered 1 through {count} in order. On every line write the position, one tab, and only that corrected translation."
         )
     };
+    let provenance_instruction = match provenance {
+        DirectSourceProvenance::Dom => {
+            "The DOM source is authoritative; do not correct or reinterpret its English before translation."
+        }
+        DirectSourceProvenance::Ocr => {
+            "Correct only an obvious OCR recognition error when grammar and context make the intended English clear; do not carry nonsensical recognition fragments into Chinese."
+        }
+    };
     format!(
         "{scope_instruction} for a reader targeting \
-        cumulative HSK 2.0 level {level}. OCR can contain minor recognition errors in letters, spacing, or \
-punctuation. Silently correct an obvious OCR error when grammar and context make the intended English \
-clear; do not carry nonsensical OCR fragments into Chinese. Fix every listed problem. The faithful Chinese reference is the semantic authority: preserve all of its meaning, add nothing, and omit nothing. Actively rewrite vocabulary, grammar, \
+        cumulative HSK 2.0 level {level}. {provenance_instruction} Fix every listed problem. The faithful Chinese reference is the semantic authority: preserve all of its meaning, add nothing, and omit nothing. Actively rewrite vocabulary, grammar, \
         clause structure, and idioms for the requested level—not vocabulary alone. {level_style} {learning_instruction} Preserve \
         every clause and detail, participant roles, \
 agency, cause and result, modality, quantities and comparisons, negation, question intent, tone \
@@ -365,13 +358,19 @@ mod tests {
             },
         ];
 
-        let system = primary_system_prompt(5, sources.len());
+        let system = primary_system_prompt_for_source(
+            5,
+            sources.len(),
+            DirectHskLearningMode::Strict,
+            DirectSourceProvenance::Ocr,
+        );
         let user = primary_user_prompt(&context, &sources);
 
         assert!(system.contains("start with `1\t`"));
         assert!(system.contains("exactly 2 non-empty lines"));
         assert!(system.contains("numbered 1 through 2 in order"));
-        assert!(system.contains("Semantic role classification is already complete"));
+        assert!(system.contains("Source registration is already complete"));
+        assert!(system.contains("every supplied span is admitted content"));
         assert!(system.contains("Never emit Latin name spellings"));
         assert!(!system.contains("keep-original"));
         assert!(!system.contains("placeholder"));
@@ -392,9 +391,24 @@ English source lines (name and structure reference):\n\
 
     #[test]
     fn low_and_high_hsk_levels_receive_materially_different_style_rules() {
-        let low = primary_system_prompt(2, 1);
-        let high = primary_system_prompt(5, 1);
-        let low_repair = repair_system_prompt(2);
+        let low = primary_system_prompt_for_source(
+            2,
+            1,
+            DirectHskLearningMode::Strict,
+            DirectSourceProvenance::Ocr,
+        );
+        let high = primary_system_prompt_for_source(
+            5,
+            1,
+            DirectHskLearningMode::Strict,
+            DirectSourceProvenance::Ocr,
+        );
+        let low_repair = repair_system_prompt_for_source(
+            2,
+            1,
+            DirectHskLearningMode::Strict,
+            DirectSourceProvenance::Ocr,
+        );
 
         assert!(low.contains("short, direct subject-verb-object clauses"));
         assert!(low.contains("Prefer two simple clauses over one nested clause"));
@@ -406,12 +420,24 @@ English source lines (name and structure reference):\n\
 
     #[test]
     fn learning_modes_have_distinct_controlled_vocabulary_policies() {
-        let natural =
-            primary_system_prompt_with_learning_policy(3, 1, DirectHskLearningMode::Natural);
-        let strict =
-            primary_system_prompt_with_learning_policy(3, 1, DirectHskLearningMode::Strict);
-        let natural_repair =
-            repair_system_prompt_with_learning_policy(3, DirectHskLearningMode::Natural);
+        let natural = primary_system_prompt_for_source(
+            3,
+            1,
+            DirectHskLearningMode::Natural,
+            DirectSourceProvenance::Ocr,
+        );
+        let strict = primary_system_prompt_for_source(
+            3,
+            1,
+            DirectHskLearningMode::Strict,
+            DirectSourceProvenance::Ocr,
+        );
+        let natural_repair = repair_system_prompt_for_source(
+            3,
+            1,
+            DirectHskLearningMode::Natural,
+            DirectSourceProvenance::Ocr,
+        );
 
         assert!(natural.contains("simplify-preserve-teach"));
         assert!(natural.contains("90% level-appropriate lexical occurrences"));

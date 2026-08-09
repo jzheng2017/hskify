@@ -15,7 +15,7 @@ mod trie;
 mod validator;
 
 pub use dataset::HskDataset;
-pub use dictionary::{LocalDictionary, LookupRegionContext, LookupResult, LookupToken};
+pub use dictionary::{LocalDictionary, LookupItemContext, LookupResult, LookupToken};
 pub use error::{HskControlError, Result};
 pub use import::{
     Delimiter, generate_dictionary_artifact, generate_hsk_artifact, parse_import_metadata,
@@ -45,7 +45,7 @@ pub const SEGMENTATION_REVISION: &str = "jieba-hsk-headword-guard-level-surface-
 
 /// Dictionary lookup policy revision included in cache identities.
 pub const LOOKUP_REVISION: &str =
-    "longest-match-simplified-learner-reading-region-context-composed-name-pinyin-v4";
+    "longest-match-simplified-learner-reading-item-context-composed-name-pinyin-v1";
 
 /// Exact `jieba-rs` release whose segmentation behavior is cache-relevant.
 pub const JIEBA_CRATE_VERSION: &str = "0.10.1";

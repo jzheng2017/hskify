@@ -142,7 +142,7 @@ pub fn run_native_host<R: Read, W: Write>(
 pub fn sibling_daemon_executable(native_host: &Path) -> PathBuf {
     let mut daemon = native_host.to_path_buf();
     daemon.set_file_name(format!(
-        "hsk-manga-browser-daemon{}",
+        "hskify-browser-daemon{}",
         std::env::consts::EXE_SUFFIX
     ));
     daemon
@@ -301,7 +301,7 @@ mod tests {
     use serde_json::json;
 
     fn manifest(directory: &Path, executable: &Path) -> PathBuf {
-        let path = directory.join("local.hskify.hsk_manga.json");
+        let path = directory.join("local.hskify.browser.json");
         std::fs::write(
             &path,
             serde_json::to_vec(&json!({
@@ -366,7 +366,7 @@ mod tests {
             &mut frame,
             &json!({
                 "type": "start-or-discover-daemon",
-                "buildFingerprint": "hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-07-28-r7",
+                "buildFingerprint": "hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-08-09-r8",
                 "extensionVersion": "0.1.0",
                 "extensionOrigin": "moz-extension://00000000-0000-4000-8000-000000000001"
             }),

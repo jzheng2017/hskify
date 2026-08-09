@@ -75,7 +75,7 @@ fn exercise_lifecycle(mode: LaunchMode) {
     }
     let directory = tempfile::tempdir().expect("temporary state directory");
     let paths = prepare_state_paths(directory.path()).expect("state paths");
-    let executable = PathBuf::from(env!("CARGO_BIN_EXE_hsk-manga-browser-daemon"));
+    let executable = PathBuf::from(env!("CARGO_BIN_EXE_hskify-browser-daemon"));
     let first = mode
         .spawn(
             &executable,

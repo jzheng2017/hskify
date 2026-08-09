@@ -94,7 +94,7 @@ export function isRectVisible(rect: DOMRect, view: Window = window): boolean {
 }
 
 export function evaluateImage(image: HTMLImageElement, domIndex: number): DiscoveryDecision {
-  if (image.closest('[data-hmt-owned="true"]') || image.hasAttribute('data-hmt-original')) {
+  if (image.closest('[data-hskify-owned="true"]') || image.hasAttribute('data-hskify-original')) {
     return { supported: false, reason: 'owned-by-extension' }
   }
   const sourceUrl = image.currentSrc || image.src
@@ -323,7 +323,7 @@ export class ImageDiscovery {
       const previous = this.candidates.get(image)
       if (
         previous &&
-        (image.closest('[data-hmt-owned="true"]') || image.hasAttribute('data-hmt-original'))
+        (image.closest('[data-hskify-owned="true"]') || image.hasAttribute('data-hskify-original'))
       ) {
         const sourceUrl = image.currentSrc || image.src
         if (sourceUrl && sourceUrl !== previous.sourceUrl) {

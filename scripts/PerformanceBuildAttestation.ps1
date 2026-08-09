@@ -1,7 +1,7 @@
 Set-StrictMode -Version Latest
 
 $script:HskifyPerformanceAttestationSchema = 'hskify.performance-build-attestation.v1'
-$script:HskifyPerformanceBuildFingerprint = 'hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-07-28-r7'
+$script:HskifyPerformanceBuildFingerprint = 'hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-08-09-r8'
 $script:HskifyPerformanceTarget = 'x86_64-pc-windows-msvc'
 $script:HskifyPerformanceGpuName = 'NVIDIA GeForce RTX 4080 SUPER'
 $script:HskifyPerformanceGpuMemoryMiB = 16376
@@ -349,13 +349,13 @@ function New-HskifyPerformanceBuildAttestation {
         binaries = @(
             [ordered]@{
                 role = 'native-host'
-                fileName = 'hsk-manga-native-host.exe'
+                fileName = 'hskify-native-host.exe'
                 bytes = $nativeHost.bytes
                 sha256 = $nativeHost.sha256
             },
             [ordered]@{
                 role = 'browser-daemon'
-                fileName = 'hsk-manga-browser-daemon.exe'
+                fileName = 'hskify-browser-daemon.exe'
                 bytes = $browserDaemon.bytes
                 sha256 = $browserDaemon.sha256
             }
@@ -533,12 +533,12 @@ function Assert-HskifyPerformanceBuildAttestation {
     $expectedBinaries = @(
         [ordered]@{
             role = 'native-host'
-            fileName = 'hsk-manga-native-host.exe'
+            fileName = 'hskify-native-host.exe'
             path = $NativeHostPath
         },
         [ordered]@{
             role = 'browser-daemon'
-            fileName = 'hsk-manga-browser-daemon.exe'
+            fileName = 'hskify-browser-daemon.exe'
             path = $BrowserDaemonPath
         }
     )

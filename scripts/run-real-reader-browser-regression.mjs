@@ -158,7 +158,7 @@ export function annotationCoverage(chapter, manifestPath, route) {
   const observedByPage = new Map(
     (route?.jobs ?? []).map((job) => [
       job.pageIndex + 1,
-      job.updates.filter((update) => update.type === 'regionReady').map((update) => update.region),
+      job.updates.filter((update) => update.type === 'imageRegionReady').map((update) => update.region),
     ]),
   )
   const observed = (page) => observedByPage.get(page) ?? []
@@ -191,12 +191,12 @@ export function annotationCoverage(chapter, manifestPath, route) {
       }))
       .sort((left, right) => right.overlap - left.overlap)[0]
     if (!candidate || candidate.overlap < 0.5) continue
-    const expectedText = normalizedEnglish(region.sourceEnglish)
-    const actualText = normalizedEnglish(candidate.observedRegion.sourceEnglish)
+    const expectedText = normalizedEnglish(region.sourceText)
+    const actualText = normalizedEnglish(candidate.observedRegion.text?.sourceText)
     if (expectedText.length > 0)
       errors.push({
         page,
-        id: region.id,
+        itemId: region.itemId,
         cer: levenshtein(expectedText, actualText) / expectedText.length,
       })
   }
@@ -208,9 +208,9 @@ export function annotationCoverage(chapter, manifestPath, route) {
   return {
     expectedTargetCount: targets.length,
     matchedTargetCount: targets.length - missingTargets.length,
-    missingTargets: missingTargets.map(({ page, region }) => ({ page, id: region.id })),
+    missingTargets: missingTargets.map(({ page, region }) => ({ page, itemId: region.itemId })),
     exclusionCount: exclusions.length,
-    modifiedExclusions: modifiedExclusions.map(({ page, region }) => ({ page, id: region.id })),
+    modifiedExclusions: modifiedExclusions.map(({ page, region }) => ({ page, itemId: region.itemId })),
     ocrCer:
       errors.length > 0 ? errors.reduce((sum, error) => sum + error.cer, 0) / errors.length : 1,
     p95RegionCer: p95Index >= 0 ? sortedErrors[p95Index].cer : 1,
@@ -223,7 +223,7 @@ export function semanticConsistency(chapter, manifestPath, route) {
   const observedByPage = new Map(
     (route?.jobs ?? []).map((job) => [
       job.pageIndex + 1,
-      job.updates.filter((update) => update.type === 'regionReady').map((update) => update.region),
+      job.updates.filter((update) => update.type === 'imageRegionReady').map((update) => update.region),
     ]),
   )
   const findObserved = (page, polygon) =>
@@ -243,7 +243,7 @@ export function semanticConsistency(chapter, manifestPath, route) {
       const actual = observed.region
       if (expected.continuationGroup) {
         const values = expectedContinuationGroups.get(expected.continuationGroup) ?? []
-        values.push({ id: expected.id, actual: actual.contextGroup })
+        values.push({ itemId: expected.itemId, actual: actual.contextGroup })
         expectedContinuationGroups.set(expected.continuationGroup, values)
       }
     }
@@ -262,51 +262,52 @@ export function publicationConsistency(dom, route) {
   const publishedRegions = (route?.jobs ?? []).flatMap((job) =>
     job.updates
       .filter((update) =>
-        ['regionReady', 'artworkPreserved', 'unreadable'].includes(update.type),
+        ['imageRegionReady', 'imageRegionPreserved'].includes(update.type),
       )
       .map((update) => ({ type: update.type, region: update.region })),
   )
   const published = new Map(
-    publishedRegions.map((entry) => [entry.region.id, entry]),
+    publishedRegions.map((entry) => [entry.region.itemId, entry]),
   )
-  const rendered = new Map((dom?.regions ?? []).map((region) => [region.regionId, region]))
+  const rendered = new Map((dom?.regions ?? []).map((region) => [region.itemId, region]))
   const missing = []
   const mismatched = []
-  for (const [id, entry] of published) {
+  for (const [itemId, entry] of published) {
     const region = entry.region
-    const actual = rendered.get(id)
-    if (entry.type === 'artworkPreserved') {
-      // Preserved furniture/artwork is a daemon evidence event, not a DOM
-      // product. Rendering a transparent or visible node would still modify
-      // the reader's interaction surface and must fail this gate.
-      if (actual) mismatched.push(id)
+    const actual = rendered.get(itemId)
+    if (entry.type === 'imageRegionPreserved') {
+      if (!actual) {
+        missing.push(itemId)
+      } else if (
+        !actual.sourcePreserving ||
+        actual.text !== region.sourceText ||
+        (actual.pinyin ?? '') !== ''
+      ) {
+        mismatched.push(itemId)
+      }
       continue
     }
     if (!actual) {
-      missing.push(id)
+      missing.push(itemId)
       continue
     }
-    if (entry.type === 'regionReady') {
+    if (entry.type === 'imageRegionReady') {
       if (
         actual.sourcePreserving ||
-        actual.text !== region.displayedChinese ||
-        actual.pinyin !== region.pinyin
+        actual.text !== region.text.displayedChinese ||
+        actual.pinyin !== region.text.pinyin
       )
-        mismatched.push(id)
-    } else {
-      const expectedText = region.translatedChinese || region.sourceEnglish
-      if (!actual.sourcePreserving || actual.text !== expectedText || (region.pinyin ?? '') !== actual.pinyin)
-        mismatched.push(id)
+        mismatched.push(itemId)
     }
   }
-  const duplicatePublishedIds = publishedRegions
-    .map((entry) => entry.region.id)
+  const duplicatePublishedItemIds = publishedRegions
+    .map((entry) => entry.region.itemId)
     .filter((id, index, ids) => ids.indexOf(id) !== index)
   const untranslatedEnglish = publishedRegions
-    .filter((entry) => entry.type === 'regionReady')
+    .filter((entry) => entry.type === 'imageRegionReady')
     .map((entry) => entry.region)
     .filter((region) => {
-      const displayed = String(region.displayedChinese ?? '')
+      const displayed = String(region.text?.displayedChinese ?? '')
       const chars = [...displayed]
       let start = -1
       for (let index = 0; index <= chars.length; index += 1) {
@@ -318,9 +319,9 @@ export function publicationConsistency(dom, route) {
       }
       return false
     })
-    .map((region) => region.id)
+    .map((region) => region.itemId)
   const weakEvidence = publishedRegions
-    .filter((entry) => entry.type === 'regionReady')
+    .filter((entry) => entry.type === 'imageRegionReady')
     .map((entry) => entry.region)
     .filter((region) => {
       const evidence = region.confidenceEvidence
@@ -331,15 +332,15 @@ export function publicationConsistency(dom, route) {
         evidence.cleanupScore < 0.5
       )
     })
-    .map((region) => region.id)
+    .map((region) => region.itemId)
   return {
     publishedCount: [...published.values()].filter(
-      (entry) => entry.type !== 'artworkPreserved',
+      (entry) => entry.type === 'imageRegionReady',
     ).length,
     renderedCount: rendered.size,
     missing,
     mismatched,
-    duplicatePublishedIds: [...new Set(duplicatePublishedIds)],
+    duplicatePublishedItemIds: [...new Set(duplicatePublishedItemIds)],
     untranslatedEnglish,
     weakEvidence,
   }
@@ -525,9 +526,18 @@ export function committedResourceIdentities(
   }))
 }
 
-export async function waitForPackagedSetup(extensionPage, timeoutMs) {
+export async function waitForPackagedSetup(
+  extensionPage,
+  timeoutMs,
+  allowResourceSetup = true,
+) {
   let status = await extensionMessage(extensionPage, { type: 'setup:status' })
   if (status.state === 'ready') return status
+  if (!allowResourceSetup) {
+    throw new Error(
+      `Packaged resources must already be ready for this run (state: ${status.state}).`,
+    )
+  }
   await extensionMessage(extensionPage, { type: 'setup:start' })
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
@@ -599,7 +609,7 @@ export async function runBrowserRegression(options) {
     })
   const expectedResourceIdentities = committedResourceIdentities()
   const manifest = JSON.parse(readFileSync(options.manifestPath, 'utf8'))
-  process.env.HSK_MANGA_STATE_DIR = resolve(config.stateDirectory)
+  process.env.HSKIFY_STATE_DIR = resolve(config.stateDirectory)
   const allCases = selectedCases(manifest, options.selection)
   const selected = options.caseId ? allCases.filter((item) => item.id === options.caseId) : allCases
   if (options.caseId && selected.length !== 1)
@@ -622,6 +632,7 @@ export async function runBrowserRegression(options) {
     const setup = await waitForPackagedSetup(
       launched.extensionPage,
       Math.min(options.timeoutMs, 5 * 60_000),
+      options.requireInstalledResources !== true,
     )
     for (const chapter of chapters) {
       const hskLevels = chapter.pages.some((page) => page.expectations?.hskDifferential === true)
@@ -674,7 +685,7 @@ export async function runBrowserRegression(options) {
             (event) => event.type === 'selectableTextDomCommitted',
           )
           const uniqueTextCommitIds = new Set(
-            textCommitEvents.map((event) => event.regionId).filter(Boolean),
+            textCommitEvents.map((event) => event.itemId).filter(Boolean),
           )
           const duplicateTextCommitCount = Math.max(
             0,
@@ -770,7 +781,7 @@ export async function runBrowserRegression(options) {
                   degradedFitCount: dom.degradedFitCount,
                   overflowRegions: dom.regions
                     .filter((region) => !region.sourcePreserving && region.overflows)
-                    .map((region) => region.regionId),
+                    .map((region) => region.itemId),
                 },
               },
               {
@@ -822,7 +833,7 @@ export async function runBrowserRegression(options) {
                 run.publication.publishedCount === run.publication.renderedCount &&
                 run.publication.missing.length === 0 &&
                 run.publication.mismatched.length === 0 &&
-                run.publication.duplicatePublishedIds.length === 0 &&
+                run.publication.duplicatePublishedItemIds.length === 0 &&
                 run.publication.untranslatedEnglish.length === 0 &&
                 run.publication.weakEvidence.length === 0,
               expected: 'terminal route text/pinyin exactly equals browser DOM with verified evidence and no extras',
@@ -910,15 +921,15 @@ export async function runBrowserRegression(options) {
     const high = chapterRuns.find((run) => run.chapterId === chapterId && run.hskLevel === 5)
     const lowByRegion = new Map(
       (low?.dom?.regions ?? []).map((region) => [
-        `${region.page}\u0000${region.regionId}`,
+        `${region.page}\u0000${region.itemId}`,
         region.text,
       ]),
     )
     const shared = (high?.dom?.regions ?? []).filter((region) =>
-      lowByRegion.has(`${region.page}\u0000${region.regionId}`),
+      lowByRegion.has(`${region.page}\u0000${region.itemId}`),
     )
     const changed = shared.filter(
-      (region) => lowByRegion.get(`${region.page}\u0000${region.regionId}`) !== region.text,
+      (region) => lowByRegion.get(`${region.page}\u0000${region.itemId}`) !== region.text,
     )
     const differentialAssertion = {
       id: `differential.${chapterId}.hsk-2-vs-5`,

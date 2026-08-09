@@ -17,10 +17,10 @@ use crate::contracts::{
     validate_resource_identities,
 };
 const MODEL_MANIFEST: &str = include_str!("../../../data/model-packs/manifest.v1.json");
-const RESOURCES_DIRECTORY_ENV: &str = "HSK_MANGA_RESOURCES_DIR";
-const HSK_RESOURCE_ENV: &str = "HSK_MANGA_HSK_PATH";
-const DICTIONARY_RESOURCE_ENV: &str = "HSK_MANGA_DICTIONARY_PATH";
-const QWEN_RESOURCE_ENV: &str = "HSK_MANGA_QWEN_MODEL_PATH";
+const RESOURCES_DIRECTORY_ENV: &str = "HSKIFY_RESOURCES_DIR";
+const HSK_RESOURCE_ENV: &str = "HSKIFY_HSK_PATH";
+const DICTIONARY_RESOURCE_ENV: &str = "HSKIFY_DICTIONARY_PATH";
+const QWEN_RESOURCE_ENV: &str = "HSKIFY_QWEN_MODEL_PATH";
 const HSK_RESOURCE_FILE: &str = "hsk-2.0.normalized.json";
 const DICTIONARY_RESOURCE_FILE: &str = "cc-cedict.normalized.json";
 const EXPECTED_MODEL_FILE: &str = "Qwen3.5-4B-Q4_K_M.gguf";
@@ -66,7 +66,7 @@ impl ManagedResourcePaths {
         let root = nonempty_env_path(RESOURCES_DIRECTORY_ENV)
             .or_else(default_resource_root)
             .context(
-                "cannot determine the per-user resource directory; set HSK_MANGA_RESOURCES_DIR",
+                "cannot determine the per-user resource directory; set HSKIFY_RESOURCES_DIR",
             )?;
         Ok(Self {
             root: root.clone(),
@@ -347,8 +347,8 @@ impl ModelSetup {
 
     pub(crate) fn font_path(&self, font_id: &str) -> Option<PathBuf> {
         let filename = match font_id {
-            "hmt-sans" | "hmt-display" => SANS_FONT_FILE,
-            "hmt-serif" | "hmt-handwritten" | "hmt-brush" => SERIF_FONT_FILE,
+            "hskify-sans" | "hskify-display" => SANS_FONT_FILE,
+            "hskify-serif" | "hskify-handwritten" | "hskify-brush" => SERIF_FONT_FILE,
             _ => return None,
         };
         Some(self.resources.fonts.join(filename))
@@ -1044,11 +1044,11 @@ mod tests {
         let setup = ModelSetup::new(resources.clone(), cache_root).unwrap();
 
         assert_eq!(
-            setup.font_path("hmt-sans"),
+            setup.font_path("hskify-sans"),
             Some(resources.fonts.join(SANS_FONT_FILE))
         );
         assert_eq!(
-            setup.font_path("hmt-serif"),
+            setup.font_path("hskify-serif"),
             Some(resources.fonts.join(SERIF_FONT_FILE))
         );
         assert!(setup.font_path("fixture-sans").is_none());

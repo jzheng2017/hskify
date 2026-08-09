@@ -9,11 +9,12 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Result, bail};
+#[cfg(test)]
+use koharu_llm::direct_hsk_protocol::repair_user_prompt_with_constraints;
 use koharu_llm::direct_hsk_protocol::{
     DirectHskContext, DirectHskLearningMode, DirectHskSource, context_budget_text,
-    primary_system_prompt_with_learning_policy, primary_user_prompt,
-    repair_batch_system_prompt_with_learning_policy, repair_item_constraints,
-    repair_system_prompt_with_learning_policy, repair_user_prompt_with_constraints,
+    primary_system_prompt_for_source, primary_user_prompt, repair_item_constraints,
+    repair_system_prompt_for_source,
 };
 use koharu_llm::{GenerateOptions, Language, ModelId};
 use serde::{Deserialize, Serialize};
@@ -23,7 +24,7 @@ use super::{Model, State};
 pub use koharu_llm::direct_hsk_protocol::{
     DIRECT_HSK_PROMPT_HASH as HSK_TRANSLATION_PROMPT_HASH,
     DIRECT_HSK_PROMPT_REVISION as HSK_TRANSLATION_PROMPT_REVISION,
-    DIRECT_HSK_VALIDATOR_HASH as HSK_TRANSLATION_VALIDATOR_HASH,
+    DIRECT_HSK_VALIDATOR_HASH as HSK_TRANSLATION_VALIDATOR_HASH, DirectSourceProvenance,
 };
 
 pub const HSK_TRANSLATION_MODEL: ModelId = ModelId::Qwen3_5_4b;
@@ -57,11 +58,23 @@ pub const fn direct_hsk_validator_hash() -> &'static str {
 const MIN_OUTPUT_TOKENS: usize = 24;
 const MAX_OUTPUT_TOKENS: usize = 256;
 const OUTPUT_TOKENS_PER_UTTERANCE: usize = 8;
-const FAITHFUL_TRANSLATION_SYSTEM_PROMPT: &str = r#"Translate each numbered, OCR-verified English comic region into complete, natural Simplified Chinese. Each output line translates only the same numbered source region. The role-position index is input metadata only: render sound-effect positions as concise natural Chinese sounds rather than dialogue or action commands; preserve the meaning and tone of dialogue, thought, and caption regions. Never output role names, labels such as 音效/对话/旁白, role-position indexes, or explanations.
+fn faithful_translation_system_prompt(provenance: DirectSourceProvenance) -> String {
+    let provenance_instruction = match provenance {
+        DirectSourceProvenance::Dom => {
+            "The English comes directly from the document DOM and is authoritative. Do not correct, normalize, or reinterpret it before translation."
+        }
+        DirectSourceProvenance::Ocr => {
+            "The English comes from OCR. Correct only an obvious recognition error when grammar and neighboring context make the intended source certain; otherwise preserve the ambiguity."
+        }
+    };
+    format!(
+        r#"Translate each numbered English source span into complete, natural Simplified Chinese. Each output line translates only the same numbered span. Render sound-effect spans as concise natural Chinese sounds; preserve the meaning and tone of prose, headings, dialogue, thoughts, captions, and sound effects. Never output kind names, labels, positions, or explanations. {provenance_instruction}
 
-Use preceding and following context only to resolve references and connected dialogue. Never import context into a region, merge regions, omit meaning, or move meaning to a neighboring line. Preserve every clause, interjection, hesitation, repetition, fragment, vocative, participant, proper name, negation, quantity, question, and tone. Render names naturally in Chinese. Do not leave Latin words in the Chinese translation and do not replace words with punctuation.
+Use preceding and neighboring context only to resolve references and connected text. Never import context into a span, merge spans, omit meaning, or move meaning to a neighboring line. Preserve every clause, interjection, hesitation, repetition, fragment, vocative, participant, proper name, negation, quantity, question, and tone. Render names naturally in Chinese. Do not leave Latin words in the Chinese translation and do not replace words with punctuation.
 
-Return exactly the requested numbered tab-separated translations, one per line, with no prose, labels, JSON, or Markdown."#;
+Return exactly the requested numbered tab-separated translations, one per line, with no prose, labels, JSON, or Markdown."#
+    )
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -72,10 +85,14 @@ pub struct HskTranslationBatchRequest {
     pub utterances: Vec<HskSourceUtterance>,
     #[serde(default)]
     pub preceding_utterances: Vec<HskPrecedingUtterance>,
-    /// Source-language regions immediately after this microbatch in
+    /// Untranslated source spans immediately before this batch in canonical
+    /// order. They are context only and remain distinct from following text.
+    #[serde(default)]
+    pub preceding_english: Vec<String>,
+    /// Source-language spans immediately after this microbatch in
     /// canonical reading order. They are context only: the model must never
     /// emit translations for them. Keeping them in the request prevents a
-    /// batch boundary from severing a sentence or connected-bubble sequence.
+    /// batch boundary from severing a sentence or connected-span sequence.
     #[serde(default)]
     pub following_english: Vec<String>,
 }
@@ -103,23 +120,30 @@ pub struct HskSourceUtterance {
     pub id: String,
     pub kind: HskUtteranceKind,
     pub source_english: String,
-    /// Complete unconstrained Chinese meaning established from the page
-    /// pixels before HSK simplification.
+    /// Complete unconstrained Chinese meaning established from the
+    /// authoritative source span before HSK simplification.
     pub faithful_chinese: String,
-    /// Maximum Chinese characters the renderer can place in this region
-    /// without shrinking below its source-relative readable size.
-    pub max_characters: u16,
-    /// Maximum readable lines in the measured inset bubble polygon.
-    pub max_lines: u8,
+    /// Image-only placement limits. DOM spans have no layout constraint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<HskLayoutConstraints>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum HskUtteranceKind {
+    Prose,
+    Heading,
     Dialogue,
     Caption,
     Thought,
     Sfx,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HskLayoutConstraints {
+    pub max_characters: u16,
+    pub max_lines: u8,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -129,16 +153,16 @@ pub struct HskPrecedingUtterance {
     pub chinese: String,
 }
 
-/// Text-only semantic translation input used after the visual model has
-/// established which OCR regions belong to the story. Keeping this contract
-/// separate from visual role classification lets one language generation
-/// overlap the next page's independent vision work.
+/// Text-only semantic translation input used after the chapter adapter has
+/// registered its ordered source spans. It is shared by DOM and OCR sources.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FaithfulTranslationBatchRequest {
     pub utterances: Vec<FaithfulSourceUtterance>,
     #[serde(default)]
     pub preceding_utterances: Vec<HskPrecedingUtterance>,
+    #[serde(default)]
+    pub preceding_english: Vec<String>,
     #[serde(default)]
     pub following_english: Vec<String>,
 }
@@ -246,6 +270,7 @@ impl HskTranslationIssue {
 /// A repair request contains exactly one candidate rejected by parsing,
 /// preservation checks, or the caller's deterministic HSK vocabulary
 /// validator. The caller owns the small bounded retry policy.
+#[cfg(test)]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct HskTranslationRepairRequest {
@@ -255,7 +280,9 @@ pub struct HskTranslationRepairRequest {
     pub utterance: HskRepairUtterance,
     #[serde(default)]
     pub preceding_utterances: Vec<HskPrecedingUtterance>,
-    /// Source-language regions immediately after this repair in canonical
+    #[serde(default)]
+    pub preceding_english: Vec<String>,
+    /// Source-language spans immediately after this repair in canonical
     /// reading order. They are reference only and must never be emitted.
     #[serde(default)]
     pub following_english: Vec<String>,
@@ -270,7 +297,9 @@ pub struct HskTranslationRepairBatchRequest {
     pub utterances: Vec<HskRepairUtterance>,
     #[serde(default)]
     pub preceding_utterances: Vec<HskPrecedingUtterance>,
-    /// Source-language regions immediately after this repair batch in
+    #[serde(default)]
+    pub preceding_english: Vec<String>,
+    /// Source-language spans immediately after this repair batch in
     /// canonical reading order. They are reference only and must never be
     /// emitted.
     #[serde(default)]
@@ -284,8 +313,9 @@ pub struct HskRepairUtterance {
     pub kind: HskUtteranceKind,
     pub source_english: String,
     pub faithful_chinese: String,
-    pub max_characters: u16,
-    pub max_lines: u8,
+    /// Image-only placement limits. DOM spans have no layout constraint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<HskLayoutConstraints>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rejected_chinese: Option<String>,
     #[serde(default)]
@@ -364,59 +394,49 @@ impl DirectHskTranslator<'_> {
             .map(|_| ())
     }
 
-    /// Translate directly from English to natural HSK-targeted Simplified
-    /// Chinese in one greedy generation. Invalid model lines are returned
-    /// beside successful items; the full batch is never retried.
-    pub async fn translate_batch(
+    /// Translate ordered source spans with explicit source provenance.
+    pub async fn translate_batch_for_source(
         &self,
         request: &HskTranslationBatchRequest,
+        provenance: DirectSourceProvenance,
         cancel: &AtomicBool,
     ) -> Result<HskTranslationBatchResult> {
-        translate_with(self.model, request, cancel).await
+        translate_with_source(self.model, request, provenance, cancel).await
     }
 
     /// Translate a batch while publishing each complete numbered line as soon
     /// as it is decoded. Application-owned IDs are restored before the
     /// callback runs.
-    pub async fn translate_batch_streaming(
+    pub async fn translate_batch_streaming_for_source(
         &self,
         request: &HskTranslationBatchRequest,
+        provenance: DirectSourceProvenance,
         cancel: &AtomicBool,
         on_item: &mut dyn FnMut(&HskTranslationOutcome) -> Result<()>,
     ) -> Result<HskTranslationBatchResult> {
-        translate_with_streaming(self.model, request, cancel, on_item).await
+        translate_with_streaming_source(self.model, request, provenance, cancel, on_item).await
     }
 
-    /// Establish the complete, unconstrained Chinese meaning of OCR-verified
-    /// story regions. This text-only stage deliberately owns translation;
-    /// the multimodal page model owns only visual role and continuation
-    /// decisions.
-    pub async fn translate_faithful_batch(
+    /// Establish complete, unconstrained Chinese for ordered source spans.
+    pub async fn translate_faithful_batch_for_source(
         &self,
         request: &FaithfulTranslationBatchRequest,
+        provenance: DirectSourceProvenance,
         cancel: &AtomicBool,
     ) -> Result<HskTranslationBatchResult> {
-        translate_faithfully_with(self.model, request, cancel).await
+        translate_faithfully_with_source(self.model, request, provenance, cancel).await
     }
 
-    /// Perform the one terminal validation repair for a rejected bubble.
-    pub async fn repair_invalid_item(
-        &self,
-        request: &HskTranslationRepairRequest,
-        cancel: &AtomicBool,
-    ) -> Result<HskTranslationOutcome> {
-        repair_with(self.model, request, cancel).await
-    }
-
-    /// Repair several rejected bubbles in one numbered generation. Parsing
+    /// Repair several rejected source spans in one numbered generation. Parsing
     /// and validation remain item-scoped so a malformed sibling cannot hide
     /// or invalidate a usable repair.
-    pub async fn repair_invalid_batch(
+    pub async fn repair_invalid_batch_for_source(
         &self,
         request: &HskTranslationRepairBatchRequest,
+        provenance: DirectSourceProvenance,
         cancel: &AtomicBool,
     ) -> Result<HskTranslationBatchResult> {
-        repair_batch_with(self.model, request, cancel).await
+        repair_batch_with_source(self.model, request, provenance, cancel).await
     }
 }
 
@@ -520,9 +540,10 @@ impl Model {
     }
 }
 
-async fn translate_faithfully_with<G>(
+async fn translate_faithfully_with_source<G>(
     generator: &G,
     request: &FaithfulTranslationBatchRequest,
+    provenance: DirectSourceProvenance,
     cancel: &AtomicBool,
 ) -> Result<HskTranslationBatchResult>
 where
@@ -540,7 +561,8 @@ where
     while !remaining.is_empty() {
         check_cancelled(cancel)?;
         let (bounded_request, options) =
-            plan_faithful_subbatch(generator, request, remaining, &rolling_context).await?;
+            plan_faithful_subbatch(generator, request, remaining, &rolling_context, provenance)
+                .await?;
         let consumed = bounded_request.utterances.len();
         let expected = bounded_request
             .utterances
@@ -552,7 +574,7 @@ where
             .collect::<Vec<_>>();
         let raw = generator
             .generate_streaming(
-                FAITHFUL_TRANSLATION_SYSTEM_PROMPT,
+                &faithful_translation_system_prompt(provenance),
                 &build_faithful_translation_prompt(&bounded_request),
                 &options,
                 Language::ChineseSimplified,
@@ -592,6 +614,7 @@ async fn plan_faithful_subbatch<G>(
     request: &FaithfulTranslationBatchRequest,
     remaining: &[FaithfulSourceUtterance],
     rolling_context: &[HskPrecedingUtterance],
+    provenance: DirectSourceProvenance,
 ) -> Result<(FaithfulTranslationBatchRequest, GenerateOptions)>
 where
     G: Generator + ?Sized,
@@ -600,7 +623,12 @@ where
         let mut candidate = request.clone();
         candidate.utterances = remaining[..count].to_vec();
         candidate.preceding_utterances = bounded_context(generator, rolling_context).await?;
-        candidate.following_english = bounded_following_context(&request.following_english);
+        (candidate.preceding_english, candidate.following_english) = bounded_source_context(
+            generator,
+            &request.preceding_english,
+            &request.following_english,
+        )
+        .await?;
         loop {
             let prompt = build_faithful_translation_prompt(&candidate);
             let desired_output_tokens = output_token_budget(
@@ -612,7 +640,7 @@ where
             );
             let completion_capacity = generator
                 .constrained_completion_capacity(
-                    FAITHFUL_TRANSLATION_SYSTEM_PROMPT,
+                    &faithful_translation_system_prompt(provenance),
                     &prompt,
                     Language::ChineseSimplified,
                 )
@@ -624,8 +652,10 @@ where
                 candidate.preceding_utterances.remove(0);
                 continue;
             }
-            if !candidate.following_english.is_empty() {
-                candidate.following_english.pop();
+            if evict_farthest_source_context(
+                &mut candidate.preceding_english,
+                &mut candidate.following_english,
+            ) {
                 continue;
             }
             if count == 1 && completion_capacity >= MIN_OUTPUT_TOKENS {
@@ -637,23 +667,25 @@ where
             break;
         }
     }
-    bail!("one OCR utterance cannot fit the resident faithful-translation context")
+    bail!("one source span cannot fit the resident faithful-translation context")
 }
 
-async fn translate_with<G>(
+async fn translate_with_source<G>(
     generator: &G,
     request: &HskTranslationBatchRequest,
+    provenance: DirectSourceProvenance,
     cancel: &AtomicBool,
 ) -> Result<HskTranslationBatchResult>
 where
     G: Generator + ?Sized,
 {
-    translate_with_streaming(generator, request, cancel, &mut |_| Ok(())).await
+    translate_with_streaming_source(generator, request, provenance, cancel, &mut |_| Ok(())).await
 }
 
-async fn translate_with_streaming<G>(
+async fn translate_with_streaming_source<G>(
     generator: &G,
     request: &HskTranslationBatchRequest,
+    provenance: DirectSourceProvenance,
     cancel: &AtomicBool,
     on_item: &mut dyn FnMut(&HskTranslationOutcome) -> Result<()>,
 ) -> Result<HskTranslationBatchResult>
@@ -672,12 +704,14 @@ where
     while !remaining.is_empty() {
         check_cancelled(cancel)?;
         let (bounded_request, options) =
-            plan_translation_subbatch(generator, request, remaining, &rolling_context).await?;
+            plan_translation_subbatch(generator, request, remaining, &rolling_context, provenance)
+                .await?;
         let consumed = bounded_request.utterances.len();
         let result = translate_prepared_request_streaming(
             generator,
             &bounded_request,
             options,
+            provenance,
             cancel,
             on_item,
         )
@@ -712,6 +746,7 @@ async fn plan_translation_subbatch<G>(
     request: &HskTranslationBatchRequest,
     remaining: &[HskSourceUtterance],
     rolling_context: &[HskPrecedingUtterance],
+    provenance: DirectSourceProvenance,
 ) -> Result<(HskTranslationBatchRequest, GenerateOptions)>
 where
     G: Generator + ?Sized,
@@ -720,12 +755,19 @@ where
         let mut candidate = request.clone();
         candidate.utterances = remaining[..count].to_vec();
         candidate.preceding_utterances = bounded_context(generator, rolling_context).await?;
+        (candidate.preceding_english, candidate.following_english) = bounded_source_context(
+            generator,
+            &request.preceding_english,
+            &request.following_english,
+        )
+        .await?;
         loop {
             let prompt = build_translation_prompt(&candidate);
-            let system_prompt = translation_system_prompt(
+            let system_prompt = translation_system_prompt_for_source(
                 candidate.requested_level,
                 candidate.utterances.len(),
                 candidate.learning_mode,
+                provenance,
             );
             let desired_output_tokens = output_token_budget(
                 candidate
@@ -748,8 +790,10 @@ where
                 candidate.preceding_utterances.remove(0);
                 continue;
             }
-            if !candidate.following_english.is_empty() {
-                candidate.following_english.pop();
+            if evict_farthest_source_context(
+                &mut candidate.preceding_english,
+                &mut candidate.following_english,
+            ) {
                 continue;
             }
             if count == 1 && completion_capacity >= MIN_OUTPUT_TOKENS {
@@ -762,7 +806,7 @@ where
         }
     }
     bail!(
-        "one OCR utterance cannot fit the resident translation context even after removing preceding context"
+        "one source span cannot fit the resident translation context even after removing preceding context"
     )
 }
 
@@ -770,6 +814,7 @@ async fn translate_prepared_request_streaming<G>(
     generator: &G,
     bounded_request: &HskTranslationBatchRequest,
     options: GenerateOptions,
+    provenance: DirectSourceProvenance,
     cancel: &AtomicBool,
     on_item: &mut dyn FnMut(&HskTranslationOutcome) -> Result<()>,
 ) -> Result<HskTranslationBatchResult>
@@ -804,10 +849,11 @@ where
     };
     let raw = generator
         .generate_streaming(
-            &translation_system_prompt(
+            &translation_system_prompt_for_source(
                 bounded_request.requested_level,
                 bounded_request.utterances.len(),
                 bounded_request.learning_mode,
+                provenance,
             ),
             &prompt,
             &options,
@@ -827,9 +873,11 @@ where
     Ok(result)
 }
 
-async fn repair_with<G>(
+#[cfg(test)]
+async fn repair_with_source<G>(
     generator: &G,
     request: &HskTranslationRepairRequest,
+    provenance: DirectSourceProvenance,
     cancel: &AtomicBool,
 ) -> Result<HskTranslationOutcome>
 where
@@ -841,7 +889,15 @@ where
     let mut bounded_request = request.clone();
     bounded_request.preceding_utterances =
         bounded_context(generator, &request.preceding_utterances).await?;
-    bounded_request.following_english = bounded_following_context(&request.following_english);
+    (
+        bounded_request.preceding_english,
+        bounded_request.following_english,
+    ) = bounded_source_context(
+        generator,
+        &request.preceding_english,
+        &request.following_english,
+    )
+    .await?;
     let prompt = build_repair_prompt(&bounded_request);
     let options = GenerateOptions::greedy(output_token_budget(
         std::iter::once(bounded_request.utterance.source_english.as_str()),
@@ -852,6 +908,7 @@ where
             &repair_system_prompt(
                 bounded_request.requested_level,
                 bounded_request.learning_mode,
+                provenance,
             ),
             &prompt,
             &options,
@@ -871,9 +928,10 @@ where
     ))
 }
 
-async fn repair_batch_with<G>(
+async fn repair_batch_with_source<G>(
     generator: &G,
     request: &HskTranslationRepairBatchRequest,
+    provenance: DirectSourceProvenance,
     cancel: &AtomicBool,
 ) -> Result<HskTranslationBatchResult>
 where
@@ -890,10 +948,10 @@ where
     while !remaining.is_empty() {
         check_cancelled(cancel)?;
         let (bounded_request, options) =
-            plan_repair_subbatch(generator, request, remaining).await?;
+            plan_repair_subbatch(generator, request, remaining, provenance).await?;
         let consumed = bounded_request.utterances.len();
         items.extend(
-            repair_prepared_batch(generator, &bounded_request, options, cancel)
+            repair_prepared_batch(generator, &bounded_request, options, provenance, cancel)
                 .await?
                 .items,
         );
@@ -906,6 +964,7 @@ async fn plan_repair_subbatch<G>(
     generator: &G,
     request: &HskTranslationRepairBatchRequest,
     remaining: &[HskRepairUtterance],
+    provenance: DirectSourceProvenance,
 ) -> Result<(HskTranslationRepairBatchRequest, GenerateOptions)>
 where
     G: Generator + ?Sized,
@@ -916,15 +975,21 @@ where
         // Repairs use the same bounded canonical chapter context as primary
         // generation. The rejected answer remains an explicit avoidable
         // artifact, while preceding accepted dialogue resolves ellipsis,
-        // speaker references, and connected-bubble continuations.
+        // speaker references, and connected-span continuations.
         candidate.preceding_utterances =
             bounded_context(generator, &request.preceding_utterances).await?;
-        candidate.following_english = bounded_following_context(&request.following_english);
+        (candidate.preceding_english, candidate.following_english) = bounded_source_context(
+            generator,
+            &request.preceding_english,
+            &request.following_english,
+        )
+        .await?;
         let prompt = build_repair_batch_prompt(&candidate);
-        let system_prompt = repair_batch_system_prompt_with_learning_policy(
+        let system_prompt = repair_system_prompt_for_source(
             candidate.requested_level,
             candidate.utterances.len(),
             candidate.learning_mode.into(),
+            provenance,
         );
         let desired_output_tokens = output_token_budget(
             candidate
@@ -939,8 +1004,10 @@ where
         if completion_capacity >= desired_output_tokens {
             return Ok((candidate, GenerateOptions::greedy(desired_output_tokens)));
         }
-        if !candidate.following_english.is_empty() {
-            candidate.following_english.pop();
+        if evict_farthest_source_context(
+            &mut candidate.preceding_english,
+            &mut candidate.following_english,
+        ) {
             continue;
         }
         if count == 1 && completion_capacity >= MIN_OUTPUT_TOKENS {
@@ -950,13 +1017,14 @@ where
             ));
         }
     }
-    bail!("one rejected OCR utterance cannot fit the resident translation context")
+    bail!("one rejected source span cannot fit the resident translation context")
 }
 
 async fn repair_prepared_batch<G>(
     generator: &G,
     bounded_request: &HskTranslationRepairBatchRequest,
     options: GenerateOptions,
+    provenance: DirectSourceProvenance,
     cancel: &AtomicBool,
 ) -> Result<HskTranslationBatchResult>
 where
@@ -965,10 +1033,11 @@ where
     let prompt = build_repair_batch_prompt(&bounded_request);
     let raw = generator
         .generate_streaming(
-            &repair_batch_system_prompt_with_learning_policy(
+            &repair_system_prompt_for_source(
                 bounded_request.requested_level,
                 bounded_request.utterances.len(),
                 bounded_request.learning_mode.into(),
+                provenance,
             ),
             &prompt,
             &options,
@@ -1010,6 +1079,69 @@ where
     Ok(bounded)
 }
 
+async fn bounded_source_context<G>(
+    generator: &G,
+    preceding: &[String],
+    following: &[String],
+) -> Result<(Vec<String>, Vec<String>)>
+where
+    G: Generator + ?Sized,
+{
+    let preceding_start = preceding.len().saturating_sub(MAX_HSK_PRECEDING_UTTERANCES);
+    let mut preceding = preceding[preceding_start..]
+        .iter()
+        .filter(|source| !source.trim().is_empty())
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut following = following
+        .iter()
+        .filter(|source| !source.trim().is_empty())
+        .take(MAX_HSK_PRECEDING_UTTERANCES)
+        .cloned()
+        .collect::<Vec<_>>();
+    while preceding.len().saturating_add(following.len()) > MAX_HSK_PRECEDING_UTTERANCES
+        || generator
+            .token_count(&render_source_context_for_budget(&preceding, &following))
+            .await?
+            > MAX_HSK_CONTEXT_TOKENS
+    {
+        if !evict_farthest_source_context(&mut preceding, &mut following) {
+            break;
+        }
+    }
+    Ok((preceding, following))
+}
+
+fn evict_farthest_source_context(preceding: &mut Vec<String>, following: &mut Vec<String>) -> bool {
+    if !following.is_empty() && (following.len() >= preceding.len() || preceding.is_empty()) {
+        following.pop();
+        true
+    } else if !preceding.is_empty() {
+        preceding.remove(0);
+        true
+    } else if !following.is_empty() {
+        following.pop();
+        true
+    } else {
+        false
+    }
+}
+
+fn render_source_context_for_budget(preceding: &[String], following: &[String]) -> String {
+    let mut text = String::new();
+    for source in preceding {
+        text.push_str("P\t");
+        text.push_str(source);
+        text.push('\n');
+    }
+    for source in following {
+        text.push_str("F\t");
+        text.push_str(source);
+        text.push('\n');
+    }
+    text
+}
+
 fn render_context_for_budget(context: &[HskPrecedingUtterance]) -> String {
     let context = context
         .iter()
@@ -1021,19 +1153,32 @@ fn render_context_for_budget(context: &[HskPrecedingUtterance]) -> String {
     context_budget_text(&context)
 }
 
-fn translation_system_prompt(level: u8, count: usize, learning_mode: HskLearningMode) -> String {
-    primary_system_prompt_with_learning_policy(level, count, learning_mode.into())
+fn translation_system_prompt_for_source(
+    level: u8,
+    count: usize,
+    learning_mode: HskLearningMode,
+    provenance: DirectSourceProvenance,
+) -> String {
+    primary_system_prompt_for_source(level, count, learning_mode.into(), provenance)
 }
 
-fn repair_system_prompt(level: u8, learning_mode: HskLearningMode) -> String {
-    repair_system_prompt_with_learning_policy(level, learning_mode.into())
+#[cfg(test)]
+fn repair_system_prompt(
+    level: u8,
+    learning_mode: HskLearningMode,
+    provenance: DirectSourceProvenance,
+) -> String {
+    repair_system_prompt_for_source(level, 1, learning_mode.into(), provenance)
 }
 
 fn build_faithful_translation_prompt(request: &FaithfulTranslationBatchRequest) -> String {
     let mut prompt = String::new();
     append_repair_context(&mut prompt, &request.preceding_utterances);
+    append_preceding_source_context(&mut prompt, &request.preceding_english);
     append_following_context(&mut prompt, &request.following_english);
     for (label, kind) in [
+        ("Prose", HskUtteranceKind::Prose),
+        ("Heading", HskUtteranceKind::Heading),
         ("Dialogue", HskUtteranceKind::Dialogue),
         ("Caption", HskUtteranceKind::Caption),
         ("Thought", HskUtteranceKind::Thought),
@@ -1058,7 +1203,7 @@ fn build_faithful_translation_prompt(request: &FaithfulTranslationBatchRequest) 
         )
         .expect("writing to String cannot fail");
     }
-    prompt.push_str("Story regions to translate:\n");
+    prompt.push_str("Source spans to translate:\n");
     for (index, utterance) in request.utterances.iter().enumerate() {
         use std::fmt::Write as _;
         writeln!(
@@ -1091,9 +1236,35 @@ fn build_translation_prompt(request: &HskTranslationBatchRequest) -> String {
         })
         .collect::<Vec<_>>();
     let mut prompt = primary_user_prompt(&context, &sources);
+    append_preceding_source_context(&mut prompt, &request.preceding_english);
     append_following_context(&mut prompt, &request.following_english);
+    append_kind_positions(
+        &mut prompt,
+        request.utterances.iter().map(|utterance| utterance.kind),
+    );
     append_layout_budgets(&mut prompt, &request.utterances);
     prompt
+}
+
+fn append_kind_positions(prompt: &mut String, kinds: impl IntoIterator<Item = HskUtteranceKind>) {
+    let kinds = kinds.into_iter().collect::<Vec<_>>();
+    prompt.push_str("\nSource span kinds:\n");
+    for (index, kind) in kinds.iter().enumerate() {
+        use std::fmt::Write as _;
+        writeln!(prompt, "line {}: {}", index + 1, hsk_kind_label(*kind))
+            .expect("writing to String cannot fail");
+    }
+}
+
+fn hsk_kind_label(kind: HskUtteranceKind) -> &'static str {
+    match kind {
+        HskUtteranceKind::Prose => "prose",
+        HskUtteranceKind::Heading => "heading",
+        HskUtteranceKind::Dialogue => "dialogue",
+        HskUtteranceKind::Caption => "caption",
+        HskUtteranceKind::Thought => "thought",
+        HskUtteranceKind::Sfx => "sfx",
+    }
 }
 
 fn append_following_context(prompt: &mut String, following: &[String]) {
@@ -1101,7 +1272,7 @@ fn append_following_context(prompt: &mut String, following: &[String]) {
         return;
     }
     prompt.push_str(
-        "Following untranslated regions (reference only; do not translate or output them):\n",
+        "Following untranslated spans (reference only; do not translate or output them):\n",
     );
     for (index, source) in following.iter().enumerate() {
         prompt.push_str(&(index + 1).to_string());
@@ -1112,17 +1283,23 @@ fn append_following_context(prompt: &mut String, following: &[String]) {
     prompt.push('\n');
 }
 
-fn bounded_following_context(following: &[String]) -> Vec<String> {
-    following
-        .iter()
-        .filter_map(|source| {
-            let source = compact_field(source);
-            (!source.is_empty()).then_some(source)
-        })
-        .take(MAX_HSK_PRECEDING_UTTERANCES)
-        .collect()
+fn append_preceding_source_context(prompt: &mut String, preceding: &[String]) {
+    if preceding.is_empty() {
+        return;
+    }
+    prompt.push_str(
+        "Preceding untranslated spans (reference only; do not translate or output them):\n",
+    );
+    for (index, source) in preceding.iter().enumerate() {
+        prompt.push_str(&(index + 1).to_string());
+        prompt.push('\t');
+        prompt.push_str(&compact_field(source));
+        prompt.push('\n');
+    }
+    prompt.push('\n');
 }
 
+#[cfg(test)]
 fn build_repair_prompt(request: &HskTranslationRepairRequest) -> String {
     let utterance = &request.utterance;
     let problems = utterance
@@ -1138,6 +1315,7 @@ fn build_repair_prompt(request: &HskTranslationRepairRequest) -> String {
         &utterance.avoid_chinese,
     );
     let mut prompt = prepend_repair_context(&request.preceding_utterances, repair);
+    append_preceding_source_context(&mut prompt, &request.preceding_english);
     append_following_context(&mut prompt, &request.following_english);
     append_layout_budget(&mut prompt, utterance);
     prompt
@@ -1146,6 +1324,7 @@ fn build_repair_prompt(request: &HskTranslationRepairRequest) -> String {
 fn build_repair_batch_prompt(request: &HskTranslationRepairBatchRequest) -> String {
     let mut prompt = String::new();
     append_repair_context(&mut prompt, &request.preceding_utterances);
+    append_preceding_source_context(&mut prompt, &request.preceding_english);
     append_following_context(&mut prompt, &request.following_english);
     prompt.push_str("Rejected items:\n");
     for (index, utterance) in request.utterances.iter().enumerate() {
@@ -1164,46 +1343,67 @@ fn build_repair_batch_prompt(request: &HskTranslationRepairBatchRequest) -> Stri
         );
         writeln!(
             &mut prompt,
-            "Item {}:\nLayout budget: maximum {} Chinese characters; maximum {} lines.\n{}",
+            "Item {} ({}):",
             index + 1,
-            utterance.max_characters,
-            utterance.max_lines,
-            constraints
+            hsk_kind_label(utterance.kind),
         )
         .expect("writing to String cannot fail");
+        if let Some(layout) = utterance.layout {
+            writeln!(
+                &mut prompt,
+                "Layout budget: maximum {} Chinese characters; maximum {} lines.",
+                layout.max_characters, layout.max_lines,
+            )
+            .expect("writing to String cannot fail");
+        }
+        writeln!(&mut prompt, "{constraints}").expect("writing to String cannot fail");
     }
     prompt.push_str("Corrected numbered lines:");
     prompt
 }
 
 fn append_layout_budgets(prompt: &mut String, utterances: &[HskSourceUtterance]) {
+    if utterances
+        .iter()
+        .all(|utterance| utterance.layout.is_none())
+    {
+        return;
+    }
     prompt.push_str(
-        "\nLayout budgets (hard limits for readable placement; use concise wording when needed):\n",
+        "\nImage layout budgets (hard limits for readable placement; unconstrained lines are omitted):\n",
     );
     for (index, utterance) in utterances.iter().enumerate() {
+        let Some(layout) = utterance.layout else {
+            continue;
+        };
         use std::fmt::Write as _;
         writeln!(
             prompt,
             "line {}: maximum {} Chinese characters; maximum {} lines",
             index + 1,
-            utterance.max_characters,
-            utterance.max_lines
+            layout.max_characters,
+            layout.max_lines
         )
         .expect("writing to String cannot fail");
     }
 }
 
+#[cfg(test)]
 fn append_layout_budget(prompt: &mut String, utterance: &HskRepairUtterance) {
+    let Some(layout) = utterance.layout else {
+        return;
+    };
     use std::fmt::Write as _;
     writeln!(
         prompt,
         "\nLayout budget (hard limit): maximum {} Chinese characters; maximum {} lines. Rewrite concisely if necessary.",
-        utterance.max_characters,
-        utterance.max_lines
+        layout.max_characters,
+        layout.max_lines
     )
     .expect("writing to String cannot fail");
 }
 
+#[cfg(test)]
 fn prepend_repair_context(context: &[HskPrecedingUtterance], repair: String) -> String {
     if context.is_empty() {
         return repair;
@@ -1251,21 +1451,9 @@ fn validate_translation_request(request: &HskTranslationBatchRequest) -> Result<
     if request.utterances.len() > MAX_HSK_TRANSLATION_BATCH {
         bail!("HSK translation batches may contain at most {MAX_HSK_TRANSLATION_BATCH} utterances");
     }
-    if request.following_english.len() > MAX_HSK_PRECEDING_UTTERANCES {
-        bail!(
-            "HSK translation context may contain at most {} following regions",
-            MAX_HSK_PRECEDING_UTTERANCES
-        );
-    }
-    if request
-        .following_english
-        .iter()
-        .any(|source| source.trim().is_empty())
-    {
-        bail!("HSK following context cannot contain empty source regions");
-    }
+    validate_source_context(&request.preceding_english, &request.following_english)?;
     for utterance in &request.utterances {
-        validate_layout_budget(&utterance.id, utterance.max_characters, utterance.max_lines)?;
+        validate_layout_budget(&utterance.id, utterance.layout.as_ref())?;
         validate_faithful_chinese(&utterance.id, &utterance.faithful_chinese)?;
     }
     validate_common(
@@ -1283,7 +1471,7 @@ fn validate_faithful_translation_request(request: &FaithfulTranslationBatchReque
             "faithful translation batches may contain at most {MAX_HSK_TRANSLATION_BATCH} utterances"
         );
     }
-    validate_following_context(&request.following_english)?;
+    validate_source_context(&request.preceding_english, &request.following_english)?;
     validate_common(
         request
             .utterances
@@ -1293,9 +1481,10 @@ fn validate_faithful_translation_request(request: &FaithfulTranslationBatchReque
     )
 }
 
+#[cfg(test)]
 fn validate_repair_request(request: &HskTranslationRepairRequest) -> Result<()> {
     validate_level(request.requested_level)?;
-    validate_following_context(&request.following_english)?;
+    validate_source_context(&request.preceding_english, &request.following_english)?;
     validate_common(
         std::iter::once((
             request.utterance.id.as_str(),
@@ -1303,17 +1492,13 @@ fn validate_repair_request(request: &HskTranslationRepairRequest) -> Result<()> 
         )),
         &request.preceding_utterances,
     )?;
-    validate_layout_budget(
-        &request.utterance.id,
-        request.utterance.max_characters,
-        request.utterance.max_lines,
-    )?;
+    validate_layout_budget(&request.utterance.id, request.utterance.layout.as_ref())?;
     validate_repair_utterance(&request.utterance)
 }
 
 fn validate_repair_batch_request(request: &HskTranslationRepairBatchRequest) -> Result<()> {
     validate_level(request.requested_level)?;
-    validate_following_context(&request.following_english)?;
+    validate_source_context(&request.preceding_english, &request.following_english)?;
     if request.utterances.len() > MAX_HSK_TRANSLATION_BATCH {
         bail!("HSK repair batches may contain at most {MAX_HSK_TRANSLATION_BATCH} utterances");
     }
@@ -1325,26 +1510,37 @@ fn validate_repair_batch_request(request: &HskTranslationRepairBatchRequest) -> 
         &request.preceding_utterances,
     )?;
     for utterance in &request.utterances {
-        validate_layout_budget(&utterance.id, utterance.max_characters, utterance.max_lines)?;
+        validate_layout_budget(&utterance.id, utterance.layout.as_ref())?;
         validate_repair_utterance(utterance)?;
     }
     Ok(())
 }
 
-fn validate_following_context(following: &[String]) -> Result<()> {
-    if following.len() > MAX_HSK_PRECEDING_UTTERANCES {
+fn validate_source_context(preceding: &[String], following: &[String]) -> Result<()> {
+    if preceding.len().saturating_add(following.len()) > MAX_HSK_PRECEDING_UTTERANCES {
         bail!(
-            "HSK repair context may contain at most {} following regions",
+            "HSK neighboring source context may contain at most {} total spans",
             MAX_HSK_PRECEDING_UTTERANCES
         );
     }
-    if following.iter().any(|source| source.trim().is_empty()) {
-        bail!("HSK repair following context cannot contain empty source regions");
+    if preceding
+        .iter()
+        .chain(following)
+        .any(|source| source.trim().is_empty())
+    {
+        bail!("HSK neighboring source context cannot contain empty spans");
     }
     Ok(())
 }
 
-fn validate_layout_budget(id: &str, max_characters: u16, max_lines: u8) -> Result<()> {
+fn validate_layout_budget(id: &str, layout: Option<&HskLayoutConstraints>) -> Result<()> {
+    let Some(layout) = layout else {
+        return Ok(());
+    };
+    let HskLayoutConstraints {
+        max_characters,
+        max_lines,
+    } = *layout;
     if !(MIN_HSK_LAYOUT_CHARACTERS..=MAX_HSK_LAYOUT_CHARACTERS).contains(&max_characters) {
         bail!(
             "HSK layout budget for `{id}` must allow {MIN_HSK_LAYOUT_CHARACTERS} through {MAX_HSK_LAYOUT_CHARACTERS} Chinese characters"
@@ -1950,7 +2146,7 @@ fn has_question_intent(source_lower: &str) -> bool {
         || trimmed.ends_with('—')
         || trimmed.ends_with('…')
     {
-        // Webtoon dialogue is often split across adjacent balloons. An
+        // A sentence can be split across adjacent ordered source spans. An
         // inverted auxiliary at the start of a comma-terminated fragment does
         // not require this fragment to carry the sentence's final question
         // mark; the mark may belong to the continuation.
@@ -2111,11 +2307,7 @@ mod tests {
         ) -> Result<usize> {
             let items = user_prompt
                 .lines()
-                .filter(|line| {
-                    line.strip_prefix("Item ")
-                        .and_then(|suffix| suffix.strip_suffix(':'))
-                        .is_some_and(|position| position.parse::<usize>().is_ok())
-                })
+                .filter(|line| line.starts_with("Item ") && line.ends_with(':'))
                 .count();
             Ok(if items <= 2 { usize::MAX } else { 0 })
         }
@@ -2210,10 +2402,17 @@ mod tests {
             learning_mode: HskLearningMode::Strict,
             utterances: vec![source("dialogue", "I saw Tarin Voss yesterday.")],
             preceding_utterances: Vec::new(),
+            preceding_english: Vec::new(),
             following_english: Vec::new(),
         };
 
-        let result = translate_with(&generator, &input, &AtomicBool::new(false)).await?;
+        let result = translate_with_source(
+            &generator,
+            &input,
+            DirectSourceProvenance::Ocr,
+            &AtomicBool::new(false),
+        )
+        .await?;
 
         assert_eq!(
             result.items[0].text.as_deref(),
@@ -2242,10 +2441,17 @@ mod tests {
             learning_mode: HskLearningMode::Strict,
             utterances: vec![source("dialogue", "THE SENIOR ADMINISTRATOR ARRIVED.")],
             preceding_utterances: Vec::new(),
+            preceding_english: Vec::new(),
             following_english: Vec::new(),
         };
 
-        let result = translate_with(&generator, &input, &AtomicBool::new(false)).await?;
+        let result = translate_with_source(
+            &generator,
+            &input,
+            DirectSourceProvenance::Ocr,
+            &AtomicBool::new(false),
+        )
+        .await?;
 
         assert!(result.items[0].is_valid());
         Ok(())
@@ -2257,7 +2463,13 @@ mod tests {
         let mut input = request();
         input.utterances = vec![source("wife", "The wife arrived.")];
 
-        let result = translate_with(&generator, &input, &AtomicBool::new(false)).await?;
+        let result = translate_with_source(
+            &generator,
+            &input,
+            DirectSourceProvenance::Ocr,
+            &AtomicBool::new(false),
+        )
+        .await?;
 
         assert_eq!(
             result.items[0].issues,
@@ -2279,8 +2491,10 @@ mod tests {
                     kind: HskUtteranceKind::Dialogue,
                     source_english: "The graduate student arrived.".to_owned(),
                     faithful_chinese: "那个研究生来了。".to_owned(),
-                    max_characters: 64,
-                    max_lines: 3,
+                    layout: Some(HskLayoutConstraints {
+                        max_characters: 64,
+                        max_lines: 3,
+                    }),
                     rejected_chinese: Some("研究生来了。".to_owned()),
                     avoid_chinese: vec!["研究生".to_owned()],
                     problems: vec!["use an easier word".to_owned()],
@@ -2290,18 +2504,27 @@ mod tests {
                     kind: HskUtteranceKind::Dialogue,
                     source_english: "My wife arrived.".to_owned(),
                     faithful_chinese: "我的妻子来了。".to_owned(),
-                    max_characters: 64,
-                    max_lines: 3,
+                    layout: Some(HskLayoutConstraints {
+                        max_characters: 64,
+                        max_lines: 3,
+                    }),
                     rejected_chinese: Some("My wife来了。".to_owned()),
                     avoid_chinese: Vec::new(),
                     problems: vec!["translate every ordinary Latin word".to_owned()],
                 },
             ],
             preceding_utterances: Vec::new(),
+            preceding_english: Vec::new(),
             following_english: Vec::new(),
         };
 
-        let result = repair_batch_with(&generator, &request, &AtomicBool::new(false)).await?;
+        let result = repair_batch_with_source(
+            &generator,
+            &request,
+            DirectSourceProvenance::Ocr,
+            &AtomicBool::new(false),
+        )
+        .await?;
 
         assert_eq!(generator.calls.load(Ordering::Relaxed), 1);
         assert_eq!(result.items[0].text.as_deref(), Some("学生"));
@@ -2331,18 +2554,27 @@ mod tests {
                     kind: HskUtteranceKind::Dialogue,
                     source_english: format!("Rejected English item {position}."),
                     faithful_chinese: "被拒的句子。".to_owned(),
-                    max_characters: 64,
-                    max_lines: 3,
+                    layout: Some(HskLayoutConstraints {
+                        max_characters: 64,
+                        max_lines: 3,
+                    }),
                     rejected_chinese: Some(format!("rejected-{position}")),
                     avoid_chinese: Vec::new(),
                     problems: vec!["translate all ordinary words".to_owned()],
                 })
                 .collect(),
             preceding_utterances: Vec::new(),
+            preceding_english: Vec::new(),
             following_english: Vec::new(),
         };
 
-        let result = repair_batch_with(&generator, &request, &AtomicBool::new(false)).await?;
+        let result = repair_batch_with_source(
+            &generator,
+            &request,
+            DirectSourceProvenance::Ocr,
+            &AtomicBool::new(false),
+        )
+        .await?;
 
         assert_eq!(generator.inner.calls.load(Ordering::Relaxed), 3);
         assert_eq!(
@@ -2371,8 +2603,10 @@ mod tests {
             kind: HskUtteranceKind::Dialogue,
             source_english: source_english.to_owned(),
             faithful_chinese: "忠实翻译。".to_owned(),
-            max_characters: 64,
-            max_lines: 3,
+            layout: Some(HskLayoutConstraints {
+                max_characters: 64,
+                max_lines: 3,
+            }),
         }
     }
 
@@ -2381,9 +2615,9 @@ mod tests {
             requested_level: 2,
             learning_mode: HskLearningMode::Strict,
             utterances: vec![
-                source("private-bubble-a", "Alice does not have 2 tickets."),
-                source("private-bubble-b", "Are you ready?"),
-                source("private-bubble-c", "Let's go!"),
+                source("private-span-a", "Alice does not have 2 tickets."),
+                source("private-span-b", "Are you ready?"),
+                source("private-span-c", "Let's go!"),
             ],
             preceding_utterances: (0..8)
                 .map(|index| HskPrecedingUtterance {
@@ -2391,6 +2625,7 @@ mod tests {
                     chinese: format!("chinese-context-{index}"),
                 })
                 .collect(),
+            preceding_english: Vec::new(),
             following_english: Vec::new(),
         }
     }
@@ -2406,6 +2641,7 @@ mod tests {
                 source_english: "We have to leave.".to_owned(),
                 chinese: "我们得走了。".to_owned(),
             }],
+            preceding_english: Vec::new(),
             following_english: vec!["The gate is closing.".to_owned()],
         }
     }
@@ -2414,9 +2650,13 @@ mod tests {
     async fn faithful_translation_is_one_text_only_semantic_generation() -> Result<()> {
         let generator = FakeGenerator::new(["1\t杰德，你准备好了吗？"]);
 
-        let result =
-            translate_faithfully_with(&generator, &faithful_request(), &AtomicBool::new(false))
-                .await?;
+        let result = translate_faithfully_with_source(
+            &generator,
+            &faithful_request(),
+            DirectSourceProvenance::Ocr,
+            &AtomicBool::new(false),
+        )
+        .await?;
 
         assert_eq!(generator.calls.load(Ordering::Relaxed), 1);
         assert!(result.items[0].is_valid());
@@ -2426,9 +2666,8 @@ mod tests {
             Some("杰德，你准备好了吗？")
         );
         let system = &generator.system_prompts.lock().unwrap()[0];
-        assert!(system.contains("OCR-verified English comic region"));
-        assert!(system.contains("role-position index is input metadata only"));
-        assert!(system.contains("Never output role names"));
+        assert!(system.contains("numbered English source span"));
+        assert!(system.contains("Never output kind names"));
         assert!(system.contains("Render names naturally in Chinese"));
         assert!(!system.contains("HSK"));
         let prompt = &generator.user_prompts.lock().unwrap()[0];
@@ -2481,8 +2720,13 @@ mod tests {
         let mut input = faithful_request();
         input.utterances[0].source_english = "Help me.".to_owned();
 
-        let punctuation =
-            translate_faithfully_with(&generator, &input, &AtomicBool::new(false)).await?;
+        let punctuation = translate_faithfully_with_source(
+            &generator,
+            &input,
+            DirectSourceProvenance::Ocr,
+            &AtomicBool::new(false),
+        )
+        .await?;
 
         assert_eq!(punctuation.items[0].text.as_deref(), Some("..."));
         assert!(
@@ -2492,7 +2736,13 @@ mod tests {
         );
 
         let generator = FakeGenerator::new(["1\tJade"]);
-        let latin = translate_faithfully_with(&generator, &input, &AtomicBool::new(false)).await?;
+        let latin = translate_faithfully_with_source(
+            &generator,
+            &input,
+            DirectSourceProvenance::Ocr,
+            &AtomicBool::new(false),
+        )
+        .await?;
         assert!(
             latin.items[0]
                 .issues
@@ -2538,7 +2788,13 @@ mod tests {
             "2\t你准备好了吗？\n",
             "3\t我们走吧！"
         )]);
-        let result = translate_with(&generator, &request(), &AtomicBool::new(false)).await?;
+        let result = translate_with_source(
+            &generator,
+            &request(),
+            DirectSourceProvenance::Ocr,
+            &AtomicBool::new(false),
+        )
+        .await?;
 
         assert!(result.items.iter().all(HskTranslationOutcome::is_valid));
         assert_eq!(
@@ -2547,7 +2803,7 @@ mod tests {
                 .iter()
                 .map(|item| item.id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["private-bubble-a", "private-bubble-b", "private-bubble-c"]
+            vec!["private-span-a", "private-span-b", "private-span-c"]
         );
         assert_eq!(generator.calls.load(Ordering::Relaxed), 1);
 
@@ -2575,7 +2831,7 @@ mod tests {
         assert!(prompt.contains("1\tAlice does not have 2 tickets."));
         assert!(!prompt.contains("INPUT\t"));
         assert!(!prompt.contains("\tD\t"));
-        assert!(!prompt.contains("private-bubble"));
+        assert!(!prompt.contains("private-span"));
         assert!(generator.system_prompts.lock().unwrap()[0].contains("HSK 2.0 level 2"));
         assert!(generator.system_prompts.lock().unwrap()[0].contains("exactly 3 non-empty lines"));
         assert!(generator.system_prompts.lock().unwrap()[0].contains("start with `1\t`"));
@@ -2589,7 +2845,13 @@ mod tests {
             "1\t我们走吧！",
         ]);
 
-        let result = translate_with(&generator, &request(), &AtomicBool::new(false)).await?;
+        let result = translate_with_source(
+            &generator,
+            &request(),
+            DirectSourceProvenance::Ocr,
+            &AtomicBool::new(false),
+        )
+        .await?;
 
         assert!(result.items.iter().all(HskTranslationOutcome::is_valid));
         assert_eq!(generator.inner.calls.load(Ordering::Relaxed), 2);
@@ -2625,13 +2887,14 @@ mod tests {
     async fn completed_numbered_lines_stream_in_application_order() -> Result<()> {
         let generator = FakeGenerator::new(["1\t\u{4f60}\u{597d}\n2\t\u{597d}\n"]);
         let mut input = request();
-        input.utterances = vec![source("bubble-a", "Hello"), source("bubble-b", "Ready")];
+        input.utterances = vec![source("span-a", "Hello"), source("span-b", "Ready")];
         input.preceding_utterances.clear();
         let mut streamed = Vec::new();
 
-        let result = translate_with_streaming(
+        let result = translate_with_streaming_source(
             &generator,
             &input,
+            DirectSourceProvenance::Ocr,
             &AtomicBool::new(false),
             &mut |outcome| {
                 streamed.push((outcome.id.clone(), outcome.text.clone()));
@@ -2643,8 +2906,8 @@ mod tests {
         assert_eq!(
             streamed,
             vec![
-                ("bubble-a".to_owned(), Some("\u{4f60}\u{597d}".to_owned())),
-                ("bubble-b".to_owned(), Some("\u{597d}".to_owned())),
+                ("span-a".to_owned(), Some("\u{4f60}\u{597d}".to_owned())),
+                ("span-b".to_owned(), Some("\u{597d}".to_owned())),
             ]
         );
         assert!(result.items.iter().all(HskTranslationOutcome::is_valid));
@@ -2682,7 +2945,13 @@ mod tests {
             "3\t\n",
             "99\tunexpected"
         )]);
-        let result = translate_with(&generator, &request(), &AtomicBool::new(false)).await?;
+        let result = translate_with_source(
+            &generator,
+            &request(),
+            DirectSourceProvenance::Ocr,
+            &AtomicBool::new(false),
+        )
+        .await?;
 
         assert_eq!(generator.calls.load(Ordering::Relaxed), 1);
         assert!(!result.items[0].is_valid());
@@ -2784,7 +3053,7 @@ mod tests {
     #[test]
     fn repair_parser_rejects_story_skip_marker() {
         let expected = ExpectedUtterance {
-            id: "story-region",
+            id: "story-span",
             source_english: "A real story line.",
         };
         let outcome = parse_repair_output("[NON-STORY]", &expected);
@@ -2818,7 +3087,13 @@ mod tests {
             "2\t你准备好了吗？\n",
             "3\t我们走吧！"
         )]);
-        let result = translate_with(&generator, &request(), &AtomicBool::new(false)).await?;
+        let result = translate_with_source(
+            &generator,
+            &request(),
+            DirectSourceProvenance::Ocr,
+            &AtomicBool::new(false),
+        )
+        .await?;
 
         assert!(result.items.iter().all(HskTranslationOutcome::is_valid));
         assert_eq!(result.items[0].text.as_deref(), Some("爱丽丝没有2张票。"));
@@ -2829,7 +3104,13 @@ mod tests {
     async fn repair_is_one_chinese_only_call_for_one_application_owned_id() -> Result<()> {
         let generator = FakeGenerator::new(["1\t她有票。\n2\t你准备好了吗？", "爱丽丝没有2张票。"]);
         let input = request();
-        let initial = translate_with(&generator, &input, &AtomicBool::new(false)).await?;
+        let initial = translate_with_source(
+            &generator,
+            &input,
+            DirectSourceProvenance::Ocr,
+            &AtomicBool::new(false),
+        )
+        .await?;
         assert!(initial.items[1].is_valid());
         assert!(!initial.items[0].is_valid());
         assert!(!initial.items[2].is_valid());
@@ -2842,20 +3123,26 @@ mod tests {
                 kind: input.utterances[0].kind,
                 source_english: input.utterances[0].source_english.clone(),
                 faithful_chinese: input.utterances[0].faithful_chinese.clone(),
-                max_characters: input.utterances[0].max_characters,
-                max_lines: input.utterances[0].max_lines,
+                layout: input.utterances[0].layout,
                 rejected_chinese: initial.items[0].text.clone(),
                 avoid_chinese: Vec::new(),
                 problems: initial.items[0].repair_problems(),
             },
             preceding_utterances: input.preceding_utterances.clone(),
+            preceding_english: Vec::new(),
             following_english: Vec::new(),
         };
-        let repaired = repair_with(&generator, &repair, &AtomicBool::new(false)).await?;
+        let repaired = repair_with_source(
+            &generator,
+            &repair,
+            DirectSourceProvenance::Ocr,
+            &AtomicBool::new(false),
+        )
+        .await?;
 
         assert_eq!(generator.calls.load(Ordering::Relaxed), 2);
         assert!(repaired.is_valid());
-        assert_eq!(repaired.id, "private-bubble-a");
+        assert_eq!(repaired.id, "private-span-a");
 
         let prompts = generator.user_prompts.lock().unwrap();
         let repair_prompt = &prompts[1];
@@ -2870,7 +3157,7 @@ mod tests {
         assert!(repair_prompt.contains("chinese-context-2"));
         assert!(!repair_prompt.contains("english-context-0"));
         assert!(!repair_prompt.contains("chinese-context-0"));
-        assert!(!repair_prompt.contains("private-bubble"));
+        assert!(!repair_prompt.contains("private-span"));
         assert!(!repair_prompt.lines().any(|line| line.starts_with("1\t")));
         assert!(generator.system_prompts.lock().unwrap()[1].contains("this one"));
         assert!(generator.system_prompts.lock().unwrap()[1].contains("no position"));
@@ -2886,7 +3173,7 @@ mod tests {
         };
         let repaired = parse_repair_output("1\t2\t爱丽丝没有2张票。", &expected);
 
-        assert_eq!(repaired.id, "private-bubble-a");
+        assert_eq!(repaired.id, "private-span-a");
         assert_eq!(repaired.text, None);
         assert_eq!(repaired.issues, vec![HskTranslationIssue::MalformedLine]);
 
@@ -3049,16 +3336,26 @@ mod tests {
         let mut input = request();
         input.utterances.clear();
         assert!(
-            translate_with(&generator, &input, &AtomicBool::new(false))
-                .await?
-                .items
-                .is_empty()
+            translate_with_source(
+                &generator,
+                &input,
+                DirectSourceProvenance::Ocr,
+                &AtomicBool::new(false)
+            )
+            .await?
+            .items
+            .is_empty()
         );
 
         input.utterances.push(source("id", "Hello"));
-        let error = translate_with(&generator, &input, &AtomicBool::new(true))
-            .await
-            .unwrap_err();
+        let error = translate_with_source(
+            &generator,
+            &input,
+            DirectSourceProvenance::Ocr,
+            &AtomicBool::new(true),
+        )
+        .await
+        .unwrap_err();
         assert_eq!(error.to_string(), "cancelled");
         assert_eq!(generator.calls.load(Ordering::Relaxed), 0);
         Ok(())
@@ -3081,8 +3378,13 @@ mod tests {
 
     #[test]
     fn primary_and_repair_prompts_have_one_chinese_name_policy() {
-        let primary = translation_system_prompt(3, 1, HskLearningMode::Strict);
-        let repair = repair_system_prompt(3, HskLearningMode::Strict);
+        let primary = translation_system_prompt_for_source(
+            3,
+            1,
+            HskLearningMode::Strict,
+            DirectSourceProvenance::Ocr,
+        );
+        let repair = repair_system_prompt(3, HskLearningMode::Strict, DirectSourceProvenance::Ocr);
 
         for prompt in [&primary, &repair] {
             assert!(prompt.contains("phonetic Chinese transliteration"));
@@ -3111,7 +3413,7 @@ mod tests {
         for size in 1..=MAX_HSK_TRANSLATION_BATCH {
             let mut input = request();
             input.utterances = (0..size)
-                .map(|index| source(&format!("bubble-{index}"), "Hello"))
+                .map(|index| source(&format!("span-{index}"), "Hello"))
                 .collect();
             validate_translation_request(&input).unwrap();
         }
@@ -3142,13 +3444,16 @@ mod tests {
                 kind: HskUtteranceKind::Dialogue,
                 source_english: "Hello".to_owned(),
                 faithful_chinese: "你好".to_owned(),
-                max_characters: 64,
-                max_lines: 3,
+                layout: Some(HskLayoutConstraints {
+                    max_characters: 64,
+                    max_lines: 3,
+                }),
                 rejected_chinese: None,
                 avoid_chinese: Vec::new(),
                 problems: Vec::new(),
             },
             preceding_utterances: Vec::new(),
+            preceding_english: Vec::new(),
             following_english: Vec::new(),
         };
         assert!(
@@ -3160,10 +3465,10 @@ mod tests {
 
         input = request();
         input.utterances.extend([
-            source("private-bubble-d", "Four"),
-            source("private-bubble-e", "Five"),
-            source("private-bubble-f", "Six"),
-            source("private-bubble-g", "Seven"),
+            source("private-span-d", "Four"),
+            source("private-span-e", "Five"),
+            source("private-span-f", "Six"),
+            source("private-span-g", "Seven"),
         ]);
         assert!(
             validate_translation_request(&input)

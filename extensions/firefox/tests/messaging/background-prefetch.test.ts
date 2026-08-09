@@ -14,11 +14,11 @@ function sender() {
   } as browser.runtime.MessageSender
 }
 
-function source(pageIndex = 1) {
+function source(sourceIndex = 1) {
   return {
     pageSessionId: 'chapter-session',
-    pageIndex,
-    imageUrl: `https://cdn.test/${pageIndex}.webp`,
+    sourceIndex,
+    imageUrl: `https://cdn.test/${sourceIndex}.webp`,
     pageUrl,
     naturalWidth: 900,
     naturalHeight: 16_000,
@@ -51,9 +51,9 @@ describe('background acquisition prefetch handoff', () => {
 
     await router.route(
       {
-        type: 'job:submit',
+        type: 'job:submit-image',
         ...source(),
-        chapterPageOrder: [0],
+        chapterSourceOrder: [1],
         surfaceKind: 'image',
         hskLevel: 5,
         learningMode: 'natural',
@@ -84,9 +84,9 @@ describe('background acquisition prefetch handoff', () => {
     )
     await router.route(
       {
-        type: 'job:submit',
+        type: 'job:submit-image',
         ...source(),
-        chapterPageOrder: [0],
+        chapterSourceOrder: [1],
         surfaceKind: 'image',
         hskLevel: 5,
         learningMode: 'natural',

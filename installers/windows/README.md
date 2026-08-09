@@ -47,8 +47,8 @@ That script rejects other GPUs, provisions the pinned CUDA 13.1 compiler
 components, sets compute capability 8.9, and produces:
 
 ```text
-target\release\hsk-manga-native-host.exe
-target\release\hsk-manga-browser-daemon.exe
+target\release\hskify-native-host.exe
+target\release\hskify-browser-daemon.exe
 target\release\hskify-performance-build-attestation.json
 ```
 
@@ -61,8 +61,8 @@ the extension's committed pnpm lockfile; npm is not part of this workflow:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\installers\windows\Build-ReleasePackage.ps1 `
-  -NativeHostPath .\target\release\hsk-manga-native-host.exe `
-  -BrowserDaemonPath .\target\release\hsk-manga-browser-daemon.exe `
+  -NativeHostPath .\target\release\hskify-native-host.exe `
+  -BrowserDaemonPath .\target\release\hskify-browser-daemon.exe `
   -BuildAttestationPath .\target\release\hskify-performance-build-attestation.json `
   -HskArtifactPath C:\artifacts\hsk-2.0.normalized.json `
   -DictionaryArtifactPath C:\artifacts\cc-cedict.normalized.json `
@@ -76,6 +76,10 @@ native host and daemon, release attestation, fonts, language resources, and
 registration scripts. HSK data, dictionary data, and the translation model are
 required inputs; incomplete, machine-dependent bundles are rejected. The
 bundle manifest hashes the copied attestation.
+
+The same installable pack supports both chapter modes. Document jobs load only
+the language runtime; image jobs additionally load the bundled vision resources.
+There is no light-novel-specific package or deployment setting.
 
 ## Installed layout
 
@@ -93,10 +97,11 @@ resources\cc-cedict.normalized.json
 resources\models\Qwen3.5-4B-Q4_K_M.gguf
 resources\fonts\NotoSansSC-VF.ttf
 resources\fonts\NotoSerifSC-VF.ttf
+app\provenance\licence-inventory.md
 ```
 
-The registered native host is `local.hskify.hsk_manga`, and the only allowed
-Firefox extension is `hsk-manga-translator@local.hskify`.
+The registered native host is `local.hskify.browser`, and the only allowed
+Firefox extension is `hskify@local.hskify`.
 
 Running a newer package's `Install.ps1` updates the existing current-user
 installation in place. The installer verifies the complete new bundle before

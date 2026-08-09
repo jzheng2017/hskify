@@ -312,17 +312,17 @@ function validStyleRuns(value, maximumLength = Number.POSITIVE_INFINITY) {
 
 function validRegionAnnotation(region) {
   if (!objectRecord(region)) return false
-  if (typeof region.sourceEnglish !== 'string') return false
-  const sourceLength = [...region.sourceEnglish].length
+  if (typeof region.sourceText !== 'string') return false
+  const sourceLength = [...region.sourceText].length
   if (
-    typeof region.id !== 'string' ||
-    !ID.test(region.id) ||
+    typeof region.itemId !== 'string' ||
+    !ID.test(region.itemId) ||
     !REGION_ROLES.has(region.role) ||
     !normalizedPolygon(region.polygon) ||
     !Number.isSafeInteger(region.readingOrder) ||
     region.readingOrder < 0 ||
-    typeof region.sourceEnglish !== 'string' ||
-    region.sourceEnglish.trim().length === 0 ||
+    typeof region.sourceText !== 'string' ||
+    region.sourceText.trim().length === 0 ||
     !validStyleRuns(region.styleRuns ?? [], sourceLength) ||
     !validReviewedAlternatives(region.reviewedTranslations) ||
     !Object.hasOwn(region, 'cleanupAllowance')
@@ -360,24 +360,27 @@ function validPageAnnotation(annotation, chapterId, pageOrder, sourceSha256) {
   ) {
     return false
   }
-  const regionIds = new Set()
+  const itemIds = new Set()
   const validRegions = annotation.regions.every((region) => {
-    if (regionIds.has(region?.id)) return false
-    if (typeof region?.id === 'string') regionIds.add(region.id)
+    if (itemIds.has(region?.itemId)) return false
+    if (typeof region?.itemId === 'string') itemIds.add(region.itemId)
     return validRegionAnnotation(region)
   })
-  const validExclusions = annotation.exclusions.every(
-    (exclusion) =>
-      objectRecord(exclusion) &&
-      typeof exclusion.id === 'string' &&
-      ID.test(exclusion.id) &&
-      !regionIds.has(exclusion.id) &&
-      normalizedPolygon(exclusion.polygon) &&
-      typeof exclusion.sourceEnglish === 'string' &&
-      exclusion.sourceEnglish.trim().length > 0 &&
-      typeof exclusion.reason === 'string' &&
-      exclusion.reason.trim().length > 0,
-  )
+  const validExclusions = annotation.exclusions.every((exclusion) => {
+    if (
+      !objectRecord(exclusion) ||
+      typeof exclusion.itemId !== 'string' ||
+      !ID.test(exclusion.itemId) ||
+      itemIds.has(exclusion.itemId) ||
+      !normalizedPolygon(exclusion.polygon) ||
+      typeof exclusion.sourceText !== 'string' ||
+      exclusion.sourceText.trim().length === 0 ||
+      typeof exclusion.reason !== 'string' ||
+      exclusion.reason.trim().length === 0
+    ) return false
+    itemIds.add(exclusion.itemId)
+    return true
+  })
   if (!validRegions || !validExclusions) return false
   const readingOrders = annotation.regions.map((region) => region.readingOrder)
   return new Set(readingOrders).size === readingOrders.length

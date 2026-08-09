@@ -1,4 +1,4 @@
-import type { BrowserRegion } from '../contracts/browser'
+import type { ImageRegion } from '../contracts/browser'
 
 const HEX_COLOR = /^#(?:[\da-f]{3}|[\da-f]{4}|[\da-f]{6}|[\da-f]{8})$/i
 
@@ -26,7 +26,7 @@ function bounded(value: number, minimum: number, maximum: number, fallback: numb
   return Number.isFinite(value) ? Math.min(maximum, Math.max(minimum, value)) : fallback
 }
 
-export function validateRegionStyle(region: BrowserRegion): AppliedRegionStyle {
+export function validateRegionStyle(region: ImageRegion): AppliedRegionStyle {
   const style = region.style
   return {
     color: safeHexColor(style.foreground, '#111111'),
@@ -50,7 +50,7 @@ export function validateRegionStyle(region: BrowserRegion): AppliedRegionStyle {
 
 export function applyRegionStyle(
   element: HTMLElement,
-  region: BrowserRegion,
+  region: ImageRegion,
   fontSize: number,
   fontFamily: string,
 ): void {
@@ -77,11 +77,11 @@ export function applyRegionStyle(
 
 export function applyRegionColorBands(
   element: HTMLElement,
-  region: BrowserRegion,
+  region: ImageRegion,
   fontSize: number,
 ): void {
   const bands = region.style.colorBands ?? []
-  const lines = [...element.querySelectorAll<HTMLElement>('.hmt-region-line')]
+  const lines = [...element.querySelectorAll<HTMLElement>('.hskify-region-line')]
   if (bands.length <= 1 || lines.length === 0) return
   for (const [index, line] of lines.entries()) {
     const position = (index + 0.5) / lines.length

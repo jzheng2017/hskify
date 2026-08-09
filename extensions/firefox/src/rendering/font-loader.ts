@@ -47,7 +47,7 @@ export class FontLoader {
     if (!this.FontFaceType) return fallback
     try {
       const bytes = await this.fetcher(fontId, jobId)
-      const family = `HMT-${fontId.replace(/[^\w-]/g, '-')}`
+      const family = `Hskify-${fontId.replace(/[^\w-]/g, '-')}`
       const face = new this.FontFaceType(family, bytes)
       await face.load()
       ;(documentRef.fonts ?? this.fallbackFontSet).add(face)

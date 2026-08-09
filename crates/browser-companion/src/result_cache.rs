@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Cursor, Read, Write};
 use std::path::{Path, PathBuf};
@@ -20,12 +20,14 @@ use koharu_app::llm::{
 use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
 
+use crate::chapter_session::ChapterContextUnit;
 use crate::contracts::{
-    BUILD_FINGERPRINT, BrowserJobRequest, PreservedArtworkRegion, TranslatedRegion,
-    UnreadableRegion, Validate,
+    BUILD_FINGERPRINT, BrowserJobSettings, BrowserSurfaceKind, DocumentBlockPreserved,
+    DocumentBlockReady, DocumentJobRequest, DocumentSourceBlock, ImagePipelineInput,
+    ImageRegionPreserved, ImageRegionReady, ReadingDirection, Validate,
 };
 use crate::crypto::sha256_hex;
-use crate::pipeline_adapter::RegionLookupContext;
+use crate::pipeline_adapter::ItemLookupContext;
 use crate::setup::{
     DICTIONARY_RESOURCE_BYTES, DICTIONARY_RESOURCE_SHA256, HSK_RESOURCE_BYTES, HSK_RESOURCE_SHA256,
 };
@@ -33,33 +35,148 @@ use crate::setup::{
 pub(crate) const RESULT_CACHE_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const RESULT_CACHE_MAX_ENTRY_BYTES: u64 = 512 * 1024 * 1024;
 const RESULT_CACHE_MAX_DECODED_PATCH_BYTES: u64 = 256 * 1024 * 1024;
-// Chapter sessions changed the meaning of a cached result (ordering,
-// context, OCR evidence, and cleanup verification are all
-// part of the result now).  Deliberately use a new identity instead of
-// attempting to migrate the old per-image cache.
-// A chapter-session cache is intentionally invalidated as one unit whenever
-// the structural pipeline changes. There is no reader for the previous
-// per-image/progressive schema.
-const RESULT_CACHE_SCHEMA: &str = "hskify-chapter-session-result-2026-08-02-v3";
+const RESULT_CACHE_SCHEMA: &str = "hskify-tagged-chapter-result-2026-08-09-v1";
 const RESULT_CACHE_PIPELINE_REVISION: &str =
-    "chapter-session-pipeline-v20-single-chinese-name-and-sfx-policy-2026-08-08";
+    "shared-language-image-document-pipeline-v1-2026-08-09";
 const MODEL_RESOURCE_MANIFEST: &[u8] = include_bytes!("../../../data/model-packs/manifest.v1.json");
 
 #[derive(Debug, Clone)]
-pub(crate) struct CachedRegion {
-    pub region: TranslatedRegion,
-    pub lookup_context: RegionLookupContext,
+pub(crate) struct CachedImageRegion {
+    pub region: ImageRegionReady,
+    pub lookup_context: ItemLookupContext,
     pub patch_png: Arc<[u8]>,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct CachedJob {
-    pub regions: Vec<CachedRegion>,
-    pub preserved_artwork: Vec<PreservedArtworkRegion>,
-    pub unreadable_regions: Vec<UnreadableRegion>,
+pub(crate) struct CachedImageJob {
+    pub regions: Vec<CachedImageRegion>,
+    pub preserved: Vec<ImageRegionPreserved>,
 }
 
-impl CachedJob {
+#[derive(Debug, Clone)]
+pub(crate) struct CachedDocumentJob {
+    pub blocks: Vec<DocumentBlockReady>,
+    pub preserved: Vec<DocumentBlockPreserved>,
+    pub lookup_contexts: Vec<(String, ItemLookupContext)>,
+}
+
+impl CachedDocumentJob {
+    fn validate(&self) -> Result<()> {
+        let mut item_ids = HashSet::new();
+        for block in &self.blocks {
+            JobUpdateValidation::document_ready(block)?;
+            if !item_ids.insert(block.item_id.as_str()) {
+                bail!("cached document contains duplicate terminal item identity");
+            }
+        }
+        for block in &self.preserved {
+            JobUpdateValidation::document_preserved(block)?;
+            if !item_ids.insert(block.item_id.as_str()) {
+                bail!("cached document contains duplicate terminal item identity");
+            }
+        }
+        let lookup_ids = self
+            .lookup_contexts
+            .iter()
+            .map(|(item_id, _)| item_id.as_str())
+            .collect::<HashSet<_>>();
+        if lookup_ids.len() != self.lookup_contexts.len()
+            || lookup_ids.len() != item_ids.len()
+            || !item_ids.iter().all(|item_id| lookup_ids.contains(item_id))
+        {
+            bail!("cached document lookup contexts must match every terminal item exactly");
+        }
+        Ok(())
+    }
+
+    fn validate_against(&self, request: &DocumentJobRequest) -> Result<()> {
+        self.validate()?;
+        enum Terminal<'a> {
+            Ready(&'a DocumentBlockReady),
+            Preserved(&'a DocumentBlockPreserved),
+        }
+        let mut terminals = HashMap::with_capacity(self.blocks.len() + self.preserved.len());
+        for block in &self.blocks {
+            terminals.insert(block.item_id.as_str(), Terminal::Ready(block));
+        }
+        for block in &self.preserved {
+            terminals.insert(block.item_id.as_str(), Terminal::Preserved(block));
+        }
+        if terminals.len() != request.blocks.len() {
+            bail!("cached document must contain exactly one terminal item per source block");
+        }
+        let lookup = self
+            .lookup_contexts
+            .iter()
+            .map(|(item_id, context)| (item_id.as_str(), context))
+            .collect::<HashMap<_, _>>();
+        for source in &request.blocks {
+            let terminal = terminals.get(source.item_id.as_str()).ok_or_else(|| {
+                anyhow::anyhow!("cached document is missing source item {}", source.item_id)
+            })?;
+            let (source_index, item_order, kind, source_text, base_text, displayed_text) =
+                match terminal {
+                    Terminal::Ready(block) => (
+                        block.source_index,
+                        block.item_order,
+                        block.kind,
+                        block.text.source_text.as_str(),
+                        block.text.base_chinese.as_str(),
+                        block.text.displayed_chinese.as_str(),
+                    ),
+                    Terminal::Preserved(block) => (
+                        block.source_index,
+                        block.item_order,
+                        block.kind,
+                        block.source_text.as_str(),
+                        block.source_text.as_str(),
+                        block.source_text.as_str(),
+                    ),
+                };
+            if source_index != source.source_index
+                || item_order != source.item_order
+                || kind != source.kind
+                || source_text != source.text
+            {
+                bail!("cached document terminal item does not match its source block");
+            }
+            let context = lookup
+                .get(source.item_id.as_str())
+                .ok_or_else(|| anyhow::anyhow!("cached document lookup context is missing"))?;
+            if context.source_text != source.text
+                || context.base_chinese != base_text
+                || context.displayed_chinese != displayed_text
+            {
+                bail!("cached document lookup context does not match its terminal item");
+            }
+        }
+        Ok(())
+    }
+}
+
+struct JobUpdateValidation;
+
+impl JobUpdateValidation {
+    fn document_ready(block: &DocumentBlockReady) -> Result<()> {
+        crate::contracts::JobUpdate::DocumentBlockReady {
+            sequence: 1,
+            block: block.clone(),
+        }
+        .validate()
+        .map_err(anyhow::Error::new)
+    }
+
+    fn document_preserved(block: &DocumentBlockPreserved) -> Result<()> {
+        crate::contracts::JobUpdate::DocumentBlockPreserved {
+            sequence: 1,
+            block: block.clone(),
+        }
+        .validate()
+        .map_err(anyhow::Error::new)
+    }
+}
+
+impl CachedImageJob {
     fn validate(&self) -> Result<()> {
         let mut region_ids = HashSet::new();
         let mut patch_ids = HashSet::new();
@@ -67,28 +184,27 @@ impl CachedJob {
             cached
                 .region
                 .validate()
-                .context("validate cached translated region")?;
+                .context("validate cached image translation")?;
             cached
                 .lookup_context
                 .validate_against(&cached.region)
                 .context("validate cached lookup context")?;
-            if !region_ids.insert(cached.region.id.as_str()) {
-                bail!("cached job contains duplicate terminal region identity");
+            if !region_ids.insert(cached.region.item_id.as_str()) {
+                bail!("cached image contains duplicate terminal item identity");
             }
             if !patch_ids.insert(cached.region.patch.blob_id.as_str()) {
                 bail!("cached job contains duplicate patch identity");
             }
         }
-        for region in &self.preserved_artwork {
-            region.validate_at("preservedArtwork")?;
-            if !region_ids.insert(region.id.as_str()) {
-                bail!("cached job contains duplicate terminal region identity");
+        for region in &self.preserved {
+            crate::contracts::JobUpdate::ImageRegionPreserved {
+                sequence: 1,
+                region: region.clone(),
             }
-        }
-        for region in &self.unreadable_regions {
-            region.validate_at("unreadableRegions")?;
-            if !region_ids.insert(region.id.as_str()) {
-                bail!("cached job contains duplicate terminal region identity");
+            .validate()
+            .context("validate cached image preservation")?;
+            if !region_ids.insert(region.item_id.as_str()) {
+                bail!("cached image contains duplicate terminal item identity");
             }
         }
         Ok(())
@@ -102,17 +218,86 @@ struct StoredJob {
     build_fingerprint: String,
     pipeline_fingerprint: String,
     key: String,
-    regions: Vec<StoredRegion>,
-    preserved_artwork: Vec<PreservedArtworkRegion>,
-    unreadable_regions: Vec<UnreadableRegion>,
+    result: StoredChapterResult,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
+enum StoredChapterResult {
+    Image {
+        regions: Vec<StoredRegion>,
+        preserved: Vec<ImageRegionPreserved>,
+    },
+    Document {
+        blocks: Vec<DocumentBlockReady>,
+        preserved: Vec<DocumentBlockPreserved>,
+        lookup_contexts: Vec<StoredLookupContext>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct StoredLookupContext {
+    item_id: String,
+    context: ItemLookupContext,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct StoredRegion {
-    region: TranslatedRegion,
-    lookup_context: RegionLookupContext,
+    region: ImageRegionReady,
+    lookup_context: ItemLookupContext,
     patch_png_base64: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ImageCacheIdentity<'a> {
+    source_sha256: &'a str,
+    natural_width: u32,
+    natural_height: u32,
+    surface_kind: BrowserSurfaceKind,
+    reading_direction: ReadingDirection,
+    settings: &'a BrowserJobSettings,
+    surrounding_context: &'a [ChapterContextUnit],
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DocumentCacheIdentity<'a> {
+    source_sha256: &'a str,
+    settings: &'a BrowserJobSettings,
+    blocks: &'a [DocumentSourceBlock],
+}
+
+#[derive(Serialize)]
+#[serde(tag = "kind", content = "source", rename_all = "lowercase")]
+enum CacheSourceIdentity<'a> {
+    Image(ImageCacheIdentity<'a>),
+    Document(DocumentCacheIdentity<'a>),
+}
+
+fn image_cache_identity<'a>(
+    request: &'a ImagePipelineInput,
+    surrounding_context: &'a [ChapterContextUnit],
+) -> CacheSourceIdentity<'a> {
+    CacheSourceIdentity::Image(ImageCacheIdentity {
+        source_sha256: &request.source_sha256,
+        natural_width: request.natural_width,
+        natural_height: request.natural_height,
+        surface_kind: request.surface_kind,
+        reading_direction: request.reading_direction,
+        settings: &request.settings,
+        surrounding_context,
+    })
+}
+
+fn document_cache_identity(request: &DocumentJobRequest) -> CacheSourceIdentity<'_> {
+    CacheSourceIdentity::Document(DocumentCacheIdentity {
+        source_sha256: &request.source_sha256,
+        settings: &request.settings,
+        blocks: &request.blocks,
+    })
 }
 
 #[derive(Debug)]
@@ -153,12 +338,25 @@ impl ResultCache {
         }
     }
 
-    pub(crate) fn key(request: &BrowserJobRequest) -> Result<String> {
-        Self::key_with_pipeline_fingerprint(request, &pipeline_fingerprint()?)
+    pub(crate) fn key_image(
+        request: &ImagePipelineInput,
+        surrounding_context: &[ChapterContextUnit],
+    ) -> Result<String> {
+        Self::key_with_pipeline_fingerprint(
+            image_cache_identity(request, surrounding_context),
+            &pipeline_fingerprint()?,
+        )
+    }
+
+    pub(crate) fn key_document(request: &DocumentJobRequest) -> Result<String> {
+        Self::key_with_pipeline_fingerprint(
+            document_cache_identity(request),
+            &pipeline_fingerprint()?,
+        )
     }
 
     fn key_with_pipeline_fingerprint(
-        request: &BrowserJobRequest,
+        request: CacheSourceIdentity<'_>,
         pipeline_fingerprint: &str,
     ) -> Result<String> {
         let material = serde_json::to_vec(&(
@@ -171,55 +369,31 @@ impl ResultCache {
         Ok(sha256_hex(&material))
     }
 
-    pub(crate) fn load(&self, request: &BrowserJobRequest) -> Result<Option<CachedJob>> {
+    pub(crate) fn load_image(
+        &self,
+        request: &ImagePipelineInput,
+        surrounding_context: &[ChapterContextUnit],
+    ) -> Result<Option<CachedImageJob>> {
         let pipeline_fingerprint = pipeline_fingerprint()?;
-        let key = Self::key_with_pipeline_fingerprint(request, &pipeline_fingerprint)?;
-        let path = self.entry_path(&key);
-        let file = match File::open(&path) {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => {
-                return Err(error).with_context(|| format!("open result cache {}", path.display()));
-            }
+        let key = Self::key_with_pipeline_fingerprint(
+            image_cache_identity(request, surrounding_context),
+            &pipeline_fingerprint,
+        )?;
+        let Some(stored) = self.load_stored(&key, &pipeline_fingerprint)? else {
+            return Ok(None);
         };
-        let metadata = file
-            .metadata()
-            .with_context(|| format!("inspect result cache {}", path.display()))?;
-        if !metadata.is_file() {
-            bail!("result cache entry is not a regular file");
-        }
-        if metadata.len() > self.max_entry_bytes {
-            bail!(
-                "result cache entry exceeds the {} byte file limit",
-                self.max_entry_bytes
-            );
-        }
-        let mut bytes = Vec::with_capacity(
-            usize::try_from(metadata.len()).context("result cache entry does not fit in memory")?,
-        );
-        BufReader::new(file)
-            .take(self.max_entry_bytes.saturating_add(1))
-            .read_to_end(&mut bytes)
-            .with_context(|| format!("read result cache {}", path.display()))?;
-        if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > self.max_entry_bytes {
-            bail!(
-                "result cache entry exceeds the {} byte file limit",
-                self.max_entry_bytes
-            );
-        }
-        let stored: StoredJob = serde_json::from_slice(&bytes)
-            .with_context(|| format!("parse result cache {}", path.display()))?;
-        if stored.schema != RESULT_CACHE_SCHEMA
-            || stored.build_fingerprint != BUILD_FINGERPRINT
-            || stored.pipeline_fingerprint != pipeline_fingerprint
-            || stored.key != key
-        {
-            bail!("result cache identity does not match the current build");
-        }
 
-        let mut regions = Vec::with_capacity(stored.regions.len());
+        let StoredChapterResult::Image {
+            regions: stored_regions,
+            preserved,
+        } = stored.result
+        else {
+            bail!("result cache modality does not match the image request");
+        };
+
+        let mut regions = Vec::with_capacity(stored_regions.len());
         let mut decoded_patch_bytes = 0_u64;
-        for stored_region in stored.regions {
+        for stored_region in stored_regions {
             stored_region
                 .region
                 .validate()
@@ -255,23 +429,103 @@ impl ResultCache {
                 );
             }
             validate_cached_png(&patch_png, self.max_decoded_patch_bytes)?;
-            regions.push(CachedRegion {
+            regions.push(CachedImageRegion {
                 region: stored_region.region,
                 lookup_context: stored_region.lookup_context,
                 patch_png: Arc::from(patch_png),
             });
         }
-        let cached = CachedJob {
-            regions,
-            preserved_artwork: stored.preserved_artwork,
-            unreadable_regions: stored.unreadable_regions,
-        };
+        let cached = CachedImageJob { regions, preserved };
         cached.validate()?;
         Ok(Some(cached))
     }
 
-    pub(crate) fn invalidate(&self, request: &BrowserJobRequest) -> Result<()> {
-        let path = self.entry_path(&Self::key(request)?);
+    pub(crate) fn load_document(
+        &self,
+        request: &DocumentJobRequest,
+    ) -> Result<Option<CachedDocumentJob>> {
+        let pipeline_fingerprint = pipeline_fingerprint()?;
+        let key = Self::key_with_pipeline_fingerprint(
+            document_cache_identity(request),
+            &pipeline_fingerprint,
+        )?;
+        let Some(stored) = self.load_stored(&key, &pipeline_fingerprint)? else {
+            return Ok(None);
+        };
+        let StoredChapterResult::Document {
+            blocks,
+            preserved,
+            lookup_contexts,
+        } = stored.result
+        else {
+            bail!("result cache modality does not match the document request");
+        };
+        let cached = CachedDocumentJob {
+            blocks,
+            preserved,
+            lookup_contexts: lookup_contexts
+                .into_iter()
+                .map(|stored| (stored.item_id, stored.context))
+                .collect(),
+        };
+        cached.validate_against(request)?;
+        Ok(Some(cached))
+    }
+
+    fn load_stored(&self, key: &str, pipeline_fingerprint: &str) -> Result<Option<StoredJob>> {
+        let path = self.entry_path(key);
+        let file = match File::open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(error).with_context(|| format!("open result cache {}", path.display()));
+            }
+        };
+        let metadata = file
+            .metadata()
+            .with_context(|| format!("inspect result cache {}", path.display()))?;
+        if !metadata.is_file() || metadata.len() > self.max_entry_bytes {
+            bail!("result cache entry is not a bounded regular file");
+        }
+        let mut bytes = Vec::with_capacity(
+            usize::try_from(metadata.len()).context("result cache entry does not fit in memory")?,
+        );
+        BufReader::new(file)
+            .take(self.max_entry_bytes.saturating_add(1))
+            .read_to_end(&mut bytes)
+            .with_context(|| format!("read result cache {}", path.display()))?;
+        if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > self.max_entry_bytes {
+            bail!("result cache entry exceeds its byte limit");
+        }
+        let stored: StoredJob = serde_json::from_slice(&bytes)
+            .with_context(|| format!("parse result cache {}", path.display()))?;
+        if stored.schema != RESULT_CACHE_SCHEMA
+            || stored.build_fingerprint != BUILD_FINGERPRINT
+            || stored.pipeline_fingerprint != pipeline_fingerprint
+            || stored.key != key
+        {
+            bail!("result cache identity does not match the current build");
+        }
+        Ok(Some(stored))
+    }
+
+    pub(crate) fn invalidate_image(
+        &self,
+        request: &ImagePipelineInput,
+        surrounding_context: &[ChapterContextUnit],
+    ) -> Result<()> {
+        let path = self.entry_path(&Self::key_image(request, surrounding_context)?);
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => {
+                Err(error).with_context(|| format!("invalidate result cache {}", path.display()))
+            }
+        }
+    }
+
+    pub(crate) fn invalidate_document(&self, request: &DocumentJobRequest) -> Result<()> {
+        let path = self.entry_path(&Self::key_document(request)?);
         match fs::remove_file(&path) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -284,13 +538,20 @@ impl ResultCache {
     /// Persist one complete job in a single atomic rename. Callers invoke this
     /// only after visible processing has finished; no tile/OCR/translation
     /// phase performs synchronous intermediate writes.
-    pub(crate) fn store(&self, request: &BrowserJobRequest, job: &CachedJob) -> Result<()> {
+    pub(crate) fn store_image(
+        &self,
+        request: &ImagePipelineInput,
+        surrounding_context: &[ChapterContextUnit],
+        job: &CachedImageJob,
+    ) -> Result<()> {
         job.validate().context("validate completed result cache")?;
         fs::create_dir_all(&self.root)
             .with_context(|| format!("create result cache {}", self.root.display()))?;
         let pipeline_fingerprint = pipeline_fingerprint()?;
-        let key = Self::key_with_pipeline_fingerprint(request, &pipeline_fingerprint)?;
-        let target = self.entry_path(&key);
+        let key = Self::key_with_pipeline_fingerprint(
+            image_cache_identity(request, surrounding_context),
+            &pipeline_fingerprint,
+        )?;
         let mut decoded_patch_bytes = 0_u64;
         let regions = job
             .regions
@@ -329,10 +590,51 @@ impl ResultCache {
             build_fingerprint: BUILD_FINGERPRINT.to_owned(),
             pipeline_fingerprint,
             key: key.clone(),
-            regions,
-            preserved_artwork: job.preserved_artwork.clone(),
-            unreadable_regions: job.unreadable_regions.clone(),
+            result: StoredChapterResult::Image {
+                regions,
+                preserved: job.preserved.clone(),
+            },
         };
+
+        self.store_stored(stored)
+    }
+
+    pub(crate) fn store_document(
+        &self,
+        request: &DocumentJobRequest,
+        job: &CachedDocumentJob,
+    ) -> Result<()> {
+        job.validate_against(request)
+            .context("validate completed document cache")?;
+        fs::create_dir_all(&self.root)
+            .with_context(|| format!("create result cache {}", self.root.display()))?;
+        let pipeline_fingerprint = pipeline_fingerprint()?;
+        let key = Self::key_with_pipeline_fingerprint(
+            document_cache_identity(request),
+            &pipeline_fingerprint,
+        )?;
+        self.store_stored(StoredJob {
+            schema: RESULT_CACHE_SCHEMA.to_owned(),
+            build_fingerprint: BUILD_FINGERPRINT.to_owned(),
+            pipeline_fingerprint,
+            key,
+            result: StoredChapterResult::Document {
+                blocks: job.blocks.clone(),
+                preserved: job.preserved.clone(),
+                lookup_contexts: job
+                    .lookup_contexts
+                    .iter()
+                    .map(|(item_id, context)| StoredLookupContext {
+                        item_id: item_id.clone(),
+                        context: context.clone(),
+                    })
+                    .collect(),
+            },
+        })
+    }
+
+    fn store_stored(&self, stored: StoredJob) -> Result<()> {
+        let target = self.entry_path(&stored.key);
 
         let mut temporary = NamedTempFile::new_in(&self.root)
             .with_context(|| format!("create atomic cache file in {}", self.root.display()))?;
@@ -477,82 +779,96 @@ fn validate_cached_png(bytes: &[u8], max_decoded_bytes: u64) -> Result<()> {
 mod tests {
     use super::*;
     use crate::contracts::{
-        BrowserTextLayout, BrowserTextStyle, FontCategory, HskLevel, HskRepairState,
-        NormalizedRect, PatchMimeType, Point, RegionPatch, TextAlignment, TranslatedHskStatus,
-        WritingMode,
+        DocumentJobRequest, HskLevel, JobUpdate, JobUpdatesResponse, LearningMode, NormalizedRect,
     };
     use hsk_control::{ProperName, ProperNameReason};
     use image::{DynamicImage, ImageFormat};
 
-    fn region(id: &str) -> TranslatedRegion {
-        let polygon = vec![
-            Point { x: 0.1, y: 0.1 },
-            Point { x: 0.2, y: 0.1 },
-            Point { x: 0.2, y: 0.2 },
-        ];
-        TranslatedRegion {
-            id: id.to_owned(),
-            text_polygon: polygon.clone(),
-            bubble_polygon: Some(polygon),
-            patch: RegionPatch {
-                blob_id: format!("patch-{id}"),
-                mime_type: PatchMimeType::Png,
-                rect: NormalizedRect {
-                    x: 0.1,
-                    y: 0.1,
-                    width: 0.1,
-                    height: 0.1,
-                },
-            },
-            source_english: "Hello".to_owned(),
-            base_chinese: "\u{4f60}\u{597d}".to_owned(),
-            displayed_chinese: "\u{4f60}\u{597d}".to_owned(),
-            pinyin: "n\u{01d0} h\u{01ce}o".to_owned(),
-            ocr_confidence: 0.99,
-            reading_order: 0,
-            role: Some(crate::contracts::TranslatedRegionRole::Dialogue),
-            context_group: None,
-            confidence_evidence: Some(crate::contracts::RegionConfidenceEvidence {
-                ocr_consensus: 0.99,
-                geometry_coverage: 1.0,
-                context_consistency: 1.0,
-                cleanup_score: 1.0,
-            }),
-            style: BrowserTextStyle {
-                font_id: "hmt-sans".to_owned(),
-                category: FontCategory::Sans,
-                weight: 600,
-                italic_degrees: 0.0,
-                foreground: "#000".to_owned(),
-                outline_color: None,
-                outline_width_ratio: 0.0,
-                shadow_color: None,
-                shadow_x_ratio: 0.0,
-                shadow_y_ratio: 0.0,
-                alignment: TextAlignment::Center,
-                writing_mode: WritingMode::HorizontalTb,
-                line_height: 1.1,
-                letter_spacing_em: 0.0,
-                color_bands: Vec::new(),
-            },
-            layout: BrowserTextLayout {
-                suggested_lines: vec!["\u{4f60}\u{597d}".to_owned()],
-                font_size_to_image_width: 0.02,
-                safe_polygon: vec![
-                    Point { x: 0.1, y: 0.1 },
-                    Point { x: 0.2, y: 0.1 },
-                    Point { x: 0.2, y: 0.2 },
-                ],
-            },
-            hsk: TranslatedHskStatus {
-                requested_level: HskLevel::Two,
-                learning_mode: crate::contracts::LearningMode::Natural,
-                strictly_valid: true,
-                level_coverage: 1.0,
-                above_level_tokens: Vec::new(),
-                teaching_terms: Vec::new(),
-                repair_state: HskRepairState::NotNeeded,
-            },
+    fn image_request() -> Result<ImagePipelineInput> {
+        Ok(
+            serde_json::from_str::<crate::contracts::ImageJobRequest>(include_str!(
+                "../../../fixtures/contracts/job-request.valid.json"
+            ))?
+            .pipeline_input(),
+        )
+    }
+
+    fn document_request() -> Result<DocumentJobRequest> {
+        Ok(serde_json::from_str(include_str!(
+            "../../../fixtures/contracts/document-job-request.valid.json"
+        ))?)
+    }
+
+    fn image_region() -> ImageRegionReady {
+        let response: JobUpdatesResponse = serde_json::from_str(include_str!(
+            "../../../fixtures/contracts/job-updates.success.json"
+        ))
+        .expect("valid image update fixture");
+        response
+            .updates
+            .into_iter()
+            .find_map(|update| match update {
+                JobUpdate::ImageRegionReady { region, .. } => Some(*region),
+                _ => None,
+            })
+            .expect("image fixture has a translated region")
+    }
+
+    fn document_job() -> CachedDocumentJob {
+        let response: JobUpdatesResponse = serde_json::from_str(include_str!(
+            "../../../fixtures/contracts/document-updates.success.json"
+        ))
+        .expect("valid document update fixture");
+        let mut blocks = Vec::new();
+        let mut preserved = Vec::new();
+        for update in response.updates {
+            match update {
+                JobUpdate::DocumentBlockReady { block, .. } => blocks.push(block),
+                JobUpdate::DocumentBlockPreserved { block, .. } => preserved.push(block),
+                _ => {}
+            }
+        }
+        let lookup_contexts = blocks
+            .iter()
+            .map(|block| {
+                (
+                    block.item_id.clone(),
+                    ItemLookupContext {
+                        source_text: block.text.source_text.clone(),
+                        base_chinese: block.text.base_chinese.clone(),
+                        displayed_chinese: block.text.displayed_chinese.clone(),
+                        proper_names: Vec::new(),
+                    },
+                )
+            })
+            .chain(preserved.iter().map(|block| {
+                (
+                    block.item_id.clone(),
+                    ItemLookupContext {
+                        source_text: block.source_text.clone(),
+                        base_chinese: block.source_text.clone(),
+                        displayed_chinese: block.source_text.clone(),
+                        proper_names: Vec::new(),
+                    },
+                )
+            }))
+            .collect();
+        CachedDocumentJob {
+            blocks,
+            preserved,
+            lookup_contexts,
+        }
+    }
+
+    fn lookup_context(region: &ImageRegionReady) -> ItemLookupContext {
+        ItemLookupContext {
+            source_text: region.text.source_text.clone(),
+            base_chinese: region.text.base_chinese.clone(),
+            displayed_chinese: region.text.displayed_chinese.clone(),
+            proper_names: vec![ProperName {
+                text: "小明".to_owned(),
+                reason: ProperNameReason::PersonName,
+            }],
         }
     }
 
@@ -560,245 +876,231 @@ mod tests {
         let mut cursor = Cursor::new(Vec::new());
         DynamicImage::new_rgba8(2, 2)
             .write_to(&mut cursor, ImageFormat::Png)
-            .unwrap();
+            .expect("encode test PNG");
         Arc::from(cursor.into_inner())
     }
 
-    fn preserved_artwork() -> PreservedArtworkRegion {
-        PreservedArtworkRegion {
-            id: "artwork-a".to_owned(),
-            text_polygon: vec![
-                Point { x: 0.1, y: 0.1 },
-                Point { x: 0.2, y: 0.1 },
-                Point { x: 0.2, y: 0.2 },
-                Point { x: 0.1, y: 0.2 },
-            ],
-            source_english: "MYUNGWANG SWORD TECHNIQUE".to_owned(),
-            ocr_confidence: 0.98,
-            reading_order: 1,
-            translated_chinese: None,
-            pinyin: None,
-            teaching_terms: Vec::new(),
-        }
-    }
-
-    fn unreadable_region() -> UnreadableRegion {
-        UnreadableRegion {
-            id: "unreadable-a".to_owned(),
-            text_polygon: vec![
-                Point { x: 0.3, y: 0.3 },
-                Point { x: 0.4, y: 0.3 },
-                Point { x: 0.4, y: 0.4 },
-                Point { x: 0.3, y: 0.4 },
-            ],
-            source_english: "UNKNOWN TEXT".to_owned(),
-            ocr_confidence: 0.3,
-            reading_order: 2,
-            reason: "Source pixels were preserved.".to_owned(),
-        }
-    }
-
-    fn lookup_context() -> RegionLookupContext {
-        RegionLookupContext {
-            source_english: "Hello".to_owned(),
-            base_chinese: "\u{4f60}\u{597d}".to_owned(),
-            displayed_chinese: "\u{4f60}\u{597d}".to_owned(),
-            proper_names: vec![ProperName {
-                text: "\u{5c0f}\u{660e}".to_owned(),
-                reason: ProperNameReason::PersonName,
+    fn image_job() -> CachedImageJob {
+        let region = image_region();
+        CachedImageJob {
+            regions: vec![CachedImageRegion {
+                lookup_context: lookup_context(&region),
+                region,
+                patch_png: png(),
             }],
+            preserved: Vec::new(),
         }
     }
 
-    fn request() -> Result<BrowserJobRequest> {
-        Ok(
-            serde_json::from_str::<crate::contracts::CreateJobRequest>(include_str!(
-                "../../../fixtures/contracts/job-request.valid.json"
-            ))?
-            .pipeline_request(),
-        )
+    fn context(text: &str) -> ChapterContextUnit {
+        ChapterContextUnit {
+            source_index: 0,
+            item_order: 0,
+            item_id: "context-0".to_owned(),
+            source_text: text.to_owned(),
+            displayed_text: Some("上下文".to_owned()),
+        }
     }
 
     #[test]
-    fn key_scopes_chapter_context_and_page_order_but_ignores_dom_and_viewport_identity()
-    -> Result<()> {
-        let first = serde_json::from_str::<crate::contracts::CreateJobRequest>(include_str!(
+    fn image_key_excludes_transport_identity_and_includes_real_context() -> Result<()> {
+        let first_wire: crate::contracts::ImageJobRequest = serde_json::from_str(include_str!(
             "../../../fixtures/contracts/job-request.valid.json"
         ))?;
-        let mut same_chapter = first.clone();
-        same_chapter.client_image_id = "different-dom-image".to_owned();
-        same_chapter.visible_rects = vec![NormalizedRect {
+        let mut transport_only = first_wire.clone();
+        transport_only.client_image_id = "different-dom-image".to_owned();
+        transport_only.page_session_id = "different-session".to_owned();
+        transport_only.visible_rects = vec![NormalizedRect {
             x: 0.25,
             y: 0.25,
             width: 0.5,
             height: 0.5,
         }];
-        let mut another_page = same_chapter.clone();
-        another_page.page_index = another_page.page_index.saturating_add(7);
-        let mut other_chapter = another_page.clone();
-        other_chapter.page_session_id = "different-page-session".to_owned();
+        let first = first_wire.pipeline_input();
+        let same = transport_only.pipeline_input();
 
         assert_eq!(
-            ResultCache::key(&first.pipeline_request())?,
-            ResultCache::key(&same_chapter.pipeline_request())?
+            ResultCache::key_image(&first, &[context("before")])?,
+            ResultCache::key_image(&same, &[context("before")])?
         );
         assert_ne!(
-            ResultCache::key(&first.pipeline_request())?,
-            ResultCache::key(&another_page.pipeline_request())?
+            ResultCache::key_image(&first, &[context("before")])?,
+            ResultCache::key_image(&same, &[context("changed")])?
         );
+
+        let mut strict = same;
+        strict.settings.learning_mode = LearningMode::Strict;
+        strict.settings.hsk_level = HskLevel::Three;
         assert_ne!(
-            ResultCache::key(&first.pipeline_request())?,
-            ResultCache::key(&other_chapter.pipeline_request())?
+            ResultCache::key_image(&first, &[context("before")])?,
+            ResultCache::key_image(&strict, &[context("before")])?
         );
         Ok(())
     }
 
     #[test]
-    fn atomic_round_trip_uses_exact_request_identity() -> Result<()> {
-        let directory = tempfile::tempdir()?;
-        let cache = ResultCache::new(directory.path().to_path_buf());
-        let request = request()?;
-        let job = CachedJob {
-            regions: vec![CachedRegion {
-                region: region("a"),
-                lookup_context: lookup_context(),
-                patch_png: png(),
-            }],
-            preserved_artwork: vec![preserved_artwork()],
-            unreadable_regions: vec![unreadable_region()],
-        };
+    fn document_key_excludes_session_and_includes_ordered_source_and_settings() -> Result<()> {
+        let first = document_request()?;
+        let mut same = first.clone();
+        same.page_session_id = "another-session".to_owned();
+        assert_eq!(
+            ResultCache::key_document(&first)?,
+            ResultCache::key_document(&same)?
+        );
 
-        cache.store(&request, &job)?;
-        cache.store(&request, &job)?;
-        let loaded = cache.load(&request)?.expect("cache hit");
+        same.blocks[1].text.push_str(" Changed.");
+        same.source_sha256 = crate::contracts::canonical_document_sha256(&same.blocks);
+        assert_ne!(
+            ResultCache::key_document(&first)?,
+            ResultCache::key_document(&same)?
+        );
 
-        assert_eq!(loaded.regions.len(), 1);
-        assert_eq!(loaded.regions[0].region.id, "a");
-        assert_eq!(loaded.regions[0].lookup_context, lookup_context());
-        assert_eq!(loaded.regions[0].patch_png.as_ref(), png().as_ref());
-        assert_eq!(loaded.preserved_artwork, vec![preserved_artwork()]);
-        assert_eq!(loaded.unreadable_regions, vec![unreadable_region()]);
+        let mut strict = first.clone();
+        strict.settings.learning_mode = LearningMode::Strict;
+        assert_ne!(
+            ResultCache::key_document(&first)?,
+            ResultCache::key_document(&strict)?
+        );
         Ok(())
     }
 
     #[test]
-    fn byte_limit_evicts_old_entries() -> Result<()> {
+    fn tagged_image_and_document_entries_round_trip() -> Result<()> {
         let directory = tempfile::tempdir()?;
-        let cache = ResultCache::with_limit(directory.path().to_path_buf(), 1);
-        let request = request()?;
-        let job = CachedJob {
-            regions: vec![CachedRegion {
-                region: region("a"),
-                lookup_context: lookup_context(),
-                patch_png: png(),
-            }],
-            preserved_artwork: Vec::new(),
-            unreadable_regions: Vec::new(),
-        };
+        let cache = ResultCache::new(directory.path().to_path_buf());
+        let image_request = image_request()?;
+        let image_context = [context("before")];
+        let image = image_job();
+        cache.store_image(&image_request, &image_context, &image)?;
+        let loaded_image = cache
+            .load_image(&image_request, &image_context)?
+            .expect("image cache hit");
+        assert_eq!(loaded_image.regions.len(), 1);
+        assert_eq!(
+            loaded_image.regions[0].region.item_id,
+            image.regions[0].region.item_id
+        );
+        assert_eq!(loaded_image.regions[0].patch_png.as_ref(), png().as_ref());
 
-        assert!(cache.store(&request, &job).is_err());
+        let document_request = document_request()?;
+        let document = document_job();
+        cache.store_document(&document_request, &document)?;
+        let loaded_document = cache
+            .load_document(&document_request)?
+            .expect("document cache hit");
+        assert_eq!(loaded_document.blocks.len(), 1);
+        assert_eq!(loaded_document.preserved.len(), 1);
+        assert_eq!(loaded_document.lookup_contexts.len(), 2);
         Ok(())
     }
 
     #[test]
-    fn load_rejects_an_entry_larger_than_its_file_bound() -> Result<()> {
+    fn document_cache_rejects_missing_reordered_or_source_mismatched_terminals() -> Result<()> {
+        let request = document_request()?;
+        let mut missing = document_job();
+        missing.preserved.clear();
+        missing
+            .lookup_contexts
+            .retain(|(item_id, _)| item_id != "block-1");
+        assert!(missing.validate_against(&request).is_err());
+
+        let mut wrong_position = document_job();
+        wrong_position.blocks[0].source_index = 99;
+        assert!(wrong_position.validate_against(&request).is_err());
+
+        let mut wrong_source = document_job();
+        wrong_source.blocks[0].text.source_text = "Different source".to_owned();
+        assert!(wrong_source.validate_against(&request).is_err());
+
         let directory = tempfile::tempdir()?;
-        let request = request()?;
         let cache = ResultCache::new(directory.path().to_path_buf());
-        cache.store(
-            &request,
-            &CachedJob {
-                regions: vec![CachedRegion {
-                    region: region("a"),
-                    lookup_context: lookup_context(),
-                    patch_png: png(),
-                }],
-                preserved_artwork: Vec::new(),
-                unreadable_regions: Vec::new(),
+        assert!(cache.store_document(&request, &wrong_source).is_err());
+
+        let valid = document_job();
+        cache.store_document(&request, &valid)?;
+        let entry = cache.entry_path(&ResultCache::key_document(&request)?);
+        let mut stored: StoredJob = serde_json::from_slice(&fs::read(&entry)?)?;
+        let StoredChapterResult::Document { blocks, .. } = &mut stored.result else {
+            panic!("expected document cache entry");
+        };
+        blocks[0].text.source_text = "Tampered source".to_owned();
+        fs::write(&entry, serde_json::to_vec(&stored)?)?;
+        assert!(cache.load_document(&request).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn tagged_modality_mismatch_is_rejected() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let cache = ResultCache::new(directory.path().to_path_buf());
+        let image_request = image_request()?;
+        let document_request = document_request()?;
+        let pipeline_fingerprint = pipeline_fingerprint()?;
+        let image_key = ResultCache::key_document(&document_request)?;
+        fs::create_dir_all(directory.path())?;
+        let stored = StoredJob {
+            schema: RESULT_CACHE_SCHEMA.to_owned(),
+            build_fingerprint: BUILD_FINGERPRINT.to_owned(),
+            pipeline_fingerprint,
+            key: image_key.clone(),
+            result: StoredChapterResult::Image {
+                regions: Vec::new(),
+                preserved: Vec::new(),
             },
-        )?;
-        let entry_bytes = fs::metadata(cache.entry_path(&ResultCache::key(&request)?))?.len();
-        let bounded =
+        };
+        fs::write(cache.entry_path(&image_key), serde_json::to_vec(&stored)?)?;
+
+        assert!(cache.load_document(&document_request).is_err());
+        assert!(cache.load_image(&image_request, &[])?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn bounded_cache_rejects_oversize_entries_and_decoded_patches() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let image_request = image_request()?;
+        let image = image_job();
+        let tiny = ResultCache::with_limit(directory.path().to_path_buf(), 1);
+        assert!(tiny.store_image(&image_request, &[], &image).is_err());
+
+        let directory = tempfile::tempdir()?;
+        let cache = ResultCache::new(directory.path().to_path_buf());
+        cache.store_image(&image_request, &[], &image)?;
+        let entry_bytes =
+            fs::metadata(cache.entry_path(&ResultCache::key_image(&image_request, &[])?))?.len();
+        let file_bounded =
             ResultCache::with_load_limits(directory.path().to_path_buf(), entry_bytes - 1, 1024);
-
-        assert!(bounded.load(&request).is_err());
+        assert!(file_bounded.load_image(&image_request, &[]).is_err());
+        let patch_bounded =
+            ResultCache::with_load_limits(directory.path().to_path_buf(), 1024 * 1024, 4);
+        assert!(patch_bounded.load_image(&image_request, &[]).is_err());
         Ok(())
     }
 
     #[test]
-    fn load_bounds_aggregate_decoded_patch_bytes_before_decode() -> Result<()> {
-        let directory = tempfile::tempdir()?;
-        let request = request()?;
-        let cache = ResultCache::new(directory.path().to_path_buf());
-        cache.store(
-            &request,
-            &CachedJob {
-                regions: vec![
-                    CachedRegion {
-                        region: region("a"),
-                        lookup_context: lookup_context(),
-                        patch_png: png(),
-                    },
-                    CachedRegion {
-                        region: region("b"),
-                        lookup_context: lookup_context(),
-                        patch_png: png(),
-                    },
-                ],
-                preserved_artwork: Vec::new(),
-                unreadable_regions: Vec::new(),
-            },
-        )?;
-        let bounded =
-            ResultCache::with_load_limits(directory.path().to_path_buf(), 1024 * 1024, 12);
-
-        assert!(bounded.load(&request).is_err());
-        Ok(())
-    }
-
-    #[test]
-    fn load_rejects_corrupt_compressed_png_data() -> Result<()> {
-        let directory = tempfile::tempdir()?;
-        let request = request()?;
-        let cache = ResultCache::new(directory.path().to_path_buf());
-        let mut corrupt = vec![137, 80, 78, 71, 13, 10, 26, 10];
-        corrupt.extend_from_slice(b"corrupt compressed data");
-        cache.store(
-            &request,
-            &CachedJob {
-                regions: vec![CachedRegion {
-                    region: region("a"),
-                    lookup_context: lookup_context(),
-                    patch_png: Arc::from(corrupt),
-                }],
-                preserved_artwork: Vec::new(),
-                unreadable_regions: Vec::new(),
-            },
-        )?;
-
-        assert!(cache.load(&request).is_err());
-        Ok(())
-    }
-
-    #[test]
-    fn load_miss_does_not_scan_or_mutate_unrelated_entries() -> Result<()> {
+    fn miss_never_scans_or_mutates_unrelated_files() -> Result<()> {
         let directory = tempfile::tempdir()?;
         let orphan = directory.path().join("orphan.json");
-        fs::write(&orphan, b"oversized")?;
+        fs::write(&orphan, b"unrelated")?;
         let cache = ResultCache::with_limit(directory.path().to_path_buf(), 4);
 
-        assert!(cache.load(&request()?)?.is_none());
+        assert!(cache.load_image(&image_request()?, &[])?.is_none());
         assert!(orphan.exists());
         Ok(())
     }
 
     #[test]
-    fn key_changes_with_the_pipeline_fingerprint() -> Result<()> {
-        let request = request()?;
-
+    fn key_changes_with_pipeline_fingerprint() -> Result<()> {
+        let request = document_request()?;
         assert_ne!(
-            ResultCache::key_with_pipeline_fingerprint(&request, "pipeline-a")?,
-            ResultCache::key_with_pipeline_fingerprint(&request, "pipeline-b")?
+            ResultCache::key_with_pipeline_fingerprint(
+                document_cache_identity(&request),
+                "pipeline-a"
+            )?,
+            ResultCache::key_with_pipeline_fingerprint(
+                document_cache_identity(&request),
+                "pipeline-b"
+            )?
         );
         Ok(())
     }

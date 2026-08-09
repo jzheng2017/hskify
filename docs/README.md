@@ -1,39 +1,35 @@
 # Hskify documentation
 
-These documents describe only the direct, performance-only Firefox build in
-the current code. The removed multilingual desktop documentation covered a
-different product surface: general RPC APIs, projects and history, provider
-configuration, broad hardware fallbacks, and page-wide translation workflows.
-It must not be used as Hskify documentation.
+These documents describe the current Windows/CUDA Firefox product. Hskify has
+one chapter controller and two exclusive reading modes: a structured document
+reader for light novels and the existing image renderer for manga and
+webtoons. There is no compatibility API, migrated storage schema, or alternate
+provider path.
 
 ## Read in this order
 
-- [Architecture](architecture.md): components, data flow, scheduling, caches,
-  security, and the RTX 4080 SUPER/CUDA-only boundary.
-- [Browser contract](browser-contract.md): exact unversioned routes, flat
-  chapter events, strict build fingerprint, and patch-first rendering.
+- [Architecture](architecture.md): classification, shared language service,
+  image/document pipelines, scheduling, cache, and runtime boundaries.
+- [Browser contract](browser-contract.md): exact unversioned routes, payload
+  limits, focus updates, and final-only job events.
+- [Firefox implementation](../extensions/firefox/IMPLEMENTATION.md): cloned-DOM
+  extraction, render ownership, recovery, and interaction behavior.
 - [Browser companion implementation](../crates/browser-companion/IMPLEMENTATION.md):
-  code-level daemon and pipeline behavior.
-- [Real-reader v2 corpus and evidence](real-reader-v2.md): the local,
-  content-addressed chapter contract and packaged Firefox release gate.
-- [Manga pipeline audit](manga-pipeline-audit.md): correctness findings,
-  structural corrections, holdout timing, and the remaining verdict.
-- [Model benchmark](model-benchmark.md): the locked translation model and
-  quality-evaluation requirements.
-- [External component evaluation](component-evaluation.md): established work
-  retained, rejected candidates, and cleanup policy.
-- [Firefox manual checklist](firefox-manual-test-checklist.md): packaged
-  browser checks that cannot be replaced by unit tests.
-- [Maintainer guide](maintainer-guide.md): invariants and documentation update
-  rules.
-- [Licence inventory](licence-inventory.md): runtime resource and data audit
-  status.
+  native runtime and pipeline details.
+- [Real-reader v2 corpus](real-reader-v2.md): image-reader correctness and
+  performance evidence.
+- [Manga pipeline audit](manga-pipeline-audit.md): image-pipeline correctness
+  findings and evidence requirements.
+- [Model benchmark](model-benchmark.md): translation quality requirements.
+- [External component evaluation](component-evaluation.md): retained and
+  rejected image-processing components.
+- [Firefox manual checklist](firefox-manual-test-checklist.md): packaged checks
+  for both chapter modes.
+- [Maintainer guide](maintainer-guide.md): invariants and verification.
+- [Licence inventory](licence-inventory.md): shipped code, data, model, font,
+  and browser dependency obligations.
 
 ## Accepted decisions
 
 - [Historical story-region processing decision](architecture-decisions/0004-progressive-story-regions.md)
 - [Local Mandarin voice selection](architecture-decisions/0005-mandarin-pronunciation-voice-selection.md)
-
-Historical gate notes and inherited desktop documentation were removed because
-they described a versioned, project-backed, page-result architecture that is
-not present in the current browser build.

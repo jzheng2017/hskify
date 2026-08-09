@@ -1,18 +1,31 @@
 use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 /// Exact build affinity shared by the extension, native host, and daemon.
 ///
 /// This is deliberately not a negotiable protocol version. A mismatched build
 /// must restart the native/daemon pair that shipped with the extension.
-pub const BUILD_FINGERPRINT: &str = "hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-07-28-r7";
+pub const BUILD_FINGERPRINT: &str = "hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-08-09-r8";
 pub const HSK_STANDARD: &str = "2.0";
 pub const SOURCE_LANGUAGE: &str = "en";
 pub const TARGET_LANGUAGE: &str = "zh-CN";
 pub const MAX_VISIBLE_RECTS: usize = 64;
+pub const MAX_VISIBLE_BLOCK_IDS: usize = 64;
 pub const MAX_CHAPTER_PAGE_ORDER: usize = 100_000;
+pub const MAX_DOCUMENT_BYTES: usize = 1024 * 1024;
+pub const MAX_DOCUMENT_BLOCKS: usize = 2_000;
+pub const MAX_DOCUMENT_BLOCK_BYTES: usize = 16 * 1024;
+const MAX_ITEM_ID_CHARS: usize = 512;
+const MAX_OUTPUT_TEXT_CHARS: usize = 16 * 1024;
+const MAX_PINYIN_CHARS: usize = 32 * 1024;
+const MAX_MESSAGE_CHARS: usize = 2_048;
+const MAX_POLYGON_POINTS: usize = 2_048;
+const MAX_HSK_ITEMS: usize = 512;
+const MAX_DEFINITIONS: usize = 32;
+const MAX_LOOKUP_STRING_CHARS: usize = 8_192;
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 #[error("{path}: {message}")]
@@ -65,6 +78,33 @@ fn require_nonempty_at_most(path: &str, value: &str, maximum: usize) -> Result<(
     }
 }
 
+fn require_at_most(path: &str, value: &str, maximum: usize) -> Result<(), ContractError> {
+    if value.chars().count() > maximum {
+        Err(ContractError::at(
+            path,
+            format!("must contain at most {maximum} characters"),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn require_nonempty_utf8_at_most(
+    path: &str,
+    value: &str,
+    maximum: usize,
+) -> Result<(), ContractError> {
+    require_nonempty(path, value)?;
+    if value.len() > maximum {
+        Err(ContractError::at(
+            path,
+            format!("must contain at most {maximum} UTF-8 bytes"),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 fn require_unit(path: &str, value: f32) -> Result<(), ContractError> {
     if value.is_finite() && (0.0..=1.0).contains(&value) {
         Ok(())
@@ -77,7 +117,11 @@ fn require_unit(path: &str, value: f32) -> Result<(), ContractError> {
 }
 
 fn require_sha256(path: &str, value: &str) -> Result<(), ContractError> {
-    if value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    if value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
         Ok(())
     } else {
         Err(ContractError::at(
@@ -88,10 +132,10 @@ fn require_sha256(path: &str, value: &str) -> Result<(), ContractError> {
 }
 
 fn require_polygon(path: &str, points: &[Point]) -> Result<(), ContractError> {
-    if points.len() < 3 {
+    if points.len() < 3 || points.len() > MAX_POLYGON_POINTS {
         return Err(ContractError::at(
             path,
-            "must contain at least three points",
+            format!("must contain between 3 and {MAX_POLYGON_POINTS} points"),
         ));
     }
     for (index, point) in points.iter().enumerate() {
@@ -462,7 +506,7 @@ impl NormalizedRect {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct CreateJobRequest {
+pub struct ImageJobRequest {
     pub build_fingerprint: String,
     pub client_image_id: String,
     pub source_sha256: String,
@@ -470,38 +514,39 @@ pub struct CreateJobRequest {
     pub natural_width: u32,
     pub natural_height: u32,
     pub page_session_id: String,
-    pub page_index: u32,
-    pub chapter_page_order: Vec<u32>,
+    pub source_index: u32,
+    pub chapter_source_order: Vec<u32>,
     pub surface_kind: BrowserSurfaceKind,
+    pub reading_direction: ReadingDirection,
     pub settings: BrowserJobSettings,
     pub visible_rects: Vec<NormalizedRect>,
 }
 
-impl Validate for CreateJobRequest {
+impl Validate for ImageJobRequest {
     fn validate(&self) -> Result<(), ContractError> {
         require_build_fingerprint("buildFingerprint", &self.build_fingerprint)?;
         validate_job_fields(self)?;
-        if self.chapter_page_order.is_empty() {
+        if self.chapter_source_order.is_empty() {
             return Err(ContractError::at(
-                "chapterPageOrder",
-                "must contain at least the submitted page index",
+                "chapterSourceOrder",
+                "must contain at least the submitted source index",
             ));
         }
-        if self.chapter_page_order.len() > MAX_CHAPTER_PAGE_ORDER {
+        if self.chapter_source_order.len() > MAX_CHAPTER_PAGE_ORDER {
             return Err(ContractError::at(
-                "chapterPageOrder",
-                format!("must contain at most {MAX_CHAPTER_PAGE_ORDER} page indexes"),
+                "chapterSourceOrder",
+                format!("must contain at most {MAX_CHAPTER_PAGE_ORDER} source indexes"),
             ));
         }
-        if !self.chapter_page_order.contains(&self.page_index)
+        if !self.chapter_source_order.contains(&self.source_index)
             || self
-                .chapter_page_order
+                .chapter_source_order
                 .windows(2)
                 .any(|window| window[0] >= window[1])
         {
             return Err(ContractError::at(
-                "chapterPageOrder",
-                "must be strictly increasing and contain pageIndex",
+                "chapterSourceOrder",
+                "must be strictly increasing and contain sourceIndex",
             ));
         }
         if self.visible_rects.len() > MAX_VISIBLE_RECTS {
@@ -517,7 +562,7 @@ impl Validate for CreateJobRequest {
     }
 }
 
-fn validate_job_fields(request: &CreateJobRequest) -> Result<(), ContractError> {
+fn validate_job_fields(request: &ImageJobRequest) -> Result<(), ContractError> {
     require_nonempty("clientImageId", &request.client_image_id)?;
     require_sha256("sourceSha256", &request.source_sha256)?;
     if !matches!(
@@ -540,31 +585,33 @@ fn validate_job_fields(request: &CreateJobRequest) -> Result<(), ContractError> 
     Ok(())
 }
 
-/// Validated input passed from the HTTP boundary into the cleaning pipeline.
+/// Validated input passed from the HTTP boundary into the image pipeline.
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct BrowserJobRequest {
+pub(crate) struct ImagePipelineInput {
     pub source_sha256: String,
     pub source_mime_type: String,
     pub natural_width: u32,
     pub natural_height: u32,
     pub page_session_id: String,
-    pub page_index: u32,
-    pub chapter_page_order: Vec<u32>,
+    pub source_index: u32,
+    pub chapter_source_order: Vec<u32>,
     pub surface_kind: BrowserSurfaceKind,
+    pub reading_direction: ReadingDirection,
     pub settings: BrowserJobSettings,
 }
 
-impl CreateJobRequest {
-    pub(crate) fn pipeline_request(&self) -> BrowserJobRequest {
-        BrowserJobRequest {
+impl ImageJobRequest {
+    pub(crate) fn pipeline_input(&self) -> ImagePipelineInput {
+        ImagePipelineInput {
             source_sha256: self.source_sha256.clone(),
             source_mime_type: self.source_mime_type.clone(),
             natural_width: self.natural_width,
             natural_height: self.natural_height,
             page_session_id: self.page_session_id.clone(),
-            page_index: self.page_index,
-            chapter_page_order: self.chapter_page_order.clone(),
+            source_index: self.source_index,
+            chapter_source_order: self.chapter_source_order.clone(),
             surface_kind: self.surface_kind,
+            reading_direction: self.reading_direction,
             settings: self.settings.clone(),
         }
     }
@@ -591,8 +638,6 @@ pub struct BrowserJobSettings {
     pub target_language: String,
     pub hsk_standard: String,
     pub hsk_level: HskLevel,
-    pub reading_direction: ReadingDirection,
-    #[serde(default)]
     pub learning_mode: LearningMode,
 }
 
@@ -633,6 +678,171 @@ pub enum LearningMode {
     #[default]
     Natural,
     Strict,
+}
+
+/// Generic ordered input understood by the shared language service.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SourceSpanKind {
+    Prose,
+    Heading,
+    Dialogue,
+    Caption,
+    Thought,
+    Sfx,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SourceProvenance {
+    Dom,
+    Ocr,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ChapterKind {
+    Image,
+    Document,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WarmupRequest {
+    pub kind: ChapterKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DocumentSourceBlock {
+    pub item_id: String,
+    pub source_index: u32,
+    pub item_order: u32,
+    pub kind: SourceSpanKind,
+    pub provenance: SourceProvenance,
+    pub text: String,
+}
+
+impl DocumentSourceBlock {
+    fn validate_at(&self, path: &str) -> Result<(), ContractError> {
+        require_nonempty_at_most(&format!("{path}.itemId"), &self.item_id, 256)?;
+        if self.provenance != SourceProvenance::Dom {
+            return Err(ContractError::at(
+                format!("{path}.provenance"),
+                "document blocks must have DOM provenance",
+            ));
+        }
+        if self.text.trim().is_empty() {
+            return Err(ContractError::at(
+                format!("{path}.text"),
+                "must not be empty",
+            ));
+        }
+        if self.text.as_bytes().len() > MAX_DOCUMENT_BLOCK_BYTES {
+            return Err(ContractError::at(
+                format!("{path}.text"),
+                format!("must contain at most {MAX_DOCUMENT_BLOCK_BYTES} UTF-8 bytes"),
+            ));
+        }
+        if self.text.contains('\r') || self.text.contains('\0') || self.text.trim() != self.text {
+            return Err(ContractError::at(
+                format!("{path}.text"),
+                "must be deterministically normalized, trimmed text using LF line breaks",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DocumentJobRequest {
+    pub build_fingerprint: String,
+    pub page_session_id: String,
+    pub source_sha256: String,
+    pub settings: BrowserJobSettings,
+    pub blocks: Vec<DocumentSourceBlock>,
+}
+
+impl Validate for DocumentJobRequest {
+    fn validate(&self) -> Result<(), ContractError> {
+        require_build_fingerprint("buildFingerprint", &self.build_fingerprint)?;
+        require_nonempty_at_most("pageSessionId", &self.page_session_id, 256)?;
+        require_sha256("sourceSha256", &self.source_sha256)?;
+        self.settings.validate()?;
+        if self.blocks.is_empty() || self.blocks.len() > MAX_DOCUMENT_BLOCKS {
+            return Err(ContractError::at(
+                "blocks",
+                format!("must contain between 1 and {MAX_DOCUMENT_BLOCKS} blocks"),
+            ));
+        }
+        let mut ids = HashSet::with_capacity(self.blocks.len());
+        let mut previous = None;
+        for (index, block) in self.blocks.iter().enumerate() {
+            block.validate_at(&format!("blocks[{index}]"))?;
+            if !ids.insert(block.item_id.as_str()) {
+                return Err(ContractError::at(
+                    format!("blocks[{index}].itemId"),
+                    "must be unique",
+                ));
+            }
+            let position = (block.source_index, block.item_order);
+            if previous.is_some_and(|value| value >= position) {
+                return Err(ContractError::at(
+                    format!("blocks[{index}]"),
+                    "blocks must be strictly ordered by sourceIndex and itemOrder",
+                ));
+            }
+            previous = Some(position);
+        }
+        let serialized_bytes = serde_json::to_vec(self)
+            .map_err(|_| ContractError::at("$", "document request could not be serialized"))?
+            .len();
+        if serialized_bytes > MAX_DOCUMENT_BYTES {
+            return Err(ContractError::at(
+                "$",
+                format!("must contain at most {MAX_DOCUMENT_BYTES} UTF-8 bytes"),
+            ));
+        }
+        let canonical = canonical_document_sha256(&self.blocks);
+        if canonical != self.source_sha256 {
+            return Err(ContractError::at(
+                "sourceSha256",
+                "does not match the native canonical document hash",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Hashes the complete ordered text snapshot. The record and unit separators
+/// are literal bytes in the unversioned contract.
+#[must_use]
+pub fn canonical_document_sha256(blocks: &[DocumentSourceBlock]) -> String {
+    let mut hasher = Sha256::new();
+    for block in blocks {
+        let record = format!(
+            "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1e}",
+            block.item_id,
+            block.source_index,
+            block.item_order,
+            match block.kind {
+                SourceSpanKind::Prose => "prose",
+                SourceSpanKind::Heading => "heading",
+                SourceSpanKind::Dialogue => "dialogue",
+                SourceSpanKind::Caption => "caption",
+                SourceSpanKind::Thought => "thought",
+                SourceSpanKind::Sfx => "sfx",
+            },
+            match block.provenance {
+                SourceProvenance::Dom => "dom",
+                SourceProvenance::Ocr => "ocr",
+            },
+            block.text,
+        );
+        hasher.update(record.as_bytes());
+    }
+    format!("{:x}", hasher.finalize())
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -822,22 +1032,66 @@ impl BrowserTextLayout {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ViewportUpdateRequest {
-    pub visible_rects: Vec<NormalizedRect>,
-    pub active: bool,
+#[serde(
+    tag = "kind",
+    rename_all = "lowercase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum FocusUpdateRequest {
+    Image {
+        visible_rects: Vec<NormalizedRect>,
+        active: bool,
+    },
+    Document {
+        visible_block_ids: Vec<String>,
+        active: bool,
+    },
 }
 
-impl Validate for ViewportUpdateRequest {
-    fn validate(&self) -> Result<(), ContractError> {
-        if self.visible_rects.len() > MAX_VISIBLE_RECTS {
-            return Err(ContractError::at(
-                "visibleRects",
-                format!("must contain at most {MAX_VISIBLE_RECTS} rectangles"),
-            ));
+impl FocusUpdateRequest {
+    #[must_use]
+    pub fn active(&self) -> bool {
+        match self {
+            Self::Image { active, .. } | Self::Document { active, .. } => *active,
         }
-        for (index, rect) in self.visible_rects.iter().enumerate() {
-            rect.validate_at(&format!("visibleRects[{index}]"))?;
+    }
+}
+
+impl Validate for FocusUpdateRequest {
+    fn validate(&self) -> Result<(), ContractError> {
+        match self {
+            Self::Image { visible_rects, .. } => {
+                if visible_rects.len() > MAX_VISIBLE_RECTS {
+                    return Err(ContractError::at(
+                        "visibleRects",
+                        format!("must contain at most {MAX_VISIBLE_RECTS} rectangles"),
+                    ));
+                }
+                for (index, rect) in visible_rects.iter().enumerate() {
+                    rect.validate_at(&format!("visibleRects[{index}]"))?;
+                }
+            }
+            Self::Document {
+                visible_block_ids, ..
+            } => {
+                if visible_block_ids.len() > MAX_VISIBLE_BLOCK_IDS {
+                    return Err(ContractError::at(
+                        "visibleBlockIds",
+                        format!("must contain at most {MAX_VISIBLE_BLOCK_IDS} IDs"),
+                    ));
+                }
+                let mut ids = HashSet::with_capacity(visible_block_ids.len());
+                for (index, id) in visible_block_ids.iter().enumerate() {
+                    require_nonempty_at_most(&format!("visibleBlockIds[{index}]"), id, 256)?;
+                    if !ids.insert(id.as_str()) {
+                        return Err(ContractError::at(
+                            format!("visibleBlockIds[{index}]"),
+                            "must be unique",
+                        ));
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -908,15 +1162,27 @@ pub enum TeachingTermReason {
 impl TranslatedHskStatus {
     fn validate_at(&self, path: &str) -> Result<(), ContractError> {
         require_unit(&format!("{path}.levelCoverage"), self.level_coverage)?;
+        if self.above_level_tokens.len() > MAX_HSK_ITEMS {
+            return Err(ContractError::at(
+                format!("{path}.aboveLevelTokens"),
+                format!("must contain at most {MAX_HSK_ITEMS} items"),
+            ));
+        }
         let mut tokens = HashSet::with_capacity(self.above_level_tokens.len());
         for (index, token) in self.above_level_tokens.iter().enumerate() {
-            require_nonempty(&format!("{path}.aboveLevelTokens[{index}]"), token)?;
+            require_nonempty_at_most(&format!("{path}.aboveLevelTokens[{index}]"), token, 256)?;
             if !tokens.insert(token.as_str()) {
                 return Err(ContractError::at(
                     format!("{path}.aboveLevelTokens[{index}]"),
                     "duplicate above-level token",
                 ));
             }
+        }
+        if self.teaching_terms.len() > MAX_HSK_ITEMS {
+            return Err(ContractError::at(
+                format!("{path}.teachingTerms"),
+                format!("must contain at most {MAX_HSK_ITEMS} items"),
+            ));
         }
         if self.strictly_valid
             && (!self.above_level_tokens.is_empty() || !self.teaching_terms.is_empty())
@@ -929,13 +1195,13 @@ impl TranslatedHskStatus {
         let mut previous_end = 0;
         for (index, term) in self.teaching_terms.iter().enumerate() {
             let term_path = format!("{path}.teachingTerms[{index}]");
-            require_nonempty(&format!("{term_path}.text"), &term.text)?;
-            require_nonempty(&format!("{term_path}.pinyin"), &term.pinyin)?;
+            require_nonempty_at_most(&format!("{term_path}.text"), &term.text, 256)?;
+            require_nonempty_at_most(&format!("{term_path}.pinyin"), &term.pinyin, 512)?;
             if term.definitions.is_empty()
-                || term
-                    .definitions
-                    .iter()
-                    .any(|definition| definition.trim().is_empty())
+                || term.definitions.len() > MAX_DEFINITIONS
+                || term.definitions.iter().any(|definition| {
+                    definition.trim().is_empty() || definition.chars().count() > 2_048
+                })
             {
                 return Err(ContractError::at(
                     format!("{term_path}.definitions"),
@@ -960,9 +1226,90 @@ impl TranslatedHskStatus {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum TranslatedRegionRole {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TranslatedText {
+    pub source_text: String,
+    pub base_chinese: String,
+    pub displayed_chinese: String,
+    pub pinyin: String,
+    pub hsk: TranslatedHskStatus,
+}
+
+impl TranslatedText {
+    fn validate_at(&self, path: &str) -> Result<(), ContractError> {
+        require_nonempty_at_most(
+            &format!("{path}.sourceText"),
+            &self.source_text,
+            MAX_OUTPUT_TEXT_CHARS,
+        )?;
+        require_nonempty_at_most(
+            &format!("{path}.baseChinese"),
+            &self.base_chinese,
+            MAX_OUTPUT_TEXT_CHARS,
+        )?;
+        require_nonempty_at_most(
+            &format!("{path}.displayedChinese"),
+            &self.displayed_chinese,
+            MAX_OUTPUT_TEXT_CHARS,
+        )?;
+        require_nonempty_at_most(&format!("{path}.pinyin"), &self.pinyin, MAX_PINYIN_CHARS)?;
+        self.hsk.validate_at(&format!("{path}.hsk"))
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DocumentBlockReady {
+    pub item_id: String,
+    pub source_index: u32,
+    pub item_order: u32,
+    pub kind: SourceSpanKind,
+    pub text: TranslatedText,
+}
+
+impl DocumentBlockReady {
+    fn validate_at(&self, path: &str) -> Result<(), ContractError> {
+        require_nonempty_at_most(&format!("{path}.itemId"), &self.item_id, MAX_ITEM_ID_CHARS)?;
+        self.text.validate_at(&format!("{path}.text"))?;
+        if matches!(
+            self.text.hsk.repair_state,
+            HskRepairState::Pending | HskRepairState::Rejected
+        ) {
+            return Err(ContractError::at(
+                format!("{path}.text.hsk.repairState"),
+                "documentBlockReady may publish only a terminal translation",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DocumentBlockPreserved {
+    pub item_id: String,
+    pub source_index: u32,
+    pub item_order: u32,
+    pub kind: SourceSpanKind,
+    pub source_text: String,
+    pub reason: String,
+}
+
+impl DocumentBlockPreserved {
+    fn validate_at(&self, path: &str) -> Result<(), ContractError> {
+        require_nonempty_at_most(&format!("{path}.itemId"), &self.item_id, MAX_ITEM_ID_CHARS)?;
+        require_nonempty_utf8_at_most(
+            &format!("{path}.sourceText"),
+            &self.source_text,
+            MAX_DOCUMENT_BLOCK_BYTES,
+        )?;
+        require_nonempty_at_most(&format!("{path}.reason"), &self.reason, MAX_MESSAGE_CHARS)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ImageRegionRole {
     Dialogue,
     Narration,
     System,
@@ -991,34 +1338,48 @@ impl RegionConfidenceEvidence {
     }
 }
 
+fn polygon_bounds(points: &[Point]) -> Option<(f32, f32, f32, f32)> {
+    let first = points.first()?;
+    Some(points.iter().skip(1).fold(
+        (first.x, first.y, first.x, first.y),
+        |(x0, y0, x1, y1), point| {
+            (
+                x0.min(point.x),
+                y0.min(point.y),
+                x1.max(point.x),
+                y1.max(point.y),
+            )
+        },
+    ))
+}
+
+/// Browser-facing image result. The image pipeline keeps its geometric work
+/// separate, while all language output is carried by the same payload used by
+/// document blocks.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct TranslatedRegion {
-    pub id: String,
+pub struct ImageRegionReady {
+    pub item_id: String,
     pub text_polygon: Vec<Point>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bubble_polygon: Option<Vec<Point>>,
     pub patch: RegionPatch,
-    pub source_english: String,
-    pub base_chinese: String,
-    pub displayed_chinese: String,
-    pub pinyin: String,
-    pub ocr_confidence: f32,
-    pub reading_order: u32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub role: Option<TranslatedRegionRole>,
+    pub text: TranslatedText,
+    pub provenance: SourceProvenance,
+    pub kind: SourceSpanKind,
+    pub confidence: f32,
+    pub item_order: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_group: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confidence_evidence: Option<RegionConfidenceEvidence>,
     pub style: BrowserTextStyle,
     pub layout: BrowserTextLayout,
-    pub hsk: TranslatedHskStatus,
 }
 
-impl TranslatedRegion {
+impl ImageRegionReady {
     fn validate_at(&self, path: &str) -> Result<(), ContractError> {
-        require_nonempty(&format!("{path}.id"), &self.id)?;
+        require_nonempty_at_most(&format!("{path}.itemId"), &self.item_id, MAX_ITEM_ID_CHARS)?;
         require_polygon(&format!("{path}.textPolygon"), &self.text_polygon)?;
         if let Some(points) = &self.bubble_polygon {
             require_polygon(&format!("{path}.bubblePolygon"), points)?;
@@ -1038,94 +1399,78 @@ impl TranslatedRegion {
                 "must overlap the source text polygon",
             ));
         }
-        require_nonempty(&format!("{path}.sourceEnglish"), &self.source_english)?;
-        require_nonempty(&format!("{path}.baseChinese"), &self.base_chinese)?;
-        require_nonempty(&format!("{path}.displayedChinese"), &self.displayed_chinese)?;
-        require_nonempty(&format!("{path}.pinyin"), &self.pinyin)?;
-        require_unit(&format!("{path}.ocrConfidence"), self.ocr_confidence)?;
+        require_unit(&format!("{path}.confidence"), self.confidence)?;
+        if self.provenance != SourceProvenance::Ocr {
+            return Err(ContractError::at(
+                format!("{path}.provenance"),
+                "image results must have OCR provenance",
+            ));
+        }
+        self.text.validate_at(&format!("{path}.text"))?;
+        if matches!(
+            self.text.hsk.repair_state,
+            HskRepairState::Pending | HskRepairState::Rejected
+        ) {
+            return Err(ContractError::at(
+                format!("{path}.text.hsk.repairState"),
+                "imageRegionReady may publish only a terminal translation",
+            ));
+        }
         if let Some(evidence) = &self.confidence_evidence {
             evidence.validate_at(&format!("{path}.confidenceEvidence"))?;
         }
+        if let Some(context_group) = &self.context_group {
+            require_nonempty_at_most(
+                &format!("{path}.contextGroup"),
+                context_group,
+                MAX_LOOKUP_STRING_CHARS,
+            )?;
+        }
         self.style.validate_at(&format!("{path}.style"))?;
-        self.layout.validate_at(&format!("{path}.layout"))?;
-        self.hsk.validate_at(&format!("{path}.hsk"))
+        self.layout.validate_at(&format!("{path}.layout"))
     }
 }
 
-fn polygon_bounds(points: &[Point]) -> Option<(f32, f32, f32, f32)> {
-    let first = points.first()?;
-    Some(points.iter().skip(1).fold(
-        (first.x, first.y, first.x, first.y),
-        |(x0, y0, x1, y1), point| {
-            (
-                x0.min(point.x),
-                y0.min(point.y),
-                x1.max(point.x),
-                y1.max(point.y),
-            )
-        },
-    ))
-}
-
-impl Validate for TranslatedRegion {
+impl Validate for ImageRegionReady {
     fn validate(&self) -> Result<(), ContractError> {
         self.validate_at("region")
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct PreservedArtworkRegion {
-    pub id: String,
+pub struct ImageRegionPreserved {
+    pub item_id: String,
     pub text_polygon: Vec<Point>,
-    pub source_english: String,
-    pub ocr_confidence: f32,
-    pub reading_order: u32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub translated_chinese: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pinyin: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub teaching_terms: Vec<TeachingTerm>,
-}
-
-impl PreservedArtworkRegion {
-    pub(crate) fn validate_at(&self, path: &str) -> Result<(), ContractError> {
-        require_nonempty(&format!("{path}.id"), &self.id)?;
-        require_polygon(&format!("{path}.textPolygon"), &self.text_polygon)?;
-        require_nonempty(&format!("{path}.sourceEnglish"), &self.source_english)?;
-        require_unit(&format!("{path}.ocrConfidence"), self.ocr_confidence)?;
-        if let Some(chinese) = &self.translated_chinese {
-            require_nonempty(&format!("{path}.translatedChinese"), chinese)?;
-        }
-        if let Some(pinyin) = &self.pinyin {
-            require_nonempty(&format!("{path}.pinyin"), pinyin)?;
-        }
-        for (index, term) in self.teaching_terms.iter().enumerate() {
-            require_nonempty(&format!("{path}.teachingTerms[{index}].text"), &term.text)?;
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct UnreadableRegion {
-    pub id: String,
-    pub text_polygon: Vec<Point>,
-    pub source_english: String,
-    pub ocr_confidence: f32,
-    pub reading_order: u32,
+    pub source_text: String,
+    pub confidence: f32,
+    pub item_order: u32,
     pub reason: String,
 }
 
-impl UnreadableRegion {
-    pub(crate) fn validate_at(&self, path: &str) -> Result<(), ContractError> {
-        require_nonempty(&format!("{path}.id"), &self.id)?;
+impl ImageRegionPreserved {
+    fn validate_at(&self, path: &str) -> Result<(), ContractError> {
+        require_nonempty_at_most(&format!("{path}.itemId"), &self.item_id, MAX_ITEM_ID_CHARS)?;
         require_polygon(&format!("{path}.textPolygon"), &self.text_polygon)?;
-        require_nonempty(&format!("{path}.sourceEnglish"), &self.source_english)?;
-        require_unit(&format!("{path}.ocrConfidence"), self.ocr_confidence)?;
-        require_nonempty(&format!("{path}.reason"), &self.reason)
+        require_at_most(
+            &format!("{path}.sourceText"),
+            &self.source_text,
+            MAX_OUTPUT_TEXT_CHARS,
+        )?;
+        if self.source_text.trim().is_empty() && self.reason != "artwork-preserved" {
+            return Err(ContractError::at(
+                format!("{path}.sourceText"),
+                "may be empty only for artwork-preserved image items",
+            ));
+        }
+        require_unit(&format!("{path}.confidence"), self.confidence)?;
+        require_nonempty_at_most(&format!("{path}.reason"), &self.reason, MAX_MESSAGE_CHARS)
+    }
+}
+
+impl Validate for ImageRegionPreserved {
+    fn validate(&self) -> Result<(), ContractError> {
+        self.validate_at("region")
     }
 }
 
@@ -1150,20 +1495,26 @@ pub enum JobUpdate {
         total: Option<u32>,
         message: String,
     },
-    RegionReady {
+    ImageRegionReady {
         sequence: u64,
-        region: Box<TranslatedRegion>,
+        region: Box<ImageRegionReady>,
     },
-    ArtworkPreserved {
+    ImageRegionPreserved {
         sequence: u64,
-        region: PreservedArtworkRegion,
+        region: ImageRegionPreserved,
     },
-    Unreadable {
+    DocumentBlockReady {
         sequence: u64,
-        region: UnreadableRegion,
+        block: DocumentBlockReady,
+    },
+    DocumentBlockPreserved {
+        sequence: u64,
+        block: DocumentBlockPreserved,
     },
     Complete {
         sequence: u64,
+        translated_count: u32,
+        preserved_count: u32,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         message: Option<String>,
     },
@@ -1184,9 +1535,10 @@ impl JobUpdate {
     pub fn sequence(&self) -> u64 {
         match self {
             Self::Progress { sequence, .. }
-            | Self::RegionReady { sequence, .. }
-            | Self::ArtworkPreserved { sequence, .. }
-            | Self::Unreadable { sequence, .. }
+            | Self::ImageRegionReady { sequence, .. }
+            | Self::ImageRegionPreserved { sequence, .. }
+            | Self::DocumentBlockReady { sequence, .. }
+            | Self::DocumentBlockPreserved { sequence, .. }
             | Self::Complete { sequence, .. }
             | Self::Failed { sequence, .. }
             | Self::Cancelled { sequence, .. } => *sequence,
@@ -1236,29 +1588,21 @@ impl Validate for JobUpdate {
                         "must be less than or equal to a non-zero total",
                     ));
                 }
-                require_nonempty("message", message)
+                require_nonempty_at_most("message", message, MAX_MESSAGE_CHARS)
             }
-            Self::RegionReady { region, .. } => {
-                region.validate()?;
-                if region.hsk.repair_state == HskRepairState::Pending {
-                    return Err(ContractError::at(
-                        "region.hsk.repairState",
-                        "regionReady may publish only a terminal translation",
-                    ));
-                }
-                Ok(())
-            }
-            Self::ArtworkPreserved { region, .. } => region.validate_at("region"),
-            Self::Unreadable { region, .. } => region.validate_at("region"),
+            Self::ImageRegionReady { region, .. } => region.validate_at("region"),
+            Self::ImageRegionPreserved { region, .. } => region.validate_at("region"),
+            Self::DocumentBlockReady { block, .. } => block.validate_at("block"),
+            Self::DocumentBlockPreserved { block, .. } => block.validate_at("block"),
             Self::Complete { message, .. } | Self::Cancelled { message, .. } => {
                 if let Some(message) = message {
-                    require_nonempty("message", message)?;
+                    require_nonempty_at_most("message", message, MAX_MESSAGE_CHARS)?;
                 }
                 Ok(())
             }
             Self::Failed { code, message, .. } => {
-                require_nonempty("code", code)?;
-                require_nonempty("message", message)
+                require_nonempty_at_most("code", code, 256)?;
+                require_nonempty_at_most("message", message, MAX_MESSAGE_CHARS)
             }
         }
     }
@@ -1274,17 +1618,29 @@ pub struct JobUpdatesResponse {
 
 impl Validate for JobUpdatesResponse {
     fn validate(&self) -> Result<(), ContractError> {
-        require_nonempty("jobId", &self.job_id)?;
-        let mut previous = 0;
-        for update in &self.updates {
+        require_nonempty_at_most("jobId", &self.job_id, MAX_ITEM_ID_CHARS)?;
+        if self.updates.len() > 1_024 {
+            return Err(ContractError::at(
+                "updates",
+                "must contain at most 1024 updates",
+            ));
+        }
+        let mut previous = None;
+        for (index, update) in self.updates.iter().enumerate() {
             update.validate()?;
-            if update.sequence() <= previous {
+            if previous.is_some_and(|value: u64| value.checked_add(1) != Some(update.sequence())) {
                 return Err(ContractError::at(
                     "updates",
-                    "update sequences must be strictly increasing",
+                    "update sequences must be contiguous",
                 ));
             }
-            previous = update.sequence();
+            if update.is_terminal() && index + 1 != self.updates.len() {
+                return Err(ContractError::at(
+                    format!("updates[{index}]"),
+                    "terminal updates must be the final update in a batch",
+                ));
+            }
+            previous = Some(update.sequence());
         }
         if let Some(last) = self.updates.last()
             && self.next_sequence != last.sequence()
@@ -1298,10 +1654,33 @@ impl Validate for JobUpdatesResponse {
     }
 }
 
+impl JobUpdatesResponse {
+    pub fn validate_after(&self, after: u64) -> Result<(), ContractError> {
+        self.validate()?;
+        if let Some(first) = self.updates.first()
+            && first.sequence() != after.saturating_add(1)
+        {
+            return Err(ContractError::at(
+                "updates[0].sequence",
+                "must immediately follow the requested acknowledgement sequence",
+            ));
+        }
+        if self.updates.is_empty() && self.next_sequence != after {
+            return Err(ContractError::at(
+                "nextSequence",
+                "must equal the requested acknowledgement when no updates are returned",
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum BrowserJobStage {
+    Warming,
     Queued,
+    Registering,
     Decoding,
     Detecting,
     Ocr,
@@ -1395,7 +1774,7 @@ pub struct LookupRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub job_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub region_id: Option<String>,
+    pub item_id: Option<String>,
 }
 
 impl Validate for LookupRequest {
@@ -1434,16 +1813,22 @@ impl Validate for LookupRequest {
                 }
             }
         }
-        if self.job_id.is_some() != self.region_id.is_some() {
+        if self.job_id.is_some() != self.item_id.is_some() {
             return Err(ContractError::at(
-                "regionId",
-                "jobId and regionId must be present together",
+                "itemId",
+                "jobId and itemId must be present together",
             ));
+        }
+        if let Some(job_id) = &self.job_id {
+            require_nonempty_at_most("jobId", job_id, MAX_LOOKUP_STRING_CHARS)?;
+        }
+        if let Some(item_id) = &self.item_id {
+            require_nonempty_at_most("itemId", item_id, MAX_LOOKUP_STRING_CHARS)?;
         }
         if self.interaction == LookupInteraction::Hover && self.job_id.is_none() {
             return Err(ContractError::at(
                 "jobId",
-                "hover lookup requires a translated job and region",
+                "hover lookup requires a translated job and item",
             ));
         }
         Ok(())
@@ -1456,23 +1841,61 @@ pub struct LookupResult {
     pub selected_text: String,
     pub tokens: Vec<LookupToken>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub region: Option<LookupRegion>,
+    pub item: Option<LookupItem>,
 }
 
 impl Validate for LookupResult {
     fn validate(&self) -> Result<(), ContractError> {
-        require_nonempty("selectedText", &self.selected_text)?;
+        require_nonempty_at_most("selectedText", &self.selected_text, MAX_LOOKUP_STRING_CHARS)?;
+        if self.tokens.len() > 512 {
+            return Err(ContractError::at(
+                "tokens",
+                "must contain at most 512 tokens",
+            ));
+        }
         for (index, token) in self.tokens.iter().enumerate() {
-            require_nonempty(&format!("tokens[{index}].simplified"), &token.simplified)?;
+            require_nonempty_at_most(
+                &format!("tokens[{index}].simplified"),
+                &token.simplified,
+                MAX_LOOKUP_STRING_CHARS,
+            )?;
             if !token.proper_name {
-                require_nonempty(&format!("tokens[{index}].pinyin"), &token.pinyin)?;
+                require_nonempty_at_most(
+                    &format!("tokens[{index}].pinyin"),
+                    &token.pinyin,
+                    MAX_LOOKUP_STRING_CHARS,
+                )?;
+            } else {
+                require_at_most(
+                    &format!("tokens[{index}].pinyin"),
+                    &token.pinyin,
+                    MAX_LOOKUP_STRING_CHARS,
+                )?;
             }
-            if token.definitions.iter().any(|item| item.trim().is_empty()) {
+            if token.definitions.len() > MAX_DEFINITIONS
+                || token
+                    .definitions
+                    .iter()
+                    .any(|item| item.trim().is_empty() || item.chars().count() > MAX_MESSAGE_CHARS)
+            {
                 return Err(ContractError::at(
                     format!("tokens[{index}].definitions"),
                     "definitions must not contain empty values",
                 ));
             }
+        }
+        if let Some(item) = &self.item {
+            require_at_most(
+                "item.displayedChinese",
+                &item.displayed_chinese,
+                MAX_OUTPUT_TEXT_CHARS,
+            )?;
+            require_at_most(
+                "item.baseChinese",
+                &item.base_chinese,
+                MAX_OUTPUT_TEXT_CHARS,
+            )?;
+            require_at_most("item.sourceText", &item.source_text, MAX_OUTPUT_TEXT_CHARS)?;
         }
         Ok(())
     }
@@ -1491,10 +1914,10 @@ pub struct LookupToken {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct LookupRegion {
+pub struct LookupItem {
     pub displayed_chinese: String,
     pub base_chinese: String,
-    pub source_english: String,
+    pub source_text: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1507,8 +1930,8 @@ pub struct ErrorResponse {
 
 impl Validate for ErrorResponse {
     fn validate(&self) -> Result<(), ContractError> {
-        require_nonempty("code", &self.code)?;
-        require_nonempty("message", &self.message)
+        require_nonempty_at_most("code", &self.code, 256)?;
+        require_nonempty_at_most("message", &self.message, MAX_MESSAGE_CHARS)
     }
 }
 
@@ -1516,15 +1939,15 @@ impl Validate for ErrorResponse {
 mod tests {
     use super::*;
 
-    fn translated_region(patch_rect: NormalizedRect) -> TranslatedRegion {
+    fn translated_region(patch_rect: NormalizedRect) -> ImageRegionReady {
         let text_polygon = vec![
             Point { x: 0.2, y: 0.3 },
             Point { x: 0.4, y: 0.3 },
             Point { x: 0.4, y: 0.4 },
             Point { x: 0.2, y: 0.4 },
         ];
-        TranslatedRegion {
-            id: "region-1".to_owned(),
+        ImageRegionReady {
+            item_id: "region-1".to_owned(),
             text_polygon: text_polygon.clone(),
             bubble_polygon: Some(text_polygon.clone()),
             patch: RegionPatch {
@@ -1532,13 +1955,25 @@ mod tests {
                 mime_type: PatchMimeType::Png,
                 rect: patch_rect,
             },
-            source_english: "HELLO".to_owned(),
-            base_chinese: "你好".to_owned(),
-            displayed_chinese: "你好".to_owned(),
-            pinyin: "nǐ hǎo".to_owned(),
-            ocr_confidence: 0.99,
-            reading_order: 1,
-            role: Some(TranslatedRegionRole::Dialogue),
+            text: TranslatedText {
+                source_text: "HELLO".to_owned(),
+                base_chinese: "你好".to_owned(),
+                displayed_chinese: "你好".to_owned(),
+                pinyin: "nǐ hǎo".to_owned(),
+                hsk: TranslatedHskStatus {
+                    requested_level: HskLevel::try_from(3).unwrap(),
+                    learning_mode: LearningMode::Natural,
+                    strictly_valid: true,
+                    level_coverage: 1.0,
+                    above_level_tokens: Vec::new(),
+                    teaching_terms: Vec::new(),
+                    repair_state: HskRepairState::NotNeeded,
+                },
+            },
+            provenance: SourceProvenance::Ocr,
+            kind: SourceSpanKind::Dialogue,
+            confidence: 0.99,
+            item_order: 1,
             context_group: None,
             confidence_evidence: Some(RegionConfidenceEvidence {
                 ocr_consensus: 0.99,
@@ -1547,7 +1982,7 @@ mod tests {
                 cleanup_score: 1.0,
             }),
             style: BrowserTextStyle {
-                font_id: "hmt-sans".to_owned(),
+                font_id: "hskify-sans".to_owned(),
                 category: FontCategory::Sans,
                 foreground: "#000".to_owned(),
                 weight: 400,
@@ -1568,15 +2003,6 @@ mod tests {
                 font_size_to_image_width: 0.05,
                 safe_polygon: text_polygon,
             },
-            hsk: TranslatedHskStatus {
-                requested_level: HskLevel::try_from(3).unwrap(),
-                learning_mode: LearningMode::Natural,
-                strictly_valid: true,
-                level_coverage: 1.0,
-                above_level_tokens: Vec::new(),
-                teaching_terms: Vec::new(),
-                repair_state: HskRepairState::NotNeeded,
-            },
         }
     }
 
@@ -1589,6 +2015,13 @@ mod tests {
             bytes: 1,
             sha256: "b".repeat(64),
         }
+    }
+
+    fn document_request() -> DocumentJobRequest {
+        serde_json::from_str(include_str!(
+            "../../../fixtures/contracts/document-job-request.valid.json"
+        ))
+        .unwrap()
     }
 
     #[test]
@@ -1609,7 +2042,7 @@ mod tests {
     #[test]
     fn text_color_bands_are_validated_as_an_ordered_source_structure() {
         let valid = BrowserTextStyle {
-            font_id: "hmt-sans".to_owned(),
+            font_id: "hskify-sans".to_owned(),
             category: FontCategory::Sans,
             foreground: "#000".to_owned(),
             weight: 600,
@@ -1673,8 +2106,8 @@ mod tests {
             width: 0.18,
             height: 0.08,
         });
-        region.hsk.repair_state = HskRepairState::Pending;
-        let update = JobUpdate::RegionReady {
+        region.text.hsk.repair_state = HskRepairState::Pending;
+        let update = JobUpdate::ImageRegionReady {
             sequence: 1,
             region: Box::new(region),
         };
@@ -1694,7 +2127,7 @@ mod tests {
             "interaction": "hover",
             "characterOffset": 2,
             "jobId": "job-1",
-            "regionId": "region-1"
+            "itemId": "region-1"
         }))
         .unwrap();
         hover.validate().unwrap();
@@ -1714,6 +2147,111 @@ mod tests {
         }))
         .unwrap();
         assert!(hover_without_region.validate().is_err());
+    }
+
+    #[test]
+    fn document_hash_is_raw_and_bounds_are_exact() {
+        let mut request = document_request();
+        request.blocks[1].text = "A literal \\ remains authoritative.".to_owned();
+        request.source_sha256 = canonical_document_sha256(&request.blocks);
+        request.validate().unwrap();
+
+        let template = request.blocks[0].clone();
+        request.blocks = (0..MAX_DOCUMENT_BLOCKS)
+            .map(|index| DocumentSourceBlock {
+                item_id: format!("block-{index}"),
+                source_index: index as u32,
+                item_order: 0,
+                kind: SourceSpanKind::Prose,
+                provenance: SourceProvenance::Dom,
+                text: "x".to_owned(),
+            })
+            .collect();
+        request.source_sha256 = canonical_document_sha256(&request.blocks);
+        request.validate().unwrap();
+        request.blocks.push(DocumentSourceBlock {
+            item_id: "over-limit".to_owned(),
+            source_index: MAX_DOCUMENT_BLOCKS as u32,
+            item_order: 0,
+            ..template.clone()
+        });
+        request.source_sha256 = canonical_document_sha256(&request.blocks);
+        assert!(request.validate().is_err());
+
+        request.blocks = vec![DocumentSourceBlock {
+            item_id: "exact-block".to_owned(),
+            source_index: 0,
+            item_order: 0,
+            text: "a".repeat(MAX_DOCUMENT_BLOCK_BYTES),
+            ..template.clone()
+        }];
+        request.source_sha256 = canonical_document_sha256(&request.blocks);
+        request.validate().unwrap();
+        request.blocks[0].text.push('a');
+        request.source_sha256 = canonical_document_sha256(&request.blocks);
+        assert!(request.validate().is_err());
+
+        request.blocks = (0..65)
+            .map(|index| DocumentSourceBlock {
+                item_id: format!("large-{index}"),
+                source_index: index,
+                item_order: 0,
+                kind: SourceSpanKind::Prose,
+                provenance: SourceProvenance::Dom,
+                text: "z".repeat(MAX_DOCUMENT_BLOCK_BYTES),
+            })
+            .collect();
+        request.source_sha256 = canonical_document_sha256(&request.blocks);
+        assert!(request.validate().is_err());
+    }
+
+    #[test]
+    fn document_focus_accepts_sixty_four_ids_and_rejects_sixty_five() {
+        let focus = |count| FocusUpdateRequest::Document {
+            visible_block_ids: (0..count).map(|index| format!("block-{index}")).collect(),
+            active: true,
+        };
+        focus(MAX_VISIBLE_BLOCK_IDS).validate().unwrap();
+        assert!(focus(MAX_VISIBLE_BLOCK_IDS + 1).validate().is_err());
+    }
+
+    #[test]
+    fn update_batches_reject_gaps_terminal_middle_and_overlarge_windows() {
+        let progress = |sequence| JobUpdate::Progress {
+            sequence,
+            stage: BrowserJobStage::Queued,
+            stage_progress: None,
+            overall_progress: None,
+            current: None,
+            total: None,
+            message: "Queued".to_owned(),
+        };
+        let gap = JobUpdatesResponse {
+            job_id: "job-gap".to_owned(),
+            next_sequence: 3,
+            updates: vec![progress(1), progress(3)],
+        };
+        assert!(gap.validate_after(0).is_err());
+        let terminal_middle = JobUpdatesResponse {
+            job_id: "job-terminal".to_owned(),
+            next_sequence: 2,
+            updates: vec![
+                JobUpdate::Complete {
+                    sequence: 1,
+                    translated_count: 0,
+                    preserved_count: 0,
+                    message: None,
+                },
+                progress(2),
+            ],
+        };
+        assert!(terminal_middle.validate_after(0).is_err());
+        let oversized = JobUpdatesResponse {
+            job_id: "job-large".to_owned(),
+            next_sequence: 1_025,
+            updates: (1..=1_025).map(progress).collect(),
+        };
+        assert!(oversized.validate_after(0).is_err());
     }
 
     #[test]

@@ -5,7 +5,9 @@
     {
       "sequence": 4,
       "type": "complete",
-      "message": "Local cleaning and HSK translation complete"
+      "translatedCount": 1,
+      "preservedCount": 0,
+      "message": "Local image and HSK translation complete"
     }
   ]
 }

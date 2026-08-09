@@ -1,250 +1,206 @@
-# Hskify performance architecture
+# Hskify chapter architecture
 
-Hskify is a local Firefox-to-native pipeline specialized for low time-to-first
-translated dialogue on one CUDA machine class. The browser and daemon exchange
-an append-only sequence of small region updates; they never wait for or
-transfer a reconstructed page.
+Hskify translates one current English chapter into Simplified Chinese. One
+browser controller chooses exactly one mode: `document`, `image`, or
+`unsupported`. Document and image work share session ownership, transport,
+language correctness, teaching tools, and recovery; modality-specific code is
+limited to acquisition and rendering.
 
 ## System shape
 
 ```mermaid
 flowchart LR
-    Reader["Firefox reader page"]
-    Extension["Hskify extension"]
-    Host["One-shot native host"]
-    Daemon["Loopback daemon"]
-    Scheduler["Viewport-first tile scheduler"]
-    Vision["Resident CUDA detection, OCR, and visual role model"]
-    Translator["Resident Qwen3.5 4B faithful/strict text translator"]
-    Control["HSK validation, pinyin, dictionary"]
-    Patch["Region-local transparent PNG patch"]
-    Overlay["Patch-first selectable overlay"]
-    Speech["Local Mandarin Web Speech voice"]
+    Page["Current Firefox chapter"] --> Classifier["Chapter classifier"]
+    Classifier -->|"confident prose"| DocumentMode["DocumentChapterMode"]
+    Classifier -->|"sequential art"| ImageMode["ImageChapterMode"]
+    Classifier -->|"neither"| Unsupported["Unsupported"]
 
-    Reader -->|"explicit action"| Extension
-    Extension -->|"native handshake"| Host
-    Host -->|"start or discover"| Daemon
-    Extension -->|"authenticated unversioned routes"| Daemon
-    Daemon --> Scheduler --> Vision
-    Vision --> Patch
-    Vision --> Translator --> Control
-    Patch --> Daemon
-    Control --> Daemon
-    Daemon -->|"flat sequenced updates"| Extension
-    Extension --> Overlay --> Reader
-    Extension -->|"resolved Chinese"| Speech
+    DocumentMode --> DocumentPipeline["DocumentPipeline"]
+    ImageMode --> ImagePipeline["ImagePipeline"]
+    DocumentPipeline --> Language["Shared TranslationService"]
+    ImagePipeline --> Language
+    ImagePipeline --> Vision["Vision-only detection, OCR, cleanup, layout"]
+    Language --> Context["Canonical ordered chapter context"]
+    Language --> Control["HSK, pinyin, dictionary, cache"]
+
+    DocumentPipeline --> DocumentReader["Inline Shadow DOM prose reader"]
+    ImagePipeline --> ImageReader["Patch and selectable-text image reader"]
+    DocumentReader --> CommonUI["Shared comparison and teaching UI"]
+    ImageReader --> CommonUI
 ```
 
-## Build affinity and trust boundary
+The fixed public identities are:
 
-`hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-07-28-r7` is compiled into the TypeScript and Rust
-contracts. Native handshake requests and responses, health responses, and job
-creation metadata must carry that exact value. A different value is rejected.
-There is no protocol-version header, range negotiation, compatibility shim, or
-migration adapter.
+- build fingerprint:
+  `hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-08-09-r8`;
+- Firefox extension: `hskify@local.hskify`;
+- native host: `local.hskify.browser`;
+- executables: `hskify-native-host` and `hskify-browser-daemon`;
+- browser headers: `X-Hskify-Extension-Origin` and `X-Hskify-Control`;
+- environment, storage, CSS, and data prefixes: `HSKIFY_*` and `hskify`.
 
-The Windows release wrapper writes a post-success, ignored JSON attestation
-covering the complete tracked and untracked-nonignored source identity, exact
-x86_64 MSVC release/CUDA configuration, pinned toolchain and llama.cpp tag,
-device-0 hardware/driver claims, and SHA-256/byte identities for both native
-binaries. Packaging and benchmark preflight reject missing, stale, mutated, or
-nonmatching attestations.
+Those identifiers are a clean protocol and installation break. There are no
+aliases, old-route parsers, storage migrations, host cleanup paths, or protocol
+adapters.
 
-The native host accepts only the registered
-`local.hskify.hsk_manga` manifest whose executable resolves to the running
-binary and whose sole allowed extension is
-`hsk-manga-translator@local.hskify`. It asks the daemon for a fresh 256-bit
-bearer token bound to the exact canonical `moz-extension://` origin.
+## Browser classification and extraction
 
-The daemon binds to a random `127.0.0.1` port. Browser requests require the
-exact `Host`, the active extension origin (standard `Origin` and/or
-`X-HSK-Manga-Extension-Origin`), and the bearer token before request-body
-polling. CORS allows only that origin and the required GET, POST, PUT, and
-DELETE methods. No general application router, URL fetch, telemetry, provider
-credential, or remote translation path is mounted.
+The classifier first attempts a document descriptor. It annotates a clone of
+the page with temporary source markers and runs `@mozilla/readability` 0.6.0
+against that clone with a DOM serializer. Readability output is never inserted
+into the live page. Accepted elements map back through the temporary markers.
 
-## Direct chapter-aware data flow
+A document descriptor is valid only when all of these are true:
 
-1. The extension uploads one raster plus strict metadata to `POST /jobs`.
-   Byte, MIME, hash, declared dimension, decoded dimension, pixel, and decoder
-   allocation checks occur before the job begins.
-2. The source is decoded once. The adapter divides it into 2,048-pixel tiles
-   with 410-pixel overlap and reprioritizes remaining tiles whenever the
-   viewport changes.
-3. The pinned RT-DETR-v2 comic detector processes true CUDA batches of up to
-   six tiles at its trained 640-pixel input size. Both `text_bubble` and
-   `text_free` proposals continue to recognition; bubble rectangles are not a
-   prerequisite. This covers dialogue, thoughts, captions, and unballooned
-   story text while leaving the final semantic decision to OCR. Text proposals
-   are spatially deduplicated at tile overlaps.
-4. PP-OCRv6-small independently detects and recognizes text in batches of
-   eight. Mechanically valid Latin OCR at the calibrated 0.55 confidence floor
-   or higher remains
-   eligible; hard-coded content word lists do not decide whether a line is
-   story text.
-5. Learned bubble segmentation assigns accepted lines to real bubble identities
-   so an entire balloon is processed atomically. PP-OCRv6-small remains the
-   sole source of line polygons; manga-text segmentation supplies only the
-   glyph matte and appearance evidence used for cleanup. Shared geometry
-   expansion grows its mask around the detected glyphs, and manga LaMa restores
-   the source artwork. Transparent region patches take alpha only from that
-   verified semantic mask. Layout uses the measured, eroded bubble contour
-   rather than a fixed detector-box inset. A proposal that fails two distinct
-   OCR views becomes an `UnreadableRegion` and stays pixel-identical.
-6. Qwen3.5 4B sees one bounded page/evidence viewport and immutable numbered
-   OCR polygons. It returns only `story`, `sfx`, `furniture`, or `artwork` plus
-   an optional story continuation. Furniture and artwork remain pixel-identical;
-   story and SFX continue. Malformed records fail per region instead of
-   discarding valid siblings.
-7. Only admitted story/SFX regions enter glyph segmentation. One page cleanup
-   task acquires the serialized Vision lane while a text-only faithful batch of
-   at most six regions acquires the separate Language lane. The role-position
-   index is separate from numbered source lines, and deterministic validation
-   rejects label leakage, Latin output, punctuation-only output, source echo,
-   and malformed/missing positions. Chapter context is refreshed at language
-   dispatch rather than snapshotted when the page job starts.
-8. Natural mode publishes the faithful Chinese after deterministic HSK
-   annotation. Strict mode performs a bounded HSK rewrite and allows at most
-   one terminal repair for invalid items. `hsk-control` owns vocabulary,
-   pinyin, and teaching-term ranges; names must be rendered in Chinese and
-   standalone numbers/question intent remain preservation requirements.
-   Digits embedded in Latin OCR tokens such as `IDENTIT4` are not treated as
-   semantic numbers.
-9. For each completed region, the daemon stores the patch blob first and then
-   appends `regionReady`, which carries the patch descriptor, geometry, source
-   text, base/direct Chinese, displayed Chinese, pinyin, style, layout, and HSK
-   status. The contract rejects pending state, so this is the only visible
-   version of the translation. Ordered color bands preserve real foreground/outline changes between
-   source lines, and Firefox keeps that band count while fitting the translation.
-10. Firefox fetches and validates the PNG, decodes it, inserts it in the patch
-   layer, and only then inserts the selectable final text.
+- at least five translatable story blocks;
+- at least 1,000 normalized characters;
+- alphabetic content is predominantly English;
+- every accepted block maps to the live page; and
+- the mapped content root is a descendant below `body`, never `body` itself.
 
-Completion is a terminal event in the same log. It does not unlock a separate
-result representation.
+A valid document descriptor wins, so chapter illustrations remain ordinary
+illustrations. Otherwise the sequential-art detector decides whether image mode
+is safe. Publisher selectors and a manual mode override are intentionally not
+part of classification.
 
-## Live-page rendering
+The document snapshot preserves order and semantics. Translatable nodes are
+title, leveled heading, paragraph, blockquote, ordered/unordered list item, and
+figure caption. Illustrations and separators are structural preserved items.
+Navigation, ads, bylines/metadata, comments, forms, and site UI are excluded.
+Whitespace normalization is deterministic. A text-block ID derives from its
+order, kind, and normalized source text, while the document hash covers the
+complete ordered text snapshot. Chapters over a native limit are rejected, not
+truncated.
 
-The renderer never reparents, replaces, hides, or rewrites the reader's source
-`img`. One document-anchored shadow-DOM portal shares the image's scroll
-coordinate space and contains only transparent patch and selectable-text
-layers. Normal document scrolling therefore stays compositor-only. Nested
-scrollers trigger a position-only update, while resize and responsive layout
-changes trigger a complete geometry/text refit. Cancellation or navigation
-removes the portal and leaves the untouched source DOM in place.
+## Shared controller and render targets
 
-The original/Chinese/hold-to-compare controls live in a separate fixed
-shadow-DOM host at the viewport edge, so they remain reachable while reading a
-long chapter. Pointer hit-testing maps a hovered rendered glyph to a Unicode
-character offset. The daemon then performs a dictionary longest-match anchored
-at that exact offset; selection remains an explicit fallback. The explanation
-is placed outside the resolved glyph range when space permits, clamped to the
-viewport, and dismissed on scroll, resize, or pointer departure.
+One page controller owns run state, native session discovery, update polling,
+acknowledgements, cancellation, recovery, HUD state, and navigation. It creates
+exactly one `DocumentChapterMode` or `ImageChapterMode`. Both implement the same
+small render-target interface used by one singleton Original/Chinese/
+hold-to-compare controller.
 
-## Scheduling and cache identity
+The document renderer inserts one isolated Shadow DOM reader adjacent to the
+mapped source root. It builds safe text, heading, list, separator, and image
+elements directly; it never copies arbitrary HTML, script, style, links, or
+controls. The complete structure mounts immediately with English text in every
+pending placeholder. A placeholder changes only when its terminal Chinese
+block arrives.
 
-The daemon stays warm for a 30-minute idle window and uses four Tokio workers,
-at most eight general blocking threads, separate serialized priority CUDA
-lanes for Vision and Language, and one dedicated six-thread Rayon pool for
-browser image preprocessing. Queue membership is cancellation-safe: dropping
-an acquiring future removes its waiter, so an aborted cleanup cannot orphan a
-lane. The comic detector, OCR recognizer, local LLM
-application state, and HSK control data are lazy `OnceCell` residents, so later
-jobs reuse loaded state.
+After the reader is mounted, the source root's relevant attributes are
+snapshotted and it is hidden and made inert. Original mode, cancellation,
+source mutation, SPA navigation, and controller disposal restore the exact
+attribute values and remove only Hskify-owned nodes. Switching modes preserves
+the nearest reader/source scroll anchor.
 
-Firefox immediately admits at most two page jobs subject to a two-page decoded
-pixel budget. It does not serialize startup, impose page-completion barriers,
-or cancel/restart admitted off-screen pages. Pending work is continuously
-reprioritized from the current viewport; this keeps both CUDA lanes supplied
-while allowing newly visible queued work to overtake off-screen work.
+An `IntersectionObserver` reports visible document block IDs. Focus reports are
+coalesced at 100 ms and never run a synchronous geometry loop on scroll. Image
+mode reports normalized visible rectangles through the same focus route.
 
-The 64 MiB byte-bounded in-memory translation cache is keyed by:
+The image renderer keeps source image nodes connected and uses isolated patch
+and selectable-text layers. It still requires a decoded cleanup patch before
+installing final Chinese. Image output and reading-direction behavior remain
+unchanged.
 
-- normalized OCR text;
-- the complete faithful Chinese reference and utterance role;
-- the canonical chapter context preceding the region;
-- bounded following English context;
-- requested HSK level;
-- natural or strict learning mode;
-- model ID and exact model revision;
-- prompt hash;
-- validator hash; and
-- the full HSK/dictionary control revision.
+## Native pipelines and runtime ownership
 
-Changing any output-affecting dependency invalidates the cache. There is no
-project cache, page history, stored page reconstruction, or level-change
-retranslation endpoint.
+`TranslationService` owns model generation, faithful-result validation, HSK
+realization, pinyin and teaching metadata, dictionary lookup context, and the
+translation cache. It accepts generic ordered source spans:
 
-Decoded images use a 512 MiB byte-bounded LRU. Completed terminal
-chapter-region results and PNG patches also have a byte-bounded
-2 GiB persistent cache. Its key includes the complete strict job request,
-source hash, exact build fingerprint, and a fingerprint of every
-output-affecting model, prompt, validator, dictionary, and pipeline resource.
-Entries are atomically installed only after visible processing completes.
-Stores enforce the 2 GiB bound and perform eviction once; reads open the exact
-SHA-keyed entry directly instead of rescanning the cache directory for every
-image. Every upload still validates its byte limit, SHA-256, encoded format,
-MIME, declared limits, and header dimensions. An exact hit then reuses the
-previously fully decoded/validated result; full pixel decoding occurs only on
-a miss. No detector, OCR, translation, or patch intermediate is written to
-disk.
+- kind: `prose`, `heading`, `dialogue`, `caption`, `thought`, or `sfx`;
+- provenance: `dom` or `ocr`;
+- optional layout constraints, present only for image regions.
 
-The chapter job log is append-only, starts at sequence 1, rejects regressive overall
-progress, rejects duplicate region publication, and permits one terminal
-`complete`, `failed`, or `cancelled` event. Clients long-poll after the last
-acknowledged sequence, so extension background suspension does not require a
-second status/result model.
+Shared prompts contain no bubble, comic, or OCR language. The adapter adds one
+OCR-correction instruction only for `ocr` spans; DOM text is authoritative.
 
-## Resource envelope
+`ImagePipeline` owns only raster validation, detection, OCR, visual
+adjudication, segmentation, cleanup, and layout. `DocumentPipeline` owns block
+registration, token-aware segmentation, priority scheduling, joined-block
+validation, and publication. Every document block is registered before any
+translation starts. The generic context store is always ordered by
+`(sourceIndex, itemOrder)`, so viewport priority changes execution order but
+never context or publication order.
 
-| Resource | Default |
+`LanguageRuntime` contains the one resident Qwen model, HSK data, dictionary,
+and translation cache. `VisionRuntime` contains detector, OCR, segmenters,
+inpainter, and projector and reuses the already-loaded language model. A
+document warm-up initializes only `LanguageRuntime`; an image warm-up
+initializes both. There is one installable resource pack and one serialized CUDA
+language lane, never a second model instance or a novel-specific deployment.
+
+## Translation correctness and scheduling
+
+The resident language context is 4,096 tokens. The real tokenizer packs at most
+six ordered units. Only a single document block that cannot fit alone is split,
+at ICU sentence boundaries while retaining line-break separators. Its pieces
+can execute independently, but the block is published only after they are
+joined and validated as one result.
+
+The shared final-only policy is:
+
+1. establish faithful Simplified Chinese;
+2. in natural mode, publish it with deterministic teaching metadata;
+3. in strict mode, realize the requested HSK level and allow at most one
+   terminal repair;
+4. never expose provisional Chinese.
+
+If any piece remains invalid, document mode publishes a source-preserving block
+result and keeps that placeholder in English. A fatal document failure restores
+the original page. Completion reports translated and preserved counts.
+
+Visible document work is dispatched first: the first visible block is sent by
+itself, followed by tokenizer-sized batches of up to six. The bounded preceding
+and following source context comes from registration order, not dispatch order.
+
+## Updates, replay, and cache
+
+The API uses exact unversioned routes: `POST /jobs/image`,
+`POST /jobs/document`, and `PUT /jobs/{jobId}/focus`, plus common update,
+cancellation, chapter-release, lookup, blob, and font routes. See the
+[browser contract](browser-contract.md) for payloads and bounds.
+
+`TranslatedText` is the shared final payload: source, faithful/base, displayed
+Chinese, pinyin, and HSK state. It is composed into `imageRegionReady`,
+`documentBlockReady`, or `documentBlockPreserved`. Lookup ownership is always
+`itemId`.
+
+Active jobs and page artifacts use an exact `image | document` tagged union.
+The append-only update log, acknowledgement cursor, and replay code are common.
+An unacknowledged update may replay after MV3 suspension, but idempotent
+installation applies it once. Recovery requires the same source modality and
+hash, preventing document output from attaching to a changed chapter.
+
+The persistent completed-result cache also stores a tagged image or document
+entry. A document entry contains final blocks and lookup contexts. Cache
+identity covers the source hash, mode, requested level, surrounding context,
+model/prompt/validator identities, and HSK resources. There is one current
+schema only.
+
+## Resource bounds and performance gates
+
+| Resource | Limit |
 | --- | ---: |
+| Document JSON body | 1 MiB UTF-8 |
+| Document text blocks | 2,000 |
+| One document block | 16 KiB UTF-8 |
+| Visible document block IDs | 64 |
+| Language context | 4,096 tokens |
+| One language batch | 6 ordered units |
 | Image multipart field | 20 MiB |
-| JSON metadata field | 64 KiB |
-| Complete HTTP body | 21 MiB |
-| Decoded pixels | 25,000,000 |
-| Either dimension | 16,384 px |
-| Decoder allocation | 128 MiB |
-| Decoded-image LRU | 512 MiB |
-| In-memory translation cache | 64 MiB |
-| Persistent completed-result cache | 2 GiB |
-| One patch blob | 16 MiB |
-| Retained jobs | 128 |
-| Retained sources and patches | 256 MiB |
-| Authenticated in-flight requests | 64 |
-| Updates per job | 10,000 |
-| One update long-poll | 20 seconds maximum |
-| Idle daemon window | 30 minutes |
+| Decoded image pixels | 25,000,000 |
+| Either image dimension | 16,384 px |
 
-Terminal inactive jobs are evicted oldest-first when job or byte capacity is
-needed. Active jobs are never eviction candidates. Patch blobs are owned by
-one job and removed with it.
+The native daemon recomputes the canonical document hash and rejects unknown
+fields, invalid bounds, and modality mismatches before work begins.
 
-## Hardware boundary
+The representative local document benchmark is 300 blocks and 100,000
+characters. Extraction plus reader skeleton p95 must remain below 100 ms on the
+supported workstation, with no scroll-time synchronous layout loop or task over
+50 ms. Instrumented document jobs must allocate or invoke no detector, OCR,
+projector, segmentation, inpainting, patch, font, or other vision resource.
 
-The performance build is CUDA-only and gated to an NVIDIA GeForce RTX 4080
-SUPER with at least 16,000 MiB, compute capability 8.9, and the pinned CUDA
-13.1 compiler packages. This is an intentional optimization boundary, not a
-recommended tier among several. Results from another GPU, a CPU path, or a
-different model revision are not evidence for this build.
-
-## Reader features retained
-
-The chapter-aware architecture preserves:
-
-- selectable Chinese with displayed pinyin;
-- position-anchored hover explanations with local longest-match dictionary
-  definitions and HSK overlay;
-- region context showing direct/displayed Chinese and source English;
-- original/Chinese/hold-to-compare controls; and
-- local-only Mandarin pronunciation using an eligible Firefox/OS voice.
-
-These browser tools do not delay offscreen inference. Region order is stable
-page order followed by within-page reading order, while current-viewport work
-may overtake queued offscreen work at detector, OCR, and translation batch
-boundaries.
-
-See [the browser contract](browser-contract.md) for exact routes and event
-shapes and [the real-reader v2 evidence plan](real-reader-v2.md) for the
-content-addressed corpus and packaged release measurements. The tracked
-manifest remains capture-required until all local pages and annotations are
-present.
+Image language throughput may regress by no more than 10 percent from the
+pre-refactor local baseline. The full image runtime with the 4,096-token
+language context must remain within the supported 16 GB VRAM envelope.

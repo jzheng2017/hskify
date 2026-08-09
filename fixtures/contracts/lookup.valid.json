@@ -9,9 +9,9 @@
       "properName": false
     }
   ],
-  "region": {
+  "item": {
     "displayedChinese": "我们现在要走！",
     "baseChinese": "我们得马上离开！",
-    "sourceEnglish": "We have to leave now!"
+    "sourceText": "We have to leave now!"
   }
 }

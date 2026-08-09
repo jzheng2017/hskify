@@ -1,138 +1,113 @@
 # Firefox extension implementation
 
-The Firefox MV3 extension is a direct client of the local, unversioned
-chapter-aware companion API. There is no result download or full cleaned
-image path.
+The Firefox MV3 extension owns one current-chapter run and selects exactly one
+rendering mode. The fixed build fingerprint is
+`hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-08-09-r8`; a different native
+build fails closed.
 
-Development runs through `pnpm dev:firefox`: WXT hot-reloads browser code while
-the repository-level watcher rebuilds and re-registers native binaries after
-native source changes. Production ZIPs are created only by the isolated release
-packager and are updated through the normal Firefox release channel.
+## Chapter selection
 
-## Companion contract
+The page classifier attempts a site-independent document descriptor before
+image discovery. It marks a cloned document, runs `@mozilla/readability` 0.6.0
+with a DOM serializer, and maps accepted semantic nodes back to the live DOM.
+The clone is disposable and Readability output is never injected.
 
-Every native and HTTP handshake is pinned to the build fingerprint
-`hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-07-28-r7`. A different fingerprint is a hard failure,
-not a negotiated compatibility mode.
+Document mode requires at least five story blocks, 1,000 normalized characters,
+predominantly English alphabetic text, complete marker mapping, and a content
+root below `body`. If it passes, it wins and illustrations remain untouched.
+Otherwise the existing sequential-art detector may choose image mode. An
+uncertain page is unsupported; there are no site selectors or manual mode
+setting.
 
-The background worker uses these loopback routes:
+Whitespace, stable block IDs, and the ordered snapshot hash are deterministic.
+The snapshot includes titles, leveled headings, paragraphs, blockquotes, list
+items, figure captions, illustrations, and separators while excluding site UI,
+navigation, ads, metadata/bylines, comments, and forms. Oversize snapshots are
+rejected rather than partially translated; the 1 MiB check measures the
+complete compact `/jobs/document` request envelope.
 
-- `POST /jobs` uploads the original image and JSON metadata as multipart
-  `image` and `request` parts.
-- `PUT /jobs/{jobId}/viewport` sends normalized visible source rectangles and
-  whether the image is actively being processed.
-- `GET /jobs/{jobId}/updates?after={sequence}&waitMs=20000` long-polls
-  monotonic updates.
-- `GET /blobs/{patchId}` downloads a region's transparent PNG patch.
-- `DELETE /jobs/{jobId}` cancels and releases a job.
-- `DELETE /chapters/{pageSessionId}` releases the daemon's ordered dialogue
-  context after the chapter is sealed or cancelled.
+## Shared ownership
 
-Setup, dictionary, and font requests remain authenticated root routes:
-`/setup`, `/setup/models`, `/lookup`, and `/fonts/{fontId}`.
+The controller owns native-session discovery, job creation, one update poll,
+acknowledgement, cancellation, replay, HUD, source/navigation monitoring, and
+chapter release. It delegates modality behavior to `DocumentChapterMode` or
+`ImageChapterMode`. Active jobs and artifacts store an exact tagged
+`image | document` source identity.
 
-`JobUpdate` is the discriminated union `progress`, `regionReady`,
-`artworkPreserved`, `unreadable`, `complete`, `failed`, and `cancelled`.
-`regionReady` carries
-geometry, patch identity and rectangle, English/base/displayed Chinese,
-pinyin, OCR confidence, reading order, typography/layout, and HSK validation
-and repair state. Its HSK state also carries the selected learning mode,
-level-appropriate lexical coverage, and exact teaching-term ranges. It is
-terminal for that region: pending translations are rejected by the contract
-and cannot be installed.
+Storage keys, classes, and owned data attributes use the `hskify` prefix. Page
+acknowledgement advances only after every update in the batch is installed. An
+unacknowledged final block may replay after background suspension, but stable
+`itemId` installation is idempotent. Recovery also requires the same source
+kind, hash, and exact translation settings. Image recovery additionally
+requires the same reading direction. Returned update sequences must be
+contiguous from the requested acknowledgement cursor.
 
-## MV3 recovery and ownership
+The background calls:
 
-Active job records are stored in `browser.storage.local`. They contain the
-tab/frame/page/source identity, the last delivered sequence, the last
-page-acknowledged sequence, and the region/patch/font IDs observed so far.
-The page acknowledges a batch only after every patch and text mutation in it
-has completed. After background suspension, recovery resumes from that
-installed sequence; an unacknowledged batch is safely replayed.
+- `POST /jobs/image` for multipart raster jobs;
+- `POST /jobs/document` for JSON snapshots;
+- `PUT /jobs/{jobId}/focus` for tagged image rectangles or visible blocks;
+- `POST /warmup` with the detected chapter kind;
+- the common update, cancellation, chapter release, lookup, blob, font, and
+  setup routes documented in `docs/browser-contract.md`.
 
-All job, patch, font, and lookup messages are checked against the owning
-tab/frame/document URL and persisted source URL/hash/dimensions. Runtime
-messages use strict allowlists and bounded binary payloads. Page navigation,
-source replacement, cancellation, disposal, or ownership mismatch uses one
-idempotent restore-all path: completed and partial overlays are both destroyed,
-every original image returns to its exact parent/sibling position with its
-original attributes intact, and the companion job is released.
+`GET /setup` remains a resource-only status read. Passive content detection
+retains the detected kind if resources are not installed yet and retries its
+tagged warm-up after installation. The popup likewise POSTs one tagged warm-up
+for the detected kind before enabling translation; it does not make setup
+status polling allocate a runtime. The always-on passive probe runs the
+Readability clone/parser only once at `document_idle`; its short discovery
+window repeats only cheap image checks on unsupported pages.
 
-## Final-region rendering
+## Document reader
 
-The renderer keeps the exact original `<img>` node connected and visible. A
-layout-preserving wrapper adds a Shadow DOM containing:
+One Shadow DOM host is inserted adjacent to the mapped chapter root. Its safe
+reader tree is constructed directly from typed snapshot items—never from
+Readability HTML or arbitrary live elements. Structural placeholders mount in
+one pass with English text. `documentBlockReady` replaces one placeholder only
+with final Chinese; `documentBlockPreserved` deliberately leaves it in English.
 
-- a transparent patch layer;
-- hover-explainable and selectable Chinese text;
-- Original, Chinese, and hold-to-compare controls; and
-- the dictionary/pinyin/Mandarin-speech popover.
+After successful mount, the source root's original attributes are captured,
+then it is hidden and made inert. Original mode, cancellation, source mutation,
+SPA navigation, fatal failure, and disposal restore the exact values and remove
+only Hskify nodes. Mode changes preserve a block-relative scroll anchor.
 
-For each `regionReady`, the patch blob is downloaded and decoded completely
-off-DOM. Only then is the patch synchronously installed, followed by its text
-node. A corrupt, stale, or cancelled patch can therefore never expose Chinese
-over source lettering. An `artworkPreserved` update carries evidence only; it
-never changes the source pixels or installs ordinary text over decorative
-lettering.
+An `IntersectionObserver` tracks placeholders and a 100 ms coalescer reports at
+most 64 visible block IDs. Scroll handlers perform no geometry reads. The first
+visible block is eligible for a single-item native dispatch before token-aware
+batches of at most six.
 
-Original and compare modes hide only the overlay. They never hide or replace
-the page image. Destroying the renderer restores the original node to its
-exact parent and sibling position.
+## Image reader
 
-## Geometry, viewport priority, and fitting
+Image mode retains the established patch-before-text renderer. Source images
+stay connected. An image job's transparent cleanup patch is fetched, validated,
+decoded off-DOM, and installed before its final selectable Chinese. Normal
+scrolling does not trigger a synchronous layout loop. Reading direction is an
+image-only popup setting.
 
-Image geometry accounts for borders, padding, `object-fit`, and
-`object-position`. Visible source rectangles also account for cover cropping
-and browser viewport intersection. The overlay is document-anchored, so normal
-page scrolling moves it with the image in the compositor without a layout read
-or text refit. Nested scrollers receive a position-only update; resize and
-image-size changes trigger the more expensive geometry and text refit. Image
-notices are mounted inside the same document-anchored wrapper while a page is
-being processed, so their coordinates are not recalculated on scroll.
-Viewport-priority reports remain coalesced at roughly 100 ms.
+## Shared interaction layer
 
-Text fitting tests nearby legal Chinese line breaks against the safe polygon.
-Model fitting and final DOM measurement both use bounded binary searches.
-When a source region contains distinct learned color bands, fitting preserves
-that line-style count and applies each foreground/outline band in source order.
-The final measurement pass checks scroll dimensions and stays inside the
-subpixel boundary while enforcing a readable floor (at least 72% of the source
-font estimate and the local CSS minimum). If that floor cannot fit, the
-renderer removes the candidate patch and leaves the source artwork unchanged;
-it never publishes zero-size or clipped selectable text.
+Both renderers implement the same small render-target interface for one
+singleton Original/Chinese/hold-to-compare controller. They also share teaching
+term markup, position-aware local dictionary lookup, pinyin display, selection,
+and local Mandarin speech. Lookup ownership is `itemId` in both modes.
+
+The popup reports `document`, `image`, or `unsupported` detection and retains
+one “Translate chapter” action. It shows reading direction only for image
+chapters.
 
 ## Verification
 
 From `extensions/firefox`:
 
 ```text
-npm run typecheck
-npm test -- --run
-npm run test:e2e
-npm run build
+pnpm typecheck
+pnpm test
+pnpm build
 ```
 
-The Vitest suite covers strict chapter contracts, exact root endpoints,
-update acknowledgement/recovery, patch ownership, atomic patch installation,
-final-only publication, viewport messages, measured fitting, hover hit-testing, selection, dictionary
-pinyin, and Mandarin speech. The Playwright Firefox harness covers real image
-decode, normalized geometry, object-fit mapping, compare modes, navigation,
-position-anchored expression lookup, selection, vertical text, and long WebP
-dimensions.
-
-## Reader-facing controls
-
-The popup describes difficulty, scope, setup, and progress in reader language.
-Raw pipeline stages and daemon messages never appear in the popup, page HUD,
-or image badge. Internal stages map to short phrases such as “Reading the
-page,” “Writing the Chinese text,” and “Fitting the text.”
-
-The persisted Learning style defaults to `natural`. Natural learning asks for
-complete natural Chinese first; above-level words become teaching terms with a
-dotted underline and the same position-aware hover explanation as every other
-translated expression. `strict` additionally rewrites and validates the text
-against the selected HSK level. Names are always rendered in Chinese; there is
-no name-mode setting or Latin-name exception. The
-learning mode travels through the popup, background, content, job, cache, and
-final-region contracts, so changing it cannot reuse output from the
-other mode.
+Fixtures cover document extraction without live-DOM mutation, unsafe root and
+input rejection, hybrid/manga classification, progressive final-only rendering,
+exact restoration, comparison and teaching tools, focus coalescing, SPA
+navigation, cancellation, and MV3 replay. Existing image contract, geometry,
+renderer, and real-reader regressions remain required under the new identities.

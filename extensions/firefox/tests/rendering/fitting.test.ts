@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import type { BrowserRegion } from '../../src/contracts/browser'
-import { createFixtureRegions } from '../support/fixture-service'
+import type { ImageRegion } from '../../src/contracts/browser'
 import {
   PolygonTextFitter,
   RectangleTextFitter,
@@ -13,14 +12,15 @@ import {
   nearbyLineCandidates,
   sourceDensityScale,
 } from '../../src/rendering/fitting'
+import { createFixtureRegions } from '../support/fixture-service'
 
-function fixtureRegion(): BrowserRegion {
+function fixtureRegion(): ImageRegion {
   return createFixtureRegions({
     jobId: 'fixture',
     sourceSha256: 'a'.repeat(64),
     sourceWidth: 1200,
     sourceHeight: 1800,
-  })[0] as BrowserRegion
+  })[0] as ImageRegion
 }
 
 describe('rectangle and polygon-aware text fitting', () => {
@@ -38,18 +38,14 @@ describe('rectangle and polygon-aware text fitting', () => {
     const candidates = nearbyLineCandidates('你好，世界！', [])
     expect(candidates.flat().some((line) => line.startsWith('，'))).toBe(false)
     const spaced = nearbyLineCandidates('面对那 6 个氏族', [])
-    expect(
-      spaced.flat().some((line) => /^\s/u.test(line)),
-    ).toBe(false)
+    expect(spaced.flat().some((line) => /^\s/u.test(line))).toBe(false)
   })
 
   it('never breaks a retained Latin name or title inside a word', () => {
     const text = '帝国称它为 SILVER HARBOR。'
     const candidates = nearbyLineCandidates(text, [])
     expect(candidates.length).toBeGreaterThan(1)
-    expect(
-      candidates.flat().some((line) => /(?:CO|ÉT)$|^(?:UP|TAT)/u.test(line)),
-    ).toBe(false)
+    expect(candidates.flat().some((line) => /(?:CO|ÉT)$|^(?:UP|TAT)/u.test(line))).toBe(false)
     expect(candidates.every((lines) => lines.join('') === text)).toBe(true)
   })
 
@@ -100,9 +96,9 @@ describe('rectangle and polygon-aware text fitting', () => {
     ]
 
     for (const polygon of shapes) {
-      const region: BrowserRegion = {
+      const region: ImageRegion = {
         ...fixtureRegion(),
-        displayedChinese: '中',
+        text: { ...fixtureRegion().text, displayedChinese: '中' },
         textPolygon: polygon,
         bubblePolygon: polygon,
         layout: {
@@ -127,8 +123,8 @@ describe('rectangle and polygon-aware text fitting', () => {
     const polygon = new PolygonTextFitter().fit(region, 600, 900)
     expect(rectangle.fontSize).toBeGreaterThanOrEqual(8)
     expect(polygon.fontSize).toBeGreaterThanOrEqual(8)
-    expect(rectangle.lines.join('')).toBe(region.displayedChinese)
-    expect(polygon.lines.join('')).toBe(region.displayedChinese)
+    expect(rectangle.lines.join('')).toBe(region.text.displayedChinese)
+    expect(polygon.lines.join('')).toBe(region.text.displayedChinese)
   })
 
   it('scales concise Chinese by source-to-translation glyph density', () => {
@@ -139,10 +135,13 @@ describe('rectangle and polygon-aware text fitting', () => {
 
   it('does not force translated line count to equal the source color sample count', () => {
     const base = fixtureRegion()
-    const region: BrowserRegion = {
+    const region: ImageRegion = {
       ...base,
-      sourceEnglish: 'A'.repeat(100),
-      displayedChinese: '我们现在必须离开这里',
+      text: {
+        ...base.text,
+        sourceText: 'A'.repeat(100),
+        displayedChinese: '我们现在必须离开这里',
+      },
       style: {
         ...base.style,
         colorBands: [
@@ -168,7 +167,7 @@ describe('rectangle and polygon-aware text fitting', () => {
     const fit = new PolygonTextFitter().fit(region, 600, 120)
 
     expect(fit.lines.length).toBeLessThan(3)
-    expect(fit.lines.join('')).toBe(region.displayedChinese)
+    expect(fit.lines.join('')).toBe(region.text.displayedChinese)
   })
 
   it('keeps font sizing above the readable floor when a bubble is small', () => {
@@ -178,10 +177,9 @@ describe('rectangle and polygon-aware text fitting', () => {
       { x: 1, y: 1 },
       { x: 0, y: 1 },
     ]
-    const region: BrowserRegion = {
+    const region: ImageRegion = {
       ...fixtureRegion(),
-      sourceEnglish: '中',
-      displayedChinese: '中',
+      text: { ...fixtureRegion().text, sourceText: '中', displayedChinese: '中' },
       textPolygon: polygon,
       bubblePolygon: polygon,
       layout: {
@@ -204,10 +202,13 @@ describe('rectangle and polygon-aware text fitting', () => {
       { x: 0.18, y: 0.06 },
       { x: 0, y: 0.06 },
     ]
-    const region: BrowserRegion = {
+    const region: ImageRegion = {
       ...fixtureRegion(),
-      sourceEnglish: 'NEXT...',
-      displayedChinese: '下一个……',
+      text: {
+        ...fixtureRegion().text,
+        sourceText: 'NEXT...',
+        displayedChinese: '下一个……',
+      },
       textPolygon: polygon,
       bubblePolygon: polygon,
       style: { ...fixtureRegion().style, lineHeight: 1 },
@@ -239,9 +240,9 @@ describe('rectangle and polygon-aware text fitting', () => {
       { x: 0.75, y: 0.8 },
       { x: 0.25, y: 0.8 },
     ]
-    const region: BrowserRegion = {
+    const region: ImageRegion = {
       ...fixtureRegion(),
-      displayedChinese: '中'.repeat(35),
+      text: { ...fixtureRegion().text, displayedChinese: '中'.repeat(35) },
       textPolygon,
       bubblePolygon: bubble,
       layout: {
@@ -266,7 +267,7 @@ describe('rectangle and polygon-aware text fitting', () => {
 
   it('supports vertical text without converting all regions to vertical', () => {
     const horizontal = fixtureRegion()
-    const vertical: BrowserRegion = {
+    const vertical: ImageRegion = {
       ...horizontal,
       style: { ...horizontal.style, writingMode: 'vertical-rl' },
       textPolygon: [

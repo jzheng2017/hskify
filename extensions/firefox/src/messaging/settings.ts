@@ -1,8 +1,8 @@
 import type { HskLevel, ReadingDirection } from '../contracts/browser'
 
-export const HSK_LEVEL_KEY = 'hmt.settings.hskLevel'
-export const LEARNING_MODE_KEY = 'hmt.settings.learningMode'
-export const READING_DIRECTION_KEY = 'hmt.settings.readingDirection'
+export const HSK_LEVEL_KEY = 'hskify.settings.hskLevel'
+export const LEARNING_MODE_KEY = 'hskify.settings.learningMode'
+export const READING_DIRECTION_KEY = 'hskify.settings.readingDirection'
 export const DEFAULT_HSK_LEVEL: HskLevel = 5
 export const DEFAULT_LEARNING_MODE: LearningMode = 'natural'
 export const DEFAULT_READING_DIRECTION: ReadingDirection = 'ltr'

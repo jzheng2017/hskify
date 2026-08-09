@@ -32,8 +32,8 @@ fn native_binary_handshake_uses_prestarted_daemon() {
     // so success here is not evidence for the launcher's detached spawn path.
     let directory = tempfile::tempdir().expect("temporary daemon state");
     let paths = prepare_state_paths(directory.path()).expect("state paths");
-    let daemon = PathBuf::from(env!("CARGO_BIN_EXE_hsk-manga-browser-daemon"));
-    let native_host = PathBuf::from(env!("CARGO_BIN_EXE_hsk-manga-native-host"));
+    let daemon = PathBuf::from(env!("CARGO_BIN_EXE_hskify-browser-daemon"));
+    let native_host = PathBuf::from(env!("CARGO_BIN_EXE_hskify-native-host"));
 
     let daemon_child = Command::new(&daemon)
         .arg("--state-dir")
@@ -61,7 +61,7 @@ fn native_binary_handshake_uses_prestarted_daemon() {
         thread::sleep(Duration::from_millis(25));
     };
 
-    let manifest_path = directory.path().join("local.hskify.hsk_manga.json");
+    let manifest_path = directory.path().join("local.hskify.browser.json");
     std::fs::write(
         &manifest_path,
         serde_json::to_vec(&json!({
@@ -80,7 +80,7 @@ fn native_binary_handshake_uses_prestarted_daemon() {
         &mut framed_request,
         &json!({
             "type": "start-or-discover-daemon",
-            "buildFingerprint": "hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-07-28-r7",
+            "buildFingerprint": "hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-08-09-r8",
             "extensionVersion": "0.1.0",
             "extensionOrigin": ORIGIN
         }),
@@ -89,7 +89,7 @@ fn native_binary_handshake_uses_prestarted_daemon() {
     let mut child = Command::new(&native_host)
         .arg(&manifest_path)
         .arg(FIREFOX_EXTENSION_ID)
-        .env("HSK_MANGA_STATE_DIR", directory.path())
+        .env("HSKIFY_STATE_DIR", directory.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

@@ -1,5 +1,5 @@
 #[cfg(not(all(target_os = "windows", target_arch = "x86_64")))]
-compile_error!("hsk-manga-browser-daemon only supports 64-bit Windows");
+compile_error!("hskify-browser-daemon only supports 64-bit Windows");
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -24,12 +24,12 @@ async fn run() {
         Ok(options) => match browser_companion::daemon::run_daemon(options).await {
             Ok(DaemonExit::Idle | DaemonExit::AlreadyRunning) => {}
             Err(error) => {
-                eprintln!("hsk-manga-browser-daemon: {error}");
+                eprintln!("hskify-browser-daemon: {error}");
                 std::process::exit(1);
             }
         },
         Err(message) => {
-            eprintln!("hsk-manga-browser-daemon: {message}");
+            eprintln!("hskify-browser-daemon: {message}");
             std::process::exit(2);
         }
     }

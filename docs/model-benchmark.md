@@ -1,70 +1,69 @@
-# Direct HSK model benchmark record
+# Shared language-model benchmark record
 
 ## Frozen comparison protocol
 
-Every candidate must use the same generic direct English-to-HSK-Chinese
-protocol:
+Every candidate uses the same generic ordered English-to-Simplified-Chinese
+source-span protocol and the real tokenizer:
 
-```text
-revision: direct-hsk-en-zh-ordered-connected-regions-v81-2026-08-02
-prompt SHA-256: 13ce6d86028dfcb13d8c7a0fca8306f6108dee4c92f67a40dbe6e29e34d64d5c
-validator SHA-256: 887ad273362f1005ff495a74ffa9487a4de524e47c51bcfc210e1b9ced7ab1c9
-decoding: greedy, unpenalized
-repair: one bounded batch; at most one new-evidence attempt per rejected item
-```
+- resident context: 4,096 tokens;
+- microbatch: at most six ordered units;
+- decoding: greedy and unpenalized;
+- natural mode: faithful Chinese plus deterministic teaching metadata;
+- strict mode: HSK realization and at most one terminal repair;
+- publication: final-only.
 
-The prompt contains only generic meaning-preservation instructions and
-application-supplied glossary entries. It must not contain chapter-specific
-terms, translations, source phrases, character names, coordinates, colors,
-URLs, hashes, or trigger rules.
+The shared prompt describes meaning preservation and generic span kinds only.
+It contains no manga, bubble, panel, OCR, website, chapter phrase, coordinate,
+color, URL, hash, or trigger language. The adapter adds an OCR-correction
+instruction only for `ocr` provenance; `dom` text is authoritative. Exact model,
+prompt, validator, tokenizer, HSK, and dictionary identities are recorded in
+each evidence bundle and cache key.
 
-The current revision adds ordered chapter context and bounded following-source
-context at microbatch boundaries. The protocol contains no chapter phrase,
-name, coordinate, color, URL, or hash trigger. Translation quality is
-qualified only through the ordered real-reader-v2 corpus; no deleted chapter
-fixture or model-only replay is a release substitute.
+## Canonical workloads
 
-## Canonical comparison workload
+Language qualification requires both:
 
-The release comparison workload is the complete ordered local real-reader-v2
-core/stress set. Its manifest and annotations are capture-required until every
-page, region, exclusion, entity, style, cleanup allowance, and HSK alternative
-has been independently reviewed. The packaged browser runner is the only
-qualification path.
+- the complete ordered local real-reader-v2 core/stress image corpus; and
+- reviewed light-novel chapters covering semantic and div-heavy extraction,
+  dialogue, headings, quotes, lists, captions, names, pronouns, numbers,
+  questions, long blocks, mid-chapter visible-first jumps, and joined-block
+  validation.
+
+The packaged Firefox path is authoritative. Model-only replay is diagnostic and
+cannot replace final reader rendering, restoration, and update-replay checks.
+Image throughput comparisons use the local image-runtime runner documented in
+the maintainer guide. It creates a fresh native result-cache state and Firefox
+profile for each baseline/current measurement while reusing the verified
+installed resource pack, joins native language timing by browser-observed job
+ID, and samples full-runtime NVIDIA memory directly.
 
 ## Candidates and qualification
 
-When gold is complete, compare these candidates in one controlled GPU sequence:
+When gold fixtures are complete, compare in one controlled GPU sequence:
 
 1. Qwen3.5 4B Q4_K_M
 2. Qwen3.5 2B Q4_K_M
 3. Hy-MT2 1.8B Q4_K_M
 
-Each candidate must receive exactly the same ordered target rows, batching,
-chapter context, role metadata, prompt, validator, decoding settings, warm-up,
-and resource monitoring. Raw evidence must preserve model hashes, commands,
-environment, per-row outputs, timing samples, and failure classifications.
+Each candidate receives identical registered source order, surrounding context,
+span metadata, tokenizer packing, prompt, validator, decoding, warm-up, and
+resource monitoring. Raw evidence preserves model hashes, commands,
+environment, per-item outputs, timing, preservation reasons, and repair counts.
 
 A smaller model qualifies only if it:
 
-- adds no critical meaning errors under human review;
-- renders names in Chinese and preserves numbers at least 99%;
-- matches the 4B model's naturalness under blinded fluent-reader review; and
-- satisfies the structural and deterministic validation gates.
+- adds no critical meaning errors under blinded human review;
+- renders names in Chinese and preserves numbers/question intent;
+- maintains cross-block names, pronouns, and dialogue continuity during
+  visible-first execution;
+- passes joined-block and strict HSK validators; and
+- meets both document and image latency/resource gates.
 
-Automated checks for output structure, names, numbers, negation, and question
-intent are useful diagnostics. They are not substitutes for critical-meaning
-and naturalness review.
-
-## Final automated comparison
-
-No final automated comparison is claimed until the v2 corpus is complete.
-
-Resource identity, timings, quality, and human review must be collected from
-the packaged Firefox v2 run and retained with its raw evidence bundle.
+Automated structure, vocabulary, entity, number, negation, and question checks
+are useful diagnostics, not substitutes for meaning and naturalness review.
 
 ## Selection
 
-Qwen3.5 4B Q4_K_M remains the resident production model. Smaller candidates
-are not packaged; any future comparison must use the v2 corpus and the same
-terminal browser gates.
+Qwen3.5 4B Q4_K_M remains the sole resident production language model. Document
+warm-up loads this language runtime without vision; image mode reuses the same
+instance when loading its vision runtime. Smaller candidates are not packaged.

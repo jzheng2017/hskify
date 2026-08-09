@@ -246,10 +246,10 @@ fn runtime_rejects_an_hsk_artifact_from_an_old_normalizer() {
 fn hover_lookup_is_longest_match_anchored_at_the_hovered_character() {
     let control = seed();
     let whole = control
-        .lookup_at_with_region_context("研究生", 0, &[], None)
+        .lookup_at_with_item_context("研究生", 0, &[], None)
         .expect("the first character starts a dictionary expression");
     let later = control
-        .lookup_at_with_region_context("研究生", 2, &[], None)
+        .lookup_at_with_item_context("研究生", 2, &[], None)
         .expect("a later component starts its own anchored lookup");
 
     assert_eq!(whole.tokens.len(), 1);
@@ -260,7 +260,7 @@ fn hover_lookup_is_longest_match_anchored_at_the_hovered_character() {
     assert_eq!(later.tokens[0].simplified, "生");
     assert!(
         control
-            .lookup_at_with_region_context("研究生。", 3, &[], None)
+            .lookup_at_with_item_context("研究生。", 3, &[], None)
             .is_none(),
         "punctuation must not jump forward to an unrelated word"
     );

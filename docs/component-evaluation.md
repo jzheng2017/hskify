@@ -13,7 +13,8 @@ rendering.
 | --- | --- | --- |
 | `ogkalu/comic-text-and-bubble-detector` RT-DETR-v2 R50 | Retained | CUDA-batched `text_bubble` and `text_free` proposals |
 | PaddlePaddle PP-OCRv6-small detector and recognizer | Retained | CUDA-batched independent text polygons and English recognition |
-| Qwen3.5 4B Q4_K_M + matching projector | Retained | Visual page-role decisions plus text-only faithful/strict Chinese generation |
+| Qwen3.5 4B Q4_K_M | Retained | One shared faithful/strict language runtime for image and document spans |
+| Matching multimodal projector | Retained for image mode only | Visual page-role decisions; never initialized by document warm-up or jobs |
 
 The detector, Paddle recognizer, and translation model revisions and hashes are
 frozen in `data/model-packs/manifest.v1.json`. Hskify adds viewport scheduling,

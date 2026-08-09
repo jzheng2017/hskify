@@ -22,6 +22,7 @@ getrandom = "0.3"
 http-body = "1"
 image = { workspace = true }
 imageproc = { workspace = true }
+icu_segmenter = { workspace = true }
 hsk-control = { path = "../hsk-control" }
 koharu-app = { workspace = true }
 koharu-core = { workspace = true }
@@ -59,11 +60,11 @@ windows-sys = { workspace = true, features = [
 ] }
 
 [[bin]]
-name = "hsk-manga-native-host"
-path = "src/bin/hsk-manga-native-host.rs"
+name = "hskify-native-host"
+path = "src/bin/hskify-native-host.rs"
 required-features = ["cuda"]
 
 [[bin]]
-name = "hsk-manga-browser-daemon"
-path = "src/bin/hsk-manga-browser-daemon.rs"
+name = "hskify-browser-daemon"
+path = "src/bin/hskify-browser-daemon.rs"
 required-features = ["cuda"]

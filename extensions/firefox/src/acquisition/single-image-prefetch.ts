@@ -3,7 +3,7 @@ export type ImagePrefetchIdentity = {
   frameId: number
   pageSessionId: string
   pageUrl: string
-  pageIndex: number
+  sourceIndex: number
   sourceUrl: string
   naturalWidth: number
   naturalHeight: number
@@ -28,7 +28,7 @@ function identityKey(identity: ImagePrefetchIdentity): string {
     identity.frameId,
     identity.pageSessionId,
     identity.pageUrl,
-    identity.pageIndex,
+    identity.sourceIndex,
     identity.sourceUrl,
     identity.naturalWidth,
     identity.naturalHeight,

@@ -94,7 +94,7 @@ async function startReaderSimulation(page, pageCount, dwellMs) {
       const state = { startedAtEpochMs: Date.now(), dwellMs: dwell, entries: [], timer: 0 }
       const enter = (pageNumber) => {
         const image = document.querySelector(`[data-page="${pageNumber}"]`)
-        const surface = image?.closest('.hmt-wrapper') ?? image
+        const surface = image?.closest('.hskify-wrapper') ?? image
         if (surface) scrollTo({ top: surface.getBoundingClientRect().top + scrollY, behavior: 'instant' })
         state.entries.push({ page: pageNumber, epochMs: Date.now() })
       }
@@ -204,7 +204,7 @@ export async function runCaptureBrowserProbe(options) {
   }
   const expectedResourceIdentities = committedResourceIdentities()
   mkdirSync(options.outputDirectory, { recursive: true })
-  process.env.HSK_MANGA_STATE_DIR = resolve(config.stateDirectory)
+  process.env.HSKIFY_STATE_DIR = resolve(config.stateDirectory)
   const capture = JSON.parse(readFileSync(options.capturePath, 'utf8'))
   const chapters = captureReaderChapters(capture)
   const reader = await createReaderServer({
@@ -272,7 +272,7 @@ export async function runCaptureBrowserProbe(options) {
         const textEvents = dom.events.filter(
           (event) => event.type === 'selectableTextDomCommitted',
         )
-        const uniqueRegionIds = new Set(textEvents.map((event) => event.regionId))
+        const uniqueItemIds = new Set(textEvents.map((event) => event.itemId))
         const firstTranslatedVisible = textEvents.find(
           (event) => event.visible && event.sourcePreserving !== true,
         )
@@ -302,12 +302,12 @@ export async function runCaptureBrowserProbe(options) {
           {
             id: `${chapter.id}.single-final-publication`,
             passed:
-              uniqueRegionIds.size === textEvents.length &&
+              uniqueItemIds.size === textEvents.length &&
               dom.regions.every((region) => region.repairState !== 'pending'),
-            expected: 'one terminal DOM commit per region',
+            expected: 'one terminal DOM commit per item',
             actual: {
               commits: textEvents.length,
-              uniqueRegionIds: uniqueRegionIds.size,
+              uniqueItemIds: uniqueItemIds.size,
               pending: dom.regions.filter((region) => region.repairState === 'pending').length,
             },
           },
@@ -328,9 +328,9 @@ export async function runCaptureBrowserProbe(options) {
             expected: 'no degraded fit or overflow',
             actual: {
               degradedFitCount: dom.degradedFitCount,
-              overflowRegionIds: dom.regions
+              overflowItemIds: dom.regions
                 .filter((region) => !region.sourcePreserving && region.overflows)
-                .map((region) => region.regionId),
+                .map((region) => region.itemId),
             },
           },
           {

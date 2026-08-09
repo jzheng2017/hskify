@@ -40,8 +40,8 @@ else {
     $targetRoot = [IO.Path]::GetFullPath((Join-Path $repositoryRoot $env:CARGO_TARGET_DIR))
 }
 $releaseDirectory = Join-Path $targetRoot 'release'
-$nativeHostPath = Join-Path $releaseDirectory 'hsk-manga-native-host.exe'
-$browserDaemonPath = Join-Path $releaseDirectory 'hsk-manga-browser-daemon.exe'
+$nativeHostPath = Join-Path $releaseDirectory 'hskify-native-host.exe'
+$browserDaemonPath = Join-Path $releaseDirectory 'hskify-browser-daemon.exe'
 if ([string]::IsNullOrWhiteSpace($AttestationPath)) {
     $AttestationPath = Join-Path $releaseDirectory 'hskify-performance-build-attestation.json'
 }
@@ -244,8 +244,8 @@ $cargoArguments = @(
     '--package', 'browser-companion',
     '--no-default-features',
     '--features', 'cuda',
-    '--bin', 'hsk-manga-native-host',
-    '--bin', 'hsk-manga-browser-daemon',
+    '--bin', 'hskify-native-host',
+    '--bin', 'hskify-browser-daemon',
     '-j', '6'
 )
 Push-Location $repositoryRoot

@@ -29,7 +29,7 @@ The browser path processes and publishes independent regions:
 6. A text-only pass establishes complete faithful Simplified Chinese in small
    batches. Natural mode publishes it directly; strict mode performs a bounded
    HSK rewrite and only invalid strict items may use one terminal repair.
-7. The patch blob is stored before `regionReady`, and Firefox installs the
+7. The patch blob is stored before `imageRegionReady`, and Firefox installs the
    decoded patch before its selectable Chinese.
 8. Completion is a terminal log event, not a separate page result.
 

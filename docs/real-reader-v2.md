@@ -1,5 +1,10 @@
 # Real-reader v2 release corpus
 
+This corpus qualifies Hskify's `image` mode. Light-novel extraction, structured
+rendering, and language-only runtime evidence use the separate document
+fixtures and `scripts/benchmark/document-chapter-gates.mjs`; neither workload
+substitutes for the other.
+
 The browser release gate uses only complete, content-addressed local chapters.
 The tracked manifest at `fixtures/real-reader-corpus/manifest.json` is the
 capture contract for the ten core chapters and three stress chapters. Until

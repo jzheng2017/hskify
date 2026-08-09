@@ -13,6 +13,9 @@
     "extensions/firefox": {
       "name": "@hskify/firefox",
       "version": "0.1.0",
+      "dependencies": {
+        "@mozilla/readability": "0.6.0",
+      },
       "devDependencies": {
         "@playwright/test": "1.61.1",
         "@types/firefox-webext-browser": "143.0.0",
@@ -379,6 +382,8 @@
     "@hskify/firefox": ["@hskify/firefox@workspace:extensions/firefox"],
 
     "@mdn/browser-compat-data": ["@mdn/browser-compat-data@8.0.4", "", {}, "sha512-up6DsNsaPt3jq5d2TGx4UOXIqBKU0D86dxWwcVmmOOEYqP1rFaV1XcAcwHxMvb6bbtMfY5JpjUCszzy/aVc4yA=="],
+
+    "@mozilla/readability": ["@mozilla/readability@0.6.0", "", {}, "sha512-juG5VWh4qAivzTAeMzvY9xs9HY5rAcr2E4I7tiSSCokRFi7XIZCAu92ZkSTsIj1OPceCifL3cpfteP3pDT9/QQ=="],
 
     "@microsoft/fetch-event-source": ["@microsoft/fetch-event-source@2.0.1", "", {}, "sha512-W6CLUJ2eBMw3Rec70qrsEW0jOm/3twwJv21mrmj2yORiaVmVYGS4sSS5yUwvQc1ZlDLYGPnClVWmUUMagKNsfA=="],
 

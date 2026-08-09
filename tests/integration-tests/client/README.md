@@ -2,7 +2,7 @@
 
 This directory is generated integration-test material for the broader reused
 application RPC surface. It is not the Hskify Firefox browser contract and is
-not shipped or mounted by `hsk-manga-browser-daemon`.
+not shipped or mounted by `hskify-browser-daemon`.
 
 Do not use the generated project, history, provider, pipeline, scene, or event
 documents in this directory to implement the extension. The current browser

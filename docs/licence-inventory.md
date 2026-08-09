@@ -1,4 +1,4 @@
-# Performance-build licence inventory
+# Hskify performance-build licence inventory
 
 This inventory covers the Hskify browser product's mandatory runtime resources.
 It contains only the required production resource identities.
@@ -6,6 +6,7 @@ It contains only the required production resource identities.
 | Resource | Required identity | Licence/audit state | Distribution state |
 | --- | --- | --- | --- |
 | Hskify code and project-authored fixtures | current repository revision | GPL-3.0-only | repository |
+| Mozilla Readability | `@mozilla/readability` 0.6.0, exact pnpm-lock identity | Apache-2.0; retain the upstream copyright and licence notice | bundled in the Firefox extension for cloned-DOM light-novel extraction |
 | Qwen3.5 4B Q4_K_M | exact revision and SHA-256 in the model manifest | Apache-2.0 inherited from Qwen; exact file identity must be preserved | mandatory local resource; bundling depends on release packaging review |
 | HSK 2.0 artifact | generated normalized artifact | provenance, redistribution, attribution, revision, and completeness audit pending | not committed as production data |
 | CC-CEDICT-compatible artifact | generated normalized artifact | CC BY-SA 4.0 source obligations and combined-distribution review pending | not committed as production data |

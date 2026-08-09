@@ -6,16 +6,16 @@
   "naturalWidth": 1200,
   "naturalHeight": 1800,
   "pageSessionId": "fixture-page-0001",
-  "pageIndex": 0,
-  "chapterPageOrder": [0],
+  "sourceIndex": 0,
+  "chapterSourceOrder": [0],
   "surfaceKind": "image",
+  "readingDirection": "ltr",
   "settings": {
     "sourceLanguage": "en",
     "targetLanguage": "zh-CN",
     "hskStandard": "2.0",
     "hskLevel": 2,
-    "learningMode": "natural",
-    "readingDirection": "ltr"
+    "learningMode": "natural"
   },
   "visibleRects": []
 }

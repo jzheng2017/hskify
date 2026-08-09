@@ -1,0 +1,32 @@
+{
+  "jobId": "fixture-document-modality",
+  "nextSequence": 1,
+  "updates": [
+    {
+      "sequence": 1,
+      "type": "documentBlockReady",
+      "block": {
+        "itemId": "block-0",
+        "sourceIndex": 0,
+        "itemOrder": 0,
+        "kind": "heading",
+        "text": {
+          "sourceText": "Chapter One",
+          "baseChinese": "\u7b2c\u4e00\u7ae0",
+          "displayedChinese": "\u7b2c\u4e00\u7ae0",
+          "pinyin": "d\u00ec y\u012b zh\u0101ng",
+          "hsk": {
+            "requestedLevel": 2,
+            "learningMode": "natural",
+            "strictlyValid": true,
+            "levelCoverage": 1.0,
+            "aboveLevelTokens": [],
+            "teachingTerms": [],
+            "repairState": "not-needed"
+          }
+        }
+      },
+      "region": {}
+    }
+  ]
+}

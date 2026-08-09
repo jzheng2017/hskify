@@ -10,7 +10,9 @@
     },
     {
       "sequence": 1,
-      "type": "complete"
+      "type": "complete",
+      "translatedCount": 0,
+      "preservedCount": 0
     }
   ]
 }

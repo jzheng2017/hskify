@@ -40,6 +40,8 @@ const statusDetail = requiredElement<HTMLElement>('#status-detail')
 const statusProgress = requiredElement<HTMLProgressElement>('#status-progress')
 const setupPrimary = requiredElement<HTMLButtonElement>('#setup-primary')
 const productName = document.querySelector<HTMLElement>('#product-name')
+const contentKind = requiredElement<HTMLElement>('#content-kind')
+const imageSettings = requiredElement<HTMLElement>('#image-settings')
 
 if (productName) productName.textContent = browser.runtime.getManifest().name
 
@@ -48,7 +50,9 @@ let startInFlight = false
 let refreshInFlight = false
 let setupReady = false
 let pagePreparationFailed = false
+let contentSupported = false
 let setupAction: 'reconnect' | 'download' | 'retry' | undefined
+let warmedContentKind: 'image' | 'document' | undefined
 
 function selectedLevel(): HskLevel {
   const parsed = Number(levelSelect.value)
@@ -69,7 +73,7 @@ function selectedReadingDirection(): ReadingDirection {
 
 function setBusy(busy: boolean): void {
   const unavailable = busy || startInFlight
-  translateAll.disabled = unavailable || !setupReady || !pagePrepared
+  translateAll.disabled = unavailable || !setupReady || !pagePrepared || !contentSupported
   levelSelect.disabled = unavailable || !setupReady
   learningModeSelect.disabled = unavailable || !setupReady
   readingDirectionSelect.disabled = unavailable || !setupReady
@@ -83,6 +87,14 @@ function renderState(state: PopupState): void {
   levelSelect.value = String(state.hskLevel)
   learningModeSelect.value = state.learningMode
   readingDirectionSelect.value = state.readingDirection
+  contentKind.textContent =
+    state.contentKind === 'document'
+      ? 'Detected: light-novel chapter'
+      : state.contentKind === 'image'
+        ? 'Detected: manga or webtoon chapter'
+        : 'No supported chapter detected'
+  imageSettings.hidden = state.contentKind !== 'image'
+  contentSupported = state.contentKind !== 'unsupported'
   const active = state.state === 'running'
   cancel.hidden = !active
   setBusy(false)
@@ -102,7 +114,7 @@ function renderState(state: PopupState): void {
       : state.state === 'complete'
         ? 'The translated text is ready.'
         : state.state === 'failed'
-          ? 'Some images could not be translated. Try again from the page.'
+          ? state.message
         : state.state === 'cancelled'
           ? 'Anything unfinished was left unchanged.'
           : state.message
@@ -235,7 +247,7 @@ function startChapter(): void {
   startInFlight = true
   setBusy(true)
   statusTitle.textContent = 'Preparing chapter'
-  statusDetail.textContent = 'Finding the chapter images…'
+  statusDetail.textContent = 'Detecting and preparing the chapter…'
   statusProgress.hidden = false
   statusProgress.removeAttribute('value')
   void finishStart(hskLevel, learningMode, readingDirection)
@@ -291,7 +303,19 @@ setupPrimary.addEventListener('click', async () => {
 async function refresh(): Promise<void> {
   if (startInFlight) return
   try {
-    renderState(await sendBackgroundMessage({ type: 'popup:state' }))
+    const state = await sendBackgroundMessage({ type: 'popup:state' })
+    if (state.contentKind !== 'unsupported' && warmedContentKind !== state.contentKind) {
+      const warmup = await sendBackgroundMessage({
+        type: 'engine:warmup',
+        contentKind: state.contentKind,
+      })
+      if (warmup.state !== 'ready') {
+        renderSetup(warmup)
+        return
+      }
+      warmedContentKind = state.contentKind
+    }
+    renderState(state)
   } catch (error) {
     const [hskLevel, learningMode, readingDirection] = await Promise.all([
       loadHskLevel(),
@@ -308,7 +332,7 @@ async function refresh(): Promise<void> {
 async function prepareReadyPage(): Promise<void> {
   if (!pagePrepared && !pagePreparationFailed) {
     statusTitle.textContent = 'Preparing chapter'
-    statusDetail.textContent = 'Finding the chapter images…'
+    statusDetail.textContent = 'Detecting chapter content…'
     try {
       await sendBackgroundMessage({ type: 'popup:prepare' })
       pagePrepared = true
