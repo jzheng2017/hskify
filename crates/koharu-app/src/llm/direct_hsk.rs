@@ -56,7 +56,7 @@ pub const fn direct_hsk_validator_hash() -> &'static str {
 }
 
 const MIN_OUTPUT_TOKENS: usize = 24;
-const MAX_OUTPUT_TOKENS: usize = 256;
+const MAX_OUTPUT_TOKENS: usize = 1024;
 const OUTPUT_TOKENS_PER_UTTERANCE: usize = 8;
 fn faithful_translation_system_prompt(provenance: DirectSourceProvenance) -> String {
     let provenance_instruction = match provenance {
@@ -3368,6 +3368,11 @@ mod tests {
         assert_eq!(
             output_token_budget(["x".repeat(242).as_str()].into_iter(), 6),
             177
+        );
+        let prose = "At dawn, Mara followed the river road while the old city disappeared behind the hills. ".repeat(4);
+        assert!(
+            output_token_budget(std::iter::repeat_n(prose.as_str(), 6), 6) > 256,
+            "a dense prose batch must not be truncated to the former comic-sized output budget"
         );
         let long = "x".repeat(10_000);
         assert_eq!(

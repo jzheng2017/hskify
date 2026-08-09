@@ -6,7 +6,7 @@
 
 use std::fmt::Write as _;
 
-pub const DIRECT_HSK_PROMPT_REVISION: &str = "ordered-span-hsk-realization-v1-2026-08-09";
+pub const DIRECT_HSK_PROMPT_REVISION: &str = "ordered-span-hsk-realization-v2-2026-08-09";
 
 /// Canonical protocol description whose SHA-256 is
 /// [`DIRECT_HSK_PROMPT_HASH`].
@@ -14,7 +14,7 @@ pub const DIRECT_HSK_PROMPT_REVISION: &str = "ordered-span-hsk-realization-v1-20
 /// Keep this material synchronized with the builders below. The unit test pins
 /// the digest so a prompt-semantic change cannot silently reuse cache entries
 /// or benchmark evidence.
-pub const DIRECT_HSK_PROMPT_FINGERPRINT_MATERIAL: &str = r#"ordered-span-hsk-realization-v1-2026-08-09
+pub const DIRECT_HSK_PROMPT_FINGERPRINT_MATERIAL: &str = r#"ordered-span-hsk-realization-v2-2026-08-09
 input=generic ordered source spans paired with complete faithful Chinese references; image spans alone may carry measured character and line budgets
 provenance=DOM text is authoritative and must not be corrected; OCR spans alone receive a bounded obvious-recognition-error correction instruction
 chapter-context=daemon-owned preceding Chinese and bounded neighboring English are reference only; preserve canonical sourceIndex and itemOrder and never emit context-only spans
@@ -24,12 +24,13 @@ natural-learning=target 90% coverage for levels 1-3, 93% for level 4, and 95% fo
 strict-learning=avoid every above-level term unless the faithful Chinese name form makes it unavoidable
 layout=honor maximum Chinese characters and line count only when image constraints are supplied
 output=one terminal numbered Chinese line per input span, no labels, explanations, markup, IDs, source-language leakage, or provisional text
+decoding=deterministic greedy generation with a source-sized output budget capped at 1024 tokens; context-aware packing shrinks the batch before exceeding the resident model context
 repair=the same ordered context is supplied to one bounded terminal repair; rejected candidates stay hidden until repair or a source-preserving terminal result"#;
 
 // Filled from the exact UTF-8 bytes of
 // DIRECT_HSK_PROMPT_FINGERPRINT_MATERIAL.
 pub const DIRECT_HSK_PROMPT_HASH: &str =
-    "sha256:d65637593d6053dbc9c5bec4428ded02842c34b587d171a43538d8d54b3fd2eb";
+    "sha256:0204bc6cd0c4a4a4d5dbf5356a1fdf53da6d4893e599d1023c574097f1d45d09";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DirectHskLearningMode {
