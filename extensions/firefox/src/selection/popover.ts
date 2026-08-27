@@ -8,6 +8,7 @@ import {
 
 export type LookupCallback = (request: LookupRequest) => Promise<LookupResult>
 export type PrimaryClickForwarder = (event: MouseEvent) => void
+export type ExplanationEventRoot = ShadowRoot | HTMLElement
 
 type SelectionRegion = {
   element: HTMLElement
@@ -145,7 +146,7 @@ export class ExplanationController {
   private hoverDismissTimer: ReturnType<typeof setTimeout> | undefined
 
   constructor(
-    private readonly root: ShadowRoot,
+    private readonly root: ExplanationEventRoot,
     private readonly popover: HTMLElement,
     private readonly lookup: LookupCallback,
     private readonly forwardPrimaryClick?: PrimaryClickForwarder,
@@ -160,15 +161,16 @@ export class ExplanationController {
     root.addEventListener('pointerout', this.onPointerOut)
     popover.addEventListener('pointerenter', this.onPopoverPointerEnter)
     popover.addEventListener('pointerleave', this.onPopoverPointerLeave)
-    root.host.ownerDocument.defaultView?.addEventListener('scroll', this.onViewportChange, true)
-    root.host.ownerDocument.defaultView?.addEventListener('resize', this.onViewportChange)
-    root.host.ownerDocument.addEventListener(
+    const documentRef = this.rootDocument()
+    documentRef.defaultView?.addEventListener('scroll', this.onViewportChange, true)
+    documentRef.defaultView?.addEventListener('resize', this.onViewportChange)
+    documentRef.addEventListener(
       'pointerdown',
       this.onDocumentPointerDown,
       true,
     )
-    root.host.ownerDocument.addEventListener('pointerup', this.onDocumentPointerUp, true)
-    root.host.ownerDocument.addEventListener(
+    documentRef.addEventListener('pointerup', this.onDocumentPointerUp, true)
+    documentRef.addEventListener(
       'selectionchange',
       this.onDocumentSelectionChange,
     )
@@ -198,26 +200,27 @@ export class ExplanationController {
     this.root.removeEventListener('pointerout', this.onPointerOut)
     this.popover.removeEventListener('pointerenter', this.onPopoverPointerEnter)
     this.popover.removeEventListener('pointerleave', this.onPopoverPointerLeave)
-    this.root.host.ownerDocument.defaultView?.removeEventListener(
+    const documentRef = this.rootDocument()
+    documentRef.defaultView?.removeEventListener(
       'scroll',
       this.onViewportChange,
       true,
     )
-    this.root.host.ownerDocument.defaultView?.removeEventListener(
+    documentRef.defaultView?.removeEventListener(
       'resize',
       this.onViewportChange,
     )
-    this.root.host.ownerDocument.removeEventListener(
+    documentRef.removeEventListener(
       'pointerdown',
       this.onDocumentPointerDown,
       true,
     )
-    this.root.host.ownerDocument.removeEventListener(
+    documentRef.removeEventListener(
       'pointerup',
       this.onDocumentPointerUp,
       true,
     )
-    this.root.host.ownerDocument.removeEventListener(
+    documentRef.removeEventListener(
       'selectionchange',
       this.onDocumentSelectionChange,
     )
@@ -547,49 +550,38 @@ export class ExplanationController {
   private positionPopover(region: HTMLElement, range: Range): void {
     const gap = 8
     const edge = 4
-    const hostRect = this.root.host.getBoundingClientRect()
     const regionRect = region.getBoundingClientRect()
     const selectedRect =
       typeof range.getBoundingClientRect === 'function'
         ? range.getBoundingClientRect()
         : regionRect
     const hasSelectedRect = selectedRect.width > 0 && selectedRect.height > 0
-    const obstruction = hasSelectedRect
-      ? {
-          left: Math.min(regionRect.left, selectedRect.left),
-          top: Math.min(regionRect.top, selectedRect.top),
-          right: Math.max(regionRect.right, selectedRect.right),
-          bottom: Math.max(regionRect.bottom, selectedRect.bottom),
-        }
-      : regionRect
+    const anchor = hasSelectedRect ? selectedRect : regionRect
     const popoverRect = this.popover.getBoundingClientRect()
     const popoverWidth = popoverRect.width || this.popover.offsetWidth
     const popoverHeight = popoverRect.height || this.popover.offsetHeight
     const view = region.ownerDocument.defaultView
-    const viewportWidth = view?.innerWidth ?? hostRect.right
-    const viewportHeight = view?.innerHeight ?? hostRect.bottom
-    const viewportRight = Math.min(hostRect.right, viewportWidth - edge)
-    const maximumLeft = Math.max(edge, viewportRight - hostRect.left - popoverWidth)
-    const left = Math.min(
-      maximumLeft,
-      Math.max(edge, obstruction.left - hostRect.left),
-    )
-    const below = obstruction.bottom - hostRect.top + gap
-    const belowSpace = Math.max(0, viewportHeight - edge - obstruction.bottom - gap)
-    const aboveSpace = Math.max(0, obstruction.top - edge - gap)
+    const viewportWidth = view?.innerWidth ?? regionRect.right
+    const viewportHeight = view?.innerHeight ?? regionRect.bottom
+    const maximumLeft = Math.max(edge, viewportWidth - edge - popoverWidth)
+    const left = Math.min(maximumLeft, Math.max(edge, anchor.left))
+    const below = anchor.bottom + gap
+    const belowSpace = Math.max(0, viewportHeight - edge - anchor.bottom - gap)
+    const aboveSpace = Math.max(0, anchor.top - edge - gap)
     const placeBelow = popoverHeight === 0 || belowSpace >= popoverHeight || belowSpace >= aboveSpace
     const availableHeight = Math.max(1, placeBelow ? belowSpace : aboveSpace)
     const renderedHeight = Math.min(popoverHeight || availableHeight, availableHeight)
     const top = placeBelow
       ? below
-      : obstruction.top - hostRect.top - gap - renderedHeight
+      : anchor.top - gap - renderedHeight
 
     this.popover.style.left = `${left}px`
     this.popover.style.maxHeight = `${availableHeight}px`
-    // Treat both the translated region and the full selected range as the
-    // obstruction. If the panel cannot fit at its natural height, it scrolls
-    // in the larger outside space instead of covering selected lettering.
-    this.popover.style.top = `${Math.max(edge - hostRect.top, top)}px`
+    this.popover.style.top = `${Math.max(edge, top)}px`
+  }
+
+  private rootDocument(): Document {
+    return 'host' in this.root ? this.root.host.ownerDocument : this.root.ownerDocument
   }
 
   private selectedText(selected: {

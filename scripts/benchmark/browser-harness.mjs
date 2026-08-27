@@ -536,7 +536,7 @@ export async function installDomObserver(page, runId) {
       if (!(element instanceof Element)) return
       for (const patch of [...(element.matches('.hskify-patch') ? [element] : []), ...element.querySelectorAll('.hskify-patch')]) emit('patchDomCommitted', { patchId: patch.dataset.hskifyPatchId ?? '', complete: patch.complete, naturalWidth: patch.naturalWidth, naturalHeight: patch.naturalHeight, decodedAndInstalled: patch.complete && patch.naturalWidth > 0 && patch.naturalHeight > 0, page: pageFor(patch), visible: visible(patch) })
       for (const region of [...(element.matches('.hskify-region') ? [element] : []), ...element.querySelectorAll('.hskify-region')]) emit('selectableTextDomCommitted', { itemId: region.dataset.hskifyItemId ?? '', sourceText: region.dataset.hskifySourceText ?? '', hskValid: region.dataset.hskifyHskValid ?? '', repairState: region.dataset.hskifyHskRepairState ?? '', sourcePreserving: region.classList.contains('hskify-source-notice'), text: region.textContent ?? '', pinyin: region.dataset.hskifyPinyin ?? '', page: pageFor(region), visible: visible(region) })
-      for (const block of [...(element.matches('.hskify-placeholder') ? [element] : []), ...element.querySelectorAll('.hskify-placeholder')]) emit('documentBlockDomCommitted', { itemId: block.dataset.hskifyItemId ?? '', state: block.dataset.hskifyState ?? '', text: block.textContent ?? '' })
+      for (const block of [...(element.matches('[data-hskify-item-id][data-hskify-state]') ? [element] : []), ...element.querySelectorAll('[data-hskify-item-id][data-hskify-state]')]) emit('documentBlockDomCommitted', { itemId: block.dataset.hskifyItemId ?? '', state: block.dataset.hskifyState ?? '', text: block.textContent ?? '' })
       for (const owned of [...(element.matches('[data-hskify-owned="true"]') ? [element] : []), ...element.querySelectorAll('[data-hskify-owned="true"]')]) {
         if (owned.classList.contains('hskify-wrapper')) emit('imageWrapperCommitted', { page: Number(owned.querySelector('img[data-page]')?.dataset.page ?? 0) })
         if (owned.dataset.hskifyDocumentReader === 'true' && !observedDocumentHosts.has(owned)) {
@@ -557,9 +557,8 @@ export async function installDomObserver(page, runId) {
 export async function documentDomEvidence(page) {
   return page.evaluate(() => {
     const host = document.querySelector('[data-hskify-document-reader="true"]')
-    const root = host?.shadowRoot
-    const blocks = root
-      ? [...root.querySelectorAll('.hskify-placeholder')].map((block) => ({
+    const blocks = host
+      ? [...document.querySelectorAll('[data-hskify-item-id][data-hskify-state]')].map((block) => ({
           itemId: block.dataset.hskifyItemId ?? '',
           state: block.dataset.hskifyState ?? '',
           text: block.textContent ?? '',
@@ -588,7 +587,7 @@ export async function documentDomEvidence(page) {
         )
       : []
     return {
-      mounted: Boolean(root),
+      mounted: Boolean(host),
       sourceSha256: host?.dataset.hskifySourceSha256 ?? '',
       sourceBlockCount: Number(host?.dataset.hskifySourceBlockCount ?? 0),
       sourceCharacterCount: Number(host?.dataset.hskifySourceCharacterCount ?? 0),

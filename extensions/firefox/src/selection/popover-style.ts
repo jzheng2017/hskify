@@ -15,7 +15,7 @@ export const LOOKUP_CSS = `
   overflow: auto;
   padding: 10px 12px;
   pointer-events: auto;
-  position: absolute;
+  position: fixed;
   text-align: left;
   user-select: text;
   z-index: 6;

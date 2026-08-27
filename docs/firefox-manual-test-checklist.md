@@ -36,12 +36,13 @@ commands, timestamps, and raw artifacts.
 
 ## Document reader
 
-- [ ] A complete semantic reader skeleton mounts adjacent to the source root in
-  under the benchmark bound, with English in every pending placeholder.
-- [ ] Only final `documentBlockReady` Chinese becomes visible; a preserved block
-  remains English and no block visibly revises.
+- [ ] In-place placeholders mount inside the mapped source blocks under the
+  benchmark bound without adding a reader surface, background, or typography.
+- [ ] Only final `documentBlockReady` Chinese becomes visible; pending and
+  preserved blocks expose no English in Chinese mode and no block visibly revises.
 - [ ] Teaching-term offsets, pinyin, hover dictionary, selection, and Mandarin
-  speech resolve against the joined final block.
+  speech resolve against the joined final block, and the popover stays beside
+  the selected word or range.
 - [ ] Original, Chinese, and hold-to-compare preserve a stable scroll anchor.
 - [ ] Source mutation, same-tab SPA navigation, cancellation, fatal failure, and
   repeated disposal remove Hskify nodes and restore every original root

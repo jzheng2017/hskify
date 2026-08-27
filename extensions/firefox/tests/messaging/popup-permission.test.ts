@@ -334,4 +334,80 @@ describe('popup permission gesture', () => {
     )
     expect(document.querySelector<HTMLProgressElement>('#status-progress')?.value).toBe(0.5)
   })
+
+  it('automatically retries page preparation after a hot-reload connection failure', async () => {
+    document.body.innerHTML = `
+      <select id="hsk-level"><option value="5" selected>5</option></select>
+      <select id="learning-mode"><option value="natural" selected>Natural</option></select>
+      <select id="reading-direction"><option value="ltr" selected>LTR</option></select>
+      <span id="content-kind"></span>
+      <div id="image-settings"></div>
+      <button id="translate-all">All</button>
+      <button id="cancel">Cancel</button>
+      <span id="status-title"></span>
+      <span id="status-detail"></span>
+      <progress id="status-progress"></progress>
+      <button id="setup-primary" hidden></button>
+    `
+    let preparationCalls = 0
+    const sendMessage = vi.fn(async (message: { type: string }) => {
+      switch (message.type) {
+        case 'setup:status':
+        case 'engine:warmup':
+          return {
+            ok: true,
+            value: { state: 'ready', modelId: 'qwen3.5-4b', message: 'Ready' },
+          }
+        case 'popup:prepare':
+          preparationCalls += 1
+          return preparationCalls === 1
+            ? {
+                ok: false,
+                error: {
+                  code: 'PAGE_INJECTION_FAILED',
+                  message: 'The previous content runtime was stale.',
+                  retryable: true,
+                },
+              }
+            : { ok: true, value: undefined }
+        case 'popup:state':
+          return {
+            ok: true,
+            value: {
+              state: 'idle',
+              contentKind: 'document',
+              current: 0,
+              total: 8,
+              message: 'Light-novel chapter detected',
+              hskLevel: 5,
+              learningMode: 'natural',
+              readingDirection: 'ltr',
+            },
+          }
+        default:
+          throw new Error(`Unexpected message ${message.type}`)
+      }
+    })
+    vi.stubGlobal('browser', {
+      runtime: { sendMessage },
+      storage: {
+        local: {
+          async get() {
+            return {}
+          },
+          async set() {},
+        },
+      },
+    })
+
+    await import('../../entrypoints/popup/main')
+    await vi.waitFor(
+      () => {
+        expect(preparationCalls).toBe(2)
+        expect(document.querySelector('#status-title')?.textContent).toBe('Ready')
+        expect(document.querySelector<HTMLButtonElement>('#translate-all')?.disabled).toBe(false)
+      },
+      { timeout: 2_500 },
+    )
+  })
 })

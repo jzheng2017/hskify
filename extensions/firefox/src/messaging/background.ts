@@ -202,6 +202,7 @@ export class BackgroundRouter {
   private readonly fixture: FixtureBackend | undefined
   private readonly prefetches: SingleImagePrefetch<PrefetchedAcquisition>
   private readonly chapters = new ChapterLifecycleStore()
+  private readonly contentPreparations = new Map<number, Promise<void>>()
   private readonly now: () => number
 
   constructor(dependencies?: Partial<BackgroundDependencies>) {
@@ -217,7 +218,7 @@ export class BackgroundRouter {
     return activeTabId(await browser.tabs.query({ active: true, currentWindow: true }))
   }
 
-  private async ensureContent(tabId: number): Promise<void> {
+  private async injectContent(tabId: number): Promise<void> {
     try {
       await browser.scripting.executeScript({
         target: { tabId, allFrames: false },
@@ -231,6 +232,29 @@ export class BackgroundRouter {
         { cause: error },
       )
     }
+  }
+
+  private async prepareContentRuntime(tabId: number): Promise<void> {
+    if (await this.contentState(tabId)) return
+    await this.injectContent(tabId)
+    if (await this.contentState(tabId)) return
+    throw new BackgroundOperationError(
+      'PAGE_INJECTION_FAILED',
+      'Hskify could not connect to this page after loading its chapter reader.',
+      true,
+    )
+  }
+
+  private async ensureContent(tabId: number): Promise<void> {
+    const existing = this.contentPreparations.get(tabId)
+    if (existing) return existing
+    const preparation = this.prepareContentRuntime(tabId).finally(() => {
+      if (this.contentPreparations.get(tabId) === preparation) {
+        this.contentPreparations.delete(tabId)
+      }
+    })
+    this.contentPreparations.set(tabId, preparation)
+    return preparation
   }
 
   private async prepareContent(): Promise<void> {

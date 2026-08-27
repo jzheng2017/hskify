@@ -15,6 +15,9 @@ debounce it rebuilds the exact CUDA companion, stops the prior development
 daemon, registers the new binary directly from `target\release`, refreshes the
 development readiness marker, and lets the extension reconnect. Stopping the
 command restores the original release registration and readiness marker.
+After an extension reload, the popup health-checks an existing tab runtime,
+reinjects a stale content script when necessary, and retries transient page
+preparation failures without requiring the chapter tab itself to be reloaded.
 
 Development mode never creates or installs a release bundle. The add-on is
 named `Hskify Dev` so it cannot be mistaken for a user build.

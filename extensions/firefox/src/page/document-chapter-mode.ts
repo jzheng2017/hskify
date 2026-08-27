@@ -22,6 +22,7 @@ export class DocumentChapterMode {
   private reader: DocumentReader | undefined
   private explanation: ExplanationController | undefined
   private jobId: string | undefined
+  private lookupJobId: string | undefined
   private lastVisibleBlockIds: string[] = []
   private invalidated = false
   private readonly sourceBlocks: ReadonlyMap<string, DocumentSourceBlock>
@@ -57,13 +58,13 @@ export class DocumentChapterMode {
         onVisibleBlocksChanged: (itemIds) => this.updateFocus(itemIds),
         onInvalidated: () => this.invalidateSource(),
         attachTranslatedText: (element, itemId) => {
-          this.explanation?.register(element, this.jobId ?? '', itemId)
+          this.explanation?.register(element, this.lookupJobId ?? '', itemId)
           return () => this.explanation?.unregister(element)
         },
       })
       this.reader = reader
       this.explanation = new ExplanationController(
-        reader.shadowRoot,
+        reader.interactionRoot,
         reader.lookupElement,
         (request: LookupRequest) => sendBackgroundMessage({ type: 'dictionary:lookup', request }),
         undefined,
@@ -96,6 +97,7 @@ export class DocumentChapterMode {
         }))
       this.run.assertCurrent(token)
       this.jobId = submitted.jobId
+      this.lookupJobId = submitted.jobId
       this.run.registerJob(token, submitted.jobId)
       await sendBackgroundMessage({
         type: 'chapter:source',
@@ -237,6 +239,7 @@ export class DocumentChapterMode {
       }).catch(() => undefined)
     }
     this.jobId = undefined
+    this.lookupJobId = undefined
     this.explanation?.destroy()
     this.explanation = undefined
     this.reader?.destroy()

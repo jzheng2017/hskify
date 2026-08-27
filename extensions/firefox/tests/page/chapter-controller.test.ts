@@ -154,7 +154,7 @@ describe('chapter controller document mode lifecycle', () => {
     const parsesAfterFirstRun = parse.mock.calls.length
     expect(firstMode).toBeDefined()
     expect(parsesAfterFirstRun).toBe(1)
-    expect(source.hidden).toBe(true)
+    expect(source.hidden).toBe(false)
 
     await expect(controller.start('all', 3, 'natural', 'ltr')).resolves.toMatchObject({
       state: 'complete',
@@ -162,7 +162,7 @@ describe('chapter controller document mode lifecycle', () => {
     })
     expect(currentDocumentMode(controller)).toBe(firstMode)
     expect(parse).toHaveBeenCalledTimes(parsesAfterFirstRun)
-    expect(source.hidden).toBe(true)
+    expect(source.hidden).toBe(false)
     controller.destroy()
   })
 
@@ -208,7 +208,7 @@ describe('chapter controller document mode lifecycle', () => {
       contentKind: 'document',
     })
     expect(currentDocumentMode(controller)).toBeDefined()
-    expect(replacementSource.hidden).toBe(true)
+    expect(replacementSource.hidden).toBe(false)
     controller.destroy()
   })
 
@@ -252,7 +252,7 @@ describe('chapter controller document mode lifecycle', () => {
         ([message]) => (message as { type?: string }).type === 'chapter:start',
       )?.[0] as { pageSessionId?: string } | undefined
       if (!chapterStart?.pageSessionId) throw new Error('Chapter session was not started.')
-      expect(source.hidden).toBe(true)
+      expect(source.hidden).toBe(false)
       expect(
         sendMessage.mock.calls.filter(
           ([message]) => (message as { type?: string }).type === 'jobs:cancel-page',

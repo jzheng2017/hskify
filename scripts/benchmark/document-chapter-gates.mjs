@@ -99,7 +99,7 @@ export function evaluateDocumentChapterBenchmark(samples) {
       samples.every(
         (sample) => sample.mounted === true && sample.blockCount === DOCUMENT_BENCHMARK_BLOCKS,
       ),
-      `mounted reader with ${DOCUMENT_BENCHMARK_BLOCKS} placeholders per sample`,
+      `mounted in-place translation with ${DOCUMENT_BENCHMARK_BLOCKS} placeholders per sample`,
       samples.map((sample) => ({ mounted: sample.mounted, blockCount: sample.blockCount })),
     ),
     gate('complete-user-timing', validDurations.length === samples.length, samples.length, validDurations.length),

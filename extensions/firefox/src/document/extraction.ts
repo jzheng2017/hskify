@@ -104,9 +104,7 @@ function utf8Length(value: string): number {
 }
 
 /** Largest exact `/jobs/document` JSON envelope these extracted blocks can enter. */
-export function documentWireRequestUtf8Bytes(
-  blocks: DocumentJobRequest['blocks'],
-): number {
+export function documentWireRequestUtf8Bytes(blocks: DocumentJobRequest['blocks']): number {
   const request: DocumentJobRequest = {
     buildFingerprint: BUILD_FINGERPRINT,
     pageSessionId: 'x'.repeat(MAX_PAGE_SESSION_ID_CHARACTERS),
@@ -430,12 +428,30 @@ function titleBlock(
       .filter((item): item is PendingText => item.type === 'text')
       .map((item) => item.liveElement),
   )
+  const mappedElements = items
+    .filter((item): item is PendingText => item.type === 'text')
+    .map((item) => item.liveElement)
+  const safelySharesStoryRoot = (item: LiveTextCandidate): boolean => {
+    const shared = commonSourceRoot([...mappedElements, item.element])
+    return Boolean(
+      shared &&
+      shared !== item.element.ownerDocument.body &&
+      shared !== item.element.ownerDocument.documentElement,
+    )
+  }
   const candidate =
     candidates.find(
       (item) =>
         !used.has(item.marker) &&
         item.text === normalizedTitle &&
         mappedRoot?.contains(item.element),
+    ) ??
+    candidates.find(
+      (item) =>
+        !used.has(item.marker) &&
+        item.text === normalizedTitle &&
+        /^h[12]$/iu.test(item.element.tagName) &&
+        safelySharesStoryRoot(item),
     ) ??
     candidates.find(
       (item) =>

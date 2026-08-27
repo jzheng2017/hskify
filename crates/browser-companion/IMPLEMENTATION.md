@@ -128,7 +128,9 @@ split. An individually oversized block is segmented at ICU sentence boundaries
 while line-break separators are retained. Its pieces can be translated in
 bounded batches, but the daemon joins and validates the complete block before
 one update is visible. If splitting, translation, joining, or final validation
-fails, `documentBlockPreserved` keeps that reader placeholder in English.
+fails, `documentBlockPreserved` records a source-preserving terminal block. The
+browser withholds that source English in Chinese mode while Original mode keeps
+the untouched site content.
 
 ## Image request and pipeline
 

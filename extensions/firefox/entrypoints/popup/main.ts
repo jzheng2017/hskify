@@ -1,8 +1,4 @@
-import type {
-  BrowserSetupStatus,
-  HskLevel,
-  ReadingDirection,
-} from '../../src/contracts/browser'
+import type { BrowserSetupStatus, HskLevel, ReadingDirection } from '../../src/contracts/browser'
 import {
   RuntimeMessageError,
   sendBackgroundMessage,
@@ -49,7 +45,6 @@ let pagePrepared = false
 let startInFlight = false
 let refreshInFlight = false
 let setupReady = false
-let pagePreparationFailed = false
 let contentSupported = false
 let setupAction: 'reconnect' | 'download' | 'retry' | undefined
 let warmedContentKind: 'image' | 'document' | undefined
@@ -60,9 +55,7 @@ function selectedLevel(): HskLevel {
 }
 
 function selectedLearningMode(): LearningMode {
-  return isLearningMode(learningModeSelect.value)
-    ? learningModeSelect.value
-    : DEFAULT_LEARNING_MODE
+  return isLearningMode(learningModeSelect.value) ? learningModeSelect.value : DEFAULT_LEARNING_MODE
 }
 
 function selectedReadingDirection(): ReadingDirection {
@@ -115,9 +108,9 @@ function renderState(state: PopupState): void {
         ? 'The translated text is ready.'
         : state.state === 'failed'
           ? state.message
-        : state.state === 'cancelled'
-          ? 'Anything unfinished was left unchanged.'
-          : state.message
+          : state.state === 'cancelled'
+            ? 'Anything unfinished was left unchanged.'
+            : state.message
   statusProgress.hidden = !active
   if (active) statusProgress.removeAttribute('value')
 }
@@ -154,10 +147,10 @@ function renderSetup(status: BrowserSetupStatus): void {
         : status.state === 'warming'
           ? 'Hskify is getting ready...'
           : status.state === 'verifying'
-          ? 'Almost ready…'
-          : status.state === 'failed'
-            ? 'Setup could not be completed. Please try again.'
-            : 'Hskify is ready.'
+            ? 'Almost ready…'
+            : status.state === 'failed'
+              ? 'Setup could not be completed. Please try again.'
+              : 'Hskify is ready.'
   setupPrimary.hidden = true
   setupAction = undefined
 
@@ -175,24 +168,19 @@ function renderSetup(status: BrowserSetupStatus): void {
         : status.state === 'warming'
           ? 'Getting ready'
           : status.state === 'verifying'
-          ? 'Finishing setup'
-          : 'Setup needs attention'
+            ? 'Finishing setup'
+            : 'Setup needs attention'
 
   if (status.state === 'missing-models' || status.state === 'failed') {
     setupAction = status.state === 'failed' ? 'retry' : 'download'
-    setupPrimary.textContent =
-      status.state === 'failed' ? 'Try setup again' : 'Set up translation'
+    setupPrimary.textContent = status.state === 'failed' ? 'Try setup again' : 'Set up translation'
     setupPrimary.hidden = false
   }
 
   const hasProgress =
-    status.completedBytes !== undefined &&
-    status.totalBytes !== undefined &&
-    status.totalBytes > 0
+    status.completedBytes !== undefined && status.totalBytes !== undefined && status.totalBytes > 0
   statusProgress.hidden =
-    status.state !== 'downloading' &&
-    status.state !== 'verifying' &&
-    status.state !== 'warming'
+    status.state !== 'downloading' && status.state !== 'verifying' && status.state !== 'warming'
   if (!statusProgress.hidden) {
     if (hasProgress) {
       statusProgress.value = status.completedBytes! / status.totalBytes!
@@ -203,9 +191,7 @@ function renderSetup(status: BrowserSetupStatus): void {
     }
   }
   setBusy(
-    status.state === 'downloading' ||
-      status.state === 'verifying' ||
-      status.state === 'warming',
+    status.state === 'downloading' || status.state === 'verifying' || status.state === 'warming',
   )
 }
 
@@ -268,11 +254,10 @@ cancel.addEventListener('click', async () => {
   }
 })
 levelSelect.addEventListener('change', () => void saveHskLevel(selectedLevel()))
-learningModeSelect.addEventListener('change', () =>
-  void saveLearningMode(selectedLearningMode()),
-)
-readingDirectionSelect.addEventListener('change', () =>
-  void saveReadingDirection(selectedReadingDirection()),
+learningModeSelect.addEventListener('change', () => void saveLearningMode(selectedLearningMode()))
+readingDirectionSelect.addEventListener(
+  'change',
+  () => void saveReadingDirection(selectedReadingDirection()),
 )
 
 setupPrimary.addEventListener('click', async () => {
@@ -330,14 +315,13 @@ async function refresh(): Promise<void> {
 }
 
 async function prepareReadyPage(): Promise<void> {
-  if (!pagePrepared && !pagePreparationFailed) {
+  if (!pagePrepared) {
     statusTitle.textContent = 'Preparing chapter'
     statusDetail.textContent = 'Detecting chapter content…'
     try {
       await sendBackgroundMessage({ type: 'popup:prepare' })
       pagePrepared = true
     } catch (error) {
-      pagePreparationFailed = true
       renderError(error)
       return
     }
@@ -369,15 +353,13 @@ async function refreshAll(): Promise<void> {
   }
 }
 
-void Promise.all([
-  loadHskLevel(),
-  loadLearningMode(),
-  loadReadingDirection(),
-]).then(([level, learningMode, readingDirection]) => {
-  levelSelect.value = String(level)
-  learningModeSelect.value = learningMode
-  readingDirectionSelect.value = readingDirection
-})
+void Promise.all([loadHskLevel(), loadLearningMode(), loadReadingDirection()]).then(
+  ([level, learningMode, readingDirection]) => {
+    levelSelect.value = String(level)
+    learningModeSelect.value = learningMode
+    readingDirectionSelect.value = readingDirection
+  },
+)
 void refreshAll()
 const refreshTimer = window.setInterval(() => void refreshAll(), 1_000)
 window.addEventListener('unload', () => window.clearInterval(refreshTimer), { once: true })

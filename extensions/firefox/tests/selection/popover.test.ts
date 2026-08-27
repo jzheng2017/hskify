@@ -142,19 +142,19 @@ describe('selection popover', () => {
     item.host.remove()
   })
 
-  it('positions the explanation after the whole translated region', async () => {
+  it('positions the explanation beside the selected text instead of the whole block', async () => {
     const item = fixture()
     item.region.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, composed: true }))
 
     await vi.waitFor(() => expect(item.lookup).toHaveBeenCalledTimes(1))
     expect(item.popover.hidden).toBe(false)
-    expect(item.popover.style.left).toBe('120px')
-    expect(item.popover.style.top).toBe('408px')
+    expect(item.popover.style.left).toBe('240px')
+    expect(item.popover.style.top).toBe('182px')
     item.controller.destroy()
     item.host.remove()
   })
 
-  it('positions outside the union of the selected range and translated region', async () => {
+  it('anchors a large selection to that selection rather than the translated region', async () => {
     const item = fixture()
     Object.defineProperty(item.range, 'getBoundingClientRect', {
       configurable: true,
@@ -163,7 +163,7 @@ describe('selection popover', () => {
     item.region.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, composed: true }))
 
     await vi.waitFor(() => expect(item.lookup).toHaveBeenCalledTimes(1))
-    expect(item.popover.style.left).toBe('100px')
+    expect(item.popover.style.left).toBe('200px')
     expect(item.popover.style.top).toBe('438px')
     item.controller.destroy()
     item.host.remove()

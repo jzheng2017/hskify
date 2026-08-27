@@ -189,15 +189,19 @@ export class ChapterController {
 }
 
 declare global {
-  var __hskifyChapterController: ChapterController | undefined
+  var __hskifyContentRuntime:
+    | {
+        controller: ChapterController
+        dispose(): void
+      }
+    | undefined
 }
 
 export function bootContentRuntime(): void {
-  if (globalThis.__hskifyChapterController) return
+  globalThis.__hskifyContentRuntime?.dispose()
   const controller = new ChapterController()
-  globalThis.__hskifyChapterController = controller
   document.documentElement.dataset.hskifyInjected = 'true'
-  browser.runtime.onMessage.addListener(async (raw: unknown, sender) => {
+  const listener = async (raw: unknown, sender: browser.runtime.MessageSender) => {
     if (
       typeof raw !== 'object' ||
       raw === null ||
@@ -225,5 +229,17 @@ export function bootContentRuntime(): void {
       case 'content:state':
         return controller.snapshot()
     }
-  })
+  }
+  browser.runtime.onMessage.addListener(listener)
+  globalThis.__hskifyContentRuntime = {
+    controller,
+    dispose() {
+      browser.runtime.onMessage.removeListener(listener)
+      controller.destroy()
+      delete document.documentElement.dataset.hskifyInjected
+      if (globalThis.__hskifyContentRuntime?.controller === controller) {
+        globalThis.__hskifyContentRuntime = undefined
+      }
+    },
+  }
 }

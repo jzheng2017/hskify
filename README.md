@@ -13,11 +13,12 @@ Original/Chinese/hold-to-compare controls, and local Mandarin speech.
 ## Reading modes
 
 For light-novel chapters, Hskify runs Mozilla Readability on a cloned document,
-maps accepted story blocks back to the live page, and mounts a safe inline
-Shadow DOM reader next to the original chapter. The complete story structure
-appears immediately with English placeholders; each block changes only when
-its final Chinese result is ready. The source DOM remains connected and is
-restored exactly on Original mode, cancellation, mutation, or navigation.
+maps accepted story blocks back to the live page, and replaces each mapped
+block in place only when its final Chinese result is ready. The site's chapter
+layout, colors, typography, illustrations, and separators stay in place; there
+is no separate reader surface. Pending or preserved English is never exposed in
+Chinese mode. Original mode, cancellation, mutation, and navigation restore the
+original connected nodes and attributes.
 
 For manga and webtoons, local vision models detect and recognize story text,
 restore only the original lettering areas, and place selectable Chinese over

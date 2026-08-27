@@ -148,7 +148,7 @@ The update union is tagged by `type`:
 | `imageRegionReady` | Final translated image item plus authorized cleanup patch and layout |
 | `documentBlockReady` | Final translated document block |
 | `imageRegionPreserved` | Terminal source-preserving image item; source pixels remain visible |
-| `documentBlockPreserved` | Terminal source-preserving document block; the reader keeps English |
+| `documentBlockPreserved` | Terminal source-preserving document block; Chinese mode withholds it while Original retains the source |
 | `complete` | Terminal translated/preserved counts |
 | `failed` | Terminal code, message, and retryability |
 | `cancelled` | Terminal cancellation |

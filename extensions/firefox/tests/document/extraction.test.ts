@@ -102,6 +102,27 @@ describe('light-novel document extraction', () => {
     expect(detection.chapter.snapshot.characterCount).toBeGreaterThanOrEqual(1_000)
   })
 
+  it('maps an exact chapter heading beside the article into the safe story root', async () => {
+    setPage(
+      `<main id="story-shell">
+        <h1 id="chapter-title">Chapter 21: The Silent Gate</h1>
+        <article id="chapter-body">${paragraphs()}</article>
+      </main>`,
+      'Chapter 21: The Silent Gate',
+    )
+
+    const detection = await detectDocumentChapter(document)
+
+    expect(detection.kind).toBe('document')
+    if (detection.kind !== 'document') return
+    const title = detection.chapter.snapshot.blocks.find((block) => block.kind === 'heading')
+    expect(title?.text).toBe('Chapter 21: The Silent Gate')
+    expect(detection.chapter.sourceElements.get(title!.itemId)).toBe(
+      document.querySelector('#chapter-title'),
+    )
+    expect(detection.chapter.sourceRoot).toBe(document.querySelector('#story-shell'))
+  })
+
   it('retains identical prose blocks with distinct stable IDs', async () => {
     const duplicate = sentence.repeat(2)
     setPage(

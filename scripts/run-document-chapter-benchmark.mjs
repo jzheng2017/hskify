@@ -338,7 +338,7 @@ async function runBrowserSample({ launched, port, options, sampleIndex, nativeEv
     await chapterPage.waitForFunction(
       (expectedBlocks) => {
         const host = document.querySelector('[data-hskify-document-reader="true"]')
-        return host?.shadowRoot?.querySelectorAll('.hskify-placeholder').length === expectedBlocks
+        return host && document.querySelectorAll('[data-hskify-item-id][data-hskify-state]').length === expectedBlocks
       },
       DOCUMENT_BENCHMARK_BLOCKS,
       { timeout: options.timeoutMs },

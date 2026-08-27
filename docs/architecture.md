@@ -80,18 +80,17 @@ exactly one `DocumentChapterMode` or `ImageChapterMode`. Both implement the same
 small render-target interface used by one singleton Original/Chinese/
 hold-to-compare controller.
 
-The document renderer inserts one isolated Shadow DOM reader adjacent to the
-mapped source root. It builds safe text, heading, list, separator, and image
-elements directly; it never copies arbitrary HTML, script, style, links, or
-controls. The complete structure mounts immediately with English text in every
-pending placeholder. A placeholder changes only when its terminal Chinese
-block arrives.
+The document renderer keeps mapped source elements in their original page
+positions and substitutes safe translated text inside those elements. It never
+copies arbitrary HTML, scripts, styles, links, or controls, and it does not add
+a reader background or restyle the chapter surface. Existing illustrations and
+separators remain connected. Pending and terminal-preserved blocks use empty
+line-box placeholders, so Chinese mode contains no English fallback text.
 
-After the reader is mounted, the source root's relevant attributes are
-snapshotted and it is hidden and made inert. Original mode, cancellation,
-source mutation, SPA navigation, and controller disposal restore the exact
-attribute values and remove only Hskify-owned nodes. Switching modes preserves
-the nearest reader/source scroll anchor.
+The original child nodes and attributes of every mapped block are retained by
+identity. Original mode, cancellation, source mutation, SPA navigation, and
+controller disposal restore them and remove only Hskify-owned metadata and
+overlay UI. Switching modes preserves the nearest block scroll anchor.
 
 An `IntersectionObserver` reports visible document block IDs. Focus reports are
 coalesced at 100 ms and never run a synchronous geometry loop on scroll. Image
@@ -147,8 +146,9 @@ The shared final-only policy is:
 4. never expose provisional Chinese.
 
 If any piece remains invalid, document mode publishes a source-preserving block
-result and keeps that placeholder in English. A fatal document failure restores
-the original page. Completion reports translated and preserved counts.
+result but withholds that English block from Chinese mode; Original mode still
+contains the untouched source. A fatal document failure restores the original
+page. Completion reports translated and preserved counts.
 
 Visible document work is dispatched first: the first visible block is sent by
 itself, followed by tokenizer-sized batches of up to six. The bounded preceding

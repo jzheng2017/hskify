@@ -42,6 +42,11 @@ kind, hash, and exact translation settings. Image recovery additionally
 requires the same reading direction. Returned update sequences must be
 contiguous from the requested acknowledgement cursor.
 
+Before using an existing chapter tab, the background health-checks its content
+runtime. It replaces and verifies a missing or stale runtime, while the popup
+retries transient preparation failures on its normal refresh interval. WXT or
+add-on reloads therefore do not require reloading the chapter page.
+
 The background calls:
 
 - `POST /jobs/image` for multipart raster jobs;
@@ -61,18 +66,20 @@ window repeats only cheap image checks on unsupported pages.
 
 ## Document reader
 
-One Shadow DOM host is inserted adjacent to the mapped chapter root. Its safe
-reader tree is constructed directly from typed snapshot items—never from
-Readability HTML or arbitrary live elements. Structural placeholders mount in
-one pass with English text. `documentBlockReady` replaces one placeholder only
-with final Chinese; `documentBlockPreserved` deliberately leaves it in English.
+Mapped live block elements remain connected in their site-defined positions.
+The renderer retains their original child nodes and attributes, then installs
+only safe final Chinese text and teaching spans inside those same elements. It
+adds no chapter surface, background, typography, or arbitrary Readability HTML.
+Pending and `documentBlockPreserved` items use empty line-box placeholders, so
+Chinese mode never mixes source English into translated prose.
 
-After successful mount, the source root's original attributes are captured,
-then it is hidden and made inert. Original mode, cancellation, source mutation,
-SPA navigation, fatal failure, and disposal restore the exact values and remove
-only Hskify nodes. Mode changes preserve a block-relative scroll anchor.
+Original mode, cancellation, source mutation, SPA navigation, fatal failure,
+and disposal restore the retained source nodes and remove only Hskify metadata
+and overlay UI. Mode changes preserve a block-relative scroll anchor. The
+dictionary overlay is viewport-fixed and anchored to the selected character or
+range rather than the containing paragraph.
 
-An `IntersectionObserver` tracks placeholders and a 100 ms coalescer reports at
+An `IntersectionObserver` tracks the in-place blocks and a 100 ms coalescer reports at
 most 64 visible block IDs. Scroll handlers perform no geometry reads. The first
 visible block is eligible for a single-item native dispatch before token-aware
 batches of at most six.

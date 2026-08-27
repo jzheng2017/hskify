@@ -85,6 +85,10 @@ function fixtureChapter(): { chapter: DocumentChapter; root: HTMLElement } {
       ...(kind === 'title' ? { headingLevel: 1 as const } : {}),
     })
     if (order === 4) {
+      const liveImage = document.createElement('img')
+      liveImage.src = 'https://images.example.test/plate.jpg'
+      liveImage.alt = 'Chapter illustration'
+      root.append(liveImage)
       structure.push({
         type: 'image',
         itemId: 'image-1',
@@ -94,6 +98,7 @@ function fixtureChapter(): { chapter: DocumentChapter; root: HTMLElement } {
       })
     }
     if (order === 5) {
+      root.append(document.createElement('hr'))
       structure.push({ type: 'separator', itemId: 'separator-1', order: 101 })
     }
   }
@@ -178,30 +183,27 @@ describe('document reader', () => {
     document.body.replaceChildren()
   })
 
-  it('mounts the complete safe skeleton before hiding the connected source', () => {
+  it('mounts translated-only placeholders in the connected source without a reader surface', () => {
     const { chapter, root } = fixtureChapter()
     const before = root.innerHTML
     const reader = new DocumentReader(chapter)
-    const host = root.nextElementSibling as HTMLElement
+    const host = document.querySelector<HTMLElement>('[data-hskify-document-reader="true"]')!
 
     expect(root.isConnected).toBe(true)
-    expect(root.hidden).toBe(true)
-    expect(root.hasAttribute('inert')).toBe(true)
+    expect(root.hidden).toBe(false)
+    expect(root.hasAttribute('inert')).toBe(false)
     expect(host.dataset.hskifyDocumentReader).toBe('true')
     expect(host.dataset.hskifySourceBlockCount).toBe('6')
     expect(host.dataset.hskifySourceCharacterCount).toBe(String(chapter.snapshot.characterCount))
-    expect(host.shadowRoot?.querySelectorAll('[data-hskify-item-id^="block-"]')).toHaveLength(6)
-    expect(host.shadowRoot?.querySelector('[data-hskify-item-id="block-0"]')?.textContent).toBe(
-      'Chapter One',
-    )
-    expect(host.shadowRoot?.querySelector('ol')?.children).toHaveLength(2)
-    expect(host.shadowRoot?.querySelector('img')?.getAttribute('src')).toBe(
+    expect(root.querySelectorAll('[data-hskify-item-id^="block-"]')).toHaveLength(6)
+    expect(chapter.sourceElements.get('block-0')?.textContent).toBe('\u200b')
+    expect(root.querySelector('img')?.getAttribute('src')).toBe(
       'https://images.example.test/plate.jpg',
     )
-    expect(host.shadowRoot?.querySelector('figure img + figcaption')).not.toBeNull()
-    expect(root.innerHTML).toBe(before)
+    expect(root.innerHTML).not.toBe(before)
 
     reader.destroy()
+    expect(root.innerHTML).toBe(before)
   })
 
   it('installs only terminal text once and wires teaching and interaction metadata', () => {
@@ -213,7 +215,7 @@ describe('document reader', () => {
 
     expect(reader.installBlock('block-1', text)).toBe(true)
     expect(reader.installBlock('block-1', text)).toBe(false)
-    const element = reader.shadowRoot.querySelector<HTMLElement>('[data-hskify-item-id="block-1"]')
+    const element = chapter.sourceElements.get('block-1')
     expect(element?.textContent).toBe(text.displayedChinese)
     expect(element?.querySelector('.hskify-learning-term')?.textContent).toBe('\u73b0\u5728')
     expect(element?.dataset.hskifyHskLearningMode).toBe('natural')
@@ -226,7 +228,7 @@ describe('document reader', () => {
     expect(detach).toHaveBeenCalledTimes(1)
   })
 
-  it('preserves a failed block in English and rejects stale source payloads', () => {
+  it('withholds failed English blocks from Chinese mode and rejects stale source payloads', () => {
     const { chapter } = fixtureChapter()
     const reader = new DocumentReader(chapter)
     expect(
@@ -235,10 +237,9 @@ describe('document reader', () => {
     expect(reader.preserveBlock('block-2', 'English source block number 2.', 'duplicate')).toBe(
       false,
     )
-    const preserved = reader.shadowRoot.querySelector<HTMLElement>(
-      '[data-hskify-item-id="block-2"]',
-    )
-    expect(preserved?.textContent).toBe('English source block number 2.')
+    const preserved = chapter.sourceElements.get('block-2')
+    expect(preserved?.textContent).toBe('\u200b')
+    expect(preserved?.textContent).not.toContain('English')
     expect(preserved?.dataset.hskifyState).toBe('preserved')
     expect(() => reader.installBlock('block-3', translation('different source'))).toThrow(
       /Source mismatch/u,
@@ -254,34 +255,30 @@ describe('document reader', () => {
       attribute.value,
     ])
     const reader = new DocumentReader(chapter)
-    const host = root.nextElementSibling as HTMLElement
+    const first = chapter.sourceElements.get('block-0')!
     expect(document.querySelectorAll('[data-hskify-mode-controls="true"]')).toHaveLength(1)
 
     modeButton('Original')?.click()
-    expect(host.hidden).toBe(true)
-    expect(host.style.getPropertyValue('display')).toBe('none')
-    expect(host.style.getPropertyPriority('display')).toBe('important')
+    expect(first.textContent).toBe('Chapter One')
+    expect(first.hasAttribute('data-hskify-item-id')).toBe(false)
     expect([...root.attributes].map((attribute) => [attribute.name, attribute.value])).toEqual(
       originalAttributes,
     )
 
     modeButton('Chinese')?.click()
-    expect(host.hidden).toBe(false)
-    expect(host.style.getPropertyValue('display')).toBe('block')
-    expect(host.style.getPropertyPriority('display')).toBe('important')
-    expect(root.hidden).toBe(true)
+    expect(first.textContent).toBe('\u200b')
+    expect(first.dataset.hskifyState).toBe('pending')
+    expect(root.hidden).toBe(false)
     modeButton('Hold to compare')?.dispatchEvent(
       new Event('pointerdown', { bubbles: true, composed: true }),
     )
-    expect(host.hidden).toBe(true)
-    expect(host.style.getPropertyValue('display')).toBe('none')
+    expect(first.textContent).toBe('Chapter One')
     expect(root.getAttribute('aria-hidden')).toBe('false')
     modeButton('Hold to compare')?.dispatchEvent(
       new Event('pointerup', { bubbles: true, composed: true }),
     )
-    expect(host.hidden).toBe(false)
-    expect(host.style.getPropertyValue('display')).toBe('block')
-    expect(root.getAttribute('aria-hidden')).toBe('true')
+    expect(first.textContent).toBe('\u200b')
+    expect(root.getAttribute('aria-hidden')).toBe('false')
 
     reader.destroy()
     expect([...root.attributes].map((attribute) => [attribute.name, attribute.value])).toEqual(
@@ -306,8 +303,8 @@ describe('document reader', () => {
       { onVisibleBlocksChanged: focus },
       { intersectionObserverFactory: factory },
     )
-    const first = reader.shadowRoot.querySelector<HTMLElement>('[data-hskify-item-id="block-0"]')!
-    const second = reader.shadowRoot.querySelector<HTMLElement>('[data-hskify-item-id="block-1"]')!
+    const first = chapter.sourceElements.get('block-0')!
+    const second = chapter.sourceElements.get('block-1')!
     observer?.trigger([second])
     observer?.trigger([first])
     expect(focus).not.toHaveBeenCalled()
@@ -332,17 +329,13 @@ describe('document reader', () => {
       return observer
     }
     const reader = new DocumentReader(chapter, {}, { intersectionObserverFactory: factory })
-    const placeholder = reader.shadowRoot.querySelector<HTMLElement>(
-      '[data-hskify-item-id="block-1"]',
-    )!
     const source = chapter.sourceElements.get('block-1')!
-    vi.spyOn(placeholder, 'getBoundingClientRect').mockReturnValue({
-      top: 40,
-    } as DOMRect)
-    vi.spyOn(source, 'getBoundingClientRect').mockReturnValue({ top: 115 } as DOMRect)
-    const scrollBy = vi.spyOn(window, 'scrollBy').mockImplementation(() => undefined)
-    observer?.trigger([placeholder])
+    observer?.trigger([source])
     vi.advanceTimersByTime(100)
+    vi.spyOn(source, 'getBoundingClientRect')
+      .mockReturnValueOnce({ top: 40 } as DOMRect)
+      .mockReturnValueOnce({ top: 115 } as DOMRect)
+    const scrollBy = vi.spyOn(window, 'scrollBy').mockImplementation(() => undefined)
 
     modeButton('Original')?.click()
 
@@ -364,7 +357,7 @@ describe('document reader', () => {
     expect(root.hidden).toBe(false)
     expect(root.hasAttribute('inert')).toBe(false)
     expect(root.getAttribute('aria-hidden')).toBe(originalAria)
-    expect(root.getAttribute('data-site-state')).toBe('ready')
+    expect(root.getAttribute('data-site-state')).toBe('changed')
     expect(document.querySelector('[data-hskify-document-reader]')).toBeNull()
   })
 
@@ -381,13 +374,15 @@ describe('document reader', () => {
     expect(document.querySelector('[data-hskify-mode-controls="true"]')).toBeNull()
   })
 
-  it('never installs an unsafe image URL from an untrusted snapshot', () => {
-    const { chapter } = fixtureChapter()
+  it('leaves the site illustration connected and unchanged', () => {
+    const { chapter, root } = fixtureChapter()
     const image = chapter.structure.find((item) => item.type === 'image')
     if (!image || image.type !== 'image') throw new Error('Fixture image missing.')
+    const liveImage = root.querySelector('img')
     image.sourceUrl = 'javascript:alert(1)'
     const reader = new DocumentReader(chapter)
-    expect(reader.shadowRoot.querySelector('img')?.hasAttribute('src')).toBe(false)
+    expect(root.querySelector('img')).toBe(liveImage)
+    expect(root.querySelector('img')?.src).toBe('https://images.example.test/plate.jpg')
     reader.destroy()
   })
 })
