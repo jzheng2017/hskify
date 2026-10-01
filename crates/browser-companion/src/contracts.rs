@@ -8,7 +8,7 @@ use thiserror::Error;
 ///
 /// This is deliberately not a negotiable protocol version. A mismatched build
 /// must restart the native/daemon pair that shipped with the extension.
-pub const BUILD_FINGERPRINT: &str = "hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-08-09-r8";
+pub const BUILD_FINGERPRINT: &str = "hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-10-01-r10";
 pub const HSK_STANDARD: &str = "2.0";
 pub const SOURCE_LANGUAGE: &str = "en";
 pub const TARGET_LANGUAGE: &str = "zh-CN";
@@ -508,6 +508,8 @@ impl NormalizedRect {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ImageJobRequest {
     pub build_fingerprint: String,
+    pub client_request_id: String,
+    pub retry_item_ids: Vec<String>,
     pub client_image_id: String,
     pub source_sha256: String,
     pub source_mime_type: String,
@@ -524,6 +526,7 @@ pub struct ImageJobRequest {
 
 impl Validate for ImageJobRequest {
     fn validate(&self) -> Result<(), ContractError> {
+        validate_creation_identity(&self.client_request_id, &self.retry_item_ids)?;
         require_build_fingerprint("buildFingerprint", &self.build_fingerprint)?;
         validate_job_fields(self)?;
         if self.chapter_source_order.is_empty() {
@@ -541,12 +544,14 @@ impl Validate for ImageJobRequest {
         if !self.chapter_source_order.contains(&self.source_index)
             || self
                 .chapter_source_order
-                .windows(2)
-                .any(|window| window[0] >= window[1])
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                != self.chapter_source_order.len()
         {
             return Err(ContractError::at(
                 "chapterSourceOrder",
-                "must be strictly increasing and contain sourceIndex",
+                "must contain unique source identities in DOM order and include sourceIndex",
             ));
         }
         if self.visible_rects.len() > MAX_VISIBLE_RECTS {
@@ -588,6 +593,8 @@ fn validate_job_fields(request: &ImageJobRequest) -> Result<(), ContractError> {
 /// Validated input passed from the HTTP boundary into the image pipeline.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct ImagePipelineInput {
+    pub retry_item_ids: Vec<String>,
+    pub surrounding_context: Vec<crate::chapter_session::ChapterContextUnit>,
     pub source_sha256: String,
     pub source_mime_type: String,
     pub natural_width: u32,
@@ -603,6 +610,8 @@ pub(crate) struct ImagePipelineInput {
 impl ImageJobRequest {
     pub(crate) fn pipeline_input(&self) -> ImagePipelineInput {
         ImagePipelineInput {
+            retry_item_ids: self.retry_item_ids.clone(),
+            surrounding_context: Vec::new(),
             source_sha256: self.source_sha256.clone(),
             source_mime_type: self.source_mime_type.clone(),
             natural_width: self.natural_width,
@@ -715,6 +724,8 @@ pub struct WarmupRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DocumentSourceBlock {
+    pub parent_block_id: String,
+    pub sub_item_order: u32,
     pub item_id: String,
     pub source_index: u32,
     pub item_order: u32,
@@ -725,6 +736,7 @@ pub struct DocumentSourceBlock {
 
 impl DocumentSourceBlock {
     fn validate_at(&self, path: &str) -> Result<(), ContractError> {
+        require_nonempty_at_most(&format!("{path}.parentBlockId"), &self.parent_block_id, 256)?;
         require_nonempty_at_most(&format!("{path}.itemId"), &self.item_id, 256)?;
         if self.provenance != SourceProvenance::Dom {
             return Err(ContractError::at(
@@ -758,6 +770,9 @@ impl DocumentSourceBlock {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DocumentJobRequest {
     pub build_fingerprint: String,
+    pub client_request_id: String,
+    pub retry_item_ids: Vec<String>,
+    pub focus: FocusUpdateRequest,
     pub page_session_id: String,
     pub source_sha256: String,
     pub settings: BrowserJobSettings,
@@ -766,6 +781,7 @@ pub struct DocumentJobRequest {
 
 impl Validate for DocumentJobRequest {
     fn validate(&self) -> Result<(), ContractError> {
+        validate_creation_identity(&self.client_request_id, &self.retry_item_ids)?;
         require_build_fingerprint("buildFingerprint", &self.build_fingerprint)?;
         require_nonempty_at_most("pageSessionId", &self.page_session_id, 256)?;
         require_sha256("sourceSha256", &self.source_sha256)?;
@@ -777,9 +793,20 @@ impl Validate for DocumentJobRequest {
             ));
         }
         let mut ids = HashSet::with_capacity(self.blocks.len());
+        let mut parent_orders = std::collections::HashMap::new();
         let mut previous = None;
         for (index, block) in self.blocks.iter().enumerate() {
             block.validate_at(&format!("blocks[{index}]"))?;
+            let expected_order = parent_orders
+                .entry(block.parent_block_id.as_str())
+                .or_insert(0u32);
+            if block.sub_item_order != *expected_order {
+                return Err(ContractError::at(
+                    format!("blocks[{index}].subItemOrder"),
+                    "must start at zero and increase consecutively within its parent",
+                ));
+            }
+            *expected_order += 1;
             if !ids.insert(block.item_id.as_str()) {
                 return Err(ContractError::at(
                     format!("blocks[{index}].itemId"),
@@ -794,6 +821,28 @@ impl Validate for DocumentJobRequest {
                 ));
             }
             previous = Some(position);
+        }
+        if self
+            .retry_item_ids
+            .iter()
+            .any(|id| !ids.contains(id.as_str()))
+        {
+            return Err(ContractError::at(
+                "retryItemIds",
+                "must identify submitted source blocks",
+            ));
+        }
+        self.focus.validate()?;
+        match &self.focus {
+            FocusUpdateRequest::Document {
+                visible_block_ids, ..
+            } if visible_block_ids.iter().all(|id| ids.contains(id.as_str())) => {}
+            _ => {
+                return Err(ContractError::at(
+                    "focus",
+                    "must identify submitted document blocks",
+                ));
+            }
         }
         let serialized_bytes = serde_json::to_vec(self)
             .map_err(|_| ContractError::at("$", "document request could not be serialized"))?
@@ -815,6 +864,21 @@ impl Validate for DocumentJobRequest {
     }
 }
 
+fn validate_creation_identity(id: &str, retries: &[String]) -> Result<(), ContractError> {
+    require_nonempty_at_most("clientRequestId", id, 128)?;
+    if retries.len() > MAX_DOCUMENT_BLOCKS {
+        return Err(ContractError::at("retryItemIds", "too many retry items"));
+    }
+    let mut unique = HashSet::with_capacity(retries.len());
+    for id in retries {
+        require_nonempty_at_most("retryItemIds", id, 256)?;
+        if !unique.insert(id) {
+            return Err(ContractError::at("retryItemIds", "must be unique"));
+        }
+    }
+    Ok(())
+}
+
 /// Hashes the complete ordered text snapshot. The record and unit separators
 /// are literal bytes in the unversioned contract.
 #[must_use]
@@ -822,8 +886,10 @@ pub fn canonical_document_sha256(blocks: &[DocumentSourceBlock]) -> String {
     let mut hasher = Sha256::new();
     for block in blocks {
         let record = format!(
-            "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1e}",
+            "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1e}",
             block.item_id,
+            block.parent_block_id,
+            block.sub_item_order,
             block.source_index,
             block.item_order,
             match block.kind {
@@ -1229,6 +1295,8 @@ impl TranslatedHskStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TranslatedText {
+    pub termination: koharu_llm::GenerationTermination,
+    pub protected_names: Vec<koharu_app::llm::ProtectedName>,
     pub source_text: String,
     pub base_chinese: String,
     pub displayed_chinese: String,
@@ -1238,6 +1306,18 @@ pub struct TranslatedText {
 
 impl TranslatedText {
     fn validate_at(&self, path: &str) -> Result<(), ContractError> {
+        if self.termination != koharu_llm::GenerationTermination::Stop
+            || self.protected_names.len() > 32
+            || self
+                .protected_names
+                .iter()
+                .any(|name| !name.is_anchored(&self.source_text, &self.displayed_chinese))
+        {
+            return Err(ContractError::at(
+                path,
+                "translation must be complete with source-anchored names",
+            ));
+        }
         require_nonempty_at_most(
             &format!("{path}.sourceText"),
             &self.source_text,
@@ -1261,6 +1341,8 @@ impl TranslatedText {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DocumentBlockReady {
+    pub parent_block_id: String,
+    pub sub_item_order: u32,
     pub item_id: String,
     pub source_index: u32,
     pub item_order: u32,
@@ -1288,6 +1370,8 @@ impl DocumentBlockReady {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DocumentBlockPreserved {
+    pub parent_block_id: String,
+    pub sub_item_order: u32,
     pub item_id: String,
     pub source_index: u32,
     pub item_order: u32,
@@ -1440,6 +1524,7 @@ impl Validate for ImageRegionReady {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ImageRegionPreserved {
+    pub disposition: PreservationDisposition,
     pub item_id: String,
     pub text_polygon: Vec<Point>,
     pub source_text: String,
@@ -1457,7 +1542,9 @@ impl ImageRegionPreserved {
             &self.source_text,
             MAX_OUTPUT_TEXT_CHARS,
         )?;
-        if self.source_text.trim().is_empty() && self.reason != "artwork-preserved" {
+        if self.source_text.trim().is_empty()
+            && self.disposition != PreservationDisposition::Excluded
+        {
             return Err(ContractError::at(
                 format!("{path}.sourceText"),
                 "may be empty only for artwork-preserved image items",
@@ -1466,6 +1553,13 @@ impl ImageRegionPreserved {
         require_unit(&format!("{path}.confidence"), self.confidence)?;
         require_nonempty_at_most(&format!("{path}.reason"), &self.reason, MAX_MESSAGE_CHARS)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PreservationDisposition {
+    Excluded,
+    Failed,
 }
 
 impl Validate for ImageRegionPreserved {
@@ -1763,6 +1857,39 @@ pub enum LookupInteraction {
     Hover,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LookupContext {
+    pub source_text: String,
+    pub base_chinese: String,
+    pub displayed_chinese: String,
+    pub proper_names: Vec<hsk_control::ProperName>,
+}
+impl Validate for LookupContext {
+    fn validate(&self) -> Result<(), ContractError> {
+        for (path, text) in [
+            ("context.sourceText", &self.source_text),
+            ("context.baseChinese", &self.base_chinese),
+            ("context.displayedChinese", &self.displayed_chinese),
+        ] {
+            require_at_most(path, text, MAX_DOCUMENT_BLOCK_BYTES)?;
+        }
+        if self.proper_names.len() > 32 {
+            return Err(ContractError::at("context.properNames", "too many names"));
+        }
+        for name in &self.proper_names {
+            require_nonempty_at_most("context.properNames.text", &name.text, 128)?;
+            if !self.displayed_chinese.contains(&name.text) {
+                return Err(ContractError::at(
+                    "context.properNames",
+                    "name is absent from displayed text",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LookupRequest {
@@ -1772,7 +1899,7 @@ pub struct LookupRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub character_offset: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub job_id: Option<String>,
+    pub context: Option<LookupContext>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub item_id: Option<String>,
 }
@@ -1813,22 +1940,32 @@ impl Validate for LookupRequest {
                 }
             }
         }
-        if self.job_id.is_some() != self.item_id.is_some() {
+        if let Some(item_id) = &self.item_id {
+            require_nonempty_at_most("itemId", item_id, 256)?;
+        }
+        if let Some(context) = &self.context {
+            context.validate()?;
+        }
+        if self.item_id.is_some() != self.context.is_some() {
             return Err(ContractError::at(
-                "itemId",
-                "jobId and itemId must be present together",
+                "context",
+                "itemId and context must be paired",
             ));
         }
-        if let Some(job_id) = &self.job_id {
-            require_nonempty_at_most("jobId", job_id, MAX_LOOKUP_STRING_CHARS)?;
+        if let (Some(offset), Some(context)) = (self.character_offset, &self.context) {
+            if offset as usize >= context.displayed_chinese.chars().count() {
+                return Err(ContractError::at(
+                    "characterOffset",
+                    "must identify a character in the item context",
+                ));
+            }
         }
-        if let Some(item_id) = &self.item_id {
-            require_nonempty_at_most("itemId", item_id, MAX_LOOKUP_STRING_CHARS)?;
-        }
-        if self.interaction == LookupInteraction::Hover && self.job_id.is_none() {
+        if self.interaction == LookupInteraction::Hover
+            && (self.context.is_none() || self.item_id.is_none())
+        {
             return Err(ContractError::at(
-                "jobId",
-                "hover lookup requires a translated job and item",
+                "context",
+                "hover lookup requires bounded item context",
             ));
         }
         Ok(())
@@ -1956,6 +2093,8 @@ mod tests {
                 rect: patch_rect,
             },
             text: TranslatedText {
+                termination: koharu_llm::GenerationTermination::Stop,
+                protected_names: Vec::new(),
                 source_text: "HELLO".to_owned(),
                 base_chinese: "你好".to_owned(),
                 displayed_chinese: "你好".to_owned(),
@@ -2126,7 +2265,7 @@ mod tests {
         let hover: LookupRequest = serde_json::from_value(serde_json::json!({
             "interaction": "hover",
             "characterOffset": 2,
-            "jobId": "job-1",
+            "context": {"sourceText": "The graduate student left.", "displayedChinese": "研究生离开。", "baseChinese": "研究生离开。", "properNames": []},
             "itemId": "region-1"
         }))
         .unwrap();
@@ -2159,6 +2298,8 @@ mod tests {
         let template = request.blocks[0].clone();
         request.blocks = (0..MAX_DOCUMENT_BLOCKS)
             .map(|index| DocumentSourceBlock {
+                parent_block_id: format!("parent-{index}"),
+                sub_item_order: 0,
                 item_id: format!("block-{index}"),
                 source_index: index as u32,
                 item_order: 0,
@@ -2193,6 +2334,8 @@ mod tests {
 
         request.blocks = (0..65)
             .map(|index| DocumentSourceBlock {
+                parent_block_id: format!("parent-{index}"),
+                sub_item_order: 0,
                 item_id: format!("large-{index}"),
                 source_index: index,
                 item_order: 0,

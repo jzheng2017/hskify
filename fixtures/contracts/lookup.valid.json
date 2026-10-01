@@ -4,7 +4,10 @@
     {
       "simplified": "离开",
       "pinyin": "lí kāi",
-      "definitions": ["leave", "depart"],
+      "definitions": [
+        "leave",
+        "depart"
+      ],
       "hskLevel": 2,
       "properName": false
     }

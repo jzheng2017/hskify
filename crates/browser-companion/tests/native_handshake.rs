@@ -80,7 +80,7 @@ fn native_binary_handshake_uses_prestarted_daemon() {
         &mut framed_request,
         &json!({
             "type": "start-or-discover-daemon",
-            "buildFingerprint": "hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-08-09-r8",
+            "buildFingerprint": "hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-10-01-r10",
             "extensionVersion": "0.1.0",
             "extensionOrigin": ORIGIN
         }),

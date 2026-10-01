@@ -40,7 +40,7 @@ describe('passive reader warmup', () => {
     vi.resetModules()
   })
 
-  it('runs Readability only once while cheap image discovery keeps polling an unsupported page', async () => {
+  it('reclassifies an unsupported page so late prose can warm the language lane', async () => {
     const definition = (await import('../../entrypoints/reader-warmup.content')).default as {
       main(): void
     }
@@ -49,6 +49,9 @@ describe('passive reader warmup', () => {
     await vi.advanceTimersByTimeAsync(6_000)
 
     expect(mocks.detectDocumentChapter).toHaveBeenCalledTimes(1)
+    document.body.append(document.createElement('article'))
+    await vi.advanceTimersByTimeAsync(1_100)
+    expect(mocks.detectDocumentChapter).toHaveBeenCalledTimes(2)
     expect(mocks.looksLikeSequentialArtReader.mock.calls.length).toBeGreaterThan(1)
     expect(mocks.discoverPageSurfaces.mock.calls.length).toBeGreaterThan(1)
     expect(mocks.sendBackgroundMessage).not.toHaveBeenCalled()

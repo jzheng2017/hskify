@@ -9,7 +9,7 @@ transport, replay, teaching tools, and lifecycle ownership shared.
 - Supported target: Windows x86-64, RTX 4080 SUPER 16 GB, compute capability
   8.9, CUDA 13.1.
 - Exact fingerprint:
-  `hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-08-09-r8`.
+  `hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-10-01-r10`.
 - Exact identities: extension `hskify@local.hskify`, native host
   `local.hskify.browser`, and binaries `hskify-native-host` /
   `hskify-browser-daemon`.
@@ -23,11 +23,9 @@ transport, replay, teaching tools, and lifecycle ownership shared.
   fatal failure, and disposal.
 - One shared `TranslationService`; prompts gain an OCR-correction instruction
   only for `ocr` provenance.
-- Every document block is registered before dispatch. Canonical context and
-  output order are `(sourceIndex, itemOrder)`, independent of focus priority.
+- Every document block is registered before dispatch. Canonical DOM context is independent of focus priority; validated groups publish immediately. Image source identities and their DOM order are separate.
 - The 4,096-token language context uses the real tokenizer and batches at most
-  six units. Only an individually oversized document block may split at ICU
-  sentence boundaries, and it publishes only after joined validation.
+  six units. Browser prose consists of independently publishable sentence groups. Native token planning splits further only when capacity requires it; each group publishes after joined validation.
 - Natural mode publishes faithful Chinese with deterministic teaching metadata.
   Strict mode permits one bounded terminal repair. No provisional Chinese is
   visible.
@@ -235,3 +233,5 @@ sample for every browser image job, positive measured language work, raw GPU
 samples, matching workload and tokenizer identities, at least 90 percent of
 baseline language throughput, and peak VRAM no greater than 16,384 MiB. A JSON
 object containing only claimed rates or memory values is rejected.
+
+The r9 redesign adds production-module Firefox regressions and independent blind-quality/first-readable gates. See [reader-redesign-evaluation.md](reader-redesign-evaluation.md) for the current evidence and remaining release prerequisites.

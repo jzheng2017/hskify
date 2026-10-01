@@ -39,17 +39,18 @@ impl ChapterContextStore {
         for unit in units {
             let position = (unit.source_index, unit.item_order);
             match chapter.get_mut(&position) {
-                Some(existing) if existing.item_id == unit.item_id => {
+                Some(existing)
+                    if existing.item_id == unit.item_id
+                        && existing.source_text == unit.source_text =>
+                {
                     // Registration is immutable apart from preserving an
                     // already-published translation during replay/refresh.
                     let displayed_text = existing.displayed_text.take();
                     *existing = unit;
                     existing.displayed_text = displayed_text;
                 }
-                Some(_) => {
-                    // Validated requests cannot contain position collisions.
-                    // Keeping the first registration avoids timing-dependent
-                    // context if a malformed internal caller violates that.
+                Some(existing) => {
+                    *existing = unit;
                 }
                 None => {
                     chapter.insert(position, unit);
@@ -81,6 +82,7 @@ impl ChapterContextStore {
         };
         let mut context = chapter
             .range(..position)
+            .rev()
             .filter_map(|(_, unit)| {
                 let chinese = unit.displayed_text.as_deref()?.trim();
                 let source = unit.source_text.trim();
@@ -89,10 +91,9 @@ impl ChapterContextStore {
                     chinese: chinese.to_owned(),
                 })
             })
+            .take(MAX_CONTEXT_UTTERANCES)
             .collect::<Vec<_>>();
-        if context.len() > MAX_CONTEXT_UTTERANCES {
-            context.drain(..context.len() - MAX_CONTEXT_UTTERANCES);
-        }
+        context.reverse();
         context
     }
 
@@ -123,17 +124,49 @@ impl ChapterContextStore {
         &self,
         chapter_id: &str,
         source_index: u32,
+        source_order: &[u32],
     ) -> Vec<ChapterContextUnit> {
-        self.chapters
-            .get(chapter_id)
-            .map(|chapter| {
+        let Some(chapter) = self.chapters.get(chapter_id) else {
+            return Vec::new();
+        };
+        let Some(position) = source_order.iter().position(|index| *index == source_index) else {
+            return Vec::new();
+        };
+        let mut preceding = source_order[..position]
+            .iter()
+            .rev()
+            .flat_map(|index| {
                 chapter
-                    .values()
-                    .filter(|unit| unit.source_index != source_index)
-                    .cloned()
-                    .collect()
+                    .range((*index, 0)..=(*index, u32::MAX))
+                    .rev()
+                    .map(|(_, unit)| unit.clone())
             })
-            .unwrap_or_default()
+            .take(MAX_CONTEXT_UTTERANCES)
+            .collect::<Vec<_>>();
+        preceding.reverse();
+        preceding.extend(
+            source_order[position + 1..]
+                .iter()
+                .flat_map(|index| {
+                    chapter
+                        .range((*index, 0)..=(*index, u32::MAX))
+                        .map(|(_, unit)| unit.clone())
+                })
+                .take(MAX_CONTEXT_UTTERANCES),
+        );
+        preceding
+    }
+
+    pub fn remove_source(&mut self, chapter_id: &str, source_index: u32) {
+        if let Some(chapter) = self.chapters.get_mut(chapter_id) {
+            let positions = chapter
+                .range((source_index, 0)..=(source_index, u32::MAX))
+                .map(|(position, _)| *position)
+                .collect::<Vec<_>>();
+            for position in positions {
+                chapter.remove(&position);
+            }
+        }
     }
 
     pub fn remove(&mut self, chapter_id: &str) {
@@ -203,8 +236,16 @@ impl ChapterSession {
         }
     }
 
-    pub fn register_surface(&mut self, surface: PageSurface) {
+    pub fn register_surface(&mut self, surface: PageSurface) -> bool {
+        let changed = self
+            .surfaces
+            .get(&surface.page_index)
+            .is_some_and(|previous| previous.source_sha256 != surface.source_sha256);
+        if changed {
+            self.analyses.remove(&surface.page_index);
+        }
         self.surfaces.insert(surface.page_index, surface);
+        changed
     }
 
     pub fn record_analysis(&mut self, analysis: PageAnalysis) {
@@ -318,6 +359,67 @@ mod tests {
             store.following_source("chapter", (0, 1), 6),
             vec!["following source".to_owned()]
         );
+    }
+
+    #[test]
+    fn late_insertions_use_canonical_dom_order_instead_of_admission_ids() {
+        let mut store = ChapterContextStore::default();
+        store.register(
+            "chapter",
+            [
+                unit(0, 0, "first", "first"),
+                unit(1, 0, "last", "last"),
+                unit(2, 0, "inserted", "inserted"),
+            ],
+        );
+        assert_eq!(
+            store
+                .snapshot_excluding_source("chapter", 0, &[2, 0, 1])
+                .iter()
+                .map(|unit| unit.item_id.as_str())
+                .collect::<Vec<_>>(),
+            ["inserted", "last"]
+        );
+    }
+
+    #[test]
+    fn changing_a_surface_discards_old_region_tails_and_context_only_for_that_source() {
+        let mut session = ChapterSession::new("chapter");
+        let surface = PageSurface {
+            session_id: "chapter".into(),
+            page_index: 0,
+            source_sha256: "old".into(),
+            width: 100,
+            height: 100,
+            kind: PageSurfaceKind::Image,
+        };
+        session.record_analysis(PageAnalysis {
+            surface: surface.clone(),
+            regions: vec![RegionPlan {
+                id: "old-tail".into(),
+                reading_order: 1,
+                role: RegionRole::Dialogue,
+                source_english: "old source".into(),
+                continuation_group: None,
+            }],
+            complete: true,
+        });
+        let mut changed = surface;
+        changed.source_sha256 = "new".into();
+        assert!(session.register_surface(changed.clone()));
+        assert!(!session.analyses.contains_key(&0));
+        assert!(!session.register_surface(changed));
+        let mut context = ChapterContextStore::default();
+        context.register(
+            "chapter",
+            [
+                unit(0, 0, "old", "old"),
+                unit(0, 1, "tail", "tail"),
+                unit(1, 0, "other", "other"),
+            ],
+        );
+        context.remove_source("chapter", 0);
+        assert_eq!(context.following_source("chapter", (0, 0), 6), ["other"]);
     }
 
     #[test]

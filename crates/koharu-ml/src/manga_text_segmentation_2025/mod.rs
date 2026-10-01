@@ -1,3 +1,5 @@
+#[cfg(feature = "cuda")]
+mod depthwise;
 mod model;
 
 use std::{

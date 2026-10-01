@@ -26,7 +26,9 @@
     "format": "oxfmt ui package.json .oxfmtrc.json .vscode",
     "format:check": "oxfmt --check ui package.json .oxfmtrc.json .vscode",
     "generate:openapi": "cargo run -p koharu-rpc --bin openapi -- ui/openapi.json",
-    "generate:client": "openapi-generator-cli generate -i ui/openapi.json -g rust -o tests/integration-tests/client --package-name koharu-client --additional-properties=library=reqwest,supportAsync=true,preferUnsignedInt=true,packageVersion=0.0.0"
+    "generate:client": "openapi-generator-cli generate -i ui/openapi.json -g rust -o tests/integration-tests/client --package-name koharu-client --additional-properties=library=reqwest,supportAsync=true,preferUnsignedInt=true,packageVersion=0.0.0",
+    "test:redesign:firefox": "node scripts/test-redesign-firefox.mjs",
+    "test:redesign:gates": "node --test scripts/benchmark/generalization-gates.test.mjs"
   },
   "devDependencies": {
     "@openapitools/openapi-generator-cli": "^2.39.0",

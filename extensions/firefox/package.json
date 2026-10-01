@@ -15,7 +15,8 @@
     "lint:extension": "web-ext lint --source-dir .output/firefox-mv3"
   },
   "dependencies": {
-    "@mozilla/readability": "0.6.0"
+    "@mozilla/readability": "0.6.0",
+    "franc-min": "6.2.0"
   },
   "devDependencies": {
     "@playwright/test": "1.61.1",

@@ -17,7 +17,7 @@ lookup ownership, update log, cancellation, and acknowledgement model.
 The TypeScript and Rust contracts contain exactly:
 
 ```text
-hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-08-09-r8
+hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-10-01-r10
 ```
 
 The install identities are:
@@ -96,160 +96,14 @@ The daemon mounts these unversioned routes:
 Serde contracts deny unknown fields. The server rejects a focus variant that
 does not match the job modality.
 
-## Document request and pipeline
+## Pipeline and release verification
 
-`POST /jobs/document` accepts at most 1 MiB of UTF-8 JSON. The strict request
-contains `buildFingerprint`, `pageSessionId`, `sourceSha256`, `settings`, and
-`blocks`. There may be at most 2,000 blocks and one block may contain at most
-16 KiB of UTF-8 text.
+The exact r9 source/retry/publication/lookup contracts are documented in [browser-contract.md](../../docs/browser-contract.md). Implementation responsibilities and bounds are documented in [architecture.md](../../docs/architecture.md); these are the maintained descriptions of the redesigned pipeline.
 
-Every block contains:
+`server.rs` owns authenticated admission, creation-id deduplication, update logs, cancellation, job eviction and a bounded optional persistence writer. `pipeline_adapter.rs` owns shared language policy, resident runtime admission, immediate validated publication, immutable context and separate HSK/faithful/page-analysis caches. `result_cache.rs` owns the current exact disk schema and indexed pruning. `chapter_session.rs` retains bounded source context in canonical chapter order.
 
-- stable `itemId`;
-- `sourceIndex` and `itemOrder`;
-- kind `prose`, `heading`, `dialogue`, `caption`, `thought`, or `sfx`;
-- provenance `dom`; and
-- authoritative normalized English `text`.
+CPU library verification uses `cargo test --lib -p browser-companion -p koharu-app -p koharu-llm -p hsk-control --no-default-features --locked`. GPU binaries require the `cuda` feature; the native handshake integration test must be run against built CUDA binaries. `scripts/Invoke-PerformanceBuild.ps1` supplies the pinned build environment and records matching source/binary/hardware attestation. Do not describe CPU library tests as packaged/GPU performance evidence.
 
-Document contracts reject OCR provenance and layout constraints. The daemon
-repeats canonical normalization and SHA-256 calculation over the complete
-ordered block sequence; a different `sourceSha256`, duplicate item/order,
-invalid bound, empty source, or unsorted source fails before publication.
+The fault regressions include concurrent/lost-response creation, cancellation and replay, optional cache-write failure, immutable-context keys and dictionary lookup after more than 128 image jobs. The existing contract fixtures deny unknown fields and bind results to the full source identity.
 
-All blocks are registered before translation. The pipeline builds canonical
-context by `(sourceIndex, itemOrder)` and then applies focus priority. Up to 64
-unique `visibleBlockIds` may be reported. If a visible block exists, its first
-dispatch is a one-block batch; later batches contain at most six real-tokenizer
-units. Dispatch order never changes surrounding context or terminal output
-order.
-
-The resident context budget is 4,096 tokens. A block that fits alone is never
-split. An individually oversized block is segmented at ICU sentence boundaries
-while line-break separators are retained. Its pieces can be translated in
-bounded batches, but the daemon joins and validates the complete block before
-one update is visible. If splitting, translation, joining, or final validation
-fails, `documentBlockPreserved` records a source-preserving terminal block. The
-browser withholds that source English in Chinese mode while Original mode keeps
-the untouched site content.
-
-## Image request and pipeline
-
-`POST /jobs/image` accepts the raster as multipart `image` and the strict JSON
-metadata as multipart `request`. Metadata includes client image identity,
-source hash/MIME/dimensions, page session and canonical source order, surface
-kind, reading direction, learning settings, and initial normalized rectangles.
-
-The server checks body, encoded type, sniffed type, SHA-256, declared/decoded
-dimensions, pixel count, and decoder allocation. The image pipeline owns only:
-
-1. tile planning and viewport priority;
-2. text proposal detection and OCR;
-3. visual story/furniture/artwork adjudication;
-4. text/bubble segmentation and local inpainting;
-5. patch, typography, style, and layout construction.
-
-Accepted source spans use provenance `ocr`, so the shared language adapter adds
-only the OCR-correction instruction. Source layout is attached only to image
-items. A translated image item stores and authorizes a valid transparent PNG
-before publishing `imageRegionReady`. A terminal non-translated item publishes
-`imageRegionPreserved`, leaving source pixels intact.
-
-## Shared language correctness
-
-`TranslationService` accepts generic ordered source spans and contains no comic,
-panel, bubble, or OCR language in its shared prompt. The two-stage policy is:
-
-1. establish faithful Simplified Chinese;
-2. for `natural`, publish it with deterministic HSK teaching metadata;
-3. for `strict`, perform HSK realization and at most one terminal repair;
-4. publish no provisional Chinese.
-
-DOM text remains authoritative. OCR inputs alone receive correction guidance.
-Deterministic validation covers output structure, source echo/Latin leakage,
-names, numbers, question intent, HSK validity, pinyin, and teaching-term ranges.
-
-The shared terminal `TranslatedText` contains `sourceText`, `baseChinese`,
-`displayedChinese`, `pinyin`, and final HSK state. It is embedded in
-`imageRegionReady` and `documentBlockReady`. Preserved variants contain source
-identity/text and a reason, never a draft translation.
-
-## Updates, completion, and recovery
-
-Each job has one append-only sequence beginning at 1. Valid update types are:
-
-- `progress`;
-- `imageRegionReady` and `imageRegionPreserved`;
-- `documentBlockReady` and `documentBlockPreserved`;
-- terminal `complete`, `failed`, or `cancelled`.
-
-`complete` reports exact `translatedCount` and `preservedCount`. The job store
-rejects duplicate item publication, regressive progress, updates after a
-terminal event, and modality-incompatible updates.
-
-`GET /jobs/{jobId}/updates?after=N&waitMs=M` returns only later updates and
-waits at most the contract limit. Each response is one contiguous page of at
-most 1,024 updates from a log retaining at most 10,000. The browser acknowledges
-after DOM install and requests the next page; there is no separate status or
-result model. An unacknowledged update may replay after MV3 suspension and is
-installed once by `itemId`.
-
-Job/artifact identity includes an exact `image | document` source tag and
-source hash. A changed document hash or different modality cannot recover stale
-output. Fatal job failure and cancellation release job-owned patches/contexts;
-the browser restores the live source page.
-
-## Lookup and cache identity
-
-Dictionary hover lookup is owned by `jobId` and `itemId`. The daemon resolves a
-Unicode offset against its canonical final displayed Chinese and returns the
-longest expression starting at that character. Selection lookup is bounded and
-does not trust browser-supplied translated context.
-
-The completed-result cache has one current schema with tagged image/document
-entries. Image entries contain final image items, patches, preserved items, and
-lookup contexts. Document entries contain final ready/preserved blocks and
-lookup contexts. The key includes modality, complete source hash, learning mode,
-level, surrounding canonical context, model/prompt/validator identities,
-tokenizer and HSK/dictionary resources, and output-affecting pipeline resources.
-There is no reader for an earlier schema.
-
-## Resource installation and environment
-
-The packager installs one verified resource pack under `%LOCALAPPDATA%\Hskify`.
-Supported overrides use only generic names:
-
-- `HSKIFY_STATE_DIR`;
-- `HSKIFY_RESOURCES_DIR`;
-- `HSKIFY_HSK_PATH`;
-- `HSKIFY_DICTIONARY_PATH`;
-- `HSKIFY_QWEN_MODEL_PATH`.
-
-Debug timing/rejection flags also use the `HSKIFY_*` prefix. There are no
-novel-specific resources or deployment settings.
-
-Local acceptance runs set `HSKIFY_BENCH_EVIDENCE_PATH` to an initialized
-`{"samples":[]}` file. Native upserts document dispatch/runtime counters and
-image language-unit/generation-duration measurements by tagged `(kind, jobId)`;
-the browser benchmark runner consumes this native output directly. Image units
-are counted once at faithful OCR-authoritative generation. Timed wall time
-covers admitted faithful, strict-primary, and terminal-repair model calls only;
-strict/repair do not increment units, and queue, cache, and validation time are
-excluded. Cache replay intentionally produces no generation sample.
-
-## Verification
-
-Relevant local checks include:
-
-```text
-cargo test -p browser-companion --all-targets -j 1
-cargo test -p koharu-app --all-targets -j 1
-cargo test -p koharu-llm --all-targets -j 1
-cargo clippy -p browser-companion -p koharu-app -p koharu-llm --all-targets -j 1 -- -D warnings
-```
-
-Contract fixtures cover image/document creation, focus modality, ready and
-preserved events, completion counts, unknown fields, limits, hashes, and replay.
-Native document tests cover token packing, mid-chapter context, joined-block
-validation, strict repair, per-block preservation, cache separation, and the
-language-only runtime boundary. Existing image and real-reader regressions
-remain mandatory under the generic identities.
+Independent annotated blind chapters and matching packaged Firefox/RTX 4080 SUPER latency samples remain release requirements in [reader-redesign-evaluation.md](../../docs/reader-redesign-evaluation.md).

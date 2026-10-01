@@ -22,7 +22,7 @@ pub use direct_hsk::{
     HskTranslationOutcome, HskTranslationRepairBatchRequest, HskUtteranceKind,
     MAX_HSK_CONTEXT_TOKENS, MAX_HSK_LAYOUT_CHARACTERS, MAX_HSK_LAYOUT_LINES,
     MAX_HSK_PRECEDING_UTTERANCES, MAX_HSK_TRANSLATION_BATCH, MIN_HSK_LAYOUT_CHARACTERS,
-    direct_hsk_prompt_hash, direct_hsk_validator_hash,
+    ProtectedName, ProtectedNameReason, direct_hsk_prompt_hash, direct_hsk_validator_hash,
 };
 
 use std::path::PathBuf;

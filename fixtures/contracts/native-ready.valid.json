@@ -1,14 +1,25 @@
 {
   "type": "ready",
-    "buildFingerprint": "hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-08-09-r8",
+  "buildFingerprint": "hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-10-01-r10",
   "engineVersion": "0.61.2",
   "port": 43127,
   "token": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
   "sessionExpiresAtUnixMs": 4102444800000,
   "capabilities": {
-    "sourceLanguages": ["en"],
-    "targetLanguages": ["zh-CN"],
-    "hskLevels": [1, 2, 3, 4, 5, 6],
+    "sourceLanguages": [
+      "en"
+    ],
+    "targetLanguages": [
+      "zh-CN"
+    ],
+    "hskLevels": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+    ],
     "modelsReady": true
   }
 }

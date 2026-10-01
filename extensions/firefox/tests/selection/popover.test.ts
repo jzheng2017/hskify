@@ -114,7 +114,12 @@ describe('selection popover', () => {
     expect(item.lookup).toHaveBeenLastCalledWith({
       interaction: 'hover',
       characterOffset: 0,
-      jobId: 'job-1',
+      context: {
+        displayedChinese: '研究生离开。',
+        baseChinese: '研究生离开。',
+        sourceText: '',
+        properNames: [],
+      },
       itemId: 'region-1',
     })
     await vi.waitFor(() => expect(item.popover.textContent).toContain('研究生'))
@@ -132,7 +137,12 @@ describe('selection popover', () => {
     expect(item.lookup).toHaveBeenLastCalledWith({
       interaction: 'hover',
       characterOffset: 2,
-      jobId: 'job-1',
+      context: {
+        displayedChinese: '研究生离开。',
+        baseChinese: '研究生离开。',
+        sourceText: '',
+        properNames: [],
+      },
       itemId: 'region-1',
     })
     await vi.waitFor(() =>

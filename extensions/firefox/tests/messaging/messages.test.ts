@@ -7,6 +7,8 @@ describe('strict extension runtime messages', () => {
   it('parses every submitted-image field and rejects page-controlled fixture switches', () => {
     const valid = {
       type: 'job:submit-image',
+      clientRequestId: 'test-request',
+      retryItemIds: [],
       pageSessionId: 'page-session',
       sourceIndex: 3,
       chapterSourceOrder: [3],
@@ -31,6 +33,9 @@ describe('strict extension runtime messages', () => {
   it('parses a complete authoritative DOM document request', () => {
     const request = {
       buildFingerprint: BUILD_FINGERPRINT,
+      clientRequestId: 'test-request',
+      retryItemIds: [],
+      focus: { kind: 'document', active: true, visibleBlockIds: [] },
       pageSessionId: 'document-page',
       sourceSha256: 'a'.repeat(64),
       settings: {
@@ -42,6 +47,8 @@ describe('strict extension runtime messages', () => {
       },
       blocks: [
         {
+          parentBlockId: 'block-0',
+          subItemOrder: 0,
           itemId: 'block-0',
           sourceIndex: 0,
           itemOrder: 0,
@@ -77,7 +84,7 @@ describe('strict extension runtime messages', () => {
         type: 'dictionary:lookup',
         request: { interaction: 'hover', characterOffset: 0 },
       }),
-    ).toThrow(/jobId/i)
+    ).toThrow(/context/i)
     expect(() => parseBackgroundRequest({ type: 'font:get', fontId: 'font' })).toThrow(/jobId/i)
     expect(() => parseBackgroundRequest({ type: 'job:result', jobId: 'job' })).toThrow(
       /not supported/i,

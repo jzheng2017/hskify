@@ -23,6 +23,8 @@ function record(overrides: Partial<ActiveJobRecord> = {}): ActiveJobRecord {
       sourceIndex: 0,
       request: {
         buildFingerprint: BUILD_FINGERPRINT,
+        clientRequestId: 'test-request',
+        retryItemIds: [],
         clientImageId: 'page-0-hash',
         sourceSha256,
         sourceMimeType: 'image/webp',

@@ -11,6 +11,8 @@ export type DocumentBlockKind =
 
 export type DocumentTextBlock = {
   itemId: string
+  parentBlockId: string
+  subItemOrder: number
   order: number
   kind: DocumentBlockKind
   text: string
@@ -49,12 +51,17 @@ export type DocumentSnapshot = {
   blocks: NativeDocumentBlock[]
 }
 
+export type SourceTextPart = { node: Text; start: number; end: number }
+
 export type DocumentChapter = {
   snapshot: DocumentSnapshot
   structure: DocumentStructureItem[]
   sourceRoot: HTMLElement
+  sourceRevisions: ReadonlyMap<Text, string>
   /** Live source elements, keyed by translated item ID. */
   sourceElements: ReadonlyMap<string, HTMLElement>
+  /** Disjoint source text nodes. Rendering never owns a site's element children. */
+  sourceSlots: ReadonlyMap<string, readonly SourceTextPart[]>
 }
 
 export type DocumentRejectionReason =
@@ -100,6 +107,8 @@ export function toNativeDocumentBlocks(
 ): NativeDocumentBlock[] {
   return blocks.map((block, itemOrder) => ({
     itemId: block.itemId,
+    parentBlockId: block.parentBlockId,
+    subItemOrder: block.subItemOrder,
     sourceIndex: 0,
     itemOrder,
     kind: nativeKindForDocumentBlock(block.kind),
@@ -118,7 +127,7 @@ export function canonicalDocumentText(blocks: readonly NativeDocumentBlock[]): s
     .sort((left, right) => left.sourceIndex - right.sourceIndex || left.itemOrder - right.itemOrder)
     .map(
       (block) =>
-        `${block.itemId}\u001f${block.sourceIndex}\u001f${block.itemOrder}\u001f${block.kind}\u001f${block.provenance}\u001f${block.text}\u001e`,
+        `${block.itemId}\u001f${block.parentBlockId}\u001f${block.subItemOrder}\u001f${block.sourceIndex}\u001f${block.itemOrder}\u001f${block.kind}\u001f${block.provenance}\u001f${block.text}\u001e`,
     )
     .join('')
 }

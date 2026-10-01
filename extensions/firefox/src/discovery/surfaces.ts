@@ -1,3 +1,4 @@
+import { sha256Hex } from '../acquisition/hash'
 /**
  * Reader-agnostic page surfaces.
  *
@@ -7,8 +8,11 @@
  * function.  Cross-origin/protected frames are reported as unsupported and
  * are never probed or bypassed.
  */
-
 import { DEFAULT_IMAGE_LIMITS, normalizeMimeType } from '../acquisition/image-format'
+import { captureRenderedRegion } from '../acquisition/rendered-region'
+import { objectFitRect } from '../rendering/geometry'
+import { measureSurfaceTransform } from '../rendering/surface-transform'
+import { evaluateImage, discoverDeferredImages, eligibleSurfaceElement } from './images'
 
 export type PageSurfaceKind = 'image' | 'background' | 'canvas' | 'webgl' | 'frame'
 
@@ -35,6 +39,7 @@ export type PageSurface = Readonly<{
   sourceUrl?: string
   /** True when the pixels are supplied by the capture callback rather than a fetchable URL. */
   captureOnly?: boolean
+  renderedBox?: boolean
   width: number
   height: number
   rect: SurfaceRect
@@ -57,10 +62,12 @@ export type DiscoveredSurface = {
   sourceUrl: string
   /** Capture bytes are authoritative; sourceUrl is only a stable identity. */
   captureOnly?: boolean
+  renderedBox?: boolean
   sourceWidth: number
   sourceHeight: number
   domIndex: number
   visible: boolean
+  sourceRevision?: string
   capture?: (signal?: AbortSignal) => Promise<SurfaceCapture | undefined>
 }
 
@@ -69,6 +76,7 @@ export type SurfaceDiscoveryEvent =
   | {
       type: 'updated'
       candidate: DiscoveredSurface
+      sourceChanged?: boolean
       previousSourceUrl: string
       previousDomIndex: number
     }
@@ -113,7 +121,10 @@ function isHtmlElement(element: Element): element is HTMLElement {
   return element.nodeType === 1
 }
 
-function visibleInViewport(element: Element, ownerDocument: Document = element.ownerDocument): boolean {
+function visibleInViewport(
+  element: Element,
+  ownerDocument: Document = element.ownerDocument,
+): boolean {
   const rect = element.getBoundingClientRect()
   return rectVisibleInViewport(rect, ownerDocument)
 }
@@ -189,6 +200,7 @@ function toCandidate(surface: PageSurface, domIndex: number): DiscoveredSurface 
     domIndex,
     visible: surface.visible,
     capture: surface.capture,
+    ...(surface.renderedBox ? { renderedBox: true } : {}),
   })
 }
 
@@ -240,7 +252,11 @@ async function fetchImage(
     const contentLength = response.headers.get('content-length')
     if (contentLength !== null) {
       const parsed = Number(contentLength)
-      if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > DEFAULT_IMAGE_LIMITS.maximumBytes) {
+      if (
+        !Number.isSafeInteger(parsed) ||
+        parsed < 1 ||
+        parsed > DEFAULT_IMAGE_LIMITS.maximumBytes
+      ) {
         return undefined
       }
     }
@@ -317,7 +333,7 @@ function cssLength(value: string, basis: number, intrinsic: number): number | un
   if (normalized === 'auto') return intrinsic
   if (normalized.endsWith('%')) {
     const percentage = Number.parseFloat(normalized.slice(0, -1))
-    return Number.isFinite(percentage) ? basis * percentage / 100 : undefined
+    return Number.isFinite(percentage) ? (basis * percentage) / 100 : undefined
   }
   if (normalized.endsWith('px')) {
     const pixels = Number.parseFloat(normalized.slice(0, -2))
@@ -334,12 +350,7 @@ function backgroundDrawPlan(
   intrinsicWidth: number,
   intrinsicHeight: number,
 ): BackgroundDrawPlan | undefined {
-  if (
-    targetWidth <= 0 ||
-    targetHeight <= 0 ||
-    intrinsicWidth <= 0 ||
-    intrinsicHeight <= 0
-  ) {
+  if (targetWidth <= 0 || targetHeight <= 0 || intrinsicWidth <= 0 || intrinsicHeight <= 0) {
     return undefined
   }
   const size = firstBackgroundLayer(style.backgroundSize || 'auto')
@@ -359,10 +370,10 @@ function backgroundDrawPlan(
     if (requestedWidth === undefined || requestedHeight === undefined) return undefined
     if (tokens.length <= 1 || tokens[1] === 'auto') {
       width = requestedWidth
-      height = width * intrinsicHeight / intrinsicWidth
+      height = (width * intrinsicHeight) / intrinsicWidth
     } else if (tokens[0] === 'auto') {
       height = requestedHeight
-      width = height * intrinsicWidth / intrinsicHeight
+      width = (height * intrinsicWidth) / intrinsicHeight
     } else {
       width = requestedWidth
       height = requestedHeight
@@ -371,20 +382,18 @@ function backgroundDrawPlan(
   if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
     return undefined
   }
-  const remainingX = targetWidth - width
-  const remainingY = targetHeight - height
-  const positionToken = firstBackgroundLayer(style.backgroundPosition || '0% 0%')
-    .split(/\s+/u)
-    .filter(Boolean)
-  const position = (token: string | undefined, remaining: number, axis: 'x' | 'y'): number => {
-    const normalized = (token || (axis === 'x' ? '0%' : '0%')).toLowerCase()
-    if (normalized === 'center') return remaining / 2
-    if (axis === 'x' && normalized === 'right') return remaining
-    if (axis === 'x' && normalized === 'left') return 0
-    if (axis === 'y' && normalized === 'bottom') return remaining
-    if (axis === 'y' && normalized === 'top') return 0
-    const parsed = cssLength(normalized, remaining, 0)
-    return parsed === undefined ? 0 : parsed
+  let offsets
+  try {
+    offsets = objectFitRect(
+      targetWidth,
+      targetHeight,
+      width,
+      height,
+      'none',
+      firstBackgroundLayer(style.backgroundPosition || '0% 0%'),
+    )
+  } catch {
+    return undefined
   }
   const repeat = firstBackgroundLayer(style.backgroundRepeat || 'repeat')
   const repeatTokens = repeat.split(/\s+/u).filter(Boolean)
@@ -395,8 +404,8 @@ function backgroundDrawPlan(
   return {
     width,
     height,
-    offsetX: position(positionToken[0], remainingX, 'x'),
-    offsetY: position(positionToken[1], remainingY, 'y'),
+    offsetX: offsets.left,
+    offsetY: offsets.top,
     repeatX,
     repeatY,
   }
@@ -421,13 +430,7 @@ async function renderedBackgroundCapture(
       new Blob([raw.bytes], raw.mimeType ? { type: raw.mimeType } : undefined),
     )
     abortIfNeeded(signal)
-    const plan = backgroundDrawPlan(
-      style,
-      width,
-      height,
-      bitmap.width,
-      bitmap.height,
-    )
+    const plan = backgroundDrawPlan(style, width, height, bitmap.width, bitmap.height)
     if (!plan) return undefined
     const canvas = ownerDocument.createElement('canvas')
     canvas.width = width
@@ -463,83 +466,36 @@ async function renderedBackgroundCapture(
   }
 }
 
-type ReadableWebGlContext = {
-  RGBA: number
-  UNSIGNED_BYTE: number
-  readPixels(
-    x: number,
-    y: number,
-    width: number,
-    height: number,
-    format: number,
-    type: number,
-    pixels: Uint8Array,
-  ): void
-}
-
-function webGlPixels(canvas: HTMLCanvasElement, width: number, height: number): Uint8Array | undefined {
-  let context: ReadableWebGlContext | null = null
-  try {
-    context =
-      (canvas.getContext('webgl2') as ReadableWebGlContext | null) ??
-      (canvas.getContext('webgl') as ReadableWebGlContext | null)
-  } catch {
-    return undefined
-  }
-  if (!context || typeof context.readPixels !== 'function') return undefined
-  const pixels = new Uint8Array(width * height * 4)
-  try {
-    context.readPixels(0, 0, width, height, context.RGBA, context.UNSIGNED_BYTE, pixels)
-  } catch {
-    return undefined
-  }
-  return pixels
-}
-
+/** Never call getContext on a publisher canvas: doing so can lock its future renderer to the wrong API. */
 function canvasCapture(
   canvas: HTMLCanvasElement,
   width: number,
   height: number,
   ownerDocument: Document,
-  kind: 'canvas' | 'webgl',
 ) {
   return async (signal?: AbortSignal): Promise<SurfaceCapture | undefined> => {
     abortIfNeeded(signal)
     try {
-      let dataUrl: string
-      if (kind === 'webgl') {
-        const pixels = webGlPixels(canvas, width, height)
-        if (pixels) {
-          const restored = ownerDocument.createElement('canvas')
-          restored.width = width
-          restored.height = height
-          const context = restored.getContext('2d')
-          if (!context) return undefined
-          const imageData = context.createImageData(width, height)
-          // WebGL's origin is bottom-left while canvas/ImageData's origin is
-          // top-left. Flip rows while copying so overlays use page order.
-          const rowBytes = width * 4
-          for (let row = 0; row < height; row += 1) {
-            const source = (height - row - 1) * rowBytes
-            imageData.data.set(pixels.subarray(source, source + rowBytes), row * rowBytes)
-          }
-          context.putImageData(imageData, 0, 0)
-          dataUrl = restored.toDataURL('image/png')
-        } else {
-          // Some readers expose a WebGL context whose current framebuffer is
-          // protected or has already been discarded. A normal canvas export
-          // is still a valid, browser-owned capture when available.
-          dataUrl = canvas.toDataURL('image/png')
-        }
-      } else {
-        dataUrl = canvas.toDataURL('image/png')
+      const probe = ownerDocument.createElement('canvas')
+      probe.width = 128
+      probe.height = 128
+      const context = probe.getContext('2d')
+      if (!context) return undefined
+      context.drawImage(canvas, 0, 0, 128, 128)
+      const pixels = context.getImageData(0, 0, 128, 128).data
+      if (
+        !pixels.some((value, index) => index % 4 === 3 && value !== 0) ||
+        !pixels.some((value, index) => value !== pixels[index % 4])
+      ) {
+        const bytes = await captureRenderedRegion(canvas, width, height, signal)
+        return bytes ? { bytes, mimeType: 'image/png', width, height } : undefined
       }
-      const response = await fetch(dataUrl, signal ? { signal } : undefined)
-      const bytes = await response.arrayBuffer()
-      return { bytes, mimeType: 'image/png', width, height }
-    } catch (error) {
-      if (signal?.aborted) throw error
-      return undefined
+      const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/png'))
+      if (!blob || signal?.aborted) return undefined
+      return { bytes: await blob.arrayBuffer(), mimeType: 'image/png', width, height }
+    } catch {
+      const bytes = await captureRenderedRegion(canvas, width, height, signal)
+      return bytes ? { bytes, mimeType: 'image/png', width, height } : undefined
     }
   }
 }
@@ -597,7 +553,6 @@ function backgroundSurface(
   ownerDocument: Document,
 ): PageSurface | undefined {
   const style = ownerDocument.defaultView?.getComputedStyle(element) ?? getComputedStyle(element)
-  if (!hasOnlyOneRenderableBackgroundImage(style.backgroundImage || '')) return undefined
   const sourceUrl = cssUrls(style.backgroundImage)[0]
   const size = dimensions(element)
   if (!sourceUrl || !size) return undefined
@@ -607,21 +562,23 @@ function backgroundSurface(
   } catch {
     return undefined
   }
-  if (
-    ['http:', 'https:'].includes(resolvedUrl.protocol) &&
-    resolvedUrl.origin !== (ownerDocument.defaultView?.location.origin ?? location.origin)
-  ) {
-    return undefined
+  const capture = async (signal?: AbortSignal) => {
+    const reconstructed =
+      hasOnlyOneRenderableBackgroundImage(style.backgroundImage || '') &&
+      (await renderedBackgroundCapture(
+        element,
+        resolvedUrl.href,
+        size.width,
+        size.height,
+        ownerDocument,
+        signal,
+      ))
+    if (reconstructed) return reconstructed
+    const bytes = await captureRenderedRegion(element, size.width, size.height, signal)
+    return bytes
+      ? { bytes, mimeType: 'image/png' as const, width: size.width, height: size.height }
+      : undefined
   }
-  const capture = (signal?: AbortSignal) =>
-    renderedBackgroundCapture(
-      element,
-      resolvedUrl.href,
-      size.width,
-      size.height,
-      ownerDocument,
-      signal,
-    )
   return Object.freeze({
     id: `background:${pageIndex}:${sourceUrl}`,
     kind: 'background' as const,
@@ -652,9 +609,47 @@ function imageSurface(
   ) {
     return undefined
   }
+  if (!evaluateImage(image, pageIndex).supported) return undefined
   const deferred = deferredSourceUrl(image, ownerDocument)
   const size = dimensions(image)
   if (!size) return undefined
+  let renderedBox = measureSurfaceTransform(image) === 'unsupported'
+  try {
+    const style = ownerDocument.defaultView?.getComputedStyle(image)
+    const rect = image.getBoundingClientRect()
+    objectFitRect(
+      rect.width,
+      rect.height,
+      size.width,
+      size.height,
+      style?.objectFit || 'fill',
+      style?.objectPosition || '50% 50%',
+    )
+  } catch {
+    renderedBox = true
+  }
+  if (renderedBox) {
+    const rect = image.getBoundingClientRect(),
+      width = Math.round(rect.width),
+      height = Math.round(rect.height)
+    return Object.freeze({
+      id: `image:${pageIndex}:rendered`,
+      kind: 'image',
+      element: image,
+      pageIndex,
+      captureOnly: true,
+      renderedBox: true,
+      width,
+      height,
+      rect: rectOf(image),
+      visible: visibleInViewport(image, ownerDocument),
+      continuous: height >= width * 2.5,
+      capture: async (signal?: AbortSignal) => {
+        const bytes = await captureRenderedRegion(image, width, height, signal)
+        return bytes ? { bytes, mimeType: 'image/png' as const, width, height } : undefined
+      },
+    })
+  }
   const sourceUrl = image.currentSrc || image.src || deferred
   return Object.freeze({
     id: `image:${pageIndex}:${sourceUrl || 'deferred'}`,
@@ -678,15 +673,9 @@ function canvasSurface(
 ): PageSurface | undefined {
   const size = dimensions(canvas)
   if (!size) return undefined
-  let kind: 'canvas' | 'webgl' = 'canvas'
-  try {
-    if (canvas.getContext('webgl2') || canvas.getContext('webgl')) kind = 'webgl'
-  } catch {
-    // A tainted/protected context is still reported through capture failure.
-  }
   return Object.freeze({
     id: `canvas:${pageIndex}:${size.width}x${size.height}`,
-    kind,
+    kind: 'canvas' as const,
     element: canvas,
     pageIndex,
     width: size.width,
@@ -694,7 +683,7 @@ function canvasSurface(
     rect: rectOf(canvas),
     visible: visibleInViewport(canvas, ownerDocument),
     continuous: size.height >= size.width * 2.5,
-    capture: canvasCapture(canvas, size.width, size.height, ownerDocument, kind),
+    capture: canvasCapture(canvas, size.width, size.height, ownerDocument),
   })
 }
 
@@ -707,15 +696,23 @@ function sameOriginFrame(frame: HTMLIFrameElement): Document | 'cross-origin' | 
 }
 
 /** Discover all publicly rendered surfaces in document order. */
-export function discoverPageSurfaces(root: Document = document): SurfaceDiscovery {
+export function discoverPageSurfaces(
+  root: Document = document,
+  scope: ParentNode = root,
+): SurfaceDiscovery {
   const surfaces: PageSurface[] = []
   const unsupported: UnsupportedSurface[] = []
   let pageIndex = 0
   const add = (surface: PageSurface | undefined): void => {
     if (surface) surfaces.push(surface)
   }
+  const eligibility = new WeakMap<Element, boolean>()
   const seen = new Set<Element>()
-  for (const element of root.querySelectorAll('img,canvas,*')) {
+  for (const element of [
+    ...(scope instanceof Element ? [scope] : []),
+    ...scope.querySelectorAll('*'),
+  ]) {
+    if (!eligibleSurfaceElement(element, eligibility)) continue
     if (seen.has(element)) continue
     seen.add(element)
     if (isImageElement(element)) {
@@ -723,6 +720,11 @@ export function discoverPageSurfaces(root: Document = document): SurfaceDiscover
     } else if (isCanvasElement(element)) {
       add(canvasSurface(element, pageIndex++, root))
     } else if (isHtmlElement(element)) {
+      if (
+        (element.clientWidth < 180 || element.clientHeight < 140) &&
+        !element.style.backgroundImage
+      )
+        continue
       const style = root.defaultView?.getComputedStyle(element) ?? getComputedStyle(element)
       if (style.backgroundImage === 'none' || !style.backgroundImage) continue
       const surface = backgroundSurface(element, pageIndex++, root)
@@ -733,7 +735,11 @@ export function discoverPageSurfaces(root: Document = document): SurfaceDiscover
       }
     }
   }
-  for (const frame of root.querySelectorAll('iframe')) {
+  for (const frame of [
+    ...(scope instanceof HTMLIFrameElement ? [scope] : []),
+    ...scope.querySelectorAll('iframe'),
+  ]) {
+    if (!eligibleSurfaceElement(frame, eligibility)) continue
     const child = sameOriginFrame(frame)
     if (child === 'cross-origin') {
       unsupported.push({ kind: 'frame', element: frame, reason: 'cross-origin' })
@@ -774,16 +780,18 @@ export function discoverPageSurfaces(root: Document = document): SurfaceDiscover
     )
     unsupported.push(...nested.unsupported)
   }
-  return Object.freeze({ surfaces: Object.freeze(surfaces), unsupported: Object.freeze(unsupported) })
+  return Object.freeze({
+    surfaces: Object.freeze(surfaces),
+    unsupported: Object.freeze(unsupported),
+  })
 }
 
 /**
- * Live discovery for non-`<img>` reader surfaces.  The image adapter keeps
+ * One incremental source registry for reader surfaces.  The image adapter keeps
  * its specialised lazy-load checks; this adapter owns every other publicly
- * rendered surface and emits the same candidate/event lifecycle.  A full
- * rescan is intentional: readers replace canvases and background hosts as
- * navigation advances, and comparing immutable identities is safer than
- * trying to infer publisher-specific mutation semantics.
+ * rendered surface and emits the same candidate/event lifecycle. After the
+ * initial scan, changed subtrees and relevant attributes drive discovery.
+ * Content revisions separately detect publisher drawing updates.
  */
 export class LiveSurfaceDiscovery {
   private readonly candidates = new Map<string, DiscoveredSurface>()
@@ -800,17 +808,28 @@ export class LiveSurfaceDiscovery {
   private viewportListener: (() => void) | undefined
   private loadListener: (() => void) | undefined
   private scanScheduled = false
+  private readonly dirty = new Set<ParentNode>()
+  private sampleTimer: ReturnType<typeof setInterval> | undefined
+  private sampling = false
+  private sampleCursor = 0
+  private active = false
+  private readonly sourceRevisions = new Map<string, string>()
 
   constructor(
     private readonly onEvent: (event: SurfaceDiscoveryEvent) => void,
     private readonly root: Document = document,
+    private readonly sourceRoot: ParentNode = root,
   ) {}
 
   start(): void {
-    this.viewportListener = () => this.refreshVisibility()
-    this.loadListener = () => this.scheduleScan()
+    this.viewportListener = () => this.refreshVisibility(true)
+    this.loadListener = (event?: Event) =>
+      this.scheduleScan(event?.target instanceof Element ? event.target : this.root)
     this.observeDocument(this.root)
     this.scan()
+    this.sampleTimer = setInterval(() => {
+      void this.sampleCanvases()
+    }, 1_000)
     this.intersectionObserver =
       typeof IntersectionObserver === 'undefined'
         ? undefined
@@ -819,35 +838,23 @@ export class LiveSurfaceDiscovery {
               const id = this.candidateIdsByElement.get(entry.target)
               const candidate = id ? this.candidates.get(id) : undefined
               if (!candidate) continue
-              // IntersectionObserver is scoped to the reader document.  A
-              // candidate discovered inside a same-origin frame is owned by a
-              // different document, so its callback entry cannot be used as a
-              // top-level viewport signal.  Recompute visibility from the
-              // candidate's global transformed rectangle instead.
-              const rect = globalRect(candidate.element, this.root)
-              const visible = rectVisibleInViewport(
-                {
-                  top: rect.y,
-                  right: rect.x + rect.width,
-                  bottom: rect.y + rect.height,
-                  left: rect.x,
-                },
-                this.root,
-              )
+              const visible = entry.isIntersecting
               if (visible === candidate.visible) continue
               const next = Object.freeze({ ...candidate, visible })
               this.candidates.set(candidate.id, next)
               this.onEvent({ type: 'visibility', candidate: next })
             }
-    })
+          })
     for (const candidate of this.candidates.values()) {
-      if (candidate.element.ownerDocument === this.root) {
-        this.intersectionObserver?.observe(candidate.element)
-      }
+      this.intersectionObserver?.observe(candidate.element)
     }
   }
 
   stop(): void {
+    if (this.sampleTimer) clearInterval(this.sampleTimer)
+    this.sampleTimer = undefined
+    this.dirty.clear()
+    this.sourceRevisions.clear()
     for (const observer of this.mutationObservers.values()) observer.disconnect()
     this.mutationObservers.clear()
     this.intersectionObserver?.disconnect()
@@ -868,8 +875,9 @@ export class LiveSurfaceDiscovery {
     this.unsupportedSurfaces = []
   }
 
-  private refreshVisibility(): void {
+  private refreshVisibility(framesOnly = false): void {
     for (const candidate of this.candidates.values()) {
+      if (framesOnly && this.intersectionObserver) continue
       const rect = globalRect(candidate.element, this.root)
       const visible = rectVisibleInViewport(
         {
@@ -889,7 +897,8 @@ export class LiveSurfaceDiscovery {
 
   current(): DiscoveredSurface[] {
     return [...this.candidates.values()].sort(
-      (left, right) => Number(right.visible) - Number(left.visible) || left.domIndex - right.domIndex,
+      (left, right) =>
+        Number(right.visible) - Number(left.visible) || left.domIndex - right.domIndex,
     )
   }
 
@@ -907,8 +916,14 @@ export class LiveSurfaceDiscovery {
       .join('|')
   }
 
-  private scan(): void {
-    const discoveredResult = discoverPageSurfaces(this.root)
+  private scan(scope: ParentNode = this.sourceRoot): void {
+    if (
+      scope === this.root ||
+      (scope instanceof Node && this.sourceRoot instanceof Node && scope.contains(this.sourceRoot))
+    )
+      scope = this.sourceRoot
+    if (scope instanceof Element && !this.inSourceRegion(scope)) return
+    const discoveredResult = discoverPageSurfaces(this.root, scope)
     this.unsupportedSurfaces = discoveredResult.unsupported
     const discovered = discoveredResult.surfaces
       .map((surface, domIndex) => toCandidate(surface, domIndex))
@@ -920,7 +935,9 @@ export class LiveSurfaceDiscovery {
           this.identities.set(candidate.element, identity)
         }
         const sourceUrl =
-          candidate.captureOnly === true || candidate.kind === 'canvas' || candidate.kind === 'webgl'
+          candidate.captureOnly === true ||
+          candidate.kind === 'canvas' ||
+          candidate.kind === 'webgl'
             ? captureOnlySurfaceIdentityUrl(candidate.element, identity)
             : candidate.sourceUrl
         return identity === candidate.id && sourceUrl === candidate.sourceUrl
@@ -928,6 +945,15 @@ export class LiveSurfaceDiscovery {
           : { ...candidate, id: identity, sourceUrl }
       })
     const live = new Map(discovered.map((candidate) => [candidate.id, candidate]))
+    if (scope !== this.sourceRoot)
+      for (const [id, candidate] of this.candidates) {
+        if (
+          candidate.element.isConnected &&
+          this.inSourceRegion(candidate.element) &&
+          !(scope instanceof Node && scope.contains(candidate.element))
+        )
+          live.set(id, candidate)
+      }
     if (this.viewportListener) {
       for (const candidate of discovered) {
         const ownerDocument = candidate.element.ownerDocument
@@ -946,9 +972,7 @@ export class LiveSurfaceDiscovery {
       if (!previous) {
         this.candidates.set(candidate.id, candidate)
         this.candidateIdsByElement.set(candidate.element, candidate.id)
-        if (candidate.element.ownerDocument === this.root) {
-          this.intersectionObserver?.observe(candidate.element)
-        }
+        this.intersectionObserver?.observe(candidate.element)
         this.onEvent({ type: 'added', candidate })
         continue
       }
@@ -956,12 +980,16 @@ export class LiveSurfaceDiscovery {
         previous.sourceUrl !== candidate.sourceUrl ||
         previous.sourceWidth !== candidate.sourceWidth ||
         previous.sourceHeight !== candidate.sourceHeight ||
-        previous.element !== candidate.element
+        previous.element !== candidate.element ||
+        previous.renderedBox !== candidate.renderedBox
       if (previous.element !== candidate.element) {
         this.candidateIdsByElement.delete(previous.element)
         this.intersectionObserver?.unobserve(previous.element)
       }
-      const next = Object.freeze({ ...candidate })
+      const next = Object.freeze({
+        ...candidate,
+        ...(previous.sourceRevision ? { sourceRevision: previous.sourceRevision } : {}),
+      })
       this.candidates.set(candidate.id, next)
       this.candidateIdsByElement.set(candidate.element, candidate.id)
       if (previous.visible !== candidate.visible) {
@@ -970,6 +998,7 @@ export class LiveSurfaceDiscovery {
       if (changed || previous.domIndex !== candidate.domIndex) {
         this.onEvent({
           type: 'updated',
+          sourceChanged: changed,
           candidate: next,
           previousSourceUrl: previous.sourceUrl,
           previousDomIndex: previous.domIndex,
@@ -978,13 +1007,107 @@ export class LiveSurfaceDiscovery {
     }
   }
 
-  /** Collapse mutation bursts into one authoritative reader scan per turn. */
-  private scheduleScan(): void {
-    if (this.scanScheduled || this.mutationObservers.size === 0) return
+  private inSourceRegion(element: Element): boolean {
+    let current = element
+    while (current.ownerDocument !== this.root) {
+      const frame = current.ownerDocument.defaultView?.frameElement
+      if (!frame) return this.sourceRoot === this.root
+      current = frame
+    }
+    return this.sourceRoot instanceof Node ? this.sourceRoot.contains(current) : true
+  }
+
+  deferred(): HTMLImageElement[] {
+    return discoverDeferredImages(this.sourceRoot)
+  }
+
+  setActive(active: boolean): void {
+    this.active = active
+  }
+
+  recordSourceRevision(id: string, revision: string): void {
+    this.sourceRevisions.set(id, revision)
+    const candidate = this.candidates.get(id)
+    if (candidate)
+      this.candidates.set(id, Object.freeze({ ...candidate, sourceRevision: revision }))
+  }
+
+  private async sampleCanvases(): Promise<void> {
+    if (!this.active || this.sampling || this.root.hidden || !this.sampleTimer) return
+    this.sampling = true
+    try {
+      const active = [...this.candidates.values()].filter(
+        (candidate) =>
+          candidate.visible &&
+          candidate.capture &&
+          (['canvas', 'webgl', 'background'].includes(candidate.kind) ||
+            candidate.element.tagName.toLowerCase() === 'canvas'),
+      )
+      for (let sampled = 0; sampled < Math.min(2, active.length); sampled++) {
+        const candidate = active[this.sampleCursor++ % active.length]!
+        const captureSource = candidate.capture!
+        const capture = await captureSource()
+        const current = this.candidates.get(candidate.id)
+        if (
+          !this.sampleTimer ||
+          this.root.hidden ||
+          !this.active ||
+          !current ||
+          !candidate.element.isConnected ||
+          current.sourceUrl !== candidate.sourceUrl ||
+          current.sourceWidth !== candidate.sourceWidth ||
+          current.sourceHeight !== candidate.sourceHeight
+        )
+          continue
+        const revision = capture ? await sha256Hex(capture.bytes) : 'unreadable'
+        const previous = this.sourceRevisions.get(candidate.id)
+        this.sourceRevisions.set(candidate.id, revision)
+        const next = Object.freeze({ ...current, sourceRevision: revision })
+        this.candidates.set(candidate.id, next)
+        if (previous !== undefined && previous !== revision)
+          this.onEvent({
+            type: 'updated',
+            sourceChanged: true,
+            candidate: next,
+            previousSourceUrl: candidate.sourceUrl,
+            previousDomIndex: candidate.domIndex,
+          })
+      }
+    } finally {
+      this.sampling = false
+    }
+  }
+
+  private scheduleScan(scope: ParentNode = this.root): void {
+    if (this.mutationObservers.size === 0) return
+    this.dirty.add(scope)
+    if (this.dirty.size > 64) {
+      this.dirty.clear()
+      this.dirty.add(this.root)
+    }
+    if (this.scanScheduled) return
     this.scanScheduled = true
     queueMicrotask(() => {
       this.scanScheduled = false
-      if (this.mutationObservers.size > 0) this.scan()
+      const scopes = [...this.dirty]
+      this.dirty.clear()
+      if (!this.mutationObservers.size) return
+      if (scopes.includes(this.root)) {
+        this.scan()
+        return
+      }
+      for (const scope of scopes) {
+        if (
+          !scopes.some(
+            (other) =>
+              other !== scope &&
+              other instanceof Node &&
+              scope instanceof Node &&
+              other.contains(scope),
+          )
+        )
+          this.scan(scope)
+      }
     })
   }
 
@@ -1002,12 +1125,40 @@ export class LiveSurfaceDiscovery {
       if (this.loadListener) ownerDocument.addEventListener('load', this.loadListener, true)
     }
     if (this.mutationObservers.has(ownerDocument) || !ownerDocument.documentElement) return
-    const observer = new MutationObserver(() => this.scheduleScan())
+    const observer = new MutationObserver((records) => {
+      for (const record of records) {
+        const target =
+          record.target instanceof Element ? record.target : record.target.parentElement
+        if (target?.closest('[data-hskify-owned]')) continue
+        if (record.type === 'attributes' && target) this.scheduleScan(target)
+        else
+          for (const node of record.addedNodes) {
+            if (node instanceof Element && !node.closest('[data-hskify-owned]'))
+              this.scheduleScan(node)
+          }
+        if (
+          [...record.removedNodes].some(
+            (node) => !(node instanceof Element && node.matches('[data-hskify-owned]')),
+          )
+        )
+          this.scheduleScan(target ?? ownerDocument)
+      }
+    })
     observer.observe(ownerDocument.documentElement, {
       childList: true,
       subtree: true,
       attributes: true,
-      attributeFilter: ['src', 'srcset', 'sizes', 'data-src', 'data-url', 'style', 'class'],
+      attributeFilter: [
+        'src',
+        'srcset',
+        'sizes',
+        'data-src',
+        'data-url',
+        'style',
+        'class',
+        'hidden',
+        'aria-hidden',
+      ],
     })
     this.mutationObservers.set(ownerDocument, observer)
   }

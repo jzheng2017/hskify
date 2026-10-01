@@ -699,7 +699,7 @@ export async function runBrowserRegression(options) {
           }, 0)
           const firstTextEvent = dom.events.find(
             (event) =>
-              event.type === 'selectableTextDomCommitted' && event.sourcePreserving !== true,
+              event.type === 'selectableTextDomCommitted' && event.sourcePreserving !== true && event.visible === true && event.readable === true,
           )
           const firstFinalVisibleTextMs = firstTextEvent
             ? firstTextEvent.epochMs - action.issuedAtEpochMs

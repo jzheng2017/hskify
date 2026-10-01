@@ -1,4 +1,4 @@
-import type { LookupRequest, LookupResult } from '../contracts/browser'
+import type { LookupContext, LookupRequest, LookupResult } from '../contracts/browser'
 import {
   MandarinSpeaker,
   type SpeechState,
@@ -26,6 +26,21 @@ export type HoverHitTester = (
   clientY: number,
 ) => HoverTextHit | null
 
+function itemContext(element: HTMLElement): LookupContext {
+  return {
+    displayedChinese: element.dataset.hskifyDisplayedChinese ?? element.textContent ?? '',
+    baseChinese:
+      element.dataset.hskifyBaseChinese ??
+      element.dataset.hskifyDisplayedChinese ??
+      element.textContent ??
+      '',
+    sourceText: element.dataset.hskifySourceText ?? '',
+    properNames: JSON.parse(
+      element.dataset.hskifyProperNames ?? '[]',
+    ) as LookupContext['properNames'],
+  }
+}
+
 const HOVER_LOOKUP_DELAY_MS = 120
 const HOVER_DISMISS_DELAY_MS = 140
 
@@ -35,9 +50,7 @@ function nodeElement(node: Node | null): Element | null {
 }
 
 function eventNode(value: EventTarget | null): Node | null {
-  return value && typeof value === 'object' && 'nodeType' in value
-    ? (value as Node)
-    : null
+  return value && typeof value === 'object' && 'nodeType' in value ? (value as Node) : null
 }
 
 function textNodes(element: HTMLElement): Text[] {
@@ -108,11 +121,7 @@ export function hoverResultRange(
   return textRange(element, characterOffset)
 }
 
-export const characterRangeAtPoint: HoverHitTester = (
-  element,
-  clientX,
-  clientY,
-) => {
+export const characterRangeAtPoint: HoverHitTester = (element, clientX, clientY) => {
   const characterCount = [...(element.textContent ?? '')].length
   for (let characterOffset = 0; characterOffset < characterCount; characterOffset += 1) {
     const range = textRange(element, characterOffset)
@@ -164,16 +173,9 @@ export class ExplanationController {
     const documentRef = this.rootDocument()
     documentRef.defaultView?.addEventListener('scroll', this.onViewportChange, true)
     documentRef.defaultView?.addEventListener('resize', this.onViewportChange)
-    documentRef.addEventListener(
-      'pointerdown',
-      this.onDocumentPointerDown,
-      true,
-    )
+    documentRef.addEventListener('pointerdown', this.onDocumentPointerDown, true)
     documentRef.addEventListener('pointerup', this.onDocumentPointerUp, true)
-    documentRef.addEventListener(
-      'selectionchange',
-      this.onDocumentSelectionChange,
-    )
+    documentRef.addEventListener('selectionchange', this.onDocumentSelectionChange)
   }
 
   register(element: HTMLElement, jobId: string, itemId: string): void {
@@ -201,29 +203,11 @@ export class ExplanationController {
     this.popover.removeEventListener('pointerenter', this.onPopoverPointerEnter)
     this.popover.removeEventListener('pointerleave', this.onPopoverPointerLeave)
     const documentRef = this.rootDocument()
-    documentRef.defaultView?.removeEventListener(
-      'scroll',
-      this.onViewportChange,
-      true,
-    )
-    documentRef.defaultView?.removeEventListener(
-      'resize',
-      this.onViewportChange,
-    )
-    documentRef.removeEventListener(
-      'pointerdown',
-      this.onDocumentPointerDown,
-      true,
-    )
-    documentRef.removeEventListener(
-      'pointerup',
-      this.onDocumentPointerUp,
-      true,
-    )
-    documentRef.removeEventListener(
-      'selectionchange',
-      this.onDocumentSelectionChange,
-    )
+    documentRef.defaultView?.removeEventListener('scroll', this.onViewportChange, true)
+    documentRef.defaultView?.removeEventListener('resize', this.onViewportChange)
+    documentRef.removeEventListener('pointerdown', this.onDocumentPointerDown, true)
+    documentRef.removeEventListener('pointerup', this.onDocumentPointerUp, true)
+    documentRef.removeEventListener('selectionchange', this.onDocumentSelectionChange)
     for (const region of this.regions.values()) {
       region.element.removeEventListener('keydown', this.onRegionKeyDown)
     }
@@ -333,10 +317,7 @@ export class ExplanationController {
 
   private readonly onSelectionComplete = (event: Event): void => {
     const target = nodeElement(eventNode(event.target))
-    if (
-      !target ||
-      ![...this.regions.values()].some((region) => region.element.contains(target))
-    ) {
+    if (!target || ![...this.regions.values()].some((region) => region.element.contains(target))) {
       return
     }
     queueMicrotask(() => {
@@ -346,10 +327,7 @@ export class ExplanationController {
 
   private readonly onKeyUp = (event: Event): void => {
     const target = nodeElement(eventNode(event.target))
-    if (
-      !target ||
-      ![...this.regions.values()].some((region) => region.element.contains(target))
-    ) {
+    if (!target || ![...this.regions.values()].some((region) => region.element.contains(target))) {
       return
     }
     queueMicrotask(() => void this.showSelection())
@@ -357,11 +335,7 @@ export class ExplanationController {
 
   private readonly onRegionKeyDown = (event: KeyboardEvent): void => {
     const target = event.currentTarget
-    if (
-      !target ||
-      event.key.toLowerCase() !== 'a' ||
-      (!event.ctrlKey && !event.metaKey)
-    ) {
+    if (!target || event.key.toLowerCase() !== 'a' || (!event.ctrlKey && !event.metaKey)) {
       return
     }
     event.preventDefault()
@@ -394,12 +368,12 @@ export class ExplanationController {
 
   private readonly onPointerOut = (event: Event): void => {
     if (this.activeInteraction !== 'hover' && !this.pendingHoverKey) return
-    const related = nodeElement(
-      eventNode((event as PointerEvent).relatedTarget),
-    )
-    if (related && (this.popover.contains(related) || [...this.regions.keys()].some(
-      (element) => element.contains(related),
-    ))) {
+    const related = nodeElement(eventNode((event as PointerEvent).relatedTarget))
+    if (
+      related &&
+      (this.popover.contains(related) ||
+        [...this.regions.keys()].some((element) => element.contains(related)))
+    ) {
       return
     }
     this.scheduleHoverDismiss()
@@ -421,9 +395,7 @@ export class ExplanationController {
     if (this.activeInteraction === 'selection' && this.selectedRegion()) return
     const target = nodeElement(eventNode(event.target))
     const region = target
-      ? [...this.regions.values()].find((candidate) =>
-          candidate.element.contains(target),
-        )
+      ? [...this.regions.values()].find((candidate) => candidate.element.contains(target))
       : undefined
     if (!region) return
     this.cancelHoverDismiss()
@@ -459,7 +431,7 @@ export class ExplanationController {
       {
         interaction: 'selection',
         selectedText,
-        jobId: selected.region.jobId,
+        context: itemContext(selected.region.element),
         itemId: selected.region.itemId,
       },
       selectedText,
@@ -468,11 +440,7 @@ export class ExplanationController {
     )
   }
 
-  private async showHover(
-    region: SelectionRegion,
-    hit: HoverTextHit,
-    key: string,
-  ): Promise<void> {
+  private async showHover(region: SelectionRegion, hit: HoverTextHit, key: string): Promise<void> {
     this.pendingHoverKey = undefined
     this.activeHoverKey = key
     const character = hit.range.cloneContents().textContent ?? ''
@@ -481,7 +449,7 @@ export class ExplanationController {
       {
         interaction: 'hover',
         characterOffset: hit.characterOffset,
-        jobId: region.jobId,
+        context: itemContext(region.element),
         itemId: region.itemId,
       },
       character,
@@ -521,7 +489,7 @@ export class ExplanationController {
       this.renderResult(result, result.selectedText)
       const resolvedRange =
         interaction === 'hover' && characterOffset !== undefined
-          ? hoverResultRange(region.element, characterOffset, result.selectedText) ?? range
+          ? (hoverResultRange(region.element, characterOffset, result.selectedText) ?? range)
           : range
       this.positionPopover(region.element, resolvedRange)
     } catch {
@@ -542,9 +510,7 @@ export class ExplanationController {
     if (!selection || selection.rangeCount === 0) return false
     const anchor = nodeElement(selection.anchorNode)
     const focus = nodeElement(selection.focusNode)
-    return Boolean(
-      (anchor && element.contains(anchor)) || (focus && element.contains(focus)),
-    )
+    return Boolean((anchor && element.contains(anchor)) || (focus && element.contains(focus)))
   }
 
   private positionPopover(region: HTMLElement, range: Range): void {
@@ -552,9 +518,7 @@ export class ExplanationController {
     const edge = 4
     const regionRect = region.getBoundingClientRect()
     const selectedRect =
-      typeof range.getBoundingClientRect === 'function'
-        ? range.getBoundingClientRect()
-        : regionRect
+      typeof range.getBoundingClientRect === 'function' ? range.getBoundingClientRect() : regionRect
     const hasSelectedRect = selectedRect.width > 0 && selectedRect.height > 0
     const anchor = hasSelectedRect ? selectedRect : regionRect
     const popoverRect = this.popover.getBoundingClientRect()
@@ -568,12 +532,11 @@ export class ExplanationController {
     const below = anchor.bottom + gap
     const belowSpace = Math.max(0, viewportHeight - edge - anchor.bottom - gap)
     const aboveSpace = Math.max(0, anchor.top - edge - gap)
-    const placeBelow = popoverHeight === 0 || belowSpace >= popoverHeight || belowSpace >= aboveSpace
+    const placeBelow =
+      popoverHeight === 0 || belowSpace >= popoverHeight || belowSpace >= aboveSpace
     const availableHeight = Math.max(1, placeBelow ? belowSpace : aboveSpace)
     const renderedHeight = Math.min(popoverHeight || availableHeight, availableHeight)
-    const top = placeBelow
-      ? below
-      : anchor.top - gap - renderedHeight
+    const top = placeBelow ? below : anchor.top - gap - renderedHeight
 
     this.popover.style.left = `${left}px`
     this.popover.style.maxHeight = `${availableHeight}px`
@@ -584,10 +547,7 @@ export class ExplanationController {
     return 'host' in this.root ? this.root.host.ownerDocument : this.root.ownerDocument
   }
 
-  private selectedText(selected: {
-    selection: Selection
-    range: Range
-  }): string {
+  private selectedText(selected: { selection: Selection; range: Range }): string {
     // `textContent` joins the renderer's visual line spans without adding
     // layout whitespace, preserving the exact Chinese source text.
     return selected.range.cloneContents().textContent ?? selected.selection.toString()
@@ -684,7 +644,7 @@ export class ExplanationController {
       word.textContent = token.simplified
       const detail = documentRef.createElement('span')
       const hsk = token.properName
-          ? 'Proper name · outside HSK list'
+        ? 'Proper name · outside HSK list'
         : token.hskLevel
           ? `HSK ${token.hskLevel}`
           : 'Outside HSK list'

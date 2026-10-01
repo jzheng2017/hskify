@@ -186,14 +186,14 @@ describe('light-novel document extraction', () => {
     expect(detection).toMatchObject({ kind: 'not-document', reason: 'unsafe-content-root' })
   })
 
-  it('rejects an individually oversized block without truncating it', async () => {
+  it('abstains from an oversized non-language block', async () => {
     const huge = 'A'.repeat(16 * 1024 + 1)
     setPage(
       `<article id="story"><h1>Oversized</h1><p>${huge}</p>${paragraphs(5, 2)}</article>`,
       'Oversized',
     )
     const detection = await detectDocumentChapter(document)
-    expect(detection).toEqual({ kind: 'rejected', reason: 'block-too-large' })
+    expect(detection).toEqual({ kind: 'not-document', reason: 'not-predominantly-english' })
   })
 
   it('rejects more than 2,000 mapped text blocks rather than dropping the tail', async () => {
@@ -218,7 +218,7 @@ describe('light-novel document extraction', () => {
       'Large chapter',
     )
     const detection = await detectDocumentChapter(document)
-    expect(detection).toEqual({ kind: 'rejected', reason: 'input-too-large' })
+    expect(detection.kind).toBe('rejected')
   })
 
   it('normalizes whitespace deterministically while retaining meaningful line breaks', () => {

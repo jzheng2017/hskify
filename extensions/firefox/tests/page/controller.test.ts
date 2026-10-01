@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { JobUpdate } from '../../src/contracts/browser'
-import type { DiscoveredImage, DiscoveryEvent } from '../../src/discovery/images'
+import type { DiscoveredImage } from '../../src/discovery/images'
 import type { VisibleFirstQueue } from '../../src/discovery/queue'
+import type { SurfaceDiscoveryEvent } from '../../src/discovery/surfaces'
 import { RuntimeMessageError } from '../../src/messaging/messages'
 import { ImageChapterMode } from '../../src/page/controller'
 import { SelectableRenderer, type RenderedImage } from '../../src/rendering/renderer'
@@ -10,7 +11,7 @@ import { loadedImage } from '../helpers/images'
 
 type ControllerInternals = {
   renderer: SelectableRenderer
-  discovery: {
+  surfaceDiscovery: {
     scan(): void
   }
   rendered: Map<HTMLImageElement, RenderedImage>
@@ -41,7 +42,7 @@ type ControllerInternals = {
     },
     signal: AbortSignal,
   ): void
-  onDiscovery(event: DiscoveryEvent): void
+  onDiscovery(event: SurfaceDiscoveryEvent): void
   checkNavigation(): void
 }
 
@@ -315,6 +316,7 @@ describe('page controller terminal restoration', () => {
         sequence: 1,
         type: 'imageRegionPreserved',
         region: {
+          disposition: 'excluded',
           itemId: 'credits',
           itemOrder: 0,
           textPolygon: [
@@ -353,6 +355,7 @@ describe('page controller terminal restoration', () => {
         sequence: 1,
         type: 'imageRegionPreserved',
         region: {
+          disposition: 'failed',
           itemId: 'uncertain-dialogue',
           itemOrder: 0,
           textPolygon: [
@@ -377,7 +380,7 @@ describe('page controller terminal restoration', () => {
     const controller = new ImageChapterMode()
 
     await controller.start('all', 3, 'natural', 'ltr')
-    await vi.waitFor(() => expect(controller.snapshot().state).toBe('complete'))
+    await vi.waitFor(() => expect(controller.snapshot().state).toBe('failed'))
 
     const notice = renderedShadowRoot(controller, image).querySelector('.hskify-source-notice')
     expect(notice?.getAttribute('data-hskify-source-text')).toBe('What did she say?')
@@ -418,7 +421,7 @@ describe('page controller terminal restoration', () => {
       naturalWidth: { configurable: true, value: 800 },
       naturalHeight: { configurable: true, value: 1280 },
     })
-    internals.discovery.scan()
+    internals.surfaceDiscovery.scan()
 
     await vi.waitFor(
       () =>
@@ -461,7 +464,7 @@ describe('page controller terminal restoration', () => {
       naturalWidth: { configurable: true, value: 800 },
       naturalHeight: { configurable: true, value: 1280 },
     })
-    internals.discovery.scan()
+    internals.surfaceDiscovery.scan()
 
     await vi.waitFor(
       () =>
@@ -494,7 +497,7 @@ describe('page controller terminal restoration', () => {
     controller.destroy()
   })
 
-  it('a source replacement terminates the run and restores every image exactly', () => {
+  it('a source replacement invalidates only its image and retains unaffected results', () => {
     const page = fixture()
     const expected = page.chapter.cloneNode(true) as HTMLElement
     const expectedChildren = [...page.chapter.childNodes]
@@ -518,9 +521,12 @@ describe('page controller terminal restoration', () => {
       previousDomIndex: 0,
     })
 
-    expectExactChapter(page, expected.innerHTML, expectedChildren)
+    expect(internals.rendered.has(page.first)).toBe(false)
+    expect(internals.rendered.get(page.second)?.wrapper.isConnected).toBe(true)
     expect(page.first.getAttribute('src')).toBe(replacement)
-    expect(internals.scope).toBeUndefined()
+    expect(internals.scope).toBe('all')
+    controller.cancel()
+    expectExactChapter(page, expected.innerHTML, expectedChildren)
     controller.destroy()
   })
 
@@ -531,6 +537,7 @@ describe('page controller terminal restoration', () => {
     internals.scope = 'all'
     internals.queueIds.set(page.second, 'queued-second')
     const reprioritize = vi.spyOn(internals.queue, 'reprioritize')
+    page.chapter.prepend(page.second)
     const reordered = candidate(page.second, 0)
 
     internals.onDiscovery({
@@ -545,7 +552,7 @@ describe('page controller terminal restoration', () => {
     controller.destroy()
   })
 
-  it('freezes canonical page indexes when lazy readers insert or reorder surfaces', () => {
+  it('keeps stable identities while transmitting late pages in canonical DOM order', () => {
     const page = fixture()
     const late = loadedImage('https://reader.test/page-late.webp')
     late.dataset.page = 'late'
@@ -562,19 +569,20 @@ describe('page controller terminal restoration', () => {
 
     // The same elements report new mutable DOM indexes after a reader
     // prepends a lazy page. Their chapter identities and context positions
-    // remain unchanged; the genuinely new surface appends to the stream.
+    // remain unchanged; the new surface enters at its live DOM position.
     expect(internals.canonicalSourceIndex(candidate(page.second, 0))).toBe(1)
     expect(internals.canonicalSourceIndex(candidate(page.first, 1))).toBe(0)
+    page.chapter.prepend(late)
     expect(internals.canonicalSourceIndex(insertedBeforeFirst)).toBe(2)
-    expect(internals.chapterSourceOrder).toEqual([0, 1, 2])
+    expect(internals.chapterSourceOrder).toEqual([2, 0, 1])
 
     // A page removed before submission must not remain in the daemon's
     // expected-page barrier. Re-inserting the same element restores its
     // frozen identity rather than allocating a new position.
     internals.onDiscovery({ type: 'removed', candidate: first })
-    expect(internals.chapterSourceOrder).toEqual([1, 2])
+    expect(internals.chapterSourceOrder).toEqual([2, 1])
     expect(internals.canonicalSourceIndex(first)).toBe(0)
-    expect(internals.chapterSourceOrder).toEqual([0, 1, 2])
+    expect(internals.chapterSourceOrder).toEqual([2, 0, 1])
     controller.destroy()
   })
 

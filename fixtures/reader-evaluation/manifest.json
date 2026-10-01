@@ -1,0 +1,267 @@
+{
+  "schemaVersion": 1,
+  "status": "annotations-and-blind-chapters-required",
+  "description": "Development discovery references only. No chapter is evaluation-ready until its local frozen annotation and source digest are supplied. Blind images and development/blind prose remain to be acquired and independently annotated.",
+  "chapters": [
+    {
+      "id": "webtoon-batman-wayne-family-adventures-1",
+      "modality": "image",
+      "split": "development",
+      "provider": "webtoon",
+      "series": "",
+      "readerClass": "continuous-image",
+      "sourceUrl": "https://www.webtoons.com/en/slice-of-life/batman-wayne-family-adventures/ep-1-moving-in/viewer?episode_no=1&title_no=3180",
+      "strata": {
+        "artwork": "",
+        "font": "",
+        "genre": "",
+        "layout": "continuous-image"
+      },
+      "annotation": {
+        "path": "",
+        "sha256": "",
+        "frozenAt": ""
+      }
+    },
+    {
+      "id": "webtoon-lore-olympus-1",
+      "modality": "image",
+      "split": "development",
+      "provider": "webtoon",
+      "series": "",
+      "readerClass": "continuous-image",
+      "sourceUrl": "https://www.webtoons.com/en/romance/lore-olympus/episode-1/viewer?episode_no=1&title_no=1320",
+      "strata": {
+        "artwork": "",
+        "font": "",
+        "genre": "",
+        "layout": "continuous-image"
+      },
+      "annotation": {
+        "path": "",
+        "sha256": "",
+        "frozenAt": ""
+      }
+    },
+    {
+      "id": "webtoon-cursed-princess-club-1",
+      "modality": "image",
+      "split": "development",
+      "provider": "webtoon",
+      "series": "",
+      "readerClass": "continuous-image",
+      "sourceUrl": "https://www.webtoons.com/en/comedy/cursed-princess-club/ep-1-the-king-returns/viewer?episode_no=1&title_no=1537",
+      "strata": {
+        "artwork": "",
+        "font": "",
+        "genre": "",
+        "layout": "continuous-image"
+      },
+      "annotation": {
+        "path": "",
+        "sha256": "",
+        "frozenAt": ""
+      }
+    },
+    {
+      "id": "webtoon-school-bus-graveyard-1",
+      "modality": "image",
+      "split": "development",
+      "provider": "webtoon",
+      "series": "",
+      "readerClass": "continuous-image",
+      "sourceUrl": "https://www.webtoons.com/en/thriller/school-bus-graveyard/episode-1/viewer?episode_no=1&title_no=2705",
+      "strata": {
+        "artwork": "",
+        "font": "",
+        "genre": "",
+        "layout": "continuous-image"
+      },
+      "annotation": {
+        "path": "",
+        "sha256": "",
+        "frozenAt": ""
+      }
+    },
+    {
+      "id": "webtoon-omniscient-reader-2",
+      "modality": "image",
+      "split": "development",
+      "provider": "webtoon",
+      "series": "",
+      "readerClass": "continuous-image",
+      "sourceUrl": "https://www.webtoons.com/en/action/omniscient-reader/episode-1/viewer?episode_no=2&title_no=2154",
+      "strata": {
+        "artwork": "",
+        "font": "",
+        "genre": "",
+        "layout": "continuous-image"
+      },
+      "annotation": {
+        "path": "",
+        "sha256": "",
+        "frozenAt": ""
+      }
+    },
+    {
+      "id": "webtoon-how-to-be-a-mind-reaver-363",
+      "modality": "image",
+      "split": "development",
+      "provider": "webtoon",
+      "series": "",
+      "readerClass": "continuous-image",
+      "sourceUrl": "https://www.webtoons.com/en/canvas/how-to-be-a-mind-reaver/the-protagonist/viewer?episode_no=363&title_no=301213",
+      "strata": {
+        "artwork": "",
+        "font": "",
+        "genre": "",
+        "layout": "continuous-image"
+      },
+      "annotation": {
+        "path": "",
+        "sha256": "",
+        "frozenAt": ""
+      }
+    },
+    {
+      "id": "tapas-free2play-1",
+      "modality": "image",
+      "split": "development",
+      "provider": "tapas",
+      "series": "",
+      "readerClass": "paged-image",
+      "sourceUrl": "https://tapas.io/series/free2play",
+      "strata": {
+        "artwork": "",
+        "font": "",
+        "genre": "",
+        "layout": "paged-image"
+      },
+      "annotation": {
+        "path": "",
+        "sha256": "",
+        "frozenAt": ""
+      }
+    },
+    {
+      "id": "manga-plus-spy-family-1001834",
+      "modality": "image",
+      "split": "development",
+      "provider": "manga-plus",
+      "series": "",
+      "readerClass": "iframe-image",
+      "sourceUrl": "https://mangaplus.shueisha.co.jp/viewer/1001834",
+      "strata": {
+        "artwork": "",
+        "font": "",
+        "genre": "",
+        "layout": "iframe-image"
+      },
+      "annotation": {
+        "path": "",
+        "sha256": "",
+        "frozenAt": ""
+      }
+    },
+    {
+      "id": "globalcomix-bloodshot-1",
+      "modality": "image",
+      "split": "development",
+      "provider": "globalcomix",
+      "series": "",
+      "readerClass": "canvas",
+      "sourceUrl": "https://globalcomix.com/read/82c4aaa9-f82c-4f77-b43b-d17e42f00c41/1",
+      "strata": {
+        "artwork": "",
+        "font": "",
+        "genre": "",
+        "layout": "canvas"
+      },
+      "annotation": {
+        "path": "",
+        "sha256": "",
+        "frozenAt": ""
+      }
+    },
+    {
+      "id": "asura-return-of-the-unrivaled-spear-knight-208",
+      "modality": "image",
+      "split": "development",
+      "provider": "asura",
+      "series": "",
+      "readerClass": "webgl",
+      "sourceUrl": "https://asurascans.com/comics/return-of-the-unrivaled-spear-knight-059befe1/chapter/208",
+      "strata": {
+        "artwork": "",
+        "font": "",
+        "genre": "",
+        "layout": "webgl"
+      },
+      "annotation": {
+        "path": "",
+        "sha256": "",
+        "frozenAt": ""
+      }
+    },
+    {
+      "id": "asura-only-i-have-an-ex-grade-summon-33",
+      "modality": "image",
+      "split": "development",
+      "provider": "asura",
+      "series": "",
+      "readerClass": "continuous-image",
+      "sourceUrl": "https://asurascans.com/comics/only-i-have-an-ex-grade-summon-059befe1/chapter/33",
+      "strata": {
+        "artwork": "",
+        "font": "",
+        "genre": "",
+        "layout": "continuous-image"
+      },
+      "annotation": {
+        "path": "",
+        "sha256": "",
+        "frozenAt": ""
+      }
+    },
+    {
+      "id": "asura-absolute-regression-110",
+      "modality": "image",
+      "split": "development",
+      "provider": "asura",
+      "series": "",
+      "readerClass": "paged-image",
+      "sourceUrl": "https://asurascans.com/comics/absolute-regression-059befe1/chapter/110",
+      "strata": {
+        "artwork": "",
+        "font": "",
+        "genre": "",
+        "layout": "paged-image"
+      },
+      "annotation": {
+        "path": "",
+        "sha256": "",
+        "frozenAt": ""
+      }
+    },
+    {
+      "id": "asura-the-demon-god-40",
+      "modality": "image",
+      "split": "development",
+      "provider": "asura",
+      "series": "",
+      "readerClass": "iframe-image",
+      "sourceUrl": "https://asurascans.com/comics/the-demon-god-059befe1/chapter/40",
+      "strata": {
+        "artwork": "",
+        "font": "",
+        "genre": "",
+        "layout": "iframe-image"
+      },
+      "annotation": {
+        "path": "",
+        "sha256": "",
+        "frozenAt": ""
+      }
+    }
+  ]
+}

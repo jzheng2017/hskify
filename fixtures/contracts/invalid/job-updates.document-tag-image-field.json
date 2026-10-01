@@ -12,9 +12,9 @@
         "kind": "heading",
         "text": {
           "sourceText": "Chapter One",
-          "baseChinese": "\u7b2c\u4e00\u7ae0",
-          "displayedChinese": "\u7b2c\u4e00\u7ae0",
-          "pinyin": "d\u00ec y\u012b zh\u0101ng",
+          "baseChinese": "第一章",
+          "displayedChinese": "第一章",
+          "pinyin": "dì yī zhāng",
           "hsk": {
             "requestedLevel": 2,
             "learningMode": "natural",
@@ -23,8 +23,12 @@
             "aboveLevelTokens": [],
             "teachingTerms": [],
             "repairState": "not-needed"
-          }
-        }
+          },
+          "termination": "stop",
+          "protectedNames": []
+        },
+        "parentBlockId": "block-0",
+        "subItemOrder": 0
       },
       "region": {}
     }

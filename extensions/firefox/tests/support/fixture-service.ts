@@ -61,6 +61,8 @@ export function createFixtureRegions(input: FixtureRegionInput): ImageRegion[] {
         rect: { x: 0.15, y: 0.08, width: 0.38, height: 0.22 },
       },
       text: {
+        termination: 'stop',
+        protectedNames: [],
         sourceText: 'We have to leave now!',
         baseChinese: '\u6211\u4eec\u5f97\u9a6c\u4e0a\u79bb\u5f00\uff01',
         displayedChinese: '\u6211\u4eec\u73b0\u5728\u8981\u8d70\uff01',
@@ -116,6 +118,8 @@ export function createFixtureRegions(input: FixtureRegionInput): ImageRegion[] {
         rect: { x: 0.55, y: 0.59, width: 0.36, height: 0.26 },
       },
       text: {
+        termination: 'stop',
+        protectedNames: [],
         sourceText: 'Wait for me!',
         baseChinese: '\u7b49\u7b49\u6211\uff01',
         displayedChinese: '\u7b49\u6211\uff01',
@@ -172,10 +176,14 @@ function fixtureTimeline(
         type: 'documentBlockReady',
         block: {
           itemId: block.itemId,
+          parentBlockId: block.parentBlockId,
+          subItemOrder: block.subItemOrder,
           sourceIndex: block.sourceIndex,
           itemOrder: block.itemOrder,
           kind: block.kind,
           text: {
+            termination: 'stop',
+            protectedNames: [],
             sourceText: block.text,
             baseChinese: `\u7ffb\u8bd1 ${index + 1}`,
             displayedChinese: `\u7ffb\u8bd1 ${index + 1}`,
@@ -353,7 +361,7 @@ export class FixtureService {
               properName: false,
             },
       ],
-      ...(request.jobId
+      ...(request.context
         ? {
             item: {
               displayedChinese: '\u6211\u4eec\u73b0\u5728\u5c31\u8d70\uff01',

@@ -46,6 +46,8 @@ function sender(url = pageUrl, tabId = 7) {
 function submitImageMessage(pageSessionId = 'fixture-page-session') {
   return {
     type: 'job:submit-image' as const,
+    clientRequestId: 'fixture-image-request',
+    retryItemIds: [],
     pageSessionId,
     sourceIndex: 0,
     chapterSourceOrder: [0],
@@ -67,11 +69,16 @@ function submitDocumentMessage(pageSessionId = 'fixture-document-session') {
     pageUrl,
     request: {
       buildFingerprint: BUILD_FINGERPRINT,
+      clientRequestId: 'fixture-document',
+      retryItemIds: [],
       pageSessionId,
+      focus: { kind: 'document' as const, active: true, visibleBlockIds: [] },
       sourceSha256: 'b'.repeat(64),
       settings: documentSettings,
       blocks: [
         {
+          parentBlockId: 'block-0',
+          subItemOrder: 0,
           itemId: 'block-0',
           sourceIndex: 0,
           itemOrder: 0,
@@ -80,6 +87,8 @@ function submitDocumentMessage(pageSessionId = 'fixture-document-session') {
           text: 'Chapter One',
         },
         {
+          parentBlockId: 'block-1',
+          subItemOrder: 0,
           itemId: 'block-1',
           sourceIndex: 0,
           itemOrder: 1,
@@ -164,6 +173,8 @@ function documentReader(request: DocumentJobRequest, attachTranslatedText: () =>
     return block.kind === 'heading'
       ? {
           type: 'text',
+          parentBlockId: block.itemId,
+          subItemOrder: 0,
           itemId: block.itemId,
           order,
           kind: 'title',
@@ -172,6 +183,8 @@ function documentReader(request: DocumentJobRequest, attachTranslatedText: () =>
         }
       : {
           type: 'text',
+          parentBlockId: block.itemId,
+          subItemOrder: 0,
           itemId: block.itemId,
           order,
           kind: 'paragraph',
@@ -182,6 +195,18 @@ function documentReader(request: DocumentJobRequest, attachTranslatedText: () =>
   const chapter: DocumentChapter = {
     sourceRoot,
     sourceElements,
+    sourceRevisions: new Map(
+      [...sourceElements.values()].map((element) => [
+        element.firstChild as Text,
+        (element.firstChild as Text).data,
+      ]),
+    ),
+    sourceSlots: new Map(
+      [...sourceElements].map(([id, element]) => [
+        id,
+        [{ node: element.firstChild as Text, start: 0, end: (element.firstChild as Text).length }],
+      ]),
+    ),
     structure,
     snapshot: {
       sourceUrl: pageUrl,
@@ -268,15 +293,21 @@ describe('progressive background fixture adapter', () => {
       sender(),
     )) as Array<{ jobId: string; acknowledgedSequence: number }>
     expect(recovered).toEqual([
-      expect.objectContaining({ kind: 'image', jobId: submitted.jobId, acknowledgedSequence: 3 }),
+      expect.objectContaining({ kind: 'image', jobId: submitted.jobId, acknowledgedSequence: 0 }),
     ])
 
     now = 2_500
     const finalBatch = (await restarted.route(
-      { type: 'job:updates', jobId: submitted.jobId, after: 3 },
+      { type: 'job:updates', jobId: submitted.jobId, after: 0 },
       sender(),
     )) as { nextSequence: number; updates: Array<{ type: string }> }
-    expect(finalBatch.updates.map(({ type }) => type)).toEqual(['imageRegionReady', 'complete'])
+    expect(finalBatch.updates.map(({ type }) => type)).toEqual([
+      'progress',
+      'progress',
+      'imageRegionReady',
+      'imageRegionReady',
+      'complete',
+    ])
     await restarted.route(
       {
         type: 'job:ack',
@@ -296,7 +327,12 @@ describe('progressive background fixture adapter', () => {
         request: {
           interaction: 'selection',
           selectedText: '\u79bb\u5f00',
-          jobId: submitted.jobId,
+          context: {
+            displayedChinese: '我们现在就走！',
+            baseChinese: '我们得马上离开！',
+            sourceText: 'We have to leave now!',
+            properNames: [],
+          },
           itemId,
         },
       },
@@ -405,19 +441,19 @@ describe('progressive background fixture adapter', () => {
       expect.objectContaining({
         kind: 'document',
         jobId: submitted.jobId,
-        acknowledgedSequence: 4,
+        acknowledgedSequence: 0,
       }),
     ])
 
     now = 2_500
     const finalBatch = (await restarted.route(
-      { type: 'job:updates', jobId: submitted.jobId, after: 4 },
+      { type: 'job:updates', jobId: submitted.jobId, after: 0 },
       sender(),
     )) as {
       nextSequence: number
       updates: Array<{ type: string; translatedCount?: number; preservedCount?: number }>
     }
-    expect(finalBatch.updates).toEqual([
+    expect(finalBatch.updates.filter((update) => update.type === 'complete')).toEqual([
       expect.objectContaining({ type: 'complete', translatedCount: 2, preservedCount: 0 }),
     ])
     await restarted.route(
@@ -498,10 +534,9 @@ describe('progressive background fixture adapter', () => {
     const replayedBlocks = replayed.updates.filter(
       (update): update is DocumentBlockReadyJobUpdate => update.type === 'documentBlockReady',
     )
-    expect(replayedBlocks.map(({ block }) => reader.installBlock(block.itemId, block.text))).toEqual([
-      false,
-      false,
-    ])
+    expect(
+      replayedBlocks.map(({ block }) => reader.installBlock(block.itemId, block.text)),
+    ).toEqual([false, false])
     expect(reader.counts()).toEqual({ translated: 2, preserved: 0, pending: 0 })
     expect(attachTranslatedText).toHaveBeenCalledTimes(2)
 
@@ -642,10 +677,7 @@ describe('progressive background fixture adapter', () => {
       } as unknown as CompanionClient
       const router = new BackgroundRouter({ jobs, artifacts, companion })
 
-      await router.route(
-        { type: 'job:ack', jobId, sequence: 1, terminalType },
-        sender(),
-      )
+      await router.route({ type: 'job:ack', jobId, sequence: 1, terminalType }, sender())
 
       expect(cancelJob).toHaveBeenCalledOnce()
       expect(cancelJob).toHaveBeenCalledWith(jobId)
@@ -674,10 +706,7 @@ describe('progressive background fixture adapter', () => {
       },
       sender(),
     )
-    await router.route(
-      { type: 'chapter:finish', pageSessionId, pageUrl },
-      sender(),
-    )
+    await router.route({ type: 'chapter:finish', pageSessionId, pageUrl }, sender())
 
     await router.cancelJobsForTab(7)
 

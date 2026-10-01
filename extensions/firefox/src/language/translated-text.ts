@@ -114,6 +114,10 @@ export function installTranslatedTextMetadata(
   translated: TranslatedText,
   options: TeachingTextOptions = {},
 ): void {
+  element.dataset.hskifyProperNames = JSON.stringify(
+    translated.protectedNames.map((name) => ({ text: name.chineseText, reason: name.reason })),
+  )
+  element.dataset.hskifyBaseChinese = translated.baseChinese
   element.lang = 'zh-CN'
   element.dataset.hskifySourceText = translated.sourceText
   element.dataset.hskifyDisplayedChinese = translated.displayedChinese

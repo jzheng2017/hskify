@@ -44,6 +44,8 @@ function sessionManager() {
 function request(): ImageJobRequest {
   return {
     buildFingerprint: BUILD_FINGERPRINT,
+    clientRequestId: 'test-request',
+    retryItemIds: [],
     clientImageId: 'page-0-hash',
     sourceSha256: 'a'.repeat(64),
     sourceMimeType: 'image/png',
@@ -67,7 +69,10 @@ function request(): ImageJobRequest {
 
 function documentRequest(): DocumentJobRequest {
   return {
+    focus: { kind: 'document', active: true, visibleBlockIds: [] },
     buildFingerprint: BUILD_FINGERPRINT,
+    clientRequestId: 'test-request',
+    retryItemIds: [],
     pageSessionId: 'document-page',
     sourceSha256: 'b'.repeat(64),
     settings: {
@@ -79,6 +84,8 @@ function documentRequest(): DocumentJobRequest {
     },
     blocks: [
       {
+        parentBlockId: 'block-0',
+        subItemOrder: 0,
         itemId: 'block-0',
         sourceIndex: 0,
         itemOrder: 0,

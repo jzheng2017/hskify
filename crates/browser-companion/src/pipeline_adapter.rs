@@ -114,7 +114,7 @@ const BROWSER_QWEN_INFERENCE_THREADS: i32 = 6;
 // never hold the ordered language stream indefinitely: the source pixels stay
 // intact and the region is published as unreadable when this deadline expires.
 const CLEANUP_RESULT_TIMEOUT: Duration = Duration::from_secs(90);
-const TRANSLATION_CACHE_SCHEMA: &str = "hskify-grounded-translation-v5-chinese-only-2026-08-08";
+const TRANSLATION_CACHE_SCHEMA: &str = "hskify-source-context-policy-v6-2026-10-01";
 // Multimodal inference should see enough artwork to classify a region, but a
 // continuous reader strip must not be sent to the projector at its full
 // height for every bounded language window.  The evidence viewport is
@@ -126,37 +126,7 @@ const PAGE_EVIDENCE_MIN_MARGIN: f32 = 96.0;
 const PAGE_EVIDENCE_MAX_MARGIN: f32 = 512.0;
 const PAGE_ROLE_MAX_LONG_EDGE: u32 = 768;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct ItemLookupContext {
-    pub(crate) source_text: String,
-    pub(crate) base_chinese: String,
-    pub(crate) displayed_chinese: String,
-    pub(crate) proper_names: Vec<ProperName>,
-}
-
-impl ItemLookupContext {
-    /// Cached dictionary context is part of the terminal item identity. A
-    /// stale context must never survive a result-cache replay because it can
-    /// explain a different sentence or reintroduce an entity from another
-    /// page. Keep this validation structural: it checks exact field identity
-    /// and bounded name records, not capitalization or lexical wordlists.
-    pub(crate) fn validate_against(&self, item: &ImageRegionReady) -> Result<()> {
-        if self.source_text != item.text.source_text
-            || self.base_chinese != item.text.base_chinese
-            || self.displayed_chinese != item.text.displayed_chinese
-        {
-            bail!("cached lookup context does not match its translated item");
-        }
-        let mut names = HashSet::with_capacity(self.proper_names.len());
-        for name in &self.proper_names {
-            if name.text.trim().is_empty() || !names.insert(name.text.as_str()) {
-                bail!("cached lookup context contains an empty or duplicate proper name");
-            }
-        }
-        Ok(())
-    }
-}
+pub(crate) use crate::contracts::LookupContext as ItemLookupContext;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum LookupInput {
@@ -364,6 +334,7 @@ pub(crate) struct HskifyPipeline {
     chapter_sessions: Mutex<ChapterSessionStore>,
     chapter_contexts: Mutex<ChapterContextStore>,
     instrumentation: Arc<RuntimeInstrumentation>,
+    analysis_cache: Mutex<TranslationCache<Arc<AnalyzedPage>>>,
 }
 
 struct ImagePipeline<'a> {
@@ -402,6 +373,7 @@ impl HskifyPipeline {
             chapter_sessions: Mutex::new(ChapterSessionStore::default()),
             chapter_contexts: Mutex::new(ChapterContextStore::default()),
             instrumentation: Arc::new(RuntimeInstrumentation::default()),
+            analysis_cache: Mutex::new(TranslationCache::default()),
         }
     }
 
@@ -582,7 +554,19 @@ impl DocumentPipeline<'_> {
             }
         }
 
-        let mut remaining = planned.clone();
+        let targeted = !request.retry_item_ids.is_empty();
+        let retry_ids = request
+            .retry_item_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<HashSet<_>>();
+        let mut remaining = planned
+            .iter()
+            .filter(|piece| {
+                !targeted || retry_ids.contains(request.blocks[piece.block_index].item_id.as_str())
+            })
+            .cloned()
+            .collect::<Vec<_>>();
         let mut accumulators = request
             .blocks
             .iter()
@@ -592,20 +576,22 @@ impl DocumentPipeline<'_> {
                     .iter()
                     .filter(|piece| piece.block_index == index)
                     .count();
-                DocumentAccumulator::new(block.clone(), piece_count)
+                let mut accumulator = DocumentAccumulator::new(block.clone(), piece_count);
+                accumulator.published = targeted && !retry_ids.contains(block.item_id.as_str());
+                accumulator
             })
             .collect::<Vec<_>>();
         for (index, reason) in preserved.drain() {
             accumulators[index].reject(reason);
         }
-        let mut next_publish_index = 0usize;
-        publish_canonical_document_prefix(
+        let mut published_count = 0usize;
+        publish_ready_document_blocks(
             &sink,
             control,
             request.settings.hsk_level,
             request.settings.learning_mode,
             &mut accumulators,
-            &mut next_publish_index,
+            &mut published_count,
             &self.chapter_contexts,
             &request.page_session_id,
         )?;
@@ -614,10 +600,11 @@ impl DocumentPipeline<'_> {
 
         while !remaining.is_empty() {
             cancellation_boundary(cancel.as_ref())?;
-            let visible = sink
-                .focus()
+            let selected_focus = wait_for_active_document(&sink, cancel.as_ref()).await?;
+            let visible = selected_focus
                 .visible_block_ids
-                .into_iter()
+                .iter()
+                .cloned()
                 .collect::<HashSet<_>>();
             let (batch, dispatch_reason) =
                 take_next_document_batch(&mut remaining, &request.blocks, &visible, first_dispatch);
@@ -647,64 +634,48 @@ impl DocumentPipeline<'_> {
                 self.instrumentation.as_ref(),
             );
             emit_document_evidence(&document_evidence).map_err(PipelineError::pipeline)?;
-            let min_index = batch
-                .iter()
-                .map(|piece| piece.block_index)
-                .min()
-                .unwrap_or(0);
-            let preceding_position = (
-                request.blocks[min_index].source_index,
-                request.blocks[min_index].item_order,
-            );
-            let preceding_utterances = self
-                .chapter_contexts
-                .lock()
-                .map_err(|_| {
-                    PipelineError::new("CHAPTER_CONTEXT_FAILED", "Chapter context lock poisoned.")
-                })?
-                .preceding(&request.page_session_id, preceding_position);
-            let (preceding_english, following_english) =
-                document_piece_neighbor_context(&context_plan, &batch)
-                    .map_err(PipelineError::pipeline)?;
-            let translated = self
-                .translation_service(language, control)
-                .translate_document_pieces(
-                    &batch,
-                    &request,
-                    preceding_utterances,
-                    preceding_english,
-                    following_english,
-                    batch
-                        .iter()
-                        .any(|piece| visible.contains(&request.blocks[piece.block_index].item_id)),
-                    cancel.clone(),
-                )
-                .await?;
-            for piece in batch {
-                match translated.get(&piece.piece_id) {
+            let mut queued = batch.into_iter();
+            while let Some(piece) = queued.next() {
+                let current_focus = sink.focus();
+                if !current_focus.active
+                    || current_focus.visible_block_ids != selected_focus.visible_block_ids
+                {
+                    remaining.push(piece);
+                    remaining.extend(queued);
+                    break;
+                }
+                let translated = self
+                    .translation_service(language, control)
+                    .translate_document_piece(
+                        &piece,
+                        &request,
+                        &context_plan,
+                        visible.contains(&request.blocks[piece.block_index].item_id),
+                        cancel.clone(),
+                    )
+                    .await?;
+                match translated.items.get(&piece.piece_id) {
                     Some(Ok(value)) => accumulators[piece.block_index].record(
                         piece.piece_order,
                         value.clone(),
                         piece.separator_after,
                     ),
-                    Some(Err(reason)) => {
-                        accumulators[piece.block_index].reject(reason.clone());
-                    }
+                    Some(Err(reason)) => accumulators[piece.block_index].reject(reason.clone()),
                     None => accumulators[piece.block_index]
                         .reject("the language model omitted this document piece".to_owned()),
                 }
+                publish_ready_document_blocks(
+                    &sink,
+                    control,
+                    request.settings.hsk_level,
+                    request.settings.learning_mode,
+                    &mut accumulators,
+                    &mut published_count,
+                    &self.chapter_contexts,
+                    &request.page_session_id,
+                )?;
             }
-            publish_canonical_document_prefix(
-                &sink,
-                control,
-                request.settings.hsk_level,
-                request.settings.learning_mode,
-                &mut accumulators,
-                &mut next_publish_index,
-                &self.chapter_contexts,
-                &request.page_session_id,
-            )?;
-            let finished = next_publish_index;
+            let finished = published_count;
             publish_progress(
                 &sink,
                 BrowserJobStage::Translating,
@@ -717,17 +688,17 @@ impl DocumentPipeline<'_> {
         }
 
         for index in 0..accumulators.len() {
-            if !accumulators[index].is_complete() {
+            if !accumulators[index].published && !accumulators[index].is_complete() {
                 accumulators[index].reject("document block translation was incomplete".to_owned());
             }
         }
-        publish_canonical_document_prefix(
+        publish_ready_document_blocks(
             &sink,
             control,
             request.settings.hsk_level,
             request.settings.learning_mode,
             &mut accumulators,
-            &mut next_publish_index,
+            &mut published_count,
             &self.chapter_contexts,
             &request.page_session_id,
         )?;
@@ -768,6 +739,16 @@ impl ImagePipeline<'_> {
         let mut sessions = self.chapter_sessions.lock().map_err(|_| {
             PipelineError::new("CHAPTER_SESSION_FAILED", "Chapter session lock poisoned.")
         })?;
+        if sessions
+            .session(&request.page_session_id)
+            .and_then(|chapter| chapter.surfaces.get(&request.source_index))
+            .is_some_and(|surface| surface.source_sha256 != request.source_sha256)
+        {
+            return Err(PipelineError::new(
+                "SOURCE_REVISION_CHANGED",
+                "The chapter has replaced this page source.",
+            ));
+        }
         sessions
             .session_mut(&request.page_session_id)
             .record_analysis(PageAnalysis {
@@ -844,7 +825,7 @@ impl ImagePipeline<'_> {
                 PipelineError::new("CHAPTER_SESSION_FAILED", "Chapter session lock poisoned.")
             })?;
             let chapter = chapter_sessions.session_mut(&input.request.page_session_id);
-            chapter.register_surface(PageSurface {
+            let changed = chapter.register_surface(PageSurface {
                 session_id: input.request.page_session_id.clone(),
                 page_index: input.request.source_index,
                 source_sha256: input.request.source_sha256.clone(),
@@ -852,6 +833,18 @@ impl ImagePipeline<'_> {
                 height: image_height,
                 kind: surface_kind.clone(),
             });
+            drop(chapter_sessions);
+            if changed {
+                self.chapter_contexts
+                    .lock()
+                    .map_err(|_| {
+                        PipelineError::new(
+                            "CHAPTER_CONTEXT_FAILED",
+                            "Chapter context lock poisoned.",
+                        )
+                    })?
+                    .remove_source(&input.request.page_session_id, input.request.source_index);
+            }
         }
         cancellation_boundary(cancel.as_ref())?;
         publish_progress(
@@ -864,6 +857,67 @@ impl ImagePipeline<'_> {
             "Loading resident CUDA detector, OCR, and translation models",
         )?;
         let (resident, control) = self.ready_models().await.map_err(PipelineError::pipeline)?;
+        let analysis_key = image_analysis_key(&input.request);
+        let cached_analysis = self
+            .analysis_cache
+            .lock()
+            .map_err(|_| PipelineError::new("CACHE_FAILED", "Page analysis cache lock poisoned."))?
+            .get(&analysis_key);
+        if let Some(analysis) = cached_analysis.filter(|analysis| {
+            analysis.preserved.iter().all(|region| {
+                region.disposition == crate::contracts::PreservationDisposition::Excluded
+            }) && input
+                .request
+                .retry_item_ids
+                .iter()
+                .all(|id| analysis.regions.iter().any(|region| &region.id == id))
+        }) {
+            self.record_page_analysis(
+                &input.request,
+                image_width,
+                image_height,
+                surface_kind,
+                &analysis.plans,
+                true,
+            )?;
+            for region in &analysis.preserved {
+                if input.request.retry_item_ids.is_empty()
+                    || input.request.retry_item_ids.contains(&region.item_id)
+                {
+                    sink.publish(JobUpdateDraft::ImageRegionPreserved {
+                        region: region.clone(),
+                    })
+                    .map_err(|error| publish_error(error, &sink))?;
+                }
+            }
+            let viewport = sink.focus();
+            let mut regions = analysis.regions.clone();
+            for region in &mut regions {
+                region.visible = viewport.active
+                    && region.candidate.bubble_rect.intersects_viewport(
+                        &viewport.visible_rects,
+                        image_width,
+                        image_height,
+                    );
+                region.translation_queued_at = tokio::time::Instant::now();
+            }
+            self.flush_translation_queue(
+                resident,
+                control,
+                &input.request,
+                &mut regions,
+                cancel,
+                &sink,
+                0.80,
+                image_width,
+                image_height,
+                &mut Vec::new(),
+                &mut TranslationLatencyPhase::AwaitingFirstVisibleRegion,
+                true,
+            )
+            .await?;
+            return Ok(());
+        }
         let preprocessing = global_preprocessing_pool().map_err(PipelineError::pipeline)?;
         cancellation_boundary(cancel.as_ref())?;
 
@@ -875,6 +929,7 @@ impl ImagePipeline<'_> {
         let mut recognized_lines = Vec::<RecognizedLine>::new();
         let mut text_probabilities = ProbabilityMap::zeros(image_width, image_height);
         let mut pending_translation = Vec::<PreparedRegion>::new();
+        let mut analyzed_regions = Vec::<PreparedRegion>::new();
         let mut translation_latency_phase = TranslationLatencyPhase::AwaitingFirstVisibleRegion;
         // The daemon chapter session supplies preceding dialogue immediately
         // before each translation window. Never seed it from browser fields.
@@ -1200,7 +1255,6 @@ impl ImagePipeline<'_> {
                 if immediate_lines.is_empty() {
                     continue;
                 }
-                self.refresh_faithful_context(&input.request, &mut dialogue_context)?;
                 let (prepared_regions, probabilities, region_plans) = prepare_grouped_regions(
                     Arc::clone(resident),
                     source.clone(),
@@ -1227,6 +1281,7 @@ impl ImagePipeline<'_> {
                     &page_region_plans,
                     false,
                 )?;
+                analyzed_regions.extend(prepared_regions.iter().cloned());
                 pending_translation.extend(prepared_regions);
                 // Multi-tile pages remain independently analyzable. The
                 // final page pass joins lines whose bubble ownership was not
@@ -1253,7 +1308,6 @@ impl ImagePipeline<'_> {
         recognized_lines.extend(deferred_page_lines);
         if !recognized_lines.is_empty() {
             let finalized_lines = std::mem::take(&mut recognized_lines);
-            self.refresh_faithful_context(&input.request, &mut dialogue_context)?;
             let (prepared_regions, _, region_plans) = prepare_grouped_regions(
                 Arc::clone(resident),
                 source.clone(),
@@ -1279,6 +1333,7 @@ impl ImagePipeline<'_> {
                 &page_region_plans,
                 false,
             )?;
+            analyzed_regions.extend(prepared_regions.iter().cloned());
             pending_translation.extend(prepared_regions);
         }
 
@@ -1310,14 +1365,48 @@ impl ImagePipeline<'_> {
         for plan in page_region_plans {
             region_plans.entry(plan.id.clone()).or_insert(plan);
         }
+        let region_plans = region_plans.into_values().collect::<Vec<_>>();
         self.record_page_analysis(
             &input.request,
             image_width,
             image_height,
             surface_kind,
-            &region_plans.into_values().collect::<Vec<_>>(),
+            &region_plans,
             true,
         )?;
+        if input.request.retry_item_ids.is_empty()
+            && analyzed_regions.iter().all(|region| {
+                region.cleanup.result.get().is_some_and(|result| {
+                    result
+                        .decisions
+                        .get(&region.id)
+                        .is_some_and(|decision| decision.patch.is_some())
+                })
+            })
+        {
+            let preserved = sink
+                .preserved_regions()
+                .into_iter()
+                .filter(|region| {
+                    !analyzed_regions
+                        .iter()
+                        .any(|prepared| prepared.id == region.item_id)
+                })
+                .collect();
+            self.analysis_cache
+                .lock()
+                .map_err(|_| {
+                    PipelineError::new("CACHE_FAILED", "Page analysis cache lock poisoned.")
+                })?
+                .insert(
+                    analysis_key,
+                    Arc::new(AnalyzedPage {
+                        regions: analyzed_regions,
+                        plans: region_plans,
+                        preserved,
+                    }),
+                );
+        }
         publish_progress(
             &sink,
             BrowserJobStage::Packaging,
@@ -1469,35 +1558,6 @@ impl ImagePipeline<'_> {
         Ok(())
     }
 
-    /// Refresh semantic translation context at the moment language work is
-    /// dispatched. A page job can spend several seconds in OCR and vision;
-    /// snapshotting only when the job started made it permanently miss prior
-    /// pages that completed during that work. Preserve any already-published
-    /// same-page context, then merge it behind the canonical chapter prefix.
-    fn refresh_faithful_context(
-        &self,
-        request: &ImagePipelineInput,
-        context: &mut Vec<HskPrecedingUtterance>,
-    ) -> std::result::Result<(), PipelineError> {
-        let local = std::mem::take(context);
-        let mut refreshed = self
-            .chapter_contexts
-            .lock()
-            .map_err(|_| {
-                PipelineError::new("CHAPTER_CONTEXT_FAILED", "Chapter context lock poisoned.")
-            })?
-            .preceding(&request.page_session_id, (request.source_index, 0));
-        for utterance in local {
-            append_terminal_context(
-                &mut refreshed,
-                &utterance.source_english,
-                &utterance.chinese,
-            );
-        }
-        *context = refreshed;
-        Ok(())
-    }
-
     #[allow(clippy::too_many_arguments)]
     async fn translate_and_publish_shared(
         &self,
@@ -1511,8 +1571,14 @@ impl ImagePipeline<'_> {
         image_width: u32,
         image_height: u32,
         context: &mut Vec<HskPrecedingUtterance>,
-        following_english: &[String],
+        _following_english: &[String],
     ) -> std::result::Result<bool, PipelineError> {
+        let regions = regions
+            .into_iter()
+            .filter(|region| {
+                request.retry_item_ids.is_empty() || request.retry_item_ids.contains(&region.id)
+            })
+            .collect::<Vec<_>>();
         if regions.is_empty() {
             return Ok(false);
         }
@@ -1531,24 +1597,12 @@ impl ImagePipeline<'_> {
             None,
             "Producing final Chinese for verified image text",
         )?;
-        let first_order = regions
-            .iter()
-            .map(|region| region.reading_order)
-            .min()
-            .unwrap_or(u32::MAX);
-        *context = self
-            .chapter_contexts
-            .lock()
-            .map_err(|_| {
-                PipelineError::new("CHAPTER_CONTEXT_FAILED", "Chapter context lock poisoned.")
-            })?
-            .preceding(
-                &request.page_session_id,
-                (request.source_index, first_order),
-            );
         let priority = prepared_region_priority(&regions, sink, image_width, image_height);
         let units = regions
             .iter()
+            .filter(|region| {
+                request.retry_item_ids.is_empty() || request.retry_item_ids.contains(&region.id)
+            })
             .map(|region| {
                 let (max_characters, max_lines) =
                     layout_budget_for_region(region, image_width, image_height);
@@ -1562,6 +1616,7 @@ impl ImagePipeline<'_> {
                         max_characters,
                         max_lines,
                     }),
+                    source_context: region.source_context.clone(),
                 }
             })
             .collect::<Vec<_>>();
@@ -1571,9 +1626,6 @@ impl ImagePipeline<'_> {
                 &units,
                 request.settings.hsk_level,
                 request.settings.learning_mode,
-                context.clone(),
-                Vec::new(),
-                following_english.to_vec(),
                 priority,
                 cancel.clone(),
             )
@@ -1748,7 +1800,18 @@ impl ChapterPipeline for HskifyPipeline {
         self.chapter_contexts
             .lock()
             .map(|contexts| {
-                contexts.snapshot_excluding_source(&request.page_session_id, request.source_index)
+                contexts
+                    .snapshot_excluding_source(
+                        &request.page_session_id,
+                        request.source_index,
+                        &request.chapter_source_order,
+                    )
+                    .into_iter()
+                    .map(|mut unit| {
+                        unit.displayed_text = None;
+                        unit
+                    })
+                    .collect()
             })
             .unwrap_or_default()
     }
@@ -1763,7 +1826,7 @@ impl ChapterPipeline for HskifyPipeline {
             PipelineError::new("CHAPTER_SESSION_FAILED", "Chapter session lock poisoned.")
         })?;
         let session = sessions.session_mut(&request.page_session_id);
-        session.register_surface(PageSurface {
+        let changed = session.register_surface(PageSurface {
             session_id: request.page_session_id.clone(),
             page_index: request.source_index,
             source_sha256: request.source_sha256.clone(),
@@ -1823,21 +1886,22 @@ impl ChapterPipeline for HskifyPipeline {
             complete: true,
         });
         drop(sessions);
-        self.chapter_contexts
-            .lock()
-            .map_err(|_| {
-                PipelineError::new("CHAPTER_CONTEXT_FAILED", "Chapter context lock poisoned.")
-            })?
-            .register(
-                &request.page_session_id,
-                regions.iter().map(|region| ChapterContextUnit {
-                    item_id: region.item_id.clone(),
-                    source_index: request.source_index,
-                    item_order: region.item_order,
-                    source_text: region.text.source_text.clone(),
-                    displayed_text: Some(region.text.displayed_chinese.clone()),
-                }),
-            );
+        let mut contexts = self.chapter_contexts.lock().map_err(|_| {
+            PipelineError::new("CHAPTER_CONTEXT_FAILED", "Chapter context lock poisoned.")
+        })?;
+        if changed {
+            contexts.remove_source(&request.page_session_id, request.source_index);
+        }
+        contexts.register(
+            &request.page_session_id,
+            regions.iter().map(|region| ChapterContextUnit {
+                item_id: region.item_id.clone(),
+                source_index: request.source_index,
+                item_order: region.item_order,
+                source_text: region.text.source_text.clone(),
+                displayed_text: Some(region.text.displayed_chinese.clone()),
+            }),
+        );
         Ok(())
     }
 
@@ -1916,6 +1980,7 @@ struct LanguageRuntime {
     app: Arc<App>,
     hsk_control: Arc<HskControl>,
     translation_cache: Mutex<TranslationCache>,
+    faithful_cache: Mutex<TranslationCache<FaithfulText>>,
 }
 
 impl LanguageRuntime {
@@ -1966,6 +2031,7 @@ impl LanguageRuntime {
             app,
             hsk_control,
             translation_cache: Mutex::new(TranslationCache::default()),
+            faithful_cache: Mutex::new(TranslationCache::default()),
         })
     }
 
@@ -2546,29 +2612,46 @@ fn split_document_block(
         .collect()
 }
 
+pub(crate) async fn wait_for_active_document(
+    sink: &JobUpdateSink,
+    cancel: &AtomicBool,
+) -> std::result::Result<crate::server::JobFocus, PipelineError> {
+    loop {
+        cancellation_boundary(cancel)?;
+        let focus = sink.focus();
+        if focus.active {
+            return Ok(focus);
+        }
+        sink.wait_for_focus_change(focus.revision, Duration::from_millis(250))
+            .await;
+    }
+}
+
 fn take_next_document_batch(
     remaining: &mut Vec<DocumentPiece>,
     blocks: &[DocumentSourceBlock],
     visible_ids: &HashSet<String>,
     isolate_first_visible: bool,
 ) -> (Vec<DocumentPiece>, &'static str) {
+    remaining.sort_unstable_by_key(|piece| (piece.block_index, piece.piece_order));
     let priority_block = blocks.iter().enumerate().find_map(|(index, block)| {
         (visible_ids.contains(&block.item_id)
             && remaining.iter().any(|piece| piece.block_index == index))
         .then_some(index)
     });
-    let mut candidates = remaining.iter().cloned().collect::<Vec<_>>();
-    candidates.sort_by_key(|piece| (piece.block_index, piece.piece_order));
     let start = priority_block
         .and_then(|index| {
-            candidates
+            remaining
                 .iter()
                 .position(|piece| piece.block_index == index)
         })
         .unwrap_or(0);
     let mut selected = Vec::<DocumentPiece>::new();
     let mut tokens = 0_usize;
-    for piece in candidates.into_iter().skip(start) {
+    for piece in remaining.iter().skip(start) {
+        if priority_block.is_some() && !visible_ids.contains(&blocks[piece.block_index].item_id) {
+            break;
+        }
         if isolate_first_visible && priority_block.is_some_and(|index| piece.block_index != index) {
             break;
         }
@@ -2589,7 +2672,7 @@ fn take_next_document_batch(
             break;
         }
         tokens = tokens.saturating_add(piece_tokens);
-        selected.push(piece);
+        selected.push(piece.clone());
     }
     let selected_ids = selected
         .iter()
@@ -2615,13 +2698,69 @@ struct TranslationUnit {
     id: String,
     kind: HskUtteranceKind,
     source_text: String,
-    faithful_chinese: Option<String>,
+    faithful_chinese: Option<FaithfulText>,
     provenance: DirectSourceProvenance,
     layout: Option<HskLayoutConstraints>,
+    source_context: SourceContext,
+}
+
+#[derive(Debug, Clone, Default)]
+struct SourceContext {
+    preceding: Vec<String>,
+    following: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct FaithfulText {
+    text: String,
+    protected_names: Vec<koharu_app::llm::ProtectedName>,
+}
+impl std::ops::Deref for FaithfulText {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.text
+    }
+}
+impl From<String> for FaithfulText {
+    fn from(text: String) -> Self {
+        Self {
+            text,
+            protected_names: Vec::new(),
+        }
+    }
+}
+impl FaithfulText {
+    fn proper_names(&self) -> Vec<ProperName> {
+        use koharu_app::llm::ProtectedNameReason as R;
+        self.protected_names
+            .iter()
+            .map(|name| ProperName {
+                text: name.chinese_text.clone(),
+                reason: match name.reason {
+                    R::PersonName => hsk_control::ProperNameReason::PersonName,
+                    R::PlaceName => hsk_control::ProperNameReason::PlaceName,
+                    R::Title => hsk_control::ProperNameReason::Title,
+                    R::UnavoidableProperNoun => {
+                        hsk_control::ProperNameReason::UnavoidableProperNoun
+                    }
+                },
+            })
+            .collect()
+    }
+}
+impl CacheValue for FaithfulText {
+    fn retained_bytes(&self) -> usize {
+        self.text.len()
+            + self
+                .protected_names
+                .iter()
+                .map(|n| n.source_text.len() + n.chinese_text.len() + 64)
+                .sum::<usize>()
+    }
 }
 
 struct FaithfulBatchResult {
-    items: HashMap<String, String>,
+    items: HashMap<String, FaithfulText>,
     generation_duration: Duration,
 }
 
@@ -2648,6 +2787,48 @@ impl TranslationService<'_> {
                 generation_duration: Duration::ZERO,
             });
         }
+        let translator = self.language.app.llm.direct_hsk_translator();
+        let mut keys = HashMap::with_capacity(utterances.len());
+        let mut items = HashMap::with_capacity(utterances.len());
+        let mut missing = Vec::new();
+        {
+            let mut cache =
+                self.language.faithful_cache.lock().map_err(|_| {
+                    PipelineError::new("CACHE_FAILED", "Faithful cache lock poisoned.")
+                })?;
+            for utterance in utterances {
+                let material = serde_json::to_vec(&(
+                    "faithful-source-names-v3",
+                    &utterance.source_english,
+                    utterance.kind,
+                    match provenance {
+                        DirectSourceProvenance::Dom => "dom",
+                        DirectSourceProvenance::Ocr => "ocr",
+                    },
+                    &preceding_utterances,
+                    &preceding_english,
+                    &following_english,
+                    translator.model_revision(),
+                    translator.prompt_hash(),
+                    translator.validator_hash(),
+                    self.control.cache_revision(),
+                ))
+                .map_err(|error| PipelineError::pipeline(error.into()))?;
+                let key = sha256_hex(&material);
+                if let Some(text) = cache.get(&key) {
+                    items.insert(utterance.id.clone(), text);
+                } else {
+                    missing.push(utterance.clone());
+                }
+                keys.insert(utterance.id, key);
+            }
+        }
+        if missing.is_empty() {
+            return Ok(FaithfulBatchResult {
+                items,
+                generation_duration: Duration::ZERO,
+            });
+        }
         let permit = self
             .cuda_scheduler
             .acquire(CudaWorkload::Language, priority, cancel.clone())
@@ -2659,7 +2840,7 @@ impl TranslationService<'_> {
             tokio::runtime::Handle::current().block_on(
                 translator.translate_faithful_batch_for_source(
                     &FaithfulTranslationBatchRequest {
-                        utterances,
+                        utterances: missing,
                         preceding_utterances,
                         preceding_english,
                         following_english,
@@ -2673,69 +2854,101 @@ impl TranslationService<'_> {
         let generation_duration = generation_started.elapsed();
         drop(permit);
         cancellation_boundary(cancel.as_ref())?;
+        let mut cache = self
+            .language
+            .faithful_cache
+            .lock()
+            .map_err(|_| PipelineError::new("CACHE_FAILED", "Faithful cache lock poisoned."))?;
+        for outcome in result.items {
+            if outcome.is_valid() {
+                if let Some(text) = outcome.text {
+                    let value = FaithfulText {
+                        text,
+                        protected_names: outcome.protected_names,
+                    };
+                    cache.insert(keys[&outcome.id].clone(), value.clone());
+                    items.insert(outcome.id, value);
+                }
+            }
+        }
         Ok(FaithfulBatchResult {
-            items: result
-                .items
-                .into_iter()
-                .filter_map(|outcome| {
-                    outcome
-                        .is_valid()
-                        .then_some(outcome.text)
-                        .flatten()
-                        .filter(|text| !text.trim().is_empty())
-                        .map(|text| (outcome.id, text))
-                })
-                .collect(),
+            items,
             generation_duration,
         })
     }
 
-    async fn translate_document_pieces(
+    async fn translate_document_piece(
         &self,
-        pieces: &[DocumentPiece],
+        piece: &DocumentPiece,
         request: &DocumentJobRequest,
-        preceding_utterances: Vec<HskPrecedingUtterance>,
-        preceding_english: Vec<String>,
-        following_english: Vec<String>,
+        context_plan: &[DocumentContextSpan],
         visible: bool,
         cancel: Arc<AtomicBool>,
-    ) -> std::result::Result<
-        HashMap<String, std::result::Result<CachedTranslation, String>>,
-        PipelineError,
-    > {
-        let priority = if visible {
-            CudaPriority::Visible
-        } else {
-            CudaPriority::Offscreen
+    ) -> std::result::Result<TranslationBatchResult, PipelineError> {
+        let (preceding, following) =
+            document_piece_neighbor_context(context_plan, std::slice::from_ref(piece))
+                .map_err(PipelineError::pipeline)?;
+        let unit = TranslationUnit {
+            id: piece.piece_id.clone(),
+            kind: document_hsk_kind(piece.kind),
+            source_text: piece.source_text.clone(),
+            faithful_chinese: None,
+            provenance: DirectSourceProvenance::Dom,
+            layout: None,
+            source_context: SourceContext {
+                preceding,
+                following,
+            },
         };
-        let units = pieces
-            .iter()
-            .map(|piece| TranslationUnit {
-                id: piece.piece_id.clone(),
-                kind: document_hsk_kind(piece.kind),
-                source_text: piece.source_text.clone(),
-                faithful_chinese: None,
-                provenance: DirectSourceProvenance::Dom,
-                layout: None,
-            })
-            .collect::<Vec<_>>();
-        Ok(self
-            .translate_units(
-                &units,
-                request.settings.hsk_level,
-                request.settings.learning_mode,
-                preceding_utterances,
-                preceding_english,
-                following_english,
-                priority,
-                cancel,
-            )
-            .await?
-            .items)
+        self.translate_units(
+            std::slice::from_ref(&unit),
+            request.settings.hsk_level,
+            request.settings.learning_mode,
+            if visible {
+                CudaPriority::Visible
+            } else {
+                CudaPriority::Offscreen
+            },
+            cancel,
+        )
+        .await
+    }
+
+    async fn translate_units(
+        &self,
+        units: &[TranslationUnit],
+        level: HskLevel,
+        mode: LearningMode,
+        priority: CudaPriority,
+        cancel: Arc<AtomicBool>,
+    ) -> std::result::Result<TranslationBatchResult, PipelineError> {
+        let mut items = HashMap::with_capacity(units.len());
+        let mut generation_duration = Duration::ZERO;
+        for unit in units {
+            cancellation_boundary(cancel.as_ref())?;
+            let result = self
+                .translate_unit(
+                    std::slice::from_ref(unit),
+                    level,
+                    mode,
+                    Vec::new(),
+                    unit.source_context.preceding.clone(),
+                    unit.source_context.following.clone(),
+                    priority,
+                    cancel.clone(),
+                )
+                .await?;
+            items.extend(result.items);
+            generation_duration += result.generation_duration;
+        }
+        Ok(TranslationBatchResult {
+            items,
+            generation_duration,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn translate_units(
+    async fn translate_unit(
         &self,
         units: &[TranslationUnit],
         requested_level: HskLevel,
@@ -2757,6 +2970,60 @@ impl TranslationService<'_> {
             ));
         }
         let translator = self.language.app.llm.direct_hsk_translator();
+        let model_id = translator.model_id().to_string();
+        let batch_source_texts = units
+            .iter()
+            .map(|unit| unit.source_text.clone())
+            .collect::<Vec<_>>();
+        let keys = units
+            .iter()
+            .map(|unit| {
+                (
+                    unit.id.clone(),
+                    translation_cache_key(
+                        &unit.source_text,
+                        unit.kind,
+                        unit.layout,
+                        &batch_source_texts,
+                        &preceding_utterances,
+                        &preceding_english,
+                        &following_english,
+                        provenance,
+                        learning_mode,
+                        u8::from(requested_level),
+                        &model_id,
+                        translator.model_revision(),
+                        translator.prompt_hash(),
+                        translator.validator_hash(),
+                        self.control.cache_revision(),
+                    ),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let mut results = HashMap::with_capacity(units.len());
+        let units = {
+            let mut cache = self.language.translation_cache.lock().map_err(|_| {
+                PipelineError::new("CACHE_FAILED", "Translation cache lock poisoned.")
+            })?;
+            units
+                .iter()
+                .filter(|unit| {
+                    if let Some(value) = cache.get(&keys[&unit.id]).filter(translation_is_final) {
+                        results.insert(unit.id.clone(), Ok(value));
+                        false
+                    } else {
+                        true
+                    }
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        if units.is_empty() {
+            return Ok(TranslationBatchResult {
+                items: results,
+                generation_duration: Duration::ZERO,
+            });
+        }
         let mut faithful_by_id = units
             .iter()
             .filter_map(|unit| {
@@ -2794,22 +3061,12 @@ impl TranslationService<'_> {
 
         let level = ControlHskLevel::new(u8::from(requested_level))
             .map_err(|error| PipelineError::new("INVALID_HSK_LEVEL", error.to_string()))?;
-        let model_id = translator.model_id().to_string();
-        let batch_source_texts = units
-            .iter()
-            .map(|unit| match unit.provenance {
-                DirectSourceProvenance::Dom => unit.source_text.clone(),
-                DirectSourceProvenance::Ocr => compact_ocr_text(&unit.source_text),
-            })
-            .collect::<Vec<_>>();
-        let mut keys = HashMap::with_capacity(units.len());
-        let mut results = HashMap::with_capacity(units.len());
         let mut pending = Vec::new();
         {
             let mut cache = self.language.translation_cache.lock().map_err(|_| {
                 PipelineError::new("CACHE_FAILED", "Translation cache lock poisoned.")
             })?;
-            for unit in units {
+            for unit in &units {
                 let Some(faithful_chinese) = faithful_by_id.get(&unit.id) else {
                     results.insert(
                         unit.id.clone(),
@@ -2817,30 +3074,28 @@ impl TranslationService<'_> {
                     );
                     continue;
                 };
-                let key = translation_cache_key(
-                    &unit.source_text,
-                    faithful_chinese,
-                    unit.kind,
-                    unit.layout,
-                    &batch_source_texts,
-                    &preceding_utterances,
-                    &preceding_english,
-                    &following_english,
-                    provenance,
-                    learning_mode,
-                    u8::from(requested_level),
-                    &model_id,
-                    translator.model_revision(),
-                    translator.prompt_hash(),
-                    translator.validator_hash(),
-                    self.control.cache_revision(),
-                );
-                if let Some(cached) = cache.get(&key).filter(translation_is_final) {
-                    results.insert(unit.id.clone(), Ok(cached));
-                } else {
-                    pending.push(unit.clone());
+                let key = &keys[&unit.id];
+                {
+                    let report = self.control.validate(
+                        faithful_chinese,
+                        level,
+                        &faithful_chinese.proper_names(),
+                    );
+                    if learning_mode == LearningMode::Strict
+                        && report.strictly_valid
+                        && unit.layout.is_none_or(|layout| {
+                            faithful_chinese.chars().count() <= usize::from(layout.max_characters)
+                                && faithful_chinese.lines().count() <= usize::from(layout.max_lines)
+                        })
+                    {
+                        let mut value = natural_translation(faithful_chinese.clone(), report);
+                        populate_pinyin(self.control, &mut value);
+                        cache.insert(key.clone(), value.clone());
+                        results.insert(unit.id.clone(), Ok(value));
+                    } else {
+                        pending.push(unit.clone());
+                    }
                 }
-                keys.insert(unit.id.clone(), key);
             }
         }
 
@@ -2850,7 +3105,9 @@ impl TranslationService<'_> {
                     .get(&unit.id)
                     .expect("pending units have faithful Chinese")
                     .clone();
-                let report = self.control.validate(&faithful, level, &[]);
+                let report = self
+                    .control
+                    .validate(&faithful, level, &faithful.proper_names());
                 let mut value = natural_translation(faithful, report);
                 populate_pinyin(self.control, &mut value);
                 self.language
@@ -2880,7 +3137,7 @@ impl TranslationService<'_> {
                 id: unit.id.clone(),
                 kind: unit.kind,
                 source_english: unit.source_text.clone(),
-                faithful_chinese: faithful_by_id[&unit.id].clone(),
+                faithful_chinese: faithful_by_id[&unit.id].text.clone(),
                 layout: unit.layout,
             })
             .collect::<Vec<_>>();
@@ -2925,12 +3182,29 @@ impl TranslationService<'_> {
                         outcome,
                         self.control,
                         level,
-                        &[],
+                        &faithful_by_id[&unit.id].proper_names(),
                         LearningMode::Strict,
                     ),
                 )
             })
             .collect::<HashMap<_, _>>();
+        for unit in &pending {
+            if let Some(state) = states.get_mut(&unit.id) {
+                for name in &faithful_by_id[&unit.id].protected_names {
+                    if !state
+                        .displayed_chinese
+                        .as_deref()
+                        .or(state.base_chinese.as_deref())
+                        .is_some_and(|text| name.is_anchored(&unit.source_text, text))
+                    {
+                        state.problems.push(format!(
+                            "Preserve the exact proper name: {} => {}",
+                            name.source_text, name.chinese_text
+                        ));
+                    }
+                }
+            }
+        }
         let repair_utterances = pending
             .iter()
             .filter_map(|unit| {
@@ -2939,7 +3213,7 @@ impl TranslationService<'_> {
                     id: unit.id.clone(),
                     kind: unit.kind,
                     source_english: unit.source_text.clone(),
-                    faithful_chinese: faithful_by_id[&unit.id].clone(),
+                    faithful_chinese: faithful_by_id[&unit.id].text.clone(),
                     layout: unit.layout,
                     rejected_chinese: state.base_chinese.clone(),
                     avoid_chinese: state.avoid_chinese(),
@@ -2975,7 +3249,12 @@ impl TranslationService<'_> {
             drop(permit);
             for outcome in repaired.items {
                 if let Some(state) = states.get_mut(&outcome.id) {
-                    state.apply_repair(outcome, self.control, level, &[]);
+                    state.apply_repair(
+                        outcome.clone(),
+                        self.control,
+                        level,
+                        &faithful_by_id[&outcome.id].proper_names(),
+                    );
                 }
             }
         }
@@ -2985,6 +3264,7 @@ impl TranslationService<'_> {
                 Some(state) if state.problems.is_empty() => state
                     .finish()
                     .map(|mut value| {
+                        value.protected_names = faithful_by_id[&unit.id].protected_names.clone();
                         populate_pinyin(self.control, &mut value);
                         value
                     })
@@ -2994,6 +3274,17 @@ impl TranslationService<'_> {
                 }
                 None => Err("no complete strict translation was returned".to_owned()),
             };
+            let value = value.and_then(|value| {
+                if value
+                    .protected_names
+                    .iter()
+                    .all(|name| name.is_anchored(&unit.source_text, &value.displayed_chinese))
+                {
+                    Ok(value)
+                } else {
+                    Err("a protected proper name was changed or omitted".to_owned())
+                }
+            });
             if let Ok(final_value) = &value {
                 self.language
                     .translation_cache
@@ -3060,7 +3351,7 @@ impl DocumentAccumulator {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn publish_canonical_document_prefix(
+fn publish_ready_document_blocks(
     sink: &JobUpdateSink,
     control: &HskControl,
     requested_level: HskLevel,
@@ -3070,13 +3361,16 @@ fn publish_canonical_document_prefix(
     chapter_contexts: &Mutex<ChapterContextStore>,
     chapter_id: &str,
 ) -> std::result::Result<(), PipelineError> {
-    while *next_index < accumulators.len() && accumulators[*next_index].is_complete() {
+    for accumulator in accumulators
+        .iter_mut()
+        .filter(|item| !item.published && item.is_complete())
+    {
         publish_document_accumulator(
             sink,
             control,
             requested_level,
             learning_mode,
-            &mut accumulators[*next_index],
+            accumulator,
             chapter_contexts,
             chapter_id,
         )?;
@@ -3098,17 +3392,10 @@ fn publish_document_accumulator(
         return Ok(());
     }
     if let Some(reason) = accumulator.rejection.take() {
-        sink.remember_item_for_lookup(
-            accumulator.block.item_id.clone(),
-            ItemLookupContext {
-                source_text: accumulator.block.text.clone(),
-                base_chinese: accumulator.block.text.clone(),
-                displayed_chinese: accumulator.block.text.clone(),
-                proper_names: Vec::new(),
-            },
-        );
         sink.publish(JobUpdateDraft::DocumentBlockPreserved {
             block: DocumentBlockPreserved {
+                parent_block_id: accumulator.block.parent_block_id.clone(),
+                sub_item_order: accumulator.block.sub_item_order,
                 item_id: accumulator.block.item_id.clone(),
                 source_index: accumulator.block.source_index,
                 item_order: accumulator.block.item_order,
@@ -3138,7 +3425,17 @@ fn publish_document_accumulator(
     }
     let level = ControlHskLevel::new(u8::from(requested_level))
         .map_err(|error| PipelineError::new("INVALID_HSK_LEVEL", error.to_string()))?;
-    let report = control.validate(&displayed_chinese, level, &[]);
+    let protected_names = accumulator
+        .pieces
+        .values()
+        .flat_map(|(piece, _)| piece.protected_names.iter().cloned())
+        .collect::<Vec<_>>();
+    let names = FaithfulText {
+        text: displayed_chinese.clone(),
+        protected_names: protected_names.clone(),
+    }
+    .proper_names();
+    let report = control.validate(&displayed_chinese, level, &names);
     if learning_policy_requires_repair(&report, learning_mode) {
         accumulator.reject("joined document block failed whole-block HSK validation".to_owned());
         return publish_document_accumulator(
@@ -3152,6 +3449,7 @@ fn publish_document_accumulator(
         );
     }
     let mut joined = CachedTranslation {
+        protected_names,
         base_chinese,
         displayed_chinese: report.normalized_text.clone(),
         pinyin: String::new(),
@@ -3168,23 +3466,19 @@ fn publish_document_accumulator(
         teaching_terms: teaching_terms(control, &joined.report),
         repair_state: joined.repair_state,
     };
-    sink.remember_item_for_lookup(
-        accumulator.block.item_id.clone(),
-        ItemLookupContext {
-            source_text: accumulator.block.text.clone(),
-            base_chinese: joined.base_chinese.clone(),
-            displayed_chinese: joined.displayed_chinese.clone(),
-            proper_names: Vec::new(),
-        },
-    );
+
     sink.publish(JobUpdateDraft::DocumentBlockReady {
         block: DocumentBlockReady {
+            parent_block_id: accumulator.block.parent_block_id.clone(),
+            sub_item_order: accumulator.block.sub_item_order,
             item_id: accumulator.block.item_id.clone(),
             source_index: accumulator.block.source_index,
             item_order: accumulator.block.item_order,
             kind: accumulator.block.kind,
             text: TranslatedText {
                 source_text: accumulator.block.text.clone(),
+                termination: koharu_llm::GenerationTermination::Stop,
+                protected_names: joined.protected_names.clone(),
                 base_chinese: joined.base_chinese,
                 displayed_chinese: joined.displayed_chinese.clone(),
                 pinyin: joined.pinyin,
@@ -3208,13 +3502,14 @@ fn publish_document_accumulator(
     Ok(())
 }
 
+#[derive(Clone)]
 struct PreparedRegion {
     id: String,
     candidate: Candidate,
     source_english: String,
     /// Established by the text-only semantic stage after visual role
     /// classification, while verified cleanup runs independently.
-    faithful_chinese: Option<String>,
+    faithful_chinese: Option<FaithfulText>,
     ocr_confidence: f32,
     reading_order: u32,
     /// Canonical chapter graph link assigned by page understanding.  This is
@@ -3235,6 +3530,61 @@ struct PreparedRegion {
     cleanup: Arc<CleanupBatchTask>,
     visible: bool,
     translation_queued_at: tokio::time::Instant,
+    source_context: SourceContext,
+}
+
+struct AnalyzedPage {
+    regions: Vec<PreparedRegion>,
+    plans: Vec<RegionPlan>,
+    preserved: Vec<ImageRegionPreserved>,
+}
+impl CacheValue for Arc<AnalyzedPage> {
+    fn retained_bytes(&self) -> usize {
+        self.regions
+            .iter()
+            .map(|region| {
+                let patches = region
+                    .cleanup
+                    .result
+                    .get()
+                    .map(|result| {
+                        result
+                            .decisions
+                            .values()
+                            .map(|decision| {
+                                decision.patch.as_ref().map_or(0, |patch| patch.bytes.len())
+                            })
+                            .sum::<usize>()
+                    })
+                    .unwrap_or(usize::MAX / 2);
+                patches
+                    .saturating_add(region.source_english.len())
+                    .saturating_add(
+                        region
+                            .faithful_chinese
+                            .as_ref()
+                            .map_or(0, CacheValue::retained_bytes),
+                    )
+                    .saturating_add(4_096)
+            })
+            .fold(0usize, usize::saturating_add)
+            .saturating_add(self.plans.len().saturating_mul(2_048))
+            .saturating_add(self.preserved.len().saturating_mul(2_048))
+    }
+}
+fn image_analysis_key(request: &ImagePipelineInput) -> String {
+    sha256_hex(
+        &serde_json::to_vec(&(
+            "verified-page-analysis-v2",
+            crate::contracts::BUILD_FINGERPRINT,
+            &request.source_sha256,
+            request.natural_width,
+            request.natural_height,
+            request.reading_direction,
+            &request.surrounding_context,
+        ))
+        .expect("source snapshot is serializable"),
+    )
 }
 
 struct CleanupBatchTask {
@@ -3403,7 +3753,7 @@ fn text_rects_represent_same_block(left: PixelRect, right: PixelRect) -> bool {
 
 fn recognized_line_quality(line: &RecognizedLine) -> (u32, u32) {
     // Overlapping detector tiles can produce two equivalent transcripts for
-    // one line. Choose the calibrated model evidence first; never let a
+    // one line. Choose the measured model evidence first; never let a
     // longer alphabetic string outrank a shorter but more reliable sequence
     // (the old rule admitted plausible letter soup). Structural evidence only
     // breaks a confidence tie.
@@ -3418,7 +3768,7 @@ struct GroupedRegion {
     candidate: Candidate,
     reading_order: u32,
     source_english: String,
-    faithful_chinese: Option<String>,
+    faithful_chinese: Option<FaithfulText>,
     ocr_confidence: f32,
     continuation_group: Option<String>,
     role: ImageRegionRole,
@@ -3816,50 +4166,36 @@ async fn translate_faithful_candidates(
     resident: Arc<VisionRuntime>,
     grouped: &[GroupedRegion],
     request: &ImagePipelineInput,
-    preceding_context: &[HskPrecedingUtterance],
+    _preceding_context: &[HskPrecedingUtterance],
     priority: CudaPriority,
     cancel: Arc<AtomicBool>,
     cuda_scheduler: &Arc<CudaScheduler>,
     sink: &JobUpdateSink,
-) -> std::result::Result<HashMap<String, String>, PipelineError> {
+) -> std::result::Result<HashMap<String, FaithfulText>, PipelineError> {
     let service = TranslationService {
         language: resident.language.as_ref(),
         control: resident.language.hsk_control.as_ref(),
         cuda_scheduler,
     };
-    let context_start = preceding_context
-        .len()
-        .saturating_sub(MAX_HSK_PRECEDING_UTTERANCES);
-    let mut rolling_context = preceding_context[context_start..].to_vec();
     let mut translations = HashMap::with_capacity(grouped.len());
-    for (chunk_index, chunk) in grouped.chunks(TRANSLATION_BATCH_MAX).enumerate() {
+    for (index, group) in grouped.iter().enumerate() {
         cancellation_boundary(cancel.as_ref())?;
-        let following_start = (chunk_index + 1) * TRANSLATION_BATCH_MAX;
-        let following_english = grouped
-            .iter()
-            .skip(following_start)
-            .take(MAX_HSK_PRECEDING_UTTERANCES)
-            .map(|group| group.source_english.clone())
-            .collect::<Vec<_>>();
-        let utterances = chunk
-            .iter()
-            .map(|group| FaithfulSourceUtterance {
-                id: stable_region_id(&request.source_sha256, group.candidate.text_rect),
-                kind: match group.role {
-                    ImageRegionRole::System => HskUtteranceKind::Sfx,
-                    ImageRegionRole::Narration => HskUtteranceKind::Caption,
-                    ImageRegionRole::Dialogue => HskUtteranceKind::Dialogue,
-                },
-                source_english: group.source_english.clone(),
-            })
-            .collect::<Vec<_>>();
-        let unit_count = utterances.len();
+        let source_context = image_source_context(grouped, index, request);
+        let id = stable_region_id(&request.source_sha256, group.candidate.text_rect);
         let faithful = service
             .establish_faithful(
-                utterances,
-                rolling_context.clone(),
+                vec![FaithfulSourceUtterance {
+                    id: id.clone(),
+                    kind: match group.role {
+                        ImageRegionRole::System => HskUtteranceKind::Sfx,
+                        ImageRegionRole::Narration => HskUtteranceKind::Caption,
+                        ImageRegionRole::Dialogue => HskUtteranceKind::Dialogue,
+                    },
+                    source_english: group.source_english.clone(),
+                }],
                 Vec::new(),
-                following_english,
+                source_context.preceding,
+                source_context.following,
                 DirectSourceProvenance::Ocr,
                 priority,
                 cancel.clone(),
@@ -3873,26 +4209,70 @@ async fn translate_faithful_candidates(
                 translator.model_id(),
                 translator.model_revision()
             ),
-            unit_count,
+            1,
             faithful.generation_duration,
         )
         .map_err(PipelineError::pipeline)?;
-        let mut outcomes = faithful.items;
-        cancellation_boundary(cancel.as_ref())?;
-        for group in chunk {
-            let id = stable_region_id(&request.source_sha256, group.candidate.text_rect);
-            let Some(faithful_chinese) = outcomes.remove(&id) else {
-                continue;
-            };
-            append_terminal_context(
-                &mut rolling_context,
-                &group.source_english,
-                &faithful_chinese,
-            );
-            translations.insert(id, faithful_chinese);
-        }
+        translations.extend(faithful.items);
     }
     Ok(translations)
+}
+
+/// The same immutable English snapshot supplies faithful and HSK generation and their cache identities.
+fn image_source_context(
+    grouped: &[GroupedRegion],
+    index: usize,
+    request: &ImagePipelineInput,
+) -> SourceContext {
+    let position = request
+        .chapter_source_order
+        .iter()
+        .position(|index| *index == request.source_index)
+        .unwrap_or(0);
+    let before = |unit: &&ChapterContextUnit| {
+        request
+            .chapter_source_order
+            .iter()
+            .position(|index| *index == unit.source_index)
+            .is_some_and(|index| index < position)
+    };
+    let after = |unit: &&ChapterContextUnit| {
+        request
+            .chapter_source_order
+            .iter()
+            .position(|index| *index == unit.source_index)
+            .is_some_and(|index| index > position)
+    };
+    let preceding = request
+        .surrounding_context
+        .iter()
+        .filter(before)
+        .map(|unit| &unit.source_text)
+        .chain(grouped[..index].iter().map(|group| &group.source_english))
+        .rev()
+        .take(MAX_HSK_PRECEDING_UTTERANCES)
+        .cloned()
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    let following = grouped[index + 1..]
+        .iter()
+        .map(|group| &group.source_english)
+        .chain(
+            request
+                .surrounding_context
+                .iter()
+                .filter(after)
+                .map(|unit| &unit.source_text),
+        )
+        .take(MAX_HSK_PRECEDING_UTTERANCES)
+        .cloned()
+        .collect();
+    SourceContext {
+        preceding,
+        following,
+    }
 }
 
 /// Execute one bounded page-understanding request.
@@ -4630,9 +5010,13 @@ async fn prepare_grouped_regions(
             prepare_started.elapsed().as_millis(),
         );
     }
+    let source_contexts = (0..grouped.len())
+        .map(|index| image_source_context(&grouped, index, request))
+        .collect::<Vec<_>>();
     let prepared_regions = grouped
         .into_iter()
-        .map(|group| {
+        .zip(source_contexts)
+        .map(|(group, source_context)| {
             let candidate = group.candidate;
             let source_english = group.source_english;
             let faithful_chinese = group.faithful_chinese;
@@ -4675,6 +5059,7 @@ async fn prepare_grouped_regions(
                 cleanup: cleanup.clone(),
                 visible,
                 translation_queued_at,
+                source_context,
             }
         })
         .collect::<Vec<_>>();
@@ -5717,17 +6102,10 @@ fn publish_preserved_group(
     image_height: u32,
 ) -> std::result::Result<(), PipelineError> {
     let region_id = stable_region_id(&request.source_sha256, group.candidate.text_rect);
-    sink.remember_item_for_lookup(
-        region_id.clone(),
-        ItemLookupContext {
-            source_text: group.source_english.clone(),
-            base_chinese: group.source_english.clone(),
-            displayed_chinese: group.source_english.clone(),
-            proper_names: Vec::new(),
-        },
-    );
+
     sink.publish(JobUpdateDraft::ImageRegionPreserved {
         region: ImageRegionPreserved {
+            disposition: crate::contracts::PreservationDisposition::Excluded,
             item_id: region_id,
             text_polygon: group.candidate.text_rect.polygon(image_width, image_height),
             source_text: group.source_english.clone(),
@@ -5752,17 +6130,18 @@ fn publish_unreadable_group(
     // Keep a source-preserving lookup context even when no patch is safe. The
     // browser can expose the OCR transcript and failure reason on hover
     // without pretending that an unverified Chinese overlay exists.
-    sink.remember_item_for_lookup(
-        region_id.clone(),
-        ItemLookupContext {
-            source_text: group.source_english.clone(),
-            base_chinese: group.source_english.clone(),
-            displayed_chinese: group.source_english.clone(),
-            proper_names: Vec::new(),
-        },
-    );
+    if !request.retry_item_ids.is_empty()
+        && !request.retry_item_ids.contains(&stable_region_id(
+            &request.source_sha256,
+            group.candidate.text_rect,
+        ))
+    {
+        return Ok(());
+    }
+
     sink.publish(JobUpdateDraft::ImageRegionPreserved {
         region: ImageRegionPreserved {
+            disposition: crate::contracts::PreservationDisposition::Failed,
             item_id: region_id,
             text_polygon: group.candidate.text_rect.polygon(image_width, image_height),
             source_text: group.source_english.clone(),
@@ -5798,6 +6177,7 @@ fn stable_region_id(source_sha256: &str, rect: PixelRect) -> String {
 
 #[derive(Debug, Clone)]
 struct CachedTranslation {
+    protected_names: Vec<koharu_app::llm::ProtectedName>,
     base_chinese: String,
     displayed_chinese: String,
     pinyin: String,
@@ -5805,9 +6185,14 @@ struct CachedTranslation {
     repair_state: HskRepairState,
 }
 
-fn natural_translation(faithful_chinese: String, report: ValidationReport) -> CachedTranslation {
+fn natural_translation(
+    faithful_chinese: impl Into<FaithfulText>,
+    report: ValidationReport,
+) -> CachedTranslation {
+    let faithful = faithful_chinese.into();
     CachedTranslation {
-        base_chinese: faithful_chinese,
+        protected_names: faithful.protected_names,
+        base_chinese: faithful.text,
         displayed_chinese: report.normalized_text.clone(),
         pinyin: String::new(),
         report,
@@ -5815,20 +6200,20 @@ fn natural_translation(faithful_chinese: String, report: ValidationReport) -> Ca
     }
 }
 
-struct TranslationCacheEntry {
-    value: CachedTranslation,
+struct TranslationCacheEntry<T> {
+    value: T,
     bytes: usize,
     last_used: u64,
 }
 
-struct TranslationCache {
-    entries: HashMap<String, TranslationCacheEntry>,
+struct TranslationCache<T = CachedTranslation> {
+    entries: HashMap<String, TranslationCacheEntry<T>>,
     retained_bytes: usize,
     clock: u64,
     max_bytes: usize,
 }
 
-impl Default for TranslationCache {
+impl<T> Default for TranslationCache<T> {
     fn default() -> Self {
         Self {
             entries: HashMap::new(),
@@ -5839,16 +6224,16 @@ impl Default for TranslationCache {
     }
 }
 
-impl TranslationCache {
-    fn get(&mut self, key: &str) -> Option<CachedTranslation> {
+impl<T: Clone + CacheValue> TranslationCache<T> {
+    fn get(&mut self, key: &str) -> Option<T> {
         self.clock = self.clock.saturating_add(1);
         let entry = self.entries.get_mut(key)?;
         entry.last_used = self.clock;
         Some(entry.value.clone())
     }
 
-    fn insert(&mut self, key: String, value: CachedTranslation) {
-        let bytes = translation_cache_bytes(&key, &value);
+    fn insert(&mut self, key: String, value: T) {
+        let bytes = key.len().saturating_add(value.retained_bytes());
         if bytes > self.max_bytes {
             return;
         }
@@ -5881,12 +6266,33 @@ impl TranslationCache {
     }
 }
 
+trait CacheValue {
+    fn retained_bytes(&self) -> usize;
+}
+impl CacheValue for String {
+    fn retained_bytes(&self) -> usize {
+        self.len()
+    }
+}
+impl CacheValue for CachedTranslation {
+    fn retained_bytes(&self) -> usize {
+        translation_cache_bytes("", self)
+    }
+}
+
 fn translation_cache_bytes(key: &str, value: &CachedTranslation) -> usize {
     let report = &value.report;
     key.len()
         .saturating_add(value.base_chinese.len())
         .saturating_add(value.displayed_chinese.len())
         .saturating_add(value.pinyin.len())
+        .saturating_add(
+            value
+                .protected_names
+                .iter()
+                .map(|n| n.source_text.len() + n.chinese_text.len() + 64)
+                .sum::<usize>(),
+        )
         .saturating_add(report.normalized_text.len())
         .saturating_add(report.cache_revision.len())
         .saturating_add(
@@ -5911,7 +6317,7 @@ fn translation_cache_bytes(key: &str, value: &CachedTranslation) -> usize {
                 .map(|exception| exception.text.len())
                 .sum::<usize>(),
         )
-        .saturating_add(std::mem::size_of::<TranslationCacheEntry>())
+        .saturating_add(std::mem::size_of::<TranslationCacheEntry<CachedTranslation>>())
 }
 
 struct TranslationState {
@@ -5921,7 +6327,7 @@ struct TranslationState {
     latest_rejected_report: Option<ValidationReport>,
     report: Option<ValidationReport>,
     problems: Vec<String>,
-    meaning_valid: bool,
+    structurally_valid: bool,
     learning_mode: LearningMode,
     repair_state: HskRepairState,
 }
@@ -5935,7 +6341,7 @@ impl TranslationState {
         learning_mode: LearningMode,
     ) -> Self {
         let mut problems = outcome.repair_problems();
-        let meaning_valid = outcome.issues.is_empty();
+        let structurally_valid = outcome.is_valid();
         let base_chinese = nonempty_translation(outcome.text);
         let report = base_chinese
             .as_deref()
@@ -5959,14 +6365,14 @@ impl TranslationState {
             latest_rejected_report: None,
             report,
             problems,
-            meaning_valid,
+            structurally_valid,
             learning_mode,
             repair_state: HskRepairState::NotNeeded,
         }
     }
 
     fn can_publish(&self) -> bool {
-        self.meaning_valid && self.base_chinese.is_some() && self.report.is_some()
+        self.structurally_valid && self.base_chinese.is_some() && self.report.is_some()
     }
 
     fn avoid_chinese(&self) -> Vec<String> {
@@ -5994,11 +6400,11 @@ impl TranslationState {
         proper_names: &[ProperName],
     ) -> bool {
         let mut problems = outcome.repair_problems();
-        let repaired_meaning_valid = outcome.issues.is_empty();
+        let repaired_structurally_valid = outcome.is_valid();
         let repaired = nonempty_translation(outcome.text);
         let report = repaired
             .as_deref()
-            .filter(|_| repaired_meaning_valid)
+            .filter(|_| repaired_structurally_valid)
             .map(|repaired| control.validate(repaired, level, proper_names));
         if let Some(report) = &report
             && learning_policy_requires_repair(report, self.learning_mode)
@@ -6006,7 +6412,7 @@ impl TranslationState {
             append_validation_problems(&mut problems, report);
         }
         self.apply_evaluated_repair(
-            repaired.filter(|_| repaired_meaning_valid),
+            repaired.filter(|_| repaired_structurally_valid),
             report,
             problems,
         )
@@ -6034,7 +6440,7 @@ impl TranslationState {
             }
             self.displayed_chinese = Some(report.normalized_text.clone());
             self.report = Some(report);
-            self.meaning_valid = true;
+            self.structurally_valid = true;
         }
         self.problems = problems;
         self.repair_state = if accepted && self.can_publish() {
@@ -6073,6 +6479,7 @@ impl TranslationState {
             .take()
             .context("translated Chinese is missing deterministic HSK validation")?;
         Ok(CachedTranslation {
+            protected_names: Vec::new(),
             base_chinese,
             displayed_chinese,
             pinyin: String::new(),
@@ -6090,6 +6497,8 @@ fn nonempty_translation(text: Option<String>) -> Option<String> {
 fn missing_translation_outcome(id: &str) -> HskTranslationOutcome {
     use koharu_app::llm::HskTranslationIssue;
     HskTranslationOutcome {
+        termination: koharu_llm::GenerationTermination::Stop,
+        protected_names: Vec::new(),
         id: id.to_owned(),
         text: None,
         issues: vec![HskTranslationIssue::MissingLine],
@@ -6153,7 +6562,6 @@ fn translation_is_final(translation: &CachedTranslation) -> bool {
 #[allow(clippy::too_many_arguments)]
 fn translation_cache_key(
     source_english: &str,
-    faithful_chinese: &str,
     kind: HskUtteranceKind,
     layout: Option<HskLayoutConstraints>,
     batch_source_texts: &[String],
@@ -6174,7 +6582,6 @@ fn translation_cache_key(
     struct KeyMaterial<'a> {
         schema: &'static str,
         source_text: &'a str,
-        faithful_chinese: &'a str,
         kind: HskUtteranceKind,
         layout: Option<HskLayoutConstraints>,
         batch_source_texts: &'a [String],
@@ -6203,7 +6610,6 @@ fn translation_cache_key(
     let material = KeyMaterial {
         schema: TRANSLATION_CACHE_SCHEMA,
         source_text: &source_text,
-        faithful_chinese,
         kind,
         layout,
         batch_source_texts: &normalized_batch_source_texts,
@@ -6263,6 +6669,8 @@ fn publish_region(
         patch,
         text: TranslatedText {
             source_text: region.source_english.clone(),
+            termination: koharu_llm::GenerationTermination::Stop,
+            protected_names: translation.protected_names.clone(),
             base_chinese: translation.base_chinese.clone(),
             displayed_chinese: translation.displayed_chinese.clone(),
             pinyin: translation.pinyin.clone(),
@@ -6298,23 +6706,7 @@ fn publish_region(
         style,
         layout,
     };
-    sink.remember_item_for_lookup(
-        region.id.clone(),
-        ItemLookupContext {
-            source_text: region.source_english.clone(),
-            base_chinese: translation.base_chinese,
-            displayed_chinese: translation.displayed_chinese,
-            proper_names: translation
-                .report
-                .exceptions
-                .into_iter()
-                .map(|exception| ProperName {
-                    text: exception.text,
-                    reason: exception.reason,
-                })
-                .collect(),
-        },
-    );
+
     sink.publish(JobUpdateDraft::ImageRegionReady {
         region: Box::new(translated),
     })
@@ -6338,17 +6730,13 @@ fn publish_unreadable_prepared(
     image_height: u32,
     reason: &str,
 ) -> std::result::Result<(), PipelineError> {
-    sink.remember_item_for_lookup(
-        region.id.clone(),
-        ItemLookupContext {
-            source_text: region.source_english.clone(),
-            base_chinese: region.source_english.clone(),
-            displayed_chinese: region.source_english.clone(),
-            proper_names: Vec::new(),
-        },
-    );
+    if !request.retry_item_ids.is_empty() && !request.retry_item_ids.contains(&region.id) {
+        return Ok(());
+    }
+
     sink.publish(JobUpdateDraft::ImageRegionPreserved {
         region: ImageRegionPreserved {
+            disposition: crate::contracts::PreservationDisposition::Failed,
             item_id: region.id.clone(),
             text_polygon: region
                 .candidate
@@ -6365,7 +6753,7 @@ fn publish_unreadable_prepared(
     Ok(())
 }
 
-/// Convert OCR detector proposals that failed both calibrated recognition
+/// Convert OCR detector proposals that failed both recognition
 /// views into terminal, source-preserving regions.  The detector is allowed
 /// to find text that the recognizer cannot read; silently dropping that
 /// proposal would make a coverage metric look green while leaving an English
@@ -6412,18 +6800,14 @@ fn publish_rejected_ocr_regions(
     for (reading_order, (_, line)) in ranked.into_iter().enumerate() {
         let reading_order = reading_order.min(u32::MAX as usize) as u32;
         let id = stable_region_id(&request.source_sha256, line.candidate.text_rect);
+        if !request.retry_item_ids.is_empty() && !request.retry_item_ids.contains(&id) {
+            continue;
+        }
         let source_english = rejected_ocr_source(&line.prediction);
-        sink.remember_item_for_lookup(
-            id.clone(),
-            ItemLookupContext {
-                source_text: source_english.clone(),
-                base_chinese: source_english.clone(),
-                displayed_chinese: source_english.clone(),
-                proper_names: Vec::new(),
-            },
-        );
+
         sink.publish(JobUpdateDraft::ImageRegionPreserved {
             region: ImageRegionPreserved {
+            disposition: crate::contracts::PreservationDisposition::Failed,
                 item_id: id.clone(),
                 text_polygon: line
                     .candidate
@@ -6432,7 +6816,7 @@ fn publish_rejected_ocr_regions(
                 source_text: source_english.clone(),
                 confidence: line.prediction.confidence.clamp(0.0, 1.0),
                 item_order: reading_order,
-                reason: "OCR consensus failed after independent recovery views; source pixels were preserved. Hover it for help.".to_owned(),
+                reason: "OCR consensus failed after two preprocessing views; source pixels were preserved. Hover it for help.".to_owned(),
             },
         })
         .map_err(|error| publish_error(error, sink))?;
@@ -6455,7 +6839,7 @@ fn rejected_ocr_quality(line: &RejectedOcrLine) -> (u32, u32) {
 }
 
 fn rejected_ocr_source(prediction: &PpOcrPrediction) -> String {
-    // A rejected proposal has failed the calibrated two-view OCR consensus.
+    // A rejected proposal has failed the two-view OCR agreement check.
     // Its transcript is therefore not trusted source evidence and must not
     // enter lookup, chapter context, or the browser's hover metadata. The
     // source pixels remain visible; the stable notice tells the reader why no
@@ -6896,7 +7280,7 @@ mod tests {
             },
             reading_order: 0,
             source_english: "A readable sentence.".to_owned(),
-            faithful_chinese: Some("一句可读的话。".to_owned()),
+            faithful_chinese: Some("一句可读的话。".to_owned().into()),
             ocr_confidence: 0.9,
             continuation_group: None,
             role: ImageRegionRole::Dialogue,
@@ -7608,7 +7992,6 @@ mod tests {
     ) -> String {
         translation_cache_key(
             source_text,
-            "忠实翻译。",
             HskUtteranceKind::Dialogue,
             layout,
             batch_source_texts,
@@ -7754,7 +8137,6 @@ mod tests {
                     context: &[HskPrecedingUtterance]| {
             translation_cache_key(
                 "Leave now",
-                "现在走。",
                 HskUtteranceKind::Dialogue,
                 None,
                 &["Leave now".to_owned()],
@@ -7868,6 +8250,8 @@ mod tests {
 
     fn test_document_block(index: usize) -> DocumentSourceBlock {
         DocumentSourceBlock {
+            parent_block_id: format!("parent-{index}"),
+            sub_item_order: 0,
             item_id: format!("block-{index}"),
             source_index: index as u32,
             item_order: 0,
@@ -7924,7 +8308,7 @@ mod tests {
                 .iter()
                 .map(|piece| piece.block_index)
                 .collect::<Vec<_>>(),
-            [8, 9]
+            [8]
         );
 
         let (ordered, reason) =
@@ -8066,7 +8450,7 @@ mod tests {
                 rotation_radians: 0.0,
             },
             source_english: "Graduate student".to_owned(),
-            faithful_chinese: Some("研究生".to_owned()),
+            faithful_chinese: Some("研究生".to_owned().into()),
             ocr_confidence: 0.99,
             reading_order: 0,
             continuation_group: None,
@@ -8090,6 +8474,7 @@ mod tests {
             }),
             visible: false,
             translation_queued_at: tokio::time::Instant::now(),
+            source_context: SourceContext::default(),
         }
     }
 

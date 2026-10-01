@@ -44,7 +44,7 @@ const DEFAULT_OUTPUT = resolve(
   REPOSITORY_ROOT,
   '.cache/document-chapter-benchmark/raw-samples.json',
 )
-const BUILD_FINGERPRINT = 'hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-08-09-r8'
+const BUILD_FINGERPRINT = 'hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-10-01-r10'
 const TITLE = 'The Lantern Road: A Representative Chapter'
 const RUNTIME_COUNTER_NAMES = [
   'vision',
@@ -193,7 +193,10 @@ export function parseDocumentBenchmarkArguments(argv) {
       ? resolve(process.env.HSKIFY_BENCH_EVIDENCE_PATH)
       : undefined,
     outputPath: DEFAULT_OUTPUT,
-    sampleCount: 20,
+    sampleCount: 30,
+    learningMode: 'natural',
+    hskLevel: 3,
+    startPosition: 'top',
     timeoutMs: 60_000,
     scrollSteps: 12,
     scrollDwellMs: 120,
@@ -213,6 +216,9 @@ export function parseDocumentBenchmarkArguments(argv) {
       case '--timeout-ms': options.timeoutMs = positiveInteger(next(), '--timeout-ms', 10 * 60_000); break
       case '--scroll-steps': options.scrollSteps = positiveInteger(next(), '--scroll-steps', 100); break
       case '--scroll-dwell-ms': options.scrollDwellMs = positiveInteger(next(), '--scroll-dwell-ms', 5_000); break
+      case '--mode': options.learningMode = next(); if (!['natural', 'strict'].includes(options.learningMode)) throw new Error('--mode must be natural or strict.'); break
+      case '--hsk-level': options.hskLevel = positiveInteger(next(), '--hsk-level', 6); break
+      case '--start-position': options.startPosition = next(); if (!['top', 'middle'].includes(options.startPosition)) throw new Error('--start-position must be top or middle.'); break
       case '--headed': options.headed = true; break
       default: throw new Error(`Unknown document benchmark argument: ${argument}.`)
     }
@@ -320,6 +326,7 @@ async function runBrowserSample({ launched, port, options, sampleIndex, nativeEv
   let scroll
   let error
   let monitorInstalled = false
+  let startPerformanceMs
   try {
     await chapterPage.goto(pageUrl, { waitUntil: 'domcontentloaded' })
     await chapterPage.waitForFunction(
@@ -334,7 +341,11 @@ async function runBrowserSample({ launched, port, options, sampleIndex, nativeEv
     await waitForDetectedDocument(launched.extensionPage, chapterPage, options.timeoutMs)
     await startJobMonitor(launched.extensionPage, pageUrl, runId)
     monitorInstalled = true
-    await beginContentStart(launched.extensionPage, 3, pageUrl, 'ltr')
+    startPerformanceMs = await chapterPage.evaluate(position => {
+      if (position === 'middle') window.scrollTo(0, Math.max(0, (document.scrollingElement.scrollHeight - innerHeight) / 2))
+      return performance.now()
+    }, options.startPosition)
+    await beginContentStart(launched.extensionPage, options.hskLevel, pageUrl, 'ltr', options.learningMode)
     await chapterPage.waitForFunction(
       (expectedBlocks) => {
         const host = document.querySelector('[data-hskify-document-reader="true"]')
@@ -345,7 +356,8 @@ async function runBrowserSample({ launched, port, options, sampleIndex, nativeEv
     )
     const observed = await waitForDocumentJob(launched.extensionPage, options.timeoutMs)
     job = observed.job
-    await delay(150)
+    await chapterPage.waitForFunction(() => globalThis.__hskifyRuntimeEvidence?.events.some(event =>
+      event.type === 'documentBlockDomCommitted' && event.state === 'translated' && event.visible && event.readable), undefined, {timeout: options.timeoutMs})
     scroll = await exerciseDocumentScroll(
       chapterPage,
       options.scrollSteps,
@@ -372,6 +384,9 @@ async function runBrowserSample({ launched, port, options, sampleIndex, nativeEv
   job ??= documentJobs.length === 1 ? documentJobs[0] : undefined
   return {
     sampleIndex,
+    modality: 'document', mode: options.learningMode, hskLevel: options.hskLevel, startPosition: options.startPosition,
+    startPerformanceMs,
+    firstReadableResultMs: documentEvidence?.events.find(event => event.performanceMs >= startPerformanceMs && event.type === 'documentBlockDomCommitted' && event.state === 'translated' && event.visible && event.readable)?.performanceMs - startPerformanceMs,
     pageUrl,
     jobId: job?.jobId,
     sourceSha256: documentEvidence?.sourceSha256,

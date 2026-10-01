@@ -50,6 +50,8 @@ function appendOversizeNovelWithMangaImage(): HTMLElement {
 
 function translation(sourceText: string, request: DocumentJobRequest): TranslatedText {
   return {
+    termination: 'stop',
+    protectedNames: [],
     sourceText,
     baseChinese: '\u7ffb\u8bd1\u5b8c\u6210\u3002',
     displayedChinese: '\u7ffb\u8bd1\u5b8c\u6210\u3002',
@@ -66,7 +68,7 @@ function translation(sourceText: string, request: DocumentJobRequest): Translate
   }
 }
 
-function installDocumentBackend(): ReturnType<typeof vi.fn> {
+function installDocumentBackend(failFirstJob = false) {
   let request: DocumentJobRequest | undefined
   let jobNumber = 0
   const sendMessage = vi.fn(async (raw: unknown) => {
@@ -88,10 +90,15 @@ function installDocumentBackend(): ReturnType<typeof vi.fn> {
         }
       case 'job:updates': {
         if (!request) throw new Error('Document request was not submitted.')
-        const updates: JobUpdate[] = request.blocks.map((block, index) => ({
+        const targets = request.retryItemIds.length
+          ? request.blocks.filter((block) => request!.retryItemIds.includes(block.itemId))
+          : request.blocks
+        const updates: JobUpdate[] = targets.map((block, index) => ({
           sequence: index + 1,
           type: 'documentBlockReady' as const,
           block: {
+            parentBlockId: block.parentBlockId,
+            subItemOrder: block.subItemOrder,
             itemId: block.itemId,
             sourceIndex: block.sourceIndex,
             itemOrder: block.itemOrder,
@@ -102,9 +109,17 @@ function installDocumentBackend(): ReturnType<typeof vi.fn> {
         updates.push({
           sequence: updates.length + 1,
           type: 'complete',
-          translatedCount: request.blocks.length,
+          translatedCount: targets.length,
           preservedCount: 0,
         })
+        if (failFirstJob && jobNumber === 1)
+          updates.splice(1, updates.length - 1, {
+            sequence: 2,
+            type: 'failed',
+            code: 'TEST_FAILURE',
+            message: 'Transport failed after one result.',
+            retryable: true,
+          })
         return {
           ok: true,
           value: {
@@ -197,10 +212,7 @@ describe('chapter controller document mode lifecycle', () => {
 
     source.remove()
     await vi.waitFor(() => expect(previous.isInvalidated).toBe(true))
-    await expect(controller.start('all', 3, 'natural', 'ltr')).resolves.toMatchObject({
-      state: 'failed',
-      contentKind: 'unsupported',
-    })
+    await vi.waitFor(() => expect(controller.snapshot().contentKind).toBe('unsupported'))
 
     const replacementSource = appendNovel('replacement', ' The replacement chapter is current.')
     await expect(controller.start('all', 3, 'natural', 'ltr')).resolves.toMatchObject({
@@ -217,14 +229,11 @@ describe('chapter controller document mode lifecycle', () => {
     expect(looksLikeSequentialArtReader()).toBe(true)
     await expect(detectDocumentChapter(document)).resolves.toEqual({
       kind: 'rejected',
-      reason: 'input-too-large',
+      reason: 'too-many-blocks',
     })
     const controller = new ChapterController()
 
-    await expect(controller.start('all', 3, 'natural', 'ltr')).resolves.toMatchObject({
-      state: 'failed',
-      contentKind: 'unsupported',
-    })
+    await vi.waitFor(() => expect(controller.snapshot().contentKind).toBe('unsupported'))
     expect((controller as unknown as { mode?: unknown }).mode).toBeUndefined()
     expect(source.hidden).toBe(false)
     expect(document.querySelector('[data-hskify-document-reader]')).toBeNull()
@@ -278,12 +287,12 @@ describe('chapter controller document mode lifecycle', () => {
         sendMessage.mock.calls.filter(
           ([message]) => (message as { type?: string }).type === 'chapter:finish',
         ),
-      ).toHaveLength(1)
+      ).toHaveLength(0)
       expect(
         sendMessage.mock.calls.filter(
           ([message]) => (message as { type?: string }).type === 'chapter:cancel',
         ),
-      ).toHaveLength(0)
+      ).toHaveLength(1)
 
       ;(controller as unknown as { checkNavigation(): void }).checkNavigation()
       controller.destroy()
@@ -299,6 +308,70 @@ describe('chapter controller document mode lifecycle', () => {
     } finally {
       controller.destroy()
       history.replaceState({}, '', originalUrl)
+    }
+  })
+  it('retains successful text when a job fails and retries only the chosen failed group with full source context', async () => {
+    const backend = installDocumentBackend(true)
+    appendNovel('partial-retry')
+    const detection = await detectDocumentChapter(document)
+    if (detection.kind !== 'document') throw new Error('Fixture was not detected.')
+    const mode = new DocumentChapterMode(detection.chapter)
+    try {
+      expect((await mode.start('all', 3, 'natural', 'ltr')).state).toBe('failed')
+      const successful = document.querySelector<HTMLElement>('[data-hskify-state="translated"]')!
+      const successfulText = successful.textContent
+      expect(document.querySelectorAll('[data-hskify-state="translated"]')).toHaveLength(1)
+      const failed = document.querySelector<HTMLElement>('[data-hskify-state="preserved"]')!
+      const retryId = failed.dataset.hskifyItemId!
+      failed.querySelector('button')!.click()
+      await vi.waitFor(() => expect(failed.dataset.hskifyState).toBe('translated'))
+      expect(successful.isConnected).toBe(true)
+      expect(successful.textContent).toBe(successfulText)
+      const submits = backend.mock.calls.filter(
+        ([raw]) => (raw as { type: string }).type === 'job:submit-document',
+      )
+      const retried = (submits[1]![0] as { request: DocumentJobRequest }).request
+      expect(retried.retryItemIds).toEqual([retryId])
+      expect(retried.blocks).toEqual(detection.chapter.snapshot.blocks)
+      expect(document.querySelectorAll('[data-hskify-state="translated"]')).toHaveLength(2)
+    } finally {
+      mode.destroy()
+    }
+  })
+
+  it('cancels a job whose creation response arrives after local cancellation', async () => {
+    const backend = installDocumentBackend()
+    const normal = backend.getMockImplementation()!
+    let release!: () => void
+    const waiting = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    backend.mockImplementation(async (raw) => {
+      if ((raw as { type: string }).type === 'job:submit-document') await waiting
+      return normal(raw)
+    })
+    appendNovel('late-job')
+    const detection = await detectDocumentChapter(document)
+    if (detection.kind !== 'document') throw new Error('Fixture was not detected.')
+    const mode = new DocumentChapterMode(detection.chapter)
+    try {
+      const started = mode.start('all', 3, 'natural', 'ltr')
+      const rejected = expect(started).rejects.toMatchObject({ name: 'AbortError' })
+      await vi.waitFor(() =>
+        expect(
+          backend.mock.calls.some(
+            ([raw]) => (raw as { type: string }).type === 'job:submit-document',
+          ),
+        ).toBe(true),
+      )
+      mode.cancel()
+      release()
+      await rejected
+      expect(backend).toHaveBeenCalledWith({ type: 'job:cancel', jobId: 'document-job-1' })
+      expect(document.querySelector('[data-hskify-document-reader]')).toBeNull()
+    } finally {
+      mode.destroy()
+      release()
     }
   })
 })

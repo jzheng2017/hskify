@@ -18,7 +18,7 @@ download, or legacy parser.
 | `GET` | `/jobs/{jobId}/updates` | Replay or long-poll updates after a sequence |
 | `DELETE` | `/jobs/{jobId}` | Cancel and release one job |
 | `DELETE` | `/chapters/{pageSessionId}` | Release ordered chapter context |
-| `POST` | `/lookup` | Local pinyin/dictionary lookup owned by an `itemId` |
+| `POST` | `/lookup` | Pure local lookup with bounded renderer-supplied item context |
 | `GET` | `/blobs/{blobId}` | Fetch an authorized job-owned image patch |
 | `GET` | `/fonts/{fontId}` | Fetch one permitted installed font |
 
@@ -37,7 +37,7 @@ The native handshake, health response, setup readiness, and both job requests
 must agree on:
 
 ```text
-hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-08-09-r8
+hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-10-01-r10
 ```
 
 The registered native host is `local.hskify.browser`; its sole allowed Firefox
@@ -59,6 +59,8 @@ identifies canonical chapter source order. The only language pair is English to
 Simplified Chinese. A successful creation returns HTTP 202 with the exact build
 fingerprint and `jobId`.
 
+Both requests require `clientRequestId` (nonempty, at most 128 bytes) and `retryItemIds` (unique IDs, at most 2,000). Identical repeated creation requests return the same job; different payloads under the same ID fail with `REQUEST_ID_CONFLICT`. The creation ledger is bounded to 4,096 IDs, with a 30-minute retention window under capacity pressure. A retry keeps the complete source and immutable context; nonempty IDs select only the requested failed items. Completed failures are not replayed as successful cache hits.
+
 Active-job and page-artifact records have one exact `source.kind` discriminator:
 `image` or `document`. The record keeps `sourceSha256` beside that tagged
 source, and its image variant retains only the image fields required for
@@ -70,7 +72,7 @@ recovery. Output from one kind cannot be replayed into the other.
 
 - `image`: PNG, JPEG, WebP, or GIF bytes;
 - `request`: `application/json` metadata containing exactly
-  `buildFingerprint`, `clientImageId`, `sourceSha256`, `sourceMimeType`,
+  `buildFingerprint`, `clientRequestId`, `retryItemIds`, `clientImageId`, `sourceSha256`, `sourceMimeType`,
   `naturalWidth`, `naturalHeight`, `pageSessionId`, `sourceIndex`,
   `chapterSourceOrder`, `surfaceKind`, `readingDirection`, `settings`, and
   `visibleRects`.
@@ -82,8 +84,8 @@ Layout constraints occur only on `ocr` source spans.
 ## Document creation
 
 `POST /jobs/document` accepts `application/json` with exactly
-`buildFingerprint`, `pageSessionId`, `sourceSha256`, `settings`, and `blocks`.
-Every block has exactly `itemId`, `sourceIndex`, `itemOrder`, `kind`,
+`buildFingerprint`, `clientRequestId`, `retryItemIds`, `pageSessionId`, `sourceSha256`, `settings`, `blocks`, and tagged document `focus`.
+Every block has exactly `itemId`, `parentBlockId`, `subItemOrder`, `sourceIndex`, `itemOrder`, `kind`,
 `provenance`, `text`, and an optional `layout`. Document blocks require
 `provenance: "dom"` and reject a present `layout`; DOM text is authoritative.
 
@@ -101,6 +103,10 @@ hash over the complete ordered text snapshot. A mismatch or oversized chapter
 is rejected; the daemon never truncates it. Browser extraction measures the
 complete compact `/jobs/document` JSON envelope, not only its block text or
 reader snapshot, before accepting the descriptor.
+
+`parentBlockId` identifies the original structural owner. `subItemOrder` starts at zero and increments within that owner; each sentence group is independently publishable. Image `sourceIndex` is a stable identity; `chapterSourceOrder` is a unique sequence of those identities in current DOM order, not a numerically sorted list.
+
+The initial observer snapshot is included in creation, before native dispatch, so starting halfway through a chapter does not dispatch block zero while waiting for the first focus PUT. Subsequent focus changes reuse the existing route.
 
 Every block is registered in canonical `(sourceIndex, itemOrder)` order before
 translation starts. This makes context independent of viewport scheduling.
@@ -158,7 +164,7 @@ payload contains:
 
 - authoritative source text;
 - faithful/base Chinese and final displayed Chinese;
-- pinyin; and
+- pinyin, `termination: "stop"`, and up to 32 `protectedNames` with exact `sourceText`, `chineseText`, and reason (`person-name`, `place-name`, `title`, or `unavoidable-proper-noun`); and
 - final HSK state, including teaching-term ranges and repair state.
 
 Each ready wrapper owns its `itemId`. `imageRegionReady` composes
@@ -166,34 +172,29 @@ Each ready wrapper owns its `itemId`. `imageRegionReady` composes
 and a stored PNG patch descriptor.
 `documentBlockReady` composes it with semantic block identity. An
 `imageRegionPreserved` contains only `itemId`, text polygon, source text,
-confidence, item order, and terminal reason; it has no patch or Chinese text. A
+confidence, item order, terminal reason, and `disposition` (`excluded` for deliberate non-story content, `failed` for translation failure); it has no patch or Chinese text. A
 `documentBlockPreserved` contains the item identity, source text, and terminal
 reason but no Chinese candidate.
 
 Natural mode publishes faithful Chinese with deterministic teaching metadata.
-Strict mode publishes only after HSK realization and at most one terminal
-repair. Joined pieces of an oversized individual document block are validated
+Strict mode accepts faithful Chinese directly if lexical and layout validation pass; otherwise it realizes HSK output with at most one terminal repair. Token-limit termination is never published. Each validated sentence group publishes immediately, independent of unfinished preceding groups. Joined pieces of an oversized individual document block are validated
 as a whole before its one block update is appended.
 
 ## Replay and acknowledgement
 
 `after` is the last page-installed acknowledgement, not merely the last update
 read by the background worker. After MV3 suspension, an unacknowledged update
-can replay; the content controller installs the same `itemId` once and advances
+can replay; a new renderer resets recovery to sequence zero, and the content controller installs the same `itemId` once and advances
 the acknowledgement only after all associated DOM work succeeds.
 
 Recovery requires the exact source kind, hash, and `TranslationSettings`; image
 recovery additionally requires the exact reading direction. Cancellation,
 mutation, or navigation invalidates ownership and tears down the complete
-render target. Fatal document failure restores the exact original source-root
-attributes.
+render target. Item failures retain successful translations and display Retry plus Original/Compare access.
 
 ## Lookup, patches, and speech
 
-`POST /lookup` supports bounded selection lookup or a hover offset owned by a
-`jobId` and `itemId`. The daemon resolves the hover against its canonical final
-Chinese and returns the longest dictionary expression beginning at that Unicode
-offset. It never trusts a browser-provided translated substring.
+`POST /lookup` supports bounded selection text or a hover character offset with `itemId` and `context`. Context contains `displayedChinese`, `baseChinese`, `sourceText` and `properNames`; each text is at most 16 KiB, names are bounded and present in displayed Chinese; renderers derive them from source-anchored translation metadata. Selection context and item identity must occur together. Hover resolves the longest dictionary expression at a Unicode offset through the existing pure lookup implementation. No job ID is accepted or required, so native job eviction cannot disable displayed translations.
 
 Image patch blobs are authorized only after their `imageRegionReady` update and
 are removed with the owning job. The extension validates and decodes a PNG

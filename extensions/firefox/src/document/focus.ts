@@ -24,6 +24,10 @@ export class DocumentFocusTracker {
   private readonly orderByItem = new Map<string, number>()
   private timer: ReturnType<typeof setTimeout> | undefined
   private destroyed = false
+  private resolveReady!: () => void
+  readonly ready = new Promise<void>((resolve) => {
+    this.resolveReady = resolve
+  })
 
   constructor(
     orderedItemIds: readonly string[],
@@ -33,9 +37,11 @@ export class DocumentFocusTracker {
     orderedItemIds.forEach((itemId, index) => this.orderByItem.set(itemId, index))
     this.observer = factory?.(this.onIntersection, {
       root: null,
-      rootMargin: '200px 0px',
+      rootMargin: '0px',
       threshold: 0,
     })
+    if (!this.observer) this.resolveReady()
+    document.addEventListener('visibilitychange', this.schedule)
   }
 
   observe(element: Element, itemId: string): void {
@@ -51,7 +57,27 @@ export class DocumentFocusTracker {
     this.schedule()
   }
 
+  initializeFromRects(): void {
+    // A single fallback snapshot, used only if initial observer delivery is unavailable.
+    for (const element of this.itemByElement.keys()) {
+      const rect = element.getBoundingClientRect(),
+        view = element.ownerDocument.defaultView
+      if (
+        view &&
+        rect.width > 0 &&
+        rect.height > 0 &&
+        rect.bottom > 0 &&
+        rect.right > 0 &&
+        rect.top < view.innerHeight &&
+        rect.left < view.innerWidth
+      )
+        this.visibleElements.add(element)
+    }
+    this.resolveReady()
+  }
+
   visibleItemIds(): string[] {
+    if (document.hidden) return []
     const visible = new Set<string>()
     for (const element of this.visibleElements) {
       const itemId = this.itemByElement.get(element)
@@ -68,9 +94,11 @@ export class DocumentFocusTracker {
 
   destroy(): void {
     this.destroyed = true
+    this.resolveReady()
     if (this.timer !== undefined) clearTimeout(this.timer)
     this.timer = undefined
     this.observer?.disconnect()
+    document.removeEventListener('visibilitychange', this.schedule)
     this.itemByElement.clear()
     this.visibleElements.clear()
   }
@@ -81,10 +109,11 @@ export class DocumentFocusTracker {
       if (entry.isIntersecting) this.visibleElements.add(entry.target)
       else this.visibleElements.delete(entry.target)
     }
+    this.resolveReady()
     this.schedule()
   }
 
-  private schedule(): void {
+  private readonly schedule = (): void => {
     if (this.destroyed || this.timer !== undefined) return
     this.timer = setTimeout(() => {
       this.timer = undefined

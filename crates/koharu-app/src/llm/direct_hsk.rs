@@ -5,6 +5,8 @@
 //! to copy opaque IDs or emit a verbose schema. Parsing and preservation
 //! checks are per item: one malformed line does not discard valid siblings.
 
+#[path = "quantities.rs"]
+mod quantities;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -16,7 +18,7 @@ use koharu_llm::direct_hsk_protocol::{
     primary_system_prompt_for_source, primary_user_prompt, repair_item_constraints,
     repair_system_prompt_for_source,
 };
-use koharu_llm::{GenerateOptions, Language, ModelId};
+use koharu_llm::{GenerateOptions, Generation, GenerationTermination, Grammar, Language, ModelId};
 use serde::{Deserialize, Serialize};
 
 use super::{Model, State};
@@ -68,11 +70,14 @@ fn faithful_translation_system_prompt(provenance: DirectSourceProvenance) -> Str
         }
     };
     format!(
-        r#"Translate each numbered English source span into complete, natural Simplified Chinese. Each output line translates only the same numbered span. Render sound-effect spans as concise natural Chinese sounds; preserve the meaning and tone of prose, headings, dialogue, thoughts, captions, and sound effects. Never output kind names, labels, positions, or explanations. {provenance_instruction}
+        r#"Translate each numbered English source span into complete, natural Simplified Chinese. Each output line translates only the same numbered span. Render sound-effect spans as concise natural Chinese sounds; preserve the meaning and tone of prose, headings, dialogue, thoughts, captions, and sound effects. Do not add role labels or explanations to the Chinese translation field. {provenance_instruction}
 
 Use preceding and neighboring context only to resolve references and connected text. Never import context into a span, merge spans, omit meaning, or move meaning to a neighboring line. Preserve every clause, interjection, hesitation, repetition, fragment, vocative, participant, proper name, negation, quantity, question, and tone. Render names naturally in Chinese. Do not leave Latin words in the Chinese translation and do not replace words with punctuation.
 
-Return exactly the requested numbered tab-separated translations, one per line, with no prose, labels, JSON, or Markdown."#
+Return exactly one line per span: position, Chinese translation, and a JSON array of protected proper names, separated by tabs. Each name is an object with sourceText (an exact English source substring), chineseText (its exact Chinese rendering), and reason (person-name, place-name, title, or unavoidable-proper-noun). Use [] when there are no names. Protect actual names only, never ordinary vocabulary. English names must have source capitalization; do not mark ordinary lowercase words as names. Do not add introductions, explanations, or Markdown.
+Formatting example (the separators are literal tabs):
+1	爱丽丝回家了。	[{{"sourceText":"Alice","chineseText":"爱丽丝","reason":"person-name"}}]
+2	门开了。	[]"#
     )
 }
 
@@ -189,12 +194,45 @@ pub struct HskTranslationOutcome {
     pub text: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub issues: Vec<HskTranslationIssue>,
+    pub termination: GenerationTermination,
+    pub protected_names: Vec<ProtectedName>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProtectedNameReason {
+    PersonName,
+    PlaceName,
+    Title,
+    UnavoidableProperNoun,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProtectedName {
+    pub source_text: String,
+    pub chinese_text: String,
+    pub reason: ProtectedNameReason,
+}
+
+impl ProtectedName {
+    pub fn is_anchored(&self, source: &str, chinese: &str) -> bool {
+        !self.source_text.trim().is_empty()
+            && self.source_text.chars().count() <= 128
+            && !self.chinese_text.trim().is_empty()
+            && self.chinese_text.chars().count() <= 128
+            && source.contains(&self.source_text)
+            && chinese.contains(&self.chinese_text)
+            && contains_han(&self.chinese_text)
+            && !self.chinese_text.chars().any(|c| c.is_ascii_alphabetic())
+    }
 }
 
 impl HskTranslationOutcome {
     #[must_use]
     pub fn is_valid(&self) -> bool {
-        self.issues.is_empty()
+        self.termination == GenerationTermination::Stop
+            && self.issues.is_empty()
             && self
                 .text
                 .as_deref()
@@ -213,6 +251,8 @@ impl HskTranslationOutcome {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", tag = "kind")]
 pub enum HskTranslationIssue {
+    InvalidProtectedNames,
+    TruncatedOutput,
     MissingLine,
     DuplicateLine,
     MalformedLine,
@@ -237,6 +277,10 @@ impl HskTranslationIssue {
     #[must_use]
     pub fn description(&self) -> String {
         match self {
+            Self::InvalidProtectedNames => {
+                "protected names must match exact source and Chinese text".to_owned()
+            }
+            Self::TruncatedOutput => "generation reached its completion token limit".to_owned(),
             Self::MissingLine => "no translation was returned".to_owned(),
             Self::DuplicateLine => "more than one translation was returned".to_owned(),
             Self::MalformedLine => "return only the Simplified Chinese translation".to_owned(),
@@ -341,7 +385,7 @@ trait Generator {
         target_language: Language,
         cancel: &AtomicBool,
         on_piece: &mut dyn FnMut(&str) -> Result<()>,
-    ) -> Result<String>;
+    ) -> Result<Generation>;
 }
 
 /// Borrowed direct-translation facade over the application's already-loaded
@@ -500,7 +544,7 @@ impl Generator for Model {
         target_language: Language,
         cancel: &AtomicBool,
         on_piece: &mut dyn FnMut(&str) -> Result<()>,
-    ) -> Result<String> {
+    ) -> Result<Generation> {
         let mut state = self.state.write().await;
         let llm = match &mut *state {
             State::ReadyLocal(llm) if llm.id() == HSK_TRANSLATION_MODEL => llm,
@@ -583,7 +627,7 @@ where
             )
             .await?;
         check_cancelled(cancel)?;
-        let result = parse_faithful_output(&raw, &expected);
+        let result = with_termination(parse_faithful_output(&raw, &expected), raw.termination);
         for outcome in &result.items {
             if !outcome.is_valid() {
                 continue;
@@ -631,7 +675,7 @@ where
         .await?;
         loop {
             let prompt = build_faithful_translation_prompt(&candidate);
-            let desired_output_tokens = output_token_budget(
+            let desired_output_tokens = faithful_output_token_budget(
                 candidate
                     .utterances
                     .iter()
@@ -646,7 +690,9 @@ where
                 )
                 .await?;
             if completion_capacity >= desired_output_tokens {
-                return Ok((candidate, GenerateOptions::greedy(desired_output_tokens)));
+                let mut options = GenerateOptions::greedy(desired_output_tokens);
+                options.grammar = Some(faithful_output_grammar(candidate.utterances.len()));
+                return Ok((candidate, options));
             }
             if !candidate.preceding_utterances.is_empty() {
                 candidate.preceding_utterances.remove(0);
@@ -658,16 +704,35 @@ where
             ) {
                 continue;
             }
-            if count == 1 && completion_capacity >= MIN_OUTPUT_TOKENS {
-                return Ok((
-                    candidate,
-                    GenerateOptions::greedy(completion_capacity.min(desired_output_tokens)),
-                ));
-            }
             break;
         }
     }
     bail!("one source span cannot fit the resident faithful-translation context")
+}
+
+/// Constrain transport structure and Latin leakage before decoding; this does not certify meaning.
+fn faithful_output_grammar(count: usize) -> Grammar {
+    use std::fmt::Write as _;
+    let mut source = String::from("root ::= ");
+    for position in 1..=count {
+        if position > 1 {
+            source.push_str(r#" "\n" "#);
+        }
+        write!(source, r#""{position}\t" chinese "\t" names"#)
+            .expect("writing to String cannot fail");
+    }
+    source.push_str(r#" "\n"?
+chinese ::= [^A-Za-z\x00-\x1F\x7F]+
+names ::= "[" ws (name ("," ws name){0,31})? "]"
+name ::= "{" ws "\"sourceText\"" ws ":" ws string "," ws "\"chineseText\"" ws ":" ws string "," ws "\"reason\"" ws ":" ws reason "}" ws
+reason ::= "\"person-name\"" ws | "\"place-name\"" ws | "\"title\"" ws | "\"unavoidable-proper-noun\"" ws
+string ::= "\"" ([^"\\\x00-\x1F\x7F] | "\\" (["\\bfnrt] | "u" [0-9a-fA-F]{4})){1,128} "\"" ws
+ws ::= [ ]{0,8}
+"#);
+    Grammar {
+        source,
+        root: "root".to_owned(),
+    }
 }
 
 async fn translate_with_source<G>(
@@ -796,12 +861,6 @@ where
             ) {
                 continue;
             }
-            if count == 1 && completion_capacity >= MIN_OUTPUT_TOKENS {
-                return Ok((
-                    candidate,
-                    GenerateOptions::greedy(completion_capacity.min(desired_output_tokens)),
-                ));
-            }
             break;
         }
     }
@@ -830,23 +889,6 @@ where
             source_english: &utterance.source_english,
         })
         .collect::<Vec<_>>();
-    let mut streamed_ids = HashSet::with_capacity(expected.len());
-    let mut pending_line = String::new();
-    let mut publish_piece = |piece: &str| -> Result<()> {
-        pending_line.push_str(piece);
-        while let Some(newline) = pending_line.find('\n') {
-            let mut tail = pending_line.split_off(newline + 1);
-            std::mem::swap(&mut tail, &mut pending_line);
-            let completed = tail.strip_suffix('\n').unwrap_or(&tail);
-            let completed = completed.strip_suffix('\r').unwrap_or(completed);
-            if let Some(outcome) = parse_streamed_line(completed, &expected)
-                && streamed_ids.insert(outcome.id.clone())
-            {
-                on_item(&outcome)?;
-            }
-        }
-        Ok(())
-    };
     let raw = generator
         .generate_streaming(
             &translation_system_prompt_for_source(
@@ -859,14 +901,14 @@ where
             &options,
             Language::ChineseSimplified,
             cancel,
-            &mut publish_piece,
+            &mut |_| Ok(()),
         )
         .await?;
     check_cancelled(cancel)?;
 
-    let result = parse_numbered_output(&raw, &expected);
+    let result = with_termination(parse_numbered_output(&raw, &expected), raw.termination);
     for outcome in &result.items {
-        if streamed_ids.insert(outcome.id.clone()) {
+        if outcome.is_valid() {
             on_item(outcome)?;
         }
     }
@@ -903,6 +945,21 @@ where
         std::iter::once(bounded_request.utterance.source_english.as_str()),
         1,
     ));
+    if generator
+        .constrained_completion_capacity(
+            &repair_system_prompt(
+                bounded_request.requested_level,
+                bounded_request.learning_mode,
+                provenance,
+            ),
+            &prompt,
+            Language::ChineseSimplified,
+        )
+        .await?
+        < options.max_tokens
+    {
+        bail!("one repair span cannot fit the resident completion capacity");
+    }
     let raw = generator
         .generate_streaming(
             &repair_system_prompt(
@@ -919,13 +976,18 @@ where
         .await?;
     check_cancelled(cancel)?;
 
-    Ok(parse_repair_output(
+    let mut outcome = parse_repair_output(
         &raw,
         &ExpectedUtterance {
             id: &bounded_request.utterance.id,
             source_english: &bounded_request.utterance.source_english,
         },
-    ))
+    );
+    outcome.termination = raw.termination;
+    if raw.termination != GenerationTermination::Stop {
+        outcome.issues.push(HskTranslationIssue::TruncatedOutput);
+    }
+    Ok(outcome)
 }
 
 async fn repair_batch_with_source<G>(
@@ -1010,12 +1072,6 @@ where
         ) {
             continue;
         }
-        if count == 1 && completion_capacity >= MIN_OUTPUT_TOKENS {
-            return Ok((
-                candidate,
-                GenerateOptions::greedy(completion_capacity.min(desired_output_tokens)),
-            ));
-        }
     }
     bail!("one rejected source span cannot fit the resident translation context")
 }
@@ -1056,7 +1112,10 @@ where
             source_english: &utterance.source_english,
         })
         .collect::<Vec<_>>();
-    Ok(parse_repair_batch_output(&raw, &expected))
+    Ok(with_termination(
+        parse_repair_batch_output(&raw, &expected),
+        raw.termination,
+    ))
 }
 
 async fn bounded_context<G>(
@@ -1427,6 +1486,20 @@ fn compact_field(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+fn faithful_output_token_budget<'a>(
+    sources: impl IntoIterator<Item = &'a str>,
+    count: usize,
+) -> usize {
+    let sources = sources.into_iter().collect::<Vec<_>>();
+    let name_capacity = sources
+        .iter()
+        .map(|source| source.split_whitespace().count().min(32))
+        .sum::<usize>();
+    output_token_budget(sources.iter().copied(), count)
+        .saturating_add(name_capacity.saturating_mul(64))
+        .min(4_096)
+}
+
 fn output_token_budget<'a>(
     sources: impl IntoIterator<Item = &'a str>,
     utterance_count: usize,
@@ -1674,12 +1747,61 @@ fn parse_numbered_output(
     HskTranslationBatchResult { items }
 }
 
+fn with_termination(
+    mut result: HskTranslationBatchResult,
+    termination: GenerationTermination,
+) -> HskTranslationBatchResult {
+    for item in &mut result.items {
+        item.termination = termination;
+        if termination != GenerationTermination::Stop {
+            item.issues.push(HskTranslationIssue::TruncatedOutput);
+        }
+    }
+    result
+}
+
 fn parse_faithful_output(
     output: &str,
     expected: &[ExpectedUtterance<'_>],
 ) -> HskTranslationBatchResult {
-    let mut result = parse_numbered_output(output, expected);
-    for (outcome, source) in result.items.iter_mut().zip(expected) {
+    let mut translations = String::new();
+    let mut metadata = std::collections::HashMap::new();
+    for line in output.lines() {
+        let mut fields = line.splitn(3, '\t');
+        let position = fields.next().unwrap_or_default();
+        let text = fields.next().unwrap_or_default();
+        let names = fields
+            .next()
+            .and_then(|value| serde_json::from_str::<Vec<ProtectedName>>(value).ok());
+        translations.push_str(&format!("{position}\t{text}\n"));
+        if let Ok(position) = position.parse::<usize>() {
+            if metadata.insert(position, names).is_some() {
+                metadata.insert(position, None);
+            }
+        }
+    }
+    let mut result = parse_numbered_output(&translations, expected);
+    for (index, (outcome, source)) in result.items.iter_mut().zip(expected).enumerate() {
+        match metadata.remove(&(index + 1)).flatten() {
+            Some(mut names)
+                if names.len() <= 32
+                    && names.iter().all(|name| {
+                        name.is_anchored(
+                            source.source_english,
+                            outcome.text.as_deref().unwrap_or_default(),
+                        )
+                    }) =>
+            {
+                // Case supplies explicit source evidence for an English name. Unsupported
+                // lowercase metadata cannot grant a vocabulary exception; it does not
+                // invalidate an otherwise valid Chinese translation.
+                names.retain(|name| name.source_text.chars().any(char::is_uppercase));
+                outcome.protected_names = names
+            }
+            _ => outcome
+                .issues
+                .push(HskTranslationIssue::InvalidProtectedNames),
+        }
         let Some(text) = outcome.text.as_deref() else {
             continue;
         };
@@ -1736,17 +1858,6 @@ fn contains_han(text: &str) -> bool {
     })
 }
 
-fn parse_streamed_line(
-    line: &str,
-    expected: &[ExpectedUtterance<'_>],
-) -> Option<HskTranslationOutcome> {
-    let (position, parsed) = parse_output_line(line, expected.len())?;
-    if is_source_echo(&parsed, expected[position - 1].source_english) {
-        return None;
-    }
-    Some(outcome_from_lines(&expected[position - 1], vec![parsed]))
-}
-
 fn parse_repair_output(output: &str, expected: &ExpectedUtterance<'_>) -> HskTranslationOutcome {
     let mut lines = output
         .split('\n')
@@ -1760,6 +1871,8 @@ fn parse_repair_output(output: &str, expected: &ExpectedUtterance<'_>) -> HskTra
     }
     if compact_field(line) == compact_field(expected.source_english) {
         return HskTranslationOutcome {
+            termination: GenerationTermination::Stop,
+            protected_names: Vec::new(),
             id: expected.id.to_owned(),
             text: None,
             issues: vec![HskTranslationIssue::SourceEcho],
@@ -1783,7 +1896,7 @@ fn parse_repair_output(output: &str, expected: &ExpectedUtterance<'_>) -> HskTra
             })
             .cloned()
             .collect::<Vec<_>>();
-        outcome.issues = preservation_issues(expected.source_english, text, true);
+        outcome.issues = preservation_issues(expected.source_english, text);
         outcome.issues.extend(markup_issues);
     }
     outcome
@@ -1812,7 +1925,7 @@ fn parse_numbered_repair_output(
             })
             .cloned()
             .collect::<Vec<_>>();
-        outcome.issues = preservation_issues(expected.source_english, text, true);
+        outcome.issues = preservation_issues(expected.source_english, text);
         outcome.issues.extend(markup_issues);
     }
     result
@@ -1844,6 +1957,8 @@ fn outcome_from_lines(
 ) -> HskTranslationOutcome {
     if lines.is_empty() {
         return HskTranslationOutcome {
+            termination: GenerationTermination::Stop,
+            protected_names: Vec::new(),
             id: expected.id.to_owned(),
             text: None,
             issues: vec![HskTranslationIssue::MissingLine],
@@ -1855,6 +1970,8 @@ fn outcome_from_lines(
             ParsedLine::Candidate { .. } | ParsedLine::Malformed => None,
         });
         return HskTranslationOutcome {
+            termination: GenerationTermination::Stop,
+            protected_names: Vec::new(),
             id: expected.id.to_owned(),
             text,
             issues: vec![HskTranslationIssue::DuplicateLine],
@@ -1865,6 +1982,8 @@ fn outcome_from_lines(
         ParsedLine::Candidate { text } => text,
         ParsedLine::Malformed => {
             return HskTranslationOutcome {
+                termination: GenerationTermination::Stop,
+                protected_names: Vec::new(),
                 id: expected.id.to_owned(),
                 text: None,
                 issues: vec![HskTranslationIssue::MalformedLine],
@@ -1874,6 +1993,8 @@ fn outcome_from_lines(
     let text = text.trim().to_owned();
     if text.is_empty() {
         return HskTranslationOutcome {
+            termination: GenerationTermination::Stop,
+            protected_names: Vec::new(),
             id: expected.id.to_owned(),
             text: None,
             issues: vec![HskTranslationIssue::EmptyTranslation],
@@ -1881,9 +2002,11 @@ fn outcome_from_lines(
     }
 
     let (text, mut markup_issues) = validate_and_strip_markup(&text);
-    let mut issues = preservation_issues(expected.source_english, &text, false);
+    let mut issues = preservation_issues(expected.source_english, &text);
     issues.append(&mut markup_issues);
     HskTranslationOutcome {
+        termination: GenerationTermination::Stop,
+        protected_names: Vec::new(),
         id: expected.id.to_owned(),
         text: Some(text),
         issues,
@@ -1958,27 +2081,20 @@ fn validate_and_strip_markup(translation: &str) -> (String, Vec<HskTranslationIs
     (output, issues)
 }
 
-fn preservation_issues(
-    source_english: &str,
-    chinese: &str,
-    accept_chinese_numerals: bool,
-) -> Vec<HskTranslationIssue> {
+fn preservation_issues(source_english: &str, chinese: &str) -> Vec<HskTranslationIssue> {
     let mut issues = Vec::new();
-    let expected_numbers = ascii_numbers(source_english);
-    let actual_numbers = if accept_chinese_numerals {
-        normalized_numbers_for_source(source_english, chinese)
-    } else {
-        ascii_numbers(chinese)
-    };
-    if actual_numbers != expected_numbers {
+    let mut expected_numbers = source_quantities(source_english);
+    let mut actual_numbers = quantities::explicit_numbers(chinese, true);
+    expected_numbers.sort();
+    actual_numbers.sort();
+    if !expected_numbers.is_empty() && actual_numbers != expected_numbers {
         issues.push(HskTranslationIssue::NumberMismatch {
             expected: expected_numbers,
             actual: actual_numbers,
         });
     }
 
-    let source_lower = source_english.to_ascii_lowercase();
-    if has_question_intent(&source_lower) && !has_chinese_question_intent(chinese) {
+    if has_question_intent(source_english) && !has_chinese_question_intent(chinese) {
         issues.push(HskTranslationIssue::QuestionIntentMissing);
     }
     let source_words = english_word_count(source_english);
@@ -2010,55 +2126,7 @@ fn chinese_character_count(text: &str) -> usize {
         .count()
 }
 
-fn normalized_numbers_for_source(source_english: &str, text: &str) -> Vec<String> {
-    let expected = ascii_numbers(source_english);
-    let actual_ascii = ascii_numbers(text);
-    if actual_ascii == expected || !actual_ascii.is_empty() {
-        return actual_ascii;
-    }
-    expected
-        .into_iter()
-        .filter(|number| {
-            chinese_number_variants(number)
-                .iter()
-                .any(|chinese| text.contains(chinese))
-        })
-        .collect()
-}
-
-fn chinese_number_variants(ascii: &str) -> Vec<String> {
-    let digit_sequence = ascii
-        .chars()
-        .filter_map(|digit| match digit {
-            '0' => Some('零'),
-            '1' => Some('一'),
-            '2' => Some('二'),
-            '3' => Some('三'),
-            '4' => Some('四'),
-            '5' => Some('五'),
-            '6' => Some('六'),
-            '7' => Some('七'),
-            '8' => Some('八'),
-            '9' => Some('九'),
-            _ => None,
-        })
-        .collect::<String>();
-    let mut variants = vec![digit_sequence];
-    if let Ok(value) = ascii.parse::<u16>()
-        && value <= 9_999
-    {
-        let standard = chinese_integer_below_10_000(value);
-        if !variants.contains(&standard) {
-            variants.push(standard.clone());
-        }
-        if standard.starts_with("二百") || standard.starts_with("二千") {
-            variants.push(format!("两{}", &standard['二'.len_utf8()..]));
-        }
-    }
-    variants.sort_by_key(|variant| std::cmp::Reverse(variant.len()));
-    variants
-}
-
+#[cfg(test)]
 fn chinese_integer_below_10_000(value: u16) -> String {
     if value == 0 {
         return "零".to_owned();
@@ -2086,113 +2154,12 @@ fn chinese_integer_below_10_000(value: u16) -> String {
     rendered
 }
 
-fn ascii_numbers(text: &str) -> Vec<String> {
-    let bytes = text.as_bytes();
-    let mut numbers = Vec::new();
-    let mut start = None;
-    for (index, byte) in bytes.iter().copied().enumerate() {
-        if byte.is_ascii_digit() {
-            start.get_or_insert(index);
-        } else if let Some(number_start) = start.take() {
-            if ascii_number_is_semantic(bytes, number_start, index) {
-                numbers.push(text[number_start..index].to_owned());
-            }
-        }
-    }
-    if let Some(number_start) = start {
-        if ascii_number_is_semantic(bytes, number_start, bytes.len()) {
-            numbers.push(text[number_start..].to_owned());
-        }
-    }
-    numbers
+fn source_quantities(text: &str) -> Vec<String> {
+    quantities::explicit_numbers(text, false)
 }
 
-fn ascii_number_is_semantic(bytes: &[u8], start: usize, end: usize) -> bool {
-    let left_alpha = start
-        .checked_sub(1)
-        .is_some_and(|index| bytes[index].is_ascii_alphabetic());
-    let right_alpha = bytes
-        .get(end)
-        .is_some_and(|byte| byte.is_ascii_alphabetic());
-    if !left_alpha && !right_alpha {
-        return true;
-    }
-
-    let left_multiplier = start.checked_sub(1).is_some_and(|marker| {
-        matches!(bytes[marker], b'x' | b'X')
-            && marker
-                .checked_sub(1)
-                .is_none_or(|before| !bytes[before].is_ascii_alphanumeric())
-    });
-    let right_multiplier = bytes.get(end).is_some_and(|marker| {
-        matches!(marker, b'x' | b'X')
-            && bytes
-                .get(end + 1)
-                .is_none_or(|after| !after.is_ascii_alphanumeric())
-    });
-    left_multiplier || right_multiplier
-}
-
-fn has_question_intent(source_lower: &str) -> bool {
-    if source_lower.contains('?') {
-        return true;
-    }
-    let trimmed = source_lower.trim_end();
-    if trimmed.ends_with("...")
-        || trimmed.ends_with(',')
-        || trimmed.ends_with(';')
-        || trimmed.ends_with(':')
-        || trimmed.ends_with('-')
-        || trimmed.ends_with('—')
-        || trimmed.ends_with('…')
-    {
-        // A sentence can be split across adjacent ordered source spans. An
-        // inverted auxiliary at the start of a comma-terminated fragment does
-        // not require this fragment to carry the sentence's final question
-        // mark; the mark may belong to the continuation.
-        return false;
-    }
-    let mut words = source_lower
-        .split(|character: char| !character.is_ascii_alphabetic())
-        .filter(|word| !word.is_empty());
-    let first_word = words.next();
-    let second_word = words.next();
-    if first_word == Some("do") && second_word == Some("not") {
-        return false;
-    }
-    first_word.is_some_and(|word| {
-        matches!(
-            word,
-            "am" | "are"
-                | "can"
-                | "could"
-                | "did"
-                | "do"
-                | "does"
-                | "had"
-                | "has"
-                | "have"
-                | "how"
-                | "is"
-                | "may"
-                | "might"
-                | "must"
-                | "shall"
-                | "should"
-                | "was"
-                | "were"
-                | "what"
-                | "when"
-                | "where"
-                | "which"
-                | "who"
-                | "whom"
-                | "whose"
-                | "why"
-                | "will"
-                | "would"
-        )
-    })
+fn has_question_intent(source: &str) -> bool {
+    source.contains('?') || source.contains('？')
 }
 
 fn has_chinese_question_intent(text: &str) -> bool {
@@ -2280,7 +2247,7 @@ mod tests {
             target_language: Language,
             cancel: &AtomicBool,
             on_piece: &mut dyn FnMut(&str) -> Result<()>,
-        ) -> Result<String> {
+        ) -> Result<Generation> {
             self.inner
                 .generate_streaming(
                     system_prompt,
@@ -2320,7 +2287,7 @@ mod tests {
             target_language: Language,
             cancel: &AtomicBool,
             on_piece: &mut dyn FnMut(&str) -> Result<()>,
-        ) -> Result<String> {
+        ) -> Result<Generation> {
             self.inner
                 .generate_streaming(
                     system_prompt,
@@ -2369,7 +2336,7 @@ mod tests {
             target_language: Language,
             _cancel: &AtomicBool,
             on_piece: &mut dyn FnMut(&str) -> Result<()>,
-        ) -> Result<String> {
+        ) -> Result<Generation> {
             self.calls.fetch_add(1, Ordering::Relaxed);
             self.system_prompts
                 .lock()
@@ -2390,8 +2357,97 @@ mod tests {
             for piece in output.split_inclusive('\n') {
                 on_piece(piece)?;
             }
-            Ok(output)
+            Ok(output.into())
         }
+    }
+
+    #[test]
+    fn explicit_evidence_does_not_turn_commands_or_subordinate_clauses_into_questions() {
+        for (source, chinese) in [
+            ("Have a seat.", "请坐。"),
+            ("May the gods protect you.", "愿众神保护你。"),
+            ("When he arrived, I left.", "他到的时候，我走了。"),
+        ] {
+            assert!(
+                !preservation_issues(source, chinese)
+                    .iter()
+                    .any(|issue| matches!(issue, HskTranslationIssue::QuestionIntentMissing))
+            );
+        }
+        assert!(!preservation_issues("Are you ready?", "你准备好了。").is_empty());
+    }
+
+    #[test]
+    fn quantity_checks_preserve_complete_values_signs_and_multiplicity() {
+        for (source, chinese) in [
+            ("3", "三十"),
+            ("3 and 3", "三"),
+            ("-3", "三"),
+            ("3.5", "三点六"),
+        ] {
+            assert!(
+                preservation_issues(source, chinese)
+                    .iter()
+                    .any(|issue| matches!(issue, HskTranslationIssue::NumberMismatch { .. }))
+            );
+        }
+        assert!(preservation_issues("3 and 3", "三个和三个").is_empty());
+    }
+
+    #[test]
+    fn faithful_names_require_source_and_translation_anchors_and_survive_validation() {
+        let expected = [ExpectedUtterance {
+            id: "name",
+            source_english: "Aria arrived.",
+        }];
+        let valid = parse_faithful_output(
+            r#"1	阿莉娅来了。	[{"sourceText":"Aria","chineseText":"阿莉娅","reason":"person-name"}]"#,
+            &expected,
+        );
+        assert!(valid.items[0].is_valid());
+        assert_eq!(valid.items[0].protected_names.len(), 1);
+        let invalid = parse_faithful_output(
+            r#"1	阿莉娅来了。	[{"sourceText":"Bob","chineseText":"阿莉娅","reason":"person-name"}]"#,
+            &expected,
+        );
+        assert!(!invalid.items[0].is_valid());
+        let truncated = with_termination(valid, GenerationTermination::TokenLimit);
+        assert!(!truncated.items[0].is_valid());
+        assert!(
+            truncated.items[0]
+                .issues
+                .contains(&HskTranslationIssue::TruncatedOutput)
+        );
+    }
+
+    #[test]
+    fn faithful_rows_without_name_metadata_are_rejected() {
+        let expected = [ExpectedUtterance {
+            id: "source",
+            source_english: "Hello.",
+        }];
+        let result = parse_faithful_output("1\t你好。", &expected);
+        assert!(!result.items[0].is_valid());
+        assert!(
+            result.items[0]
+                .issues
+                .contains(&HskTranslationIssue::InvalidProtectedNames)
+        );
+    }
+
+    #[test]
+    fn ordinary_lowercase_metadata_cannot_grant_a_name_exception() {
+        let expected = [ExpectedUtterance {
+            id: "name",
+            source_english: "Mara left the village.",
+        }];
+        let result = parse_faithful_output(
+            r#"1	玛拉离开村庄。	[{"sourceText":"Mara","chineseText":"玛拉","reason":"person-name"},{"sourceText":"village","chineseText":"村庄","reason":"place-name"}]"#,
+            &expected,
+        );
+        assert!(result.items[0].is_valid());
+        assert_eq!(result.items[0].protected_names.len(), 1);
+        assert_eq!(result.items[0].protected_names[0].source_text, "Mara");
     }
 
     #[tokio::test]
@@ -2648,7 +2704,9 @@ mod tests {
 
     #[tokio::test]
     async fn faithful_translation_is_one_text_only_semantic_generation() -> Result<()> {
-        let generator = FakeGenerator::new(["1\t杰德，你准备好了吗？"]);
+        let generator = FakeGenerator::new([
+            r#"1	杰德，你准备好了吗？	[{"sourceText":"Jade","chineseText":"杰德","reason":"person-name"}]"#,
+        ]);
 
         let result = translate_faithfully_with_source(
             &generator,
@@ -2667,7 +2725,15 @@ mod tests {
         );
         let system = &generator.system_prompts.lock().unwrap()[0];
         assert!(system.contains("numbered English source span"));
-        assert!(system.contains("Never output kind names"));
+        assert!(
+            generator.options.lock().unwrap()[0]
+                .grammar
+                .as_ref()
+                .is_some_and(|grammar| grammar.source.contains("sourceText"))
+        );
+        assert!(system.contains("Do not add role labels"));
+        assert!(!system.contains("Never output kind names, labels, positions"));
+        assert!(system.contains("1\t爱丽丝回家了。\t[{\"sourceText\":\"Alice\""));
         assert!(system.contains("Render names naturally in Chinese"));
         assert!(!system.contains("HSK"));
         let prompt = &generator.user_prompts.lock().unwrap()[0];
@@ -2703,7 +2769,7 @@ mod tests {
             source_english: "KICK",
         }];
 
-        let result = parse_faithful_output("1\t【音效】 踢", &expected);
+        let result = parse_faithful_output("1\t【音效】 踢\t[]", &expected);
 
         assert_eq!(result.items[0].text.as_deref(), Some("【音效】 踢"));
         assert!(
@@ -2716,7 +2782,7 @@ mod tests {
 
     #[tokio::test]
     async fn faithful_translation_rejects_non_chinese_and_latin_outputs_per_item() -> Result<()> {
-        let generator = FakeGenerator::new(["1\t..."]);
+        let generator = FakeGenerator::new(["1\t...\t[]"]);
         let mut input = faithful_request();
         input.utterances[0].source_english = "Help me.".to_owned();
 
@@ -2735,7 +2801,7 @@ mod tests {
                 .contains(&HskTranslationIssue::MissingChineseText)
         );
 
-        let generator = FakeGenerator::new(["1\tJade"]);
+        let generator = FakeGenerator::new(["1\tJade\t[]"]);
         let latin = translate_faithfully_with_source(
             &generator,
             &input,
@@ -3189,12 +3255,11 @@ mod tests {
     #[test]
     fn deterministic_validator_preserves_question_intent_and_numbers() {
         assert!(
-            preservation_issues("Does Alice not have 2 tickets?", "爱丽丝没有2张票。", true,)
+            preservation_issues("Does Alice not have 2 tickets?", "爱丽丝没有2张票。")
                 .contains(&HskTranslationIssue::QuestionIntentMissing)
         );
         assert!(
-            preservation_issues("Does Alice not have 2 tickets?", "爱丽丝没有2张票？", true,)
-                .is_empty()
+            preservation_issues("Does Alice not have 2 tickets?", "爱丽丝没有2张票？").is_empty()
         );
     }
 
@@ -3229,14 +3294,13 @@ mod tests {
     #[test]
     fn deterministic_validator_ignores_digits_embedded_in_latin_ocr_tokens() {
         assert_eq!(
-            ascii_numbers("IDENTIT4, WH4, M4, but 7 years and 120 people."),
+            source_quantities("IDENTIT4, WH4, M4, but 7 years and 120 people."),
             vec!["7", "120"]
         );
         assert!(
             preservation_issues(
                 "I found your IDENTIT4 and returned after 7 years.",
-                "我找到你的身份，7年后回来了。",
-                false,
+                "我找到你的身份，7年后回来了。"
             )
             .is_empty()
         );
@@ -3246,10 +3310,10 @@ mod tests {
     fn deterministic_validator_preserves_multiplier_notation_without_treating_ocr_noise_as_numbers()
     {
         assert_eq!(
-            ascii_numbers("THIRTY OF THEM!!! X3; another 3x, but IDENTIT4 and M4"),
-            vec!["3", "3"]
+            source_quantities("THIRTY OF THEM!!! X3; another 3x, but IDENTIT4 and M4"),
+            vec!["3", "3", "30"]
         );
-        assert!(preservation_issues("THIRTY OF THEM!!! X3", "三十个！×3", false).is_empty());
+        assert!(preservation_issues("THIRTY OF THEM!!! X3", "三十个！×3").is_empty());
     }
 
     #[test]
@@ -3257,7 +3321,6 @@ mod tests {
         let issues = preservation_issues(
             "\"ASSASSINATION REQUESTS.\"",
             "以及那个策划了肃清小组的阴影之刃。",
-            true,
         );
         assert!(issues.iter().any(|issue| {
             matches!(
@@ -3268,9 +3331,7 @@ mod tests {
                 }
             )
         }));
-        assert!(
-            preservation_issues("\"ASSASSINATION REQUESTS.\"", "“暗杀请求。”", true).is_empty()
-        );
+        assert!(preservation_issues("\"ASSASSINATION REQUESTS.\"", "“暗杀请求。”").is_empty());
         assert_eq!(english_word_count("No, wait—I meant this."), 5);
         assert_eq!(chinese_character_count("不是，等等——我是说这个。"), 9);
     }
@@ -3291,7 +3352,7 @@ mod tests {
             &expected,
         );
 
-        assert!(!result.items[0].is_valid());
+        assert!(result.items[0].is_valid());
         assert!(
             result.items[1..]
                 .iter()

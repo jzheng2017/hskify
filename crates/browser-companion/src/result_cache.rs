@@ -1,8 +1,8 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Cursor, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use anyhow::{Context, Result, bail};
@@ -27,7 +27,6 @@ use crate::contracts::{
     ImageRegionPreserved, ImageRegionReady, ReadingDirection, Validate,
 };
 use crate::crypto::sha256_hex;
-use crate::pipeline_adapter::ItemLookupContext;
 use crate::setup::{
     DICTIONARY_RESOURCE_BYTES, DICTIONARY_RESOURCE_SHA256, HSK_RESOURCE_BYTES, HSK_RESOURCE_SHA256,
 };
@@ -35,15 +34,14 @@ use crate::setup::{
 pub(crate) const RESULT_CACHE_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const RESULT_CACHE_MAX_ENTRY_BYTES: u64 = 512 * 1024 * 1024;
 const RESULT_CACHE_MAX_DECODED_PATCH_BYTES: u64 = 256 * 1024 * 1024;
-const RESULT_CACHE_SCHEMA: &str = "hskify-tagged-chapter-result-2026-08-09-v1";
-const RESULT_CACHE_PIPELINE_REVISION: &str =
-    "shared-language-image-document-pipeline-v1-2026-08-09";
+const RESULT_CACHE_SCHEMA: &str = "hskify-source-revision-result-2026-10-01-v2";
+const RESULT_CACHE_PIPELINE_REVISION: &str = "immutable-context-fused-depthwise-pipeline-v3-2026-10-01";
 const MODEL_RESOURCE_MANIFEST: &[u8] = include_bytes!("../../../data/model-packs/manifest.v1.json");
 
 #[derive(Debug, Clone)]
 pub(crate) struct CachedImageRegion {
     pub region: ImageRegionReady,
-    pub lookup_context: ItemLookupContext,
+
     pub patch_png: Arc<[u8]>,
 }
 
@@ -57,7 +55,6 @@ pub(crate) struct CachedImageJob {
 pub(crate) struct CachedDocumentJob {
     pub blocks: Vec<DocumentBlockReady>,
     pub preserved: Vec<DocumentBlockPreserved>,
-    pub lookup_contexts: Vec<(String, ItemLookupContext)>,
 }
 
 impl CachedDocumentJob {
@@ -74,17 +71,6 @@ impl CachedDocumentJob {
             if !item_ids.insert(block.item_id.as_str()) {
                 bail!("cached document contains duplicate terminal item identity");
             }
-        }
-        let lookup_ids = self
-            .lookup_contexts
-            .iter()
-            .map(|(item_id, _)| item_id.as_str())
-            .collect::<HashSet<_>>();
-        if lookup_ids.len() != self.lookup_contexts.len()
-            || lookup_ids.len() != item_ids.len()
-            || !item_ids.iter().all(|item_id| lookup_ids.contains(item_id))
-        {
-            bail!("cached document lookup contexts must match every terminal item exactly");
         }
         Ok(())
     }
@@ -105,49 +91,37 @@ impl CachedDocumentJob {
         if terminals.len() != request.blocks.len() {
             bail!("cached document must contain exactly one terminal item per source block");
         }
-        let lookup = self
-            .lookup_contexts
-            .iter()
-            .map(|(item_id, context)| (item_id.as_str(), context))
-            .collect::<HashMap<_, _>>();
         for source in &request.blocks {
             let terminal = terminals.get(source.item_id.as_str()).ok_or_else(|| {
                 anyhow::anyhow!("cached document is missing source item {}", source.item_id)
             })?;
-            let (source_index, item_order, kind, source_text, base_text, displayed_text) =
-                match terminal {
-                    Terminal::Ready(block) => (
-                        block.source_index,
-                        block.item_order,
-                        block.kind,
-                        block.text.source_text.as_str(),
-                        block.text.base_chinese.as_str(),
-                        block.text.displayed_chinese.as_str(),
-                    ),
-                    Terminal::Preserved(block) => (
-                        block.source_index,
-                        block.item_order,
-                        block.kind,
-                        block.source_text.as_str(),
-                        block.source_text.as_str(),
-                        block.source_text.as_str(),
-                    ),
-                };
-            if source_index != source.source_index
+            let (parent_id, sub_order, source_index, item_order, kind, source_text) = match terminal
+            {
+                Terminal::Ready(block) => (
+                    &block.parent_block_id,
+                    block.sub_item_order,
+                    block.source_index,
+                    block.item_order,
+                    block.kind,
+                    block.text.source_text.as_str(),
+                ),
+                Terminal::Preserved(block) => (
+                    &block.parent_block_id,
+                    block.sub_item_order,
+                    block.source_index,
+                    block.item_order,
+                    block.kind,
+                    block.source_text.as_str(),
+                ),
+            };
+            if parent_id != &source.parent_block_id
+                || sub_order != source.sub_item_order
+                || source_index != source.source_index
                 || item_order != source.item_order
                 || kind != source.kind
                 || source_text != source.text
             {
                 bail!("cached document terminal item does not match its source block");
-            }
-            let context = lookup
-                .get(source.item_id.as_str())
-                .ok_or_else(|| anyhow::anyhow!("cached document lookup context is missing"))?;
-            if context.source_text != source.text
-                || context.base_chinese != base_text
-                || context.displayed_chinese != displayed_text
-            {
-                bail!("cached document lookup context does not match its terminal item");
             }
         }
         Ok(())
@@ -185,10 +159,6 @@ impl CachedImageJob {
                 .region
                 .validate()
                 .context("validate cached image translation")?;
-            cached
-                .lookup_context
-                .validate_against(&cached.region)
-                .context("validate cached lookup context")?;
             if !region_ids.insert(cached.region.item_id.as_str()) {
                 bail!("cached image contains duplicate terminal item identity");
             }
@@ -231,28 +201,21 @@ enum StoredChapterResult {
     Document {
         blocks: Vec<DocumentBlockReady>,
         preserved: Vec<DocumentBlockPreserved>,
-        lookup_contexts: Vec<StoredLookupContext>,
     },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct StoredLookupContext {
-    item_id: String,
-    context: ItemLookupContext,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct StoredRegion {
     region: ImageRegionReady,
-    lookup_context: ItemLookupContext,
+
     patch_png_base64: String,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ImageCacheIdentity<'a> {
+    source_index: u32,
     source_sha256: &'a str,
     natural_width: u32,
     natural_height: u32,
@@ -282,6 +245,7 @@ fn image_cache_identity<'a>(
     surrounding_context: &'a [ChapterContextUnit],
 ) -> CacheSourceIdentity<'a> {
     CacheSourceIdentity::Image(ImageCacheIdentity {
+        source_index: request.source_index,
         source_sha256: &request.source_sha256,
         natural_width: request.natural_width,
         natural_height: request.natural_height,
@@ -306,12 +270,31 @@ pub(crate) struct ResultCache {
     max_bytes: u64,
     max_entry_bytes: u64,
     max_decoded_patch_bytes: u64,
+    index: Mutex<Option<CacheIndex>>,
+}
+
+#[derive(Debug, Default)]
+struct CacheIndex {
+    entries: BTreeMap<(SystemTime, PathBuf), u64>,
+    paths: HashMap<PathBuf, (SystemTime, u64)>,
+    total: u64,
+}
+impl CacheIndex {
+    fn insert(&mut self, path: PathBuf, bytes: u64, modified: SystemTime) {
+        if let Some((time, old_bytes)) = self.paths.insert(path.clone(), (modified, bytes)) {
+            self.entries.remove(&(time, path.clone()));
+            self.total = self.total.saturating_sub(old_bytes);
+        }
+        self.entries.insert((modified, path), bytes);
+        self.total = self.total.saturating_add(bytes);
+    }
 }
 
 impl ResultCache {
     pub(crate) fn new(root: PathBuf) -> Self {
         Self {
             root,
+            index: Mutex::new(None),
             max_bytes: RESULT_CACHE_MAX_BYTES,
             max_entry_bytes: RESULT_CACHE_MAX_ENTRY_BYTES,
             max_decoded_patch_bytes: RESULT_CACHE_MAX_DECODED_PATCH_BYTES,
@@ -322,6 +305,7 @@ impl ResultCache {
     fn with_limit(root: PathBuf, max_bytes: u64) -> Self {
         Self {
             root,
+            index: Mutex::new(None),
             max_bytes,
             max_entry_bytes: RESULT_CACHE_MAX_ENTRY_BYTES,
             max_decoded_patch_bytes: RESULT_CACHE_MAX_DECODED_PATCH_BYTES,
@@ -332,6 +316,7 @@ impl ResultCache {
     fn with_load_limits(root: PathBuf, max_entry_bytes: u64, max_decoded_patch_bytes: u64) -> Self {
         Self {
             root,
+            index: Mutex::new(None),
             max_bytes: RESULT_CACHE_MAX_BYTES,
             max_entry_bytes,
             max_decoded_patch_bytes,
@@ -398,10 +383,6 @@ impl ResultCache {
                 .region
                 .validate()
                 .context("validate cached translated region")?;
-            stored_region
-                .lookup_context
-                .validate_against(&stored_region.region)
-                .context("validate cached lookup context")?;
             let decoded_upper_bound =
                 base64_decoded_upper_bound(stored_region.patch_png_base64.len())?;
             if decoded_upper_bound
@@ -431,7 +412,7 @@ impl ResultCache {
             validate_cached_png(&patch_png, self.max_decoded_patch_bytes)?;
             regions.push(CachedImageRegion {
                 region: stored_region.region,
-                lookup_context: stored_region.lookup_context,
+
                 patch_png: Arc::from(patch_png),
             });
         }
@@ -452,22 +433,10 @@ impl ResultCache {
         let Some(stored) = self.load_stored(&key, &pipeline_fingerprint)? else {
             return Ok(None);
         };
-        let StoredChapterResult::Document {
-            blocks,
-            preserved,
-            lookup_contexts,
-        } = stored.result
-        else {
+        let StoredChapterResult::Document { blocks, preserved } = stored.result else {
             bail!("result cache modality does not match the document request");
         };
-        let cached = CachedDocumentJob {
-            blocks,
-            preserved,
-            lookup_contexts: lookup_contexts
-                .into_iter()
-                .map(|stored| (stored.item_id, stored.context))
-                .collect(),
-        };
+        let cached = CachedDocumentJob { blocks, preserved };
         cached.validate_against(request)?;
         Ok(Some(cached))
     }
@@ -561,10 +530,6 @@ impl ResultCache {
                     .region
                     .validate()
                     .context("validate translated region before caching")?;
-                cached
-                    .lookup_context
-                    .validate_against(&cached.region)
-                    .context("validate lookup context before caching")?;
                 validate_png(&cached.patch_png)?;
                 decoded_patch_bytes = decoded_patch_bytes
                     .checked_add(
@@ -580,7 +545,7 @@ impl ResultCache {
                 }
                 Ok(StoredRegion {
                     region: cached.region.clone(),
-                    lookup_context: cached.lookup_context.clone(),
+
                     patch_png_base64: BASE64.encode(cached.patch_png.as_ref()),
                 })
             })
@@ -621,14 +586,6 @@ impl ResultCache {
             result: StoredChapterResult::Document {
                 blocks: job.blocks.clone(),
                 preserved: job.preserved.clone(),
-                lookup_contexts: job
-                    .lookup_contexts
-                    .iter()
-                    .map(|(item_id, context)| StoredLookupContext {
-                        item_id: item_id.clone(),
-                        context: context.clone(),
-                    })
-                    .collect(),
             },
         })
     }
@@ -668,54 +625,58 @@ impl ResultCache {
     }
 
     fn prune_to_limit(&self, protected: Option<&Path>) -> Result<()> {
-        let directory = match fs::read_dir(&self.root) {
-            Ok(directory) => directory,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("scan result cache {}", self.root.display()));
-            }
-        };
-        let mut entries = Vec::new();
-        for entry in directory {
-            let entry =
-                entry.with_context(|| format!("read result cache {}", self.root.display()))?;
-            let path = entry.path();
-            if path.extension().and_then(|value| value.to_str()) != Some("json") {
-                continue;
-            }
-            let metadata = entry
-                .metadata()
-                .with_context(|| format!("inspect result cache {}", path.display()))?;
-            if !metadata.is_file() {
-                continue;
-            }
-            let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-            entries.push((path, metadata.len(), modified));
-        }
-        let mut total = entries
-            .iter()
-            .fold(0_u64, |sum, (_, bytes, _)| sum.saturating_add(*bytes));
-        entries.sort_by_key(|(_, _, modified)| *modified);
-
-        for (path, bytes, _) in entries {
-            if total <= self.max_bytes {
-                break;
-            }
-            if protected.is_some_and(|protected| protected == path) {
-                continue;
-            }
-            match fs::remove_file(&path) {
-                Ok(()) => total = total.saturating_sub(bytes),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => {
-                    return Err(error)
-                        .with_context(|| format!("evict result cache {}", path.display()));
+        let mut guard = self
+            .index
+            .lock()
+            .map_err(|_| anyhow::anyhow!("result cache index lock poisoned"))?;
+        if guard.is_none() {
+            let mut index = CacheIndex::default();
+            if self.root.exists() {
+                for entry in fs::read_dir(&self.root)? {
+                    let entry = entry?;
+                    let path = entry.path();
+                    if path.extension().and_then(|value| value.to_str()) != Some("json") {
+                        continue;
+                    }
+                    let metadata = entry.metadata()?;
+                    if metadata.is_file() {
+                        index.insert(
+                            path,
+                            metadata.len(),
+                            metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+                        );
+                    }
                 }
             }
+            *guard = Some(index);
         }
-        if total > self.max_bytes {
-            bail!("completed result exceeds the 2 GiB persistent cache limit");
+        let index = guard.as_mut().expect("initialized cache index");
+        if let Some(path) = protected {
+            let metadata = fs::metadata(path)?;
+            index.insert(
+                path.to_path_buf(),
+                metadata.len(),
+                metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+            );
+        }
+        while index.total > self.max_bytes {
+            let Some((key, bytes)) = index.entries.pop_first() else {
+                break;
+            };
+            if protected == Some(key.1.as_path()) {
+                index.entries.insert(key, bytes);
+                bail!("completed result exceeds the persistent cache limit");
+            }
+            match fs::remove_file(&key.1) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    index.entries.insert(key, bytes);
+                    return Err(error.into());
+                }
+            }
+            index.paths.remove(&key.1);
+            index.total = index.total.saturating_sub(bytes);
         }
         Ok(())
     }
@@ -781,7 +742,6 @@ mod tests {
     use crate::contracts::{
         DocumentJobRequest, HskLevel, JobUpdate, JobUpdatesResponse, LearningMode, NormalizedRect,
     };
-    use hsk_control::{ProperName, ProperNameReason};
     use image::{DynamicImage, ImageFormat};
 
     fn image_request() -> Result<ImagePipelineInput> {
@@ -828,48 +788,7 @@ mod tests {
                 _ => {}
             }
         }
-        let lookup_contexts = blocks
-            .iter()
-            .map(|block| {
-                (
-                    block.item_id.clone(),
-                    ItemLookupContext {
-                        source_text: block.text.source_text.clone(),
-                        base_chinese: block.text.base_chinese.clone(),
-                        displayed_chinese: block.text.displayed_chinese.clone(),
-                        proper_names: Vec::new(),
-                    },
-                )
-            })
-            .chain(preserved.iter().map(|block| {
-                (
-                    block.item_id.clone(),
-                    ItemLookupContext {
-                        source_text: block.source_text.clone(),
-                        base_chinese: block.source_text.clone(),
-                        displayed_chinese: block.source_text.clone(),
-                        proper_names: Vec::new(),
-                    },
-                )
-            }))
-            .collect();
-        CachedDocumentJob {
-            blocks,
-            preserved,
-            lookup_contexts,
-        }
-    }
-
-    fn lookup_context(region: &ImageRegionReady) -> ItemLookupContext {
-        ItemLookupContext {
-            source_text: region.text.source_text.clone(),
-            base_chinese: region.text.base_chinese.clone(),
-            displayed_chinese: region.text.displayed_chinese.clone(),
-            proper_names: vec![ProperName {
-                text: "小明".to_owned(),
-                reason: ProperNameReason::PersonName,
-            }],
-        }
+        CachedDocumentJob { blocks, preserved }
     }
 
     fn png() -> Arc<[u8]> {
@@ -884,7 +803,6 @@ mod tests {
         let region = image_region();
         CachedImageJob {
             regions: vec![CachedImageRegion {
-                lookup_context: lookup_context(&region),
                 region,
                 patch_png: png(),
             }],
@@ -990,7 +908,6 @@ mod tests {
             .expect("document cache hit");
         assert_eq!(loaded_document.blocks.len(), 1);
         assert_eq!(loaded_document.preserved.len(), 1);
-        assert_eq!(loaded_document.lookup_contexts.len(), 2);
         Ok(())
     }
 
@@ -999,9 +916,6 @@ mod tests {
         let request = document_request()?;
         let mut missing = document_job();
         missing.preserved.clear();
-        missing
-            .lookup_contexts
-            .retain(|(item_id, _)| item_id != "block-1");
         assert!(missing.validate_against(&request).is_err());
 
         let mut wrong_position = document_job();

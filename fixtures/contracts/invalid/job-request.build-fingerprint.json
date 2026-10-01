@@ -7,7 +7,9 @@
   "naturalHeight": 1800,
   "pageSessionId": "fixture-page-0001",
   "sourceIndex": 0,
-  "chapterSourceOrder": [0],
+  "chapterSourceOrder": [
+    0
+  ],
   "surfaceKind": "image",
   "readingDirection": "ltr",
   "settings": {
@@ -17,5 +19,7 @@
     "hskLevel": 2,
     "learningMode": "natural"
   },
-  "visibleRects": []
+  "visibleRects": [],
+  "clientRequestId": "fixture-request",
+  "retryItemIds": []
 }

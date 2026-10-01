@@ -45,7 +45,6 @@ let pagePrepared = false
 let startInFlight = false
 let refreshInFlight = false
 let setupReady = false
-let contentSupported = false
 let setupAction: 'reconnect' | 'download' | 'retry' | undefined
 let warmedContentKind: 'image' | 'document' | undefined
 
@@ -66,7 +65,7 @@ function selectedReadingDirection(): ReadingDirection {
 
 function setBusy(busy: boolean): void {
   const unavailable = busy || startInFlight
-  translateAll.disabled = unavailable || !setupReady || !pagePrepared || !contentSupported
+  translateAll.disabled = unavailable || !setupReady || !pagePrepared
   levelSelect.disabled = unavailable || !setupReady
   learningModeSelect.disabled = unavailable || !setupReady
   readingDirectionSelect.disabled = unavailable || !setupReady
@@ -87,7 +86,8 @@ function renderState(state: PopupState): void {
         ? 'Detected: manga or webtoon chapter'
         : 'No supported chapter detected'
   imageSettings.hidden = state.contentKind !== 'image'
-  contentSupported = state.contentKind !== 'unsupported'
+  translateAll.textContent =
+    state.contentKind === 'unsupported' ? 'Select story region' : 'Translate chapter'
   const active = state.state === 'running'
   cancel.hidden = !active
   setBusy(false)

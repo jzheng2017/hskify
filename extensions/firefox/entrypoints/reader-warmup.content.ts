@@ -1,6 +1,4 @@
-import { looksLikeSequentialArtReader } from '../src/discovery/images'
-import { discoverPageSurfaces } from '../src/discovery/surfaces'
-import { detectDocumentChapter } from '../src/document/extraction'
+import { classifyChapter } from '../src/discovery/chapter'
 import { sendBackgroundMessage } from '../src/messaging/messages'
 
 const PROBE_LIFETIME_MS = 20_000
@@ -16,8 +14,6 @@ export default defineContentScript({
     let lastInspectionStarted = Number.NEGATIVE_INFINITY
     let contentKind: 'image' | 'document' | undefined
     let discoveryActive = true
-    let documentInspected = false
-    let documentRejected = false
 
     const stopDiscovery = (): void => {
       if (!discoveryActive) return
@@ -45,21 +41,10 @@ export default defineContentScript({
       lastInspectionStarted = performance.now()
       try {
         if (!contentKind) {
-          if (!documentInspected) {
-            documentInspected = true
-            const documentDetection = await detectDocumentChapter(document).catch(() => undefined)
-            if (finished) return
-            if (documentDetection?.kind === 'document') contentKind = 'document'
-            documentRejected = documentDetection?.kind === 'rejected'
-          }
-          if (
-            !contentKind &&
-            !documentRejected &&
-            (looksLikeSequentialArtReader() || discoverPageSurfaces().surfaces.some(
-                (surface) => surface.kind !== 'image' &&
-                  (surface.continuous || surface.width >= 500) && surface.height >= 700,
-            ))
-          ) contentKind = 'image'
+          const classification = await classifyChapter(document).catch(() => undefined)
+          if (finished) return
+          if (classification?.kind === 'document' || classification?.kind === 'image')
+            contentKind = classification.kind
           if (contentKind) stopDiscovery()
         }
         if (contentKind) {
@@ -72,7 +57,7 @@ export default defineContentScript({
       } finally {
         inspecting = false
       }
-      if (!finished) schedule()
+      if (!finished && contentKind) schedule()
     }
 
     const schedule = (): void => {
@@ -84,7 +69,17 @@ export default defineContentScript({
       scheduled = window.setTimeout(() => void inspect(), delay)
     }
 
-    const observer = new MutationObserver(schedule)
+    const observer = new MutationObserver((records) => {
+      if (
+        records.some(
+          (record) =>
+            !(
+              record.target instanceof Element ? record.target : record.target.parentElement
+            )?.closest('[data-hskify-owned]'),
+        )
+      )
+        schedule()
+    })
     observer.observe(document.documentElement, {
       childList: true,
       subtree: true,

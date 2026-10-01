@@ -93,6 +93,8 @@ describe('shared translated text markup', () => {
   it('installs the shared source and displayed identities for every renderer', () => {
     const host = document.createElement('span')
     installTranslatedText(host, {
+      termination: 'stop',
+      protectedNames: [],
       sourceText: 'The lantern was still burning.',
       baseChinese: '灯还亮着。',
       displayedChinese: '灯还亮着。',

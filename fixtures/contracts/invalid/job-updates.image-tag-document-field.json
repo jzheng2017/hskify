@@ -24,7 +24,8 @@
         ],
         "sourceText": "Wait!",
         "confidence": 0.9,
-        "reason": "source-preserved"
+        "reason": "source-preserved",
+        "disposition": "failed"
       },
       "block": {}
     }

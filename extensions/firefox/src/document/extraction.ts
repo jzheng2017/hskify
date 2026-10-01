@@ -1,4 +1,5 @@
 import { Readability } from '@mozilla/readability'
+import { franc } from 'franc-min'
 
 import { sha256Hex } from '../acquisition/hash'
 import {
@@ -21,72 +22,22 @@ import {
   type DocumentBlockKind,
   type DocumentChapter,
   type DocumentDetection,
-  type DocumentImageItem,
-  type DocumentSeparatorItem,
   type DocumentStructureItem,
   type DocumentTextBlock,
+  type SourceTextPart,
 } from './types'
 
 const SOURCE_MARKER = 'data-hskify-source-marker'
-const MIN_BLOCKS = 5
-const MIN_CHARACTERS = 1_000
-const MIN_LATIN_LETTER_RATIO = 0.75
-const MIN_LATIN_LETTERS = 500
-const MAX_PAGE_SESSION_ID_CHARACTERS = 256
-
-const EXCLUDED_SELECTOR = [
-  'nav',
-  'aside',
-  'form',
-  'button',
-  'input',
-  'select',
-  'textarea',
-  'script',
-  'style',
-  'template',
-  '[role="navigation"]',
-  '[role="banner"]',
-  '[role="complementary"]',
-  '[role="contentinfo"]',
-  '[role="form"]',
-  '[aria-hidden="true"]',
-  '[data-hskify-document-reader]',
-].join(',')
-
+const EXCLUDED =
+  'nav,aside,form,button,input,select,textarea,script,style,template,' +
+  '[role="navigation"],[role="banner"],[role="complementary"],[role="contentinfo"],' +
+  '[role="form"],[aria-hidden="true"],[hidden],[contenteditable="true"],[data-hskify-owned]'
 const UI_NAME =
-  /(?:^|[-_\s])(?:ad|ads|advert|advertisement|author|byline|breadcrumb|comment|comments|cookie|footer|header|login|menu|metadata|modal|nav|newsletter|pagination|promo|recommend|related|share|sidebar|social|toolbar|widget)(?:$|[-_\s])/iu
-const ANCESTOR_UI_NAME =
-  /(?:^|[-_\s])(?:ad|ads|advert|advertisement|breadcrumb|comment|comments|cookie|login|menu|modal|nav|newsletter|pagination|promo|recommend|related|share|sidebar|social|toolbar|widget)(?:$|[-_\s])/iu
+  /(?:^|[-_\s])(?:ad|ads|advert|advertisement|author|byline|breadcrumb|comment|comments|cookie|login|menu|metadata|modal|nav|newsletter|pagination|promo|recommend|related|share|sidebar|social|toolbar|widget)(?:$|[-_\s])/iu
+const BLOCK_TAGS = /^(?:article|section|div|p|h[1-6]|blockquote|li|figcaption)$/iu
+const utf8 = new TextEncoder()
 
-type AnnotatedClone = {
-  document: Document
-  liveByMarker: Map<string, HTMLElement>
-  markerByLive: Map<HTMLElement, string>
-}
-
-type LiveTextCandidate = {
-  marker: string
-  element: HTMLElement
-  text: string
-}
-
-type PendingText = {
-  type: 'text'
-  kind: DocumentBlockKind
-  text: string
-  headingLevel?: 1 | 2 | 3 | 4 | 5 | 6
-  liveElement: HTMLElement
-  marker: string
-}
-
-type PendingImage = Omit<DocumentImageItem, 'itemId' | 'order'>
-type PendingSeparator = Omit<DocumentSeparatorItem, 'itemId' | 'order'>
-type PendingItem = PendingText | PendingImage | PendingSeparator
-
-export type DocumentExtractionOptions = {
-  crypto?: Crypto
-}
+export type DocumentExtractionOptions = { crypto?: Crypto; root?: HTMLElement }
 
 export function normalizeDocumentText(value: string): string {
   return value
@@ -99,15 +50,17 @@ export function normalizeDocumentText(value: string): string {
     .trim()
 }
 
-function utf8Length(value: string): number {
-  return new TextEncoder().encode(value).byteLength
-}
-
-/** Largest exact `/jobs/document` JSON envelope these extracted blocks can enter. */
 export function documentWireRequestUtf8Bytes(blocks: DocumentJobRequest['blocks']): number {
   const request: DocumentJobRequest = {
+    clientRequestId: 'x'.repeat(128),
+    retryItemIds: blocks.map((block) => block.itemId),
+    focus: {
+      kind: 'document',
+      active: true,
+      visibleBlockIds: blocks.slice(0, 64).map((block) => block.itemId),
+    },
     buildFingerprint: BUILD_FINGERPRINT,
-    pageSessionId: 'x'.repeat(MAX_PAGE_SESSION_ID_CHARACTERS),
+    pageSessionId: 'x'.repeat(256),
     sourceSha256: '0'.repeat(64),
     settings: {
       sourceLanguage: 'en',
@@ -118,477 +71,359 @@ export function documentWireRequestUtf8Bytes(blocks: DocumentJobRequest['blocks'
     },
     blocks,
   }
-  return utf8Length(JSON.stringify(request))
+  return utf8.encode(JSON.stringify(request)).byteLength
 }
 
-function stableTextId(order: number, kind: DocumentBlockKind, text: string): string {
-  // FNV-1a is used only as a compact stable label. The complete source is
-  // independently protected by SHA-256 before it crosses the native boundary.
-  let hash = 0x811c9dc5
-  const bytes = new TextEncoder().encode(`${order}\u001f${kind}\u001f${text}`)
-  for (const byte of bytes) {
-    hash ^= byte
-    hash = Math.imul(hash, 0x01000193)
-  }
-  return `document-${order}-${kind}-${(hash >>> 0).toString(16).padStart(8, '0')}`
-}
-
-function annotateClone(live: Document): AnnotatedClone {
-  const cloned = live.cloneNode(true) as Document
-  const liveElements: HTMLElement[] = [
-    live.documentElement as HTMLElement,
-    ...live.documentElement.querySelectorAll<HTMLElement>('*'),
-  ]
-  const clonedElements: HTMLElement[] = [
-    cloned.documentElement as HTMLElement,
-    ...cloned.documentElement.querySelectorAll<HTMLElement>('*'),
-  ]
-  if (liveElements.length !== clonedElements.length) {
-    throw new Error('The cloned document does not match the live source tree.')
-  }
-
-  const liveByMarker = new Map<string, HTMLElement>()
-  const markerByLive = new Map<HTMLElement, string>()
-  for (let index = 0; index < clonedElements.length; index += 1) {
-    const liveElement = liveElements[index]
-    const clonedElement = clonedElements[index]
-    if (!liveElement || !clonedElement) continue
-    const marker = index.toString(36)
-    clonedElement.setAttribute(SOURCE_MARKER, marker)
-    liveByMarker.set(marker, liveElement)
-    markerByLive.set(liveElement, marker)
-  }
-  return { document: cloned, liveByMarker, markerByLive }
-}
-
-function nearestSourceMarker(element: Element): string | undefined {
-  const marked = element.closest(`[${SOURCE_MARKER}]`)
-  if (marked) return marked.getAttribute(SOURCE_MARKER) ?? undefined
-  return element.querySelector(`[${SOURCE_MARKER}]`)?.getAttribute(SOURCE_MARKER) ?? undefined
-}
-
-function excluded(element: Element): boolean {
-  if (element.matches(EXCLUDED_SELECTOR) || element.closest(EXCLUDED_SELECTOR)) return true
-  for (const candidate of [element.id, element.className]) {
-    if (typeof candidate === 'string' && UI_NAME.test(candidate)) return true
-  }
-  for (let current = element.parentElement; current; current = current.parentElement) {
-    for (const candidate of [current.id, current.className]) {
-      if (typeof candidate === 'string' && ANCESTOR_UI_NAME.test(candidate)) return true
+export function eligibleStoryElement(
+  element: Element,
+  styles = new WeakMap<Element, boolean>(),
+): boolean {
+  if (element.closest(EXCLUDED)) return false
+  for (let current: Element | null = element; current; current = current.parentElement) {
+    if (
+      UI_NAME.test(
+        `${current.id} ${typeof current.className === 'string' ? current.className : ''}`,
+      )
+    )
+      return false
+    let shown = styles.get(current)
+    if (shown === undefined) {
+      const style = current.ownerDocument.defaultView?.getComputedStyle(current)
+      shown =
+        !style ||
+        (style.display !== 'none' &&
+          style.visibility !== 'hidden' &&
+          style.visibility !== 'collapse')
+      styles.set(current, shown)
     }
+    if (!shown) return false
   }
-  return false
+  return true
 }
 
-function blockKind(element: Element): {
+/** Bounded language evidence sampled across the chapter, rather than inferred from its alphabet. */
+export function consistentlyEnglish(text: string): boolean {
+  if (text.length < 160) return false
+  const size = Math.min(1_024, text.length)
+  const offsets = new Set([0, Math.floor((text.length - size) / 2), text.length - size])
+  for (const offset of offsets) {
+    if (franc(text.slice(offset, offset + size), { minLength: 160 }) !== 'eng') return false
+  }
+  return true
+}
+
+function commonRoot(elements: readonly HTMLElement[]): HTMLElement | null {
+  let root = elements[0] ?? null
+  while (root && !elements.every((element) => root!.contains(element))) root = root.parentElement
+  return root
+}
+
+function identifyRegion(live: Document): { root: HTMLElement; title?: string } | undefined {
+  const styles = new WeakMap<Element, boolean>()
+  const clone = live.cloneNode(true) as Document
+  const original = [live.documentElement, ...live.documentElement.querySelectorAll('*')]
+  const copied = [clone.documentElement, ...clone.documentElement.querySelectorAll('*')]
+  if (original.length !== copied.length) return undefined
+  const byMarker = new Map<string, HTMLElement>()
+  for (let index = 0; index < copied.length; index++) {
+    const marker = index.toString(36)
+    copied[index]!.setAttribute(SOURCE_MARKER, marker)
+    byMarker.set(marker, original[index] as HTMLElement)
+  }
+  const article = new Readability<HTMLElement>(clone, {
+    charThreshold: 500,
+    serializer: (node) => node as HTMLElement,
+  }).parse()
+  if (!article?.content) return undefined
+  const elements: HTMLElement[] = []
+  for (const marked of article.content.querySelectorAll(`[${SOURCE_MARKER}]`)) {
+    const source = byMarker.get(marked.getAttribute(SOURCE_MARKER)!)
+    if (
+      source &&
+      BLOCK_TAGS.test(source.tagName) &&
+      eligibleStoryElement(source, styles) &&
+      normalizeDocumentText(marked.textContent ?? '')
+    )
+      elements.push(source)
+  }
+  let root = commonRoot(elements)
+  const title = normalizeDocumentText(article.title ?? '')
+  const heading = [...live.querySelectorAll<HTMLElement>('h1,h2')].find(
+    (element) =>
+      eligibleStoryElement(element, styles) &&
+      normalizeDocumentText(element.textContent ?? '') === title,
+  )
+  if (root && heading && !root.contains(heading)) {
+    const shared = commonRoot([root, heading])
+    if (shared && shared !== live.body && shared !== live.documentElement) root = shared
+  }
+  return root ? { root, ...(title ? { title } : {}) } : undefined
+}
+
+function kindFor(element: HTMLElement): {
   kind: DocumentBlockKind
   headingLevel?: 1 | 2 | 3 | 4 | 5 | 6
-} | null {
-  const tag = element.tagName.toLowerCase()
-  if (/^h[1-6]$/u.test(tag)) {
+} {
+  if (/^h[1-6]$/iu.test(element.tagName))
     return {
       kind: 'heading',
-      headingLevel: Number(tag.slice(1)) as 1 | 2 | 3 | 4 | 5 | 6,
+      headingLevel: Number(element.tagName[1]) as 1 | 2 | 3 | 4 | 5 | 6,
     }
-  }
-  if (tag === 'p') return { kind: 'paragraph' }
-  if (tag === 'blockquote') return { kind: 'blockquote' }
-  if (tag === 'figcaption') return { kind: 'caption' }
-  if (tag === 'li') {
+  if (element.tagName === 'BLOCKQUOTE') return { kind: 'blockquote' }
+  if (element.tagName === 'FIGCAPTION') return { kind: 'caption' }
+  if (element.tagName === 'LI')
     return {
       kind: element.closest('ol') ? 'ordered-list-item' : 'unordered-list-item',
     }
-  }
-  if (
-    tag === 'div' &&
-    !element.querySelector(
-      'article, section, div, p, h1, h2, h3, h4, h5, h6, blockquote, ol, ul, figure, figcaption',
+  return { kind: element.closest('blockquote') ? 'blockquote' : 'paragraph' }
+}
+
+function stableId(order: number, kind: string, text: string): string {
+  let hash = 0x811c9dc5
+  for (const byte of utf8.encode(`${order}\u001f${kind}\u001f${text}`))
+    hash = Math.imul(hash ^ byte, 0x01000193)
+  return `document-${order}-${kind}-${(hash >>> 0).toString(16).padStart(8, '0')}`
+}
+
+const sourceIdentities = new WeakMap<Node, string>()
+function sourceIdentity(node: Node): string {
+  const known = sourceIdentities.get(node)
+  if (known) return known
+  const path: string[] = []
+  for (let current: Node | null = node; current?.parentNode; current = current.parentNode) {
+    path.push(
+      `${current.nodeName}:${Array.prototype.indexOf.call(current.parentNode.childNodes, current)}`,
     )
-  ) {
-    return { kind: 'paragraph' }
   }
-  return null
+  const id = stableId(0, 'source', path.reverse().join('/'))
+  sourceIdentities.set(node, id)
+  return id
 }
 
-function normalizedOwnBlockText(element: Element, kind: DocumentBlockKind): string {
-  const clone = element.cloneNode(true) as Element
-  if (kind.endsWith('list-item')) {
-    for (const nested of clone.querySelectorAll('ol, ul')) nested.remove()
-  }
-  const separator = '\u0000'
-  for (const lineBreak of clone.querySelectorAll('br')) {
-    lineBreak.replaceWith(clone.ownerDocument.createTextNode(separator))
-  }
-  if (kind === 'blockquote') {
-    for (const block of clone.querySelectorAll('p, div')) {
-      block.append(clone.ownerDocument.createTextNode(separator))
+function sentenceGroupEnds(text: string): number[] {
+  const ends: number[] = []
+  let start = 0,
+    end = 0
+  for (const sentence of new Intl.Segmenter('en', { granularity: 'sentence' }).segment(text)) {
+    const next = sentence.index + sentence.segment.length
+    if (next - start > 600 && end > start) {
+      ends.push(end)
+      start = end
     }
-  }
-  return (clone.textContent ?? '')
-    .split(separator)
-    .map((part) => part.replace(/[\s\u00a0]+/gu, ' ').trim())
-    .join('\n')
-    .replace(/\n{3,}/gu, '\n\n')
-    .trim()
-}
-
-function liveTextCandidates(
-  live: Document,
-  markerByLive: ReadonlyMap<HTMLElement, string>,
-): LiveTextCandidate[] {
-  const result: LiveTextCandidate[] = []
-  for (const element of live.body.querySelectorAll<HTMLElement>('*')) {
-    const semantic = blockKind(element)
-    const marker = markerByLive.get(element)
-    if (!semantic || !marker || excluded(element)) continue
-    const text = normalizedOwnBlockText(element, semantic.kind)
-    if (text) result.push({ marker, element, text })
-  }
-  return result
-}
-
-function mappedTextSource(
-  parsed: Element,
-  text: string,
-  liveByMarker: ReadonlyMap<string, HTMLElement>,
-  candidatesByText: ReadonlyMap<string, readonly LiveTextCandidate[]>,
-  usedMarkers: ReadonlySet<string>,
-): { marker: string; element: HTMLElement } | undefined {
-  const nearestMarker = nearestSourceMarker(parsed)
-  const nearestLive = nearestMarker ? liveByMarker.get(nearestMarker) : undefined
-  if (nearestMarker && nearestLive && !usedMarkers.has(nearestMarker) && !excluded(nearestLive)) {
-    const semantic = blockKind(nearestLive)
-    if (semantic && normalizedOwnBlockText(nearestLive, semantic.kind) === text) {
-      return { marker: nearestMarker, element: nearestLive }
+    while (next - start > 600) {
+      let split = text.lastIndexOf(' ', start + 600)
+      if (split <= start) split = start + 600
+      ends.push(split)
+      start = split
     }
+    end = next
   }
-  const candidate = candidatesByText
-    .get(text)
-    ?.find(
-      (item) =>
-        !usedMarkers.has(item.marker) &&
-        item.text === text &&
-        (!nearestLive || nearestLive.contains(item.element)),
-    )
-  return candidate ? { marker: candidate.marker, element: candidate.element } : undefined
+  if (end > start) ends.push(end)
+  return ends
 }
 
-function safeImageSource(
-  liveImage: HTMLImageElement,
-  parsedImage: Element,
-  baseUrl: string,
-): string | undefined {
-  const candidates = [
-    parsedImage.getAttribute('src'),
-    parsedImage.getAttribute('data-src'),
-    liveImage.currentSrc,
-    liveImage.getAttribute('src'),
-    liveImage.getAttribute('data-src'),
-  ]
-  for (const candidate of candidates) {
-    if (!candidate) continue
-    let url: URL
-    try {
-      url = new URL(candidate, baseUrl)
-    } catch {
-      continue
+/** Visits live source once. Every eligible text node belongs to exactly one slot. */
+function extractRegion(root: HTMLElement, title?: string) {
+  const styles = new WeakMap<Element, boolean>()
+  const structure: DocumentStructureItem[] = []
+  const blocks: DocumentTextBlock[] = []
+  const sourceElements = new Map<string, HTMLElement>()
+  const sourceSlots = new Map<string, readonly SourceTextPart[]>()
+  const subOrders = new Map<HTMLElement, number>()
+  let owner = root
+  let nodes: Array<{ node: Text; offset: number }> = []
+  let offset = 0
+  let parts: string[] = []
+  const flush = () => {
+    const raw = parts.join('')
+    const semantic = kindFor(owner)
+    let start = 0
+    for (const end of sentenceGroupEnds(raw)) {
+      const text = normalizeDocumentText(raw.slice(start, end))
+      if (text && nodes.length) {
+        if (
+          semantic.kind === 'heading' &&
+          (text === title ||
+            (semantic.headingLevel === 1 && !blocks.some((block) => block.kind === 'title')))
+        )
+          semantic.kind = 'title'
+        const order = blocks.length
+        const parentBlockId = sourceIdentity(owner)
+        const subItemOrder = subOrders.get(owner) ?? 0
+        subOrders.set(owner, subItemOrder + 1)
+        const segments = nodes.flatMap(({ node, offset }) => {
+          const from = Math.max(0, start - offset),
+            to = Math.min(node.length, end - offset)
+          return from < to ? [{ node, start: from, end: to }] : []
+        })
+        const itemId = `${sourceIdentity(segments[0]!.node)}-${stableId(start, semantic.kind, text)}`
+        const block = { itemId, parentBlockId, subItemOrder, order, ...semantic, text }
+        blocks.push(block)
+        structure.push({ type: 'text', ...block })
+        sourceElements.set(itemId, owner)
+        sourceSlots.set(itemId, segments)
+      }
+      start = end
     }
-    if (url.protocol === 'http:' || url.protocol === 'https:' || url.protocol === 'blob:') {
-      return url.href
+    nodes = []
+    parts = []
+    offset = 0
+  }
+  const visit = (node: Node): void => {
+    if (node.nodeType === 3) {
+      nodes.push({ node: node as Text, offset })
+      const data = (node as Text).data
+      parts.push(data.replace(/[\r\n\t\f\v]/gu, ' '))
+      offset += data.length
+      return
     }
-    if (url.protocol === 'data:' && /^data:image\//iu.test(url.href)) return url.href
-  }
-  return undefined
-}
-
-function collectPendingItems(
-  content: HTMLElement,
-  liveByMarker: ReadonlyMap<string, HTMLElement>,
-  candidates: readonly LiveTextCandidate[],
-  sourceUrl: string,
-): PendingItem[] {
-  const items: PendingItem[] = []
-  const usedTextMarkers = new Set<string>()
-  const candidatesByText = new Map<string, LiveTextCandidate[]>()
-  for (const candidate of candidates) {
-    const matches = candidatesByText.get(candidate.text)
-    if (matches) matches.push(candidate)
-    else candidatesByText.set(candidate.text, [candidate])
-  }
-
-  const visit = (element: Element): void => {
-    if (excluded(element)) return
-    const tag = element.tagName.toLowerCase()
-    const marker = nearestSourceMarker(element)
-    const liveElement = marker ? liveByMarker.get(marker) : undefined
-
-    if (tag === 'img') {
-      if (liveElement?.tagName.toLowerCase() === 'img' && !excluded(liveElement)) {
-        const liveImage = liveElement as HTMLImageElement
-        const source = safeImageSource(liveImage, element, sourceUrl)
-        if (source) {
-          const image: PendingImage = {
-            type: 'image',
-            sourceUrl: source,
-            alt: normalizeDocumentText(liveImage.alt),
+    if (node.nodeType !== 1) return
+    const element = node as HTMLElement
+    if (!eligibleStoryElement(element, styles)) return
+    if (element.tagName === 'BR') {
+      parts.push('\n')
+      offset++
+      return
+    }
+    if (/^(?:IMG|HR|CANVAS|VIDEO)$/u.test(element.tagName)) {
+      flush()
+      const order = structure.length
+      if (element.tagName === 'HR')
+        structure.push({
+          type: 'separator',
+          itemId: `document-separator-${order}`,
+          order,
+        })
+      if (element.tagName === 'IMG') {
+        const image = element as HTMLImageElement
+        const src = image.currentSrc || image.getAttribute('src') || image.getAttribute('data-src')
+        if (src) {
+          try {
+            const url = new URL(src, root.ownerDocument.URL)
+            if (/^(?:https?:|blob:|data:)$/u.test(url.protocol))
+              structure.push({
+                type: 'image',
+                itemId: `document-image-${order}`,
+                order,
+                sourceUrl: url.href,
+                alt: image.alt,
+                ...(image.naturalWidth
+                  ? { width: image.naturalWidth, height: image.naturalHeight }
+                  : {}),
+              })
+          } catch {
+            /* Invalid media never removes its live node. */
           }
-          if (liveImage.naturalWidth > 0) image.width = liveImage.naturalWidth
-          if (liveImage.naturalHeight > 0) image.height = liveImage.naturalHeight
-          items.push(image)
         }
       }
       return
     }
-    if (tag === 'hr') {
-      items.push({ type: 'separator' })
-      return
+    const previous = owner
+    const block = BLOCK_TAGS.test(element.tagName)
+    if (block) {
+      flush()
+      owner = element
     }
-
-    const semantic = blockKind(element)
-    if (semantic) {
-      const text = normalizedOwnBlockText(element, semantic.kind)
-      const source = text
-        ? mappedTextSource(element, text, liveByMarker, candidatesByText, usedTextMarkers)
-        : undefined
-      if (text && source) {
-        usedTextMarkers.add(source.marker)
-        items.push({
-          type: 'text',
-          kind: semantic.kind,
-          text,
-          liveElement: source.element,
-          marker: source.marker,
-          ...(semantic.headingLevel === undefined ? {} : { headingLevel: semantic.headingLevel }),
-        })
-      }
-      // A selected block owns its inline descendants, but media and nested
-      // lists remain distinct structural items.
-      for (const child of element.children) {
-        const childTag = child.tagName.toLowerCase()
-        if (childTag === 'img' || childTag === 'ol' || childTag === 'ul') visit(child)
-        else for (const image of child.querySelectorAll(':scope img')) visit(image)
-      }
-      return
+    for (const child of element.childNodes) visit(child)
+    if (block) {
+      flush()
+      owner = previous
     }
-
-    for (const child of element.children) visit(child)
   }
-
-  visit(content)
-  return items
+  visit(root)
+  flush()
+  return { structure, blocks, sourceElements, sourceSlots }
 }
 
-function commonSourceRoot(elements: readonly HTMLElement[]): HTMLElement | null {
-  let root: HTMLElement | null = elements[0] ?? null
-  while (root && !elements.every((element) => root!.contains(element))) {
-    root = root.parentElement
-  }
-  return root
-}
-
-function predominantlyEnglish(text: string): boolean {
-  let letters = 0
-  let latin = 0
-  for (const character of text) {
-    if (!/\p{Letter}/u.test(character)) continue
-    letters += 1
-    if (/[A-Za-z]/u.test(character)) latin += 1
-  }
-  return latin >= MIN_LATIN_LETTERS && letters > 0 && latin / letters >= MIN_LATIN_LETTER_RATIO
-}
-
-function titleBlock(
-  items: PendingItem[],
-  readabilityTitle: string | null | undefined,
-  candidates: readonly LiveTextCandidate[],
-): void {
-  const normalizedTitle = normalizeDocumentText(readabilityTitle ?? '')
-  if (!normalizedTitle) return
-  const heading = items.find(
-    (item): item is PendingText =>
-      item.type === 'text' && item.kind === 'heading' && item.text === normalizedTitle,
-  )
-  if (heading) {
-    heading.kind = 'title'
-    return
-  }
-  const firstLevelOne = items.find(
-    (item): item is PendingText =>
-      item.type === 'text' && item.kind === 'heading' && item.headingLevel === 1,
-  )
-  if (firstLevelOne) {
-    firstLevelOne.kind = 'title'
-    return
-  }
-  const used = new Set(
-    items.filter((item): item is PendingText => item.type === 'text').map((item) => item.marker),
-  )
-  const mappedRoot = commonSourceRoot(
-    items
-      .filter((item): item is PendingText => item.type === 'text')
-      .map((item) => item.liveElement),
-  )
-  const mappedElements = items
-    .filter((item): item is PendingText => item.type === 'text')
-    .map((item) => item.liveElement)
-  const safelySharesStoryRoot = (item: LiveTextCandidate): boolean => {
-    const shared = commonSourceRoot([...mappedElements, item.element])
-    return Boolean(
-      shared &&
-      shared !== item.element.ownerDocument.body &&
-      shared !== item.element.ownerDocument.documentElement,
-    )
-  }
-  const candidate =
-    candidates.find(
-      (item) =>
-        !used.has(item.marker) &&
-        item.text === normalizedTitle &&
-        mappedRoot?.contains(item.element),
-    ) ??
-    candidates.find(
-      (item) =>
-        !used.has(item.marker) &&
-        item.text === normalizedTitle &&
-        /^h[12]$/iu.test(item.element.tagName) &&
-        safelySharesStoryRoot(item),
-    ) ??
-    candidates.find(
-      (item) =>
-        !used.has(item.marker) &&
-        /^h[12]$/iu.test(item.element.tagName) &&
-        mappedRoot?.contains(item.element),
-    )
-  if (candidate) {
-    items.unshift({
-      type: 'text',
-      kind: 'title',
-      headingLevel: 1,
-      text: candidate.text,
-      liveElement: candidate.element,
-      marker: candidate.marker,
-    })
-  }
-}
-
-function finalizedStructure(items: readonly PendingItem[]): {
-  structure: DocumentStructureItem[]
-  blocks: DocumentTextBlock[]
-  sourceElements: Map<string, HTMLElement>
-} {
-  const structure: DocumentStructureItem[] = []
-  const blocks: DocumentTextBlock[] = []
-  const sourceElements = new Map<string, HTMLElement>()
-  let textOrder = 0
-
-  for (let order = 0; order < items.length; order += 1) {
-    const item = items[order]!
-    if (item.type === 'text') {
-      const itemId = stableTextId(textOrder, item.kind, item.text)
-      const block: DocumentTextBlock = {
-        itemId,
-        order: textOrder,
-        kind: item.kind,
-        text: item.text,
-        ...(item.headingLevel === undefined ? {} : { headingLevel: item.headingLevel }),
-      }
-      blocks.push(block)
-      structure.push({ type: 'text', ...block })
-      sourceElements.set(itemId, item.liveElement)
-      textOrder += 1
-      continue
-    }
-    if (item.type === 'image') {
-      structure.push({
-        ...item,
-        itemId: `document-image-${order}`,
-        order,
-      })
-      continue
-    }
-    structure.push({ type: 'separator', itemId: `document-separator-${order}`, order })
-  }
-  return { structure, blocks, sourceElements }
-}
-
-async function detectDocumentChapterInternal(
+async function detectInternal(
   live: Document,
-  options: DocumentExtractionOptions = {},
+  options: DocumentExtractionOptions,
 ): Promise<DocumentDetection> {
-  let annotated: AnnotatedClone
+  let region: ReturnType<typeof identifyRegion>
   try {
-    annotated = annotateClone(live)
-  } catch {
-    return { kind: 'not-document', reason: 'unmapped-content' }
-  }
-
-  let article: ReturnType<Readability<HTMLElement>['parse']>
-  try {
-    article = new Readability<HTMLElement>(annotated.document, {
-      charThreshold: 500,
-      serializer: (node) => node as HTMLElement,
-    }).parse()
+    region = options.root ? { root: options.root } : identifyRegion(live)
   } catch {
     return { kind: 'not-document', reason: 'readability-rejected' }
   }
-  if (!article?.content) return { kind: 'not-document', reason: 'readability-rejected' }
-  const candidates = liveTextCandidates(live, annotated.markerByLive)
-  const pending = collectPendingItems(article.content, annotated.liveByMarker, candidates, live.URL)
-  titleBlock(pending, article.title, candidates)
-  const finalized = finalizedStructure(pending)
-
-  if (finalized.blocks.length > MAX_DOCUMENT_BLOCKS) {
-    return { kind: 'rejected', reason: 'too-many-blocks' }
-  }
-  if (finalized.blocks.length < MIN_BLOCKS) {
-    return { kind: 'not-document', reason: 'too-few-blocks' }
-  }
-  if (finalized.blocks.some((block) => utf8Length(block.text) > MAX_DOCUMENT_BLOCK_UTF8_BYTES)) {
-    return { kind: 'rejected', reason: 'block-too-large' }
-  }
-
-  const normalizedChapter = finalized.blocks.map((block) => block.text).join('\n\n')
-  const characterCount = [...normalizedChapter].length
-  if (characterCount < MIN_CHARACTERS) return { kind: 'not-document', reason: 'too-short' }
-  if (!predominantlyEnglish(normalizedChapter)) {
-    return { kind: 'not-document', reason: 'not-predominantly-english' }
-  }
-
-  const mappedElements = [...finalized.sourceElements.values()]
-  if (mappedElements.length !== finalized.blocks.length) {
-    return { kind: 'not-document', reason: 'unmapped-content' }
-  }
-  const sourceRoot = commonSourceRoot(mappedElements)
+  if (!region) return { kind: 'not-document', reason: 'readability-rejected' }
+  const { root } = region
   if (
-    !sourceRoot ||
-    !sourceRoot.isConnected ||
-    sourceRoot === live.body ||
-    sourceRoot === live.documentElement ||
-    !live.body.contains(sourceRoot)
-  ) {
+    !root.isConnected ||
+    root === live.body ||
+    root === live.documentElement ||
+    !live.body.contains(root)
+  )
     return { kind: 'not-document', reason: 'unsafe-content-root' }
+  const extracted = extractRegion(root, region.title)
+  if (extracted.blocks.length > MAX_DOCUMENT_BLOCKS)
+    return { kind: 'rejected', reason: 'too-many-blocks' }
+  if (extracted.blocks.length < (options.root ? 1 : 5))
+    return { kind: 'not-document', reason: 'too-few-blocks' }
+  if (
+    extracted.blocks.some(
+      (block) => utf8.encode(block.text).byteLength > MAX_DOCUMENT_BLOCK_UTF8_BYTES,
+    )
+  )
+    return {
+      kind: 'rejected',
+      reason: 'block-too-large',
+    }
+  const normalized = extracted.blocks.map((block) => block.text).join('\n\n')
+  const characterCount = [...normalized].length
+  if (!options.root && characterCount < 1_000) return { kind: 'not-document', reason: 'too-short' }
+  if (!options.root && !consistentlyEnglish(normalized))
+    return {
+      kind: 'not-document',
+      reason: 'not-predominantly-english',
+    }
+  const nativeBlocks = toNativeDocumentBlocks(extracted.blocks)
+  if (documentWireRequestUtf8Bytes(nativeBlocks) > MAX_DOCUMENT_UTF8_BYTES)
+    return {
+      kind: 'rejected',
+      reason: 'input-too-large',
+    }
+  const revisions = new Map<Text, string>()
+  for (const segments of extracted.sourceSlots.values())
+    for (const { node } of segments) revisions.set(node, node.data)
+  let changed = false
+  const observer = new MutationObserver((records) => {
+    changed ||= records.length > 0
+  })
+  observer.observe(root, {
+    subtree: true,
+    childList: true,
+    characterData: true,
+    attributes: true,
+    attributeFilter: ['hidden', 'aria-hidden', 'contenteditable'],
+  })
+  let sourceSha256: string
+  try {
+    sourceSha256 = await sha256Hex(
+      utf8.encode(canonicalDocumentText(nativeBlocks)).buffer,
+      options.crypto,
+    )
+    changed ||= observer.takeRecords().length > 0
+  } finally {
+    observer.disconnect()
   }
-
-  const nativeBlocks = toNativeDocumentBlocks(finalized.blocks)
-  const title = finalized.blocks.find((block) => block.kind === 'title')?.text
-  if (documentWireRequestUtf8Bytes(nativeBlocks) > MAX_DOCUMENT_UTF8_BYTES) {
-    return { kind: 'rejected', reason: 'input-too-large' }
-  }
-  const canonical = canonicalDocumentText(nativeBlocks)
-  const digestBytes = new TextEncoder().encode(canonical)
-  const sourceSha256 = await sha256Hex(digestBytes.buffer, options.crypto)
-  const snapshot = {
-    sourceUrl: live.URL,
-    sourceSha256,
-    ...(title === undefined ? {} : { title }),
-    characterCount,
-    blocks: nativeBlocks,
-  }
+  if (
+    changed ||
+    !root.isConnected ||
+    [...revisions].some(([node, text]) => !root.contains(node) || node.data !== text)
+  )
+    return { kind: 'not-document', reason: 'unmapped-content' }
+  const title = extracted.blocks.find((block) => block.kind === 'title')?.text
   const chapter: DocumentChapter = {
-    snapshot,
-    structure: finalized.structure,
-    sourceRoot,
-    sourceElements: finalized.sourceElements,
+    ...extracted,
+    sourceRoot: root,
+    sourceRevisions: revisions,
+    snapshot: {
+      sourceUrl: live.URL,
+      sourceSha256,
+      characterCount,
+      blocks: nativeBlocks,
+      ...(title ? { title } : {}),
+    },
   }
   return { kind: 'document', chapter }
 }
@@ -597,14 +432,14 @@ export async function detectDocumentChapter(
   live: Document,
   options: DocumentExtractionOptions = {},
 ): Promise<DocumentDetection> {
-  const performanceApi = live.defaultView?.performance
-  markDocumentPerformance(performanceApi, DOCUMENT_EXTRACTION_START_MARK)
+  const performance = live.defaultView?.performance
+  markDocumentPerformance(performance, DOCUMENT_EXTRACTION_START_MARK)
   try {
-    return await detectDocumentChapterInternal(live, options)
+    return await detectInternal(live, options)
   } finally {
-    markDocumentPerformance(performanceApi, DOCUMENT_EXTRACTION_END_MARK)
+    markDocumentPerformance(performance, DOCUMENT_EXTRACTION_END_MARK)
     measureDocumentPerformance(
-      performanceApi,
+      performance,
       DOCUMENT_EXTRACTION_MEASURE,
       DOCUMENT_EXTRACTION_START_MARK,
       DOCUMENT_EXTRACTION_END_MARK,

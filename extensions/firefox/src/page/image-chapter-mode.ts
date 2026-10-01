@@ -1,12 +1,13 @@
 import { sha256Hex } from '../acquisition/hash'
 import { DEFAULT_IMAGE_LIMITS } from '../acquisition/image-format'
+import { waitForVisibleSource } from '../acquisition/rendered-region'
 import type {
   LearningMode,
   LookupRequest,
   ReadingDirection,
   TranslationSettings,
 } from '../contracts/browser'
-import { ImageDiscovery, isRectVisible, type DiscoveryEvent } from '../discovery/images'
+import { isRectVisible } from '../discovery/images'
 import { VisibleFirstQueue, type QueueItem } from '../discovery/queue'
 import {
   LiveSurfaceDiscovery,
@@ -42,6 +43,7 @@ export const COMPLETION_SETTLE_MS = 300
 type TranslationCandidate = {
   candidate: DiscoveredSurface
   recovered?: RecoveredImageJob
+  retryItemIds?: string[]
 }
 
 type ImageFailureDiagnostic = {
@@ -58,6 +60,9 @@ type SourceSnapshot = {
   sourceUrl: string
   naturalWidth: number
   naturalHeight: number
+  contentRevision?: string
+  capturedRevision?: boolean
+  jobId?: string
 }
 
 function normalizedSourceUrl(value: string): string {
@@ -68,6 +73,7 @@ function normalizedSourceUrl(value: string): string {
 
 function currentSourceUrl(candidate: DiscoveredSurface): string {
   if (
+    candidate.captureOnly ||
     candidate.kind !== 'image' ||
     candidate.element.tagName.toLowerCase() !== 'img' ||
     !('currentSrc' in candidate.element)
@@ -79,7 +85,7 @@ function currentSourceUrl(candidate: DiscoveredSurface): string {
 }
 
 function candidateKey(candidate: DiscoveredSurface): string {
-  return `${candidate.id}:${normalizedSourceUrl(candidate.sourceUrl)}:${candidate.sourceWidth}x${candidate.sourceHeight}`
+  return `${candidate.id}:${normalizedSourceUrl(candidate.sourceUrl)}:${candidate.sourceWidth}x${candidate.sourceHeight}:${candidate.sourceRevision ?? ''}`
 }
 
 /**
@@ -249,7 +255,7 @@ export async function tryContentBytes(candidate: DiscoveredSurface): Promise<
   }
 }
 
-class ImageFocusReporter {
+export class ImageFocusReporter {
   private timer: number | undefined
   private lastPayload = ''
   private stopped = false
@@ -281,7 +287,10 @@ class ImageFocusReporter {
   }
 
   private send(active: boolean, force = false): void {
-    const visibleRects = visibleImageRects(this.image, this.sourceWidth, this.sourceHeight)
+    active = active && !this.image.ownerDocument.hidden
+    const visibleRects = active
+      ? visibleImageRects(this.image, this.sourceWidth, this.sourceHeight)
+      : []
     const payloadKey = JSON.stringify({ visibleRects, active })
     if (!force && payloadKey === this.lastPayload) return
     this.lastPayload = payloadKey
@@ -320,7 +329,6 @@ function errorMessage(error: unknown): string {
 
 export class ImageChapterMode {
   private readonly run: ChapterRunController
-  private readonly discovery: ImageDiscovery
   private readonly surfaceDiscovery: LiveSurfaceDiscovery
   private readonly renderer: SelectableRenderer
   private readonly queue: VisibleFirstQueue<TranslationCandidate>
@@ -330,6 +338,7 @@ export class ImageChapterMode {
   private readonly processed = new Set<HTMLElement>()
   private readonly runState = new ChapterRunState<HTMLElement>()
   private readonly failures = new Map<HTMLElement, ImageFailureDiagnostic>()
+  private readonly failedItems = new Map<HTMLElement, Set<string>>()
   // A reader may insert or reorder DOM nodes while lazy loading.  DOM indexes
   // are therefore observations, not page identities.  Assign one canonical
   // index to each admitted surface for the lifetime of this chapter run and
@@ -350,7 +359,7 @@ export class ImageChapterMode {
   private completionTimer: number | undefined
   private destroyed = false
 
-  constructor() {
+  constructor(sourceRoot: ParentNode = document) {
     this.run = new ChapterRunController('image', () => this.restoreAll())
     this.renderer = new SelectableRenderer({
       fetchFont: async (fontId, jobId) =>
@@ -370,6 +379,7 @@ export class ImageChapterMode {
         // The region remains selectable and non-clipping; diagnostics can read
         // data-hskify-fit="degraded" without interrupting the normal workflow.
       },
+      onRetryRegion: (itemId, candidate) => this.retry(candidate.element, itemId),
     })
     this.queue = new VisibleFirstQueue(
       (item, signal) => this.process(item, signal),
@@ -413,9 +423,11 @@ export class ImageChapterMode {
         maximumActiveCost: CHAPTER_PIPELINE_PIXEL_BUDGET,
       },
     )
-    this.discovery = new ImageDiscovery((event) => this.onDiscovery(event))
-    this.surfaceDiscovery = new LiveSurfaceDiscovery((event) => this.onDiscovery(event))
-    this.discovery.start()
+    this.surfaceDiscovery = new LiveSurfaceDiscovery(
+      (event) => this.onDiscovery(event),
+      document,
+      sourceRoot,
+    )
     this.surfaceDiscovery.start()
   }
 
@@ -436,12 +448,7 @@ export class ImageChapterMode {
   }
 
   private currentCandidates(): DiscoveredSurface[] {
-    const images = this.discovery.current()
-    const imageElements = new Set<HTMLElement>(images.map((candidate) => candidate.element))
-    const otherSurfaces = visibleSurfaceFirst(this.surfaceDiscovery.current()).filter(
-      (candidate) => !imageElements.has(candidate.element),
-    )
-    return [...images, ...otherSurfaces].sort(
+    return visibleSurfaceFirst(this.surfaceDiscovery.current()).sort(
       (left, right) =>
         Number(right.visible) - Number(left.visible) ||
         this.orderingIndex(left) - this.orderingIndex(right),
@@ -450,12 +457,14 @@ export class ImageChapterMode {
 
   /** Return the frozen chapter index when admitted, otherwise the discovery hint. */
   private orderingIndex(candidate: DiscoveredSurface): number {
-    return this.canonicalSourceIndexByElement.get(candidate.element) ?? candidate.domIndex
+    const sourceIndex = this.canonicalSourceIndexByElement.get(candidate.element)
+    return sourceIndex === undefined
+      ? candidate.domIndex
+      : this.chapterSourceOrder.indexOf(sourceIndex)
   }
 
   /**
-   * Admit a surface to the chapter's immutable document stream.  New pages
-   * discovered after startup append to that stream; a DOM reorder cannot
+   * Admit a surface to the chapter's immutable document stream.  DOM order is transmitted separately, so a lazy insertion cannot
    * rewrite the index of work already submitted or waiting in the queue.
    */
   private canonicalSourceIndex(candidate: DiscoveredSurface): number {
@@ -471,10 +480,12 @@ export class ImageChapterMode {
   }
 
   private includeChapterPage(sourceIndex: number): void {
-    if (this.chapterSourceOrder.includes(sourceIndex)) return
-    this.chapterSourceOrder = [...this.chapterSourceOrder, sourceIndex].sort(
-      (left, right) => left - right,
-    )
+    const live = new Set(this.chapterSourceOrder)
+    live.add(sourceIndex)
+    this.chapterSourceOrder = [...this.canonicalSourceIndexByElement]
+      .filter(([, index]) => live.has(index))
+      .sort(([left], [right]) => compareDocumentElements(left, right))
+      .map(([, index]) => index)
   }
 
   private removeUnsubmittedSource(element: HTMLElement): void {
@@ -491,7 +502,7 @@ export class ImageChapterMode {
 
   private establishCanonicalPageOrder(candidates: readonly DiscoveredSurface[]): void {
     const admitted = new Set<HTMLElement>(candidates.map((candidate) => candidate.element))
-    const lazyImages = this.discovery
+    const lazyImages = this.surfaceDiscovery
       .deferred()
       .filter(
         (image) =>
@@ -522,20 +533,7 @@ export class ImageChapterMode {
   }
 
   private completionKey(): string {
-    const imageCandidates = this.discovery.current()
-    const imageElements = new Set<HTMLElement>(
-      imageCandidates.map((candidate) => candidate.element),
-    )
-    const surfaceKey = this.surfaceDiscovery
-      .current()
-      .filter((candidate) => !imageElements.has(candidate.element))
-      .map(
-        (candidate) =>
-          `${candidate.id}:${candidate.sourceUrl}:${candidate.sourceWidth}x${candidate.sourceHeight}`,
-      )
-      .sort()
-      .join('|')
-    return [this.discovery.completionKey(), surfaceKey].filter(Boolean).join('|')
+    return this.surfaceDiscovery.completionKey()
   }
 
   async start(
@@ -549,12 +547,13 @@ export class ImageChapterMode {
     this.learningMode = learningMode
     this.readingDirection = readingDirection
     const token = await this.run.start(0, 'Preparing the manga or webtoon reader')
+    this.surfaceDiscovery.setActive(true)
     try {
       this.scope = scope
       const candidates = this.currentCandidates().filter(
         (candidate) => scope === 'all' || candidate.visible,
       )
-      const deferred = scope === 'all' ? this.discovery.deferred().length : 0
+      const deferred = scope === 'all' ? this.surfaceDiscovery.deferred().length : 0
       this.run.update({
         current: 0,
         total: candidates.length + deferred,
@@ -565,6 +564,7 @@ export class ImageChapterMode {
       })
       this.runState.reset()
       this.failures.clear()
+      this.failedItems.clear()
       this.cancelCompletion()
       const generation = token.generation
       this.establishCanonicalPageOrder(candidates)
@@ -584,6 +584,7 @@ export class ImageChapterMode {
           unsupportedSurfaceCount > 0
             ? 'This reader hides its artwork from the extension.'
             : 'No manga images were found on this page.',
+          true,
         )
       }
       if (unsupportedSurfaceCount > 0) {
@@ -667,7 +668,6 @@ export class ImageChapterMode {
   destroy(): void {
     if (this.destroyed) return
     this.destroyed = true
-    this.discovery.stop()
     this.surfaceDiscovery.stop()
     this.run.destroy()
   }
@@ -711,6 +711,7 @@ export class ImageChapterMode {
   }
 
   private restoreAll(): void {
+    this.surfaceDiscovery.setActive(false)
     this.cancelCompletion()
     this.queue.cancelAll()
     this.clearPrefetch()
@@ -724,6 +725,7 @@ export class ImageChapterMode {
     this.processed.clear()
     this.runState.reset()
     this.failures.clear()
+    this.failedItems.clear()
     this.canonicalSourceIndexByElement.clear()
     this.submittedSourceIndexes.clear()
     this.submittingSourceIndexes.clear()
@@ -809,7 +811,7 @@ export class ImageChapterMode {
         ...(recovered ? { recovered } : {}),
       },
       visible: candidate.visible,
-      order: sourceIndex,
+      order: this.orderingIndex(candidate),
       cost: candidate.sourceWidth * candidate.sourceHeight,
     })
     if (!accepted) {
@@ -832,10 +834,10 @@ export class ImageChapterMode {
     return badge
   }
 
-  private retry(image: HTMLElement): void {
+  private retry(image: HTMLElement, itemId?: string): void {
     if (!this.runState.manualRetryQueued(image)) return
     this.failures.delete(image)
-    if (this.requeueFailedImage(image, 'Trying again')) {
+    if (this.requeueFailedImage(image, 'Trying again', itemId)) {
       const run = this.runState.snapshot()
       this.run.update({ current: run.resolved, total: run.total })
       return
@@ -845,16 +847,19 @@ export class ImageChapterMode {
     this.badge(image).failure("This image couldn't be translated. Try again.")
   }
 
-  private requeueFailedImage(image: HTMLElement, status: string): boolean {
+  private requeueFailedImage(image: HTMLElement, status: string, itemId?: string): boolean {
     const candidate = this.currentCandidates().find((item) => item.element === image)
     const failedId = this.queueIds.get(image)
     this.processed.delete(image)
     if (!candidate || !failedId) return false
     const queued = this.queue.retry({
       id: failedId,
-      value: { candidate },
+      value: {
+        candidate,
+        retryItemIds: itemId ? [itemId] : [...(this.failedItems.get(image) ?? [])],
+      },
       visible: candidate.visible,
-      order: this.canonicalSourceIndex(candidate),
+      order: this.orderingIndex(candidate),
       cost: candidate.sourceWidth * candidate.sourceHeight,
     })
     if (!queued) return false
@@ -871,6 +876,33 @@ export class ImageChapterMode {
       sourceUrl: normalizedSourceUrl(candidate.sourceUrl),
       naturalWidth: candidate.sourceWidth,
       naturalHeight: candidate.sourceHeight,
+    }
+  }
+
+  private async verifySource(
+    candidate: DiscoveredSurface,
+    snapshot: SourceSnapshot,
+    signal: AbortSignal,
+  ): Promise<void> {
+    this.assertCurrent(candidate, snapshot, signal)
+    if (!snapshot.contentRevision) return
+    await waitForVisibleSource(candidate.element, signal)
+    this.assertCurrent(candidate, snapshot, signal)
+    const capture = snapshot.capturedRevision ? await candidate.capture?.(signal) : undefined
+    const revision = snapshot.capturedRevision
+      ? capture
+        ? await sha256Hex(capture.bytes)
+        : 'unreadable'
+      : await sendBackgroundMessage({ type: 'source:image-revision', jobId: snapshot.jobId! })
+    this.assertCurrent(candidate, snapshot, signal)
+    if (revision !== snapshot.contentRevision) {
+      this.surfaceDiscovery.recordSourceRevision(candidate.id, snapshot.contentRevision)
+      this.removeTracked(candidate.element)
+      throw new RuntimeMessageError(
+        'SOURCE_REVISION_CHANGED',
+        'This page changed during translation. Retry its current content.',
+        true,
+      )
     }
   }
 
@@ -900,6 +932,7 @@ export class ImageChapterMode {
 
   private async process(item: QueueItem<TranslationCandidate>, signal: AbortSignal): Promise<void> {
     const { candidate, recovered } = item.value
+    const retryItemIds = item.value.retryItemIds ?? []
     const runToken = this.run.currentToken()
     const sourceIndex = this.canonicalSourceIndex(candidate)
     if (recovered?.jobId) this.submittedSourceIndexes.add(sourceIndex)
@@ -911,6 +944,11 @@ export class ImageChapterMode {
     if (consumesPrefetch) this.prefetchTargetId = undefined
     this.prefetchEnabled = false
     const snapshot = this.sourceSnapshot(candidate)
+    if (recovered) {
+      snapshot.contentRevision = recovered.sourceSha256
+      snapshot.capturedRevision = candidate.captureOnly === true
+      snapshot.jobId = recovered.jobId
+    }
     const badge = this.badge(candidate.element)
     let jobId = recovered?.jobId
     let sourceSha256 = recovered?.sourceSha256
@@ -930,11 +968,18 @@ export class ImageChapterMode {
         badge.update('Opening the image')
         const inline = consumesPrefetch ? undefined : await tryContentBytes(candidate)
         this.assertCurrent(candidate, snapshot, signal)
+        if (inline && candidate.capture) {
+          snapshot.capturedRevision = true
+          snapshot.contentRevision = await sha256Hex(inline.bytes)
+          this.surfaceDiscovery.recordSourceRevision(candidate.id, snapshot.contentRevision)
+        }
         this.submittingSourceIndexes.add(sourceIndex)
         let submitted: Awaited<ReturnType<typeof sendBackgroundMessage<'job:submit-image'>>>
         try {
           submitted = await sendBackgroundMessage({
             type: 'job:submit-image',
+            clientRequestId: crypto.randomUUID(),
+            retryItemIds,
             pageSessionId: runToken.pageSessionId,
             sourceIndex,
             chapterSourceOrder: [...this.chapterSourceOrder],
@@ -963,6 +1008,8 @@ export class ImageChapterMode {
         jobId = submitted.jobId
         this.run.registerJob(runToken, jobId)
         sourceSha256 = submitted.sourceSha256
+        snapshot.contentRevision ??= sourceSha256
+        snapshot.jobId = jobId
         sourceUrl = submitted.sourceUrl
         sourceWidth = submitted.sourceWidth
         sourceHeight = submitted.sourceHeight
@@ -1006,18 +1053,20 @@ export class ImageChapterMode {
       this.run.registerJob(runToken, jobId)
       this.prefetchEnabled = true
       this.refreshPrefetch()
-      rendered = this.renderer.begin(
-        candidate,
-        {
-          jobId,
-          sourceWidth,
-          sourceHeight,
-        },
-        {
-          signal,
-          validate: () => this.assertCurrent(candidate, snapshot, signal),
-        },
-      )
+      rendered =
+        this.rendered.get(candidate.element) ??
+        this.renderer.begin(
+          candidate,
+          {
+            jobId,
+            sourceWidth,
+            sourceHeight,
+          },
+          {
+            signal,
+            validate: () => this.assertCurrent(candidate, snapshot, signal),
+          },
+        )
       this.rendered.set(candidate.element, rendered)
       badge.attach(rendered.wrapper)
       viewportReporter = new ImageFocusReporter(jobId, candidate.element, sourceWidth, sourceHeight)
@@ -1026,6 +1075,7 @@ export class ImageChapterMode {
       const activeRenderer = rendered
       const translatedItemIds = new Set<string>()
       const preservedItemIds = new Set<string>()
+      const failedItemIds = new Set<string>()
       const terminal = await this.run.stream(
         runToken,
         activeJobId,
@@ -1058,6 +1108,12 @@ export class ImageChapterMode {
                 )
               }
               badge.update('Adding translated text')
+              if (retryItemIds.length && !retryItemIds.includes(update.region.itemId))
+                throw new RuntimeMessageError(
+                  'RETRY_ITEM_MISMATCH',
+                  'A retry returned an unrequested source item.',
+                  false,
+                )
               const patch = await sendBackgroundMessage({
                 type: 'job:patch',
                 jobId: activeJobId,
@@ -1075,6 +1131,7 @@ export class ImageChapterMode {
               await activeRenderer.installRegion(update.region, patch.bytes, {
                 signal,
                 validate: () => this.assertCurrent(candidate, snapshot, signal),
+                verify: () => this.verifySource(candidate, snapshot, signal),
               })
               translatedItemIds.add(update.region.itemId)
               break
@@ -1090,8 +1147,15 @@ export class ImageChapterMode {
                   false,
                 )
               }
-              if (update.region.sourceText.trim()) {
+              if (retryItemIds.length && !retryItemIds.includes(update.region.itemId))
+                throw new RuntimeMessageError(
+                  'RETRY_ITEM_MISMATCH',
+                  'A retry returned an unrequested source item.',
+                  false,
+                )
+              if (update.region.disposition === 'failed') {
                 activeRenderer.installSourcePreservingRegion(update.region)
+                failedItemIds.add(update.region.itemId)
               }
               preservedItemIds.add(update.region.itemId)
               break
@@ -1107,7 +1171,9 @@ export class ImageChapterMode {
       )
       if (
         terminal.translatedCount !== translatedItemIds.size ||
-        terminal.preservedCount !== preservedItemIds.size
+        terminal.preservedCount !== preservedItemIds.size ||
+        (retryItemIds.length > 0 &&
+          translatedItemIds.size + preservedItemIds.size !== retryItemIds.length)
       ) {
         throw new RuntimeMessageError(
           'IMAGE_COMPLETION_MISMATCH',
@@ -1119,6 +1185,19 @@ export class ImageChapterMode {
       await viewportReporter.stop().catch(() => undefined)
       viewportReporter = undefined
       this.assertCurrent(candidate, snapshot, signal)
+      const remainingFailures = retryItemIds.length
+        ? new Set(this.failedItems.get(candidate.element))
+        : new Set<string>()
+      for (const id of translatedItemIds) remainingFailures.delete(id)
+      for (const id of failedItemIds) remainingFailures.add(id)
+      this.failedItems.set(candidate.element, remainingFailures)
+      if (remainingFailures.size)
+        throw new RuntimeMessageError(
+          'IMAGE_ITEMS_FAILED',
+          `${activeRenderer.regionCount} translated; ${remainingFailures.size} failed. Original and Compare remain available.`,
+          true,
+        )
+      this.failedItems.delete(candidate.element)
       this.processed.add(candidate.element)
       badge.destroy()
       this.badges.delete(candidate.element)
@@ -1126,7 +1205,12 @@ export class ImageChapterMode {
       await viewportReporter?.stop().catch(() => undefined)
       viewportReporter = undefined
       if (jobId) this.run.cancelJob(jobId)
-      if (rendered && !this.processed.has(candidate.element)) {
+      if (
+        rendered &&
+        rendered.regionCount === 0 &&
+        !this.failedItems.get(candidate.element)?.size &&
+        !this.processed.has(candidate.element)
+      ) {
         // Move a failure notice out before the renderer removes its anchored
         // wrapper. The fallback is positioned once at document coordinates;
         // the next attempt attaches it to the new wrapper.
@@ -1168,14 +1252,16 @@ export class ImageChapterMode {
     }
     if (this.runState.remove(image)) tracked = true
     this.failures.delete(image)
+    this.failedItems.delete(image)
     this.badges.get(image)?.destroy()
     this.badges.delete(image)
     if (tracked) this.scheduleFinish()
   }
 
-  private onDiscovery(event: DiscoveryEvent | SurfaceDiscoveryEvent): void {
+  private onDiscovery(event: SurfaceDiscoveryEvent): void {
     const image = event.candidate.element
-    if (this.completionPublished && event.type === 'added') return
+    if (event.type === 'added' || event.type === 'updated')
+      this.canonicalSourceIndex(event.candidate)
     if (event.type === 'visibility') {
       const id = this.queueIds.get(image)
       if (id) {
@@ -1199,7 +1285,7 @@ export class ImageChapterMode {
       return
     }
     if (event.type === 'updated') {
-      if (event.previousSourceUrl === event.candidate.sourceUrl) {
+      if (event.previousSourceUrl === event.candidate.sourceUrl && event.sourceChanged !== true) {
         const id = this.queueIds.get(image)
         if (id) {
           this.queue.reprioritize(id, event.candidate.visible, this.orderingIndex(event.candidate))
@@ -1207,13 +1293,8 @@ export class ImageChapterMode {
         this.refreshPrefetch()
         return
       }
-      if (this.scope === undefined) {
-        this.removeTracked(image)
-        return
-      }
-      const run = this.runState.snapshot()
-      this.scope = undefined
-      this.run.cancel({ current: run.completed, total: run.total })
+      this.removeTracked(image)
+      if (this.scope && !this.cancelledState) this.enqueue(event.candidate)
       return
     }
     if (
@@ -1266,7 +1347,7 @@ export class ImageChapterMode {
   private finish(): void {
     if (!this.scope || this.cancelledState) return
     const run = this.runState.snapshot()
-    const deferred = this.scope === 'all' ? this.discovery.deferred().length : 0
+    const deferred = this.scope === 'all' ? this.surfaceDiscovery.deferred().length : 0
     if (deferred > 0) {
       this.run.update({
         current: run.resolved,
@@ -1285,7 +1366,11 @@ export class ImageChapterMode {
       return
     }
     if (!run.allResolved) {
-      this.run.finish({ current: 0, total: 0 }, 'No chapter images remain to translate.')
+      this.run.finish(
+        { current: 0, total: 0 },
+        'No discovered chapter images remain. Waiting for new content.',
+        true,
+      )
       return
     }
     if (run.failed > 0) {
@@ -1295,7 +1380,7 @@ export class ImageChapterMode {
         true,
       )
     } else {
-      this.run.finish({ current: run.completed, total: run.total })
+      this.run.finish({ current: run.completed, total: run.total }, undefined, true)
     }
   }
 }

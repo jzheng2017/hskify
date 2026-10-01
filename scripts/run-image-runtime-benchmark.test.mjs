@@ -38,7 +38,7 @@ function summary(settings = {
           sourceWidth: 800,
           sourceHeight: 1_200,
           submittedRequest: {
-            buildFingerprint: 'hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-08-09-r8',
+            buildFingerprint: 'hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-10-01-r10',
             clientImageId: 'chapter-one-page-one',
             sourceSha256: 'a'.repeat(64),
             sourceMimeType: 'image/png',
@@ -85,8 +85,8 @@ test('builds a settings-sensitive canonical same-workload identity', () => {
 
 test('rejects malformed or oversized image request workload arrays', () => {
   const malformed = summary()
-  malformed.chapterRuns[0].monitor.observations[0].submittedRequest.chapterSourceOrder = [1, 0]
-  assert.throws(() => imageWorkload(malformed), /strictly increasing/u)
+  malformed.chapterRuns[0].monitor.observations[0].submittedRequest.chapterSourceOrder = [0, 0]
+  assert.throws(() => imageWorkload(malformed), /unique/u)
 
   const oversized = summary()
   oversized.chapterRuns[0].monitor.observations[0].submittedRequest.chapterSourceOrder =

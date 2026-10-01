@@ -23,8 +23,12 @@
             "aboveLevelTokens": [],
             "teachingTerms": [],
             "repairState": "not-needed"
-          }
-        }
+          },
+          "termination": "stop",
+          "protectedNames": []
+        },
+        "parentBlockId": "block-0",
+        "subItemOrder": 0
       }
     },
     {
@@ -36,7 +40,9 @@
         "itemOrder": 0,
         "kind": "prose",
         "sourceText": "The rain had stopped before dawn.",
-        "reason": "fixture preservation"
+        "reason": "fixture preservation",
+        "parentBlockId": "block-1",
+        "subItemOrder": 0
       }
     },
     {

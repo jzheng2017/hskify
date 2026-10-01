@@ -1,5 +1,5 @@
 {
-  "buildFingerprint": "hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-08-09-r8",
+  "buildFingerprint": "hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-10-01-r10",
   "clientImageId": "fixture-page-0001-image-0001",
   "sourceSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "sourceMimeType": "image/png",
@@ -7,7 +7,9 @@
   "naturalHeight": 1800,
   "pageSessionId": "fixture-page-0001",
   "sourceIndex": 0,
-  "chapterSourceOrder": [0],
+  "chapterSourceOrder": [
+    0
+  ],
   "surfaceKind": "image",
   "readingDirection": "ltr",
   "settings": {
@@ -24,5 +26,7 @@
       "width": 1,
       "height": 0.45
     }
-  ]
+  ],
+  "clientRequestId": "fixture-request",
+  "retryItemIds": []
 }

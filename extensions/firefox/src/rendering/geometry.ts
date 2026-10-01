@@ -52,56 +52,50 @@ export function polygonBounds(points: readonly Point[]): Bounds {
   }
 }
 
-function positionToken(token: string | undefined, horizontal: boolean): number | string {
-  if (!token) return 0.5
-  const normalized = token.toLowerCase()
-  if (normalized === 'center') return 0.5
-  if (normalized === 'left' || normalized === 'top') return 0
-  if (normalized === 'right' || normalized === 'bottom') return 1
-  if (normalized.endsWith('%')) {
-    const percentage = Number.parseFloat(normalized)
-    return Number.isFinite(percentage) ? percentage / 100 : 0.5
-  }
-  if (normalized.endsWith('px')) return normalized
-  // A vertical keyword in the horizontal slot (or vice versa) is a valid CSS
-  // reordering case. Fall back to center rather than guessing an edge.
-  if (
-    (horizontal && (normalized === 'top' || normalized === 'bottom')) ||
-    (!horizontal && (normalized === 'left' || normalized === 'right'))
-  ) {
-    return 0.5
-  }
-  return 0.5
-}
-
 function objectPositionTokens(value: string): [string | undefined, string | undefined] {
-  const tokens = value.trim().split(/\s+/).filter(Boolean)
-  if (tokens.length === 0) return [undefined, undefined]
-  if (tokens.length === 1) {
-    const only = tokens[0]
-    if (only === 'top' || only === 'bottom') return ['center', only]
-    return [only, 'center']
+  const tokens = value.toLowerCase().match(/calc\([^)]*\)|[^\s]+/gu) ?? []
+  if (tokens.length <= 2) {
+    if (tokens.length === 1)
+      return /^(top|bottom)$/u.test(tokens[0]!) ? ['center', tokens[0]] : [tokens[0], 'center']
+    if (/^(top|bottom)$/u.test(tokens[0] ?? '') && /^(left|right|center)$/u.test(tokens[1] ?? ''))
+      return [tokens[1], tokens[0]]
+    return [tokens[0], tokens[1]]
   }
-  const first = tokens[0]
-  const second = tokens[1]
-  if (
-    (first === 'top' || first === 'bottom') &&
-    (second === 'left' || second === 'right')
-  ) {
-    return [second, first]
+  let horizontal: string | undefined, vertical: string | undefined
+  for (let index = 0; index < tokens.length; index++) {
+    const token = tokens[index]!
+    const isX = token === 'left' || token === 'right'
+    const isY = token === 'top' || token === 'bottom'
+    if (!isX && !isY && token !== 'center') throw new RangeError('Unsupported object-position')
+    let position = token
+    const next = tokens[index + 1]
+    if ((isX || isY) && next && /^(?:[-+]?\d|calc\()/u.test(next)) {
+      index++
+      position = token === 'right' || token === 'bottom' ? `calc(100% - ${next})` : next
+    }
+    if (isX || (token === 'center' && horizontal === undefined)) horizontal = position
+    else vertical = position
   }
-  return [first, second]
+  return [horizontal, vertical]
 }
 
 function positionOffset(
   available: number,
   token: string | undefined,
-  horizontal: boolean,
+  _horizontal: boolean,
 ): number {
-  const parsed = positionToken(token, horizontal)
-  if (typeof parsed === 'number') return available * parsed
-  const pixels = Number.parseFloat(parsed)
-  return Number.isFinite(pixels) ? pixels : available / 2
+  if (!token || token === 'center') return available / 2
+  if (token === 'left' || token === 'top') return 0
+  if (token === 'right' || token === 'bottom') return available
+  let expression = token.replace(/^calc\((.*)\)$/u, '$1').replace(/\s/gu, '')
+  // Computed length-percentage values are linear combinations of percentages and pixels.
+  if (!/^[+-]?\d*\.?\d+(?:px|%)(?:[+-]\d*\.?\d+(?:px|%))*$/u.test(expression))
+    throw new RangeError('Unsupported object-position')
+  let offset = 0
+  for (const term of expression.matchAll(/([+-]?\d*\.?\d+)(px|%)/gu)) {
+    offset += Number(term[1]) * (term[2] === '%' ? available / 100 : 1)
+  }
+  return offset
 }
 
 export function objectFitRect(
@@ -118,10 +112,7 @@ export function objectFitRect(
     containerWidth / safeSourceWidth,
     containerHeight / safeSourceHeight,
   )
-  const coverScale = Math.max(
-    containerWidth / safeSourceWidth,
-    containerHeight / safeSourceHeight,
-  )
+  const coverScale = Math.max(containerWidth / safeSourceWidth, containerHeight / safeSourceHeight)
   let width = containerWidth
   let height = containerHeight
   switch (objectFit) {
@@ -162,11 +153,22 @@ export function calculateImageGeometry(
   sourceWidth: number,
   sourceHeight: number,
   localBox?: LocalImageBox,
+  renderedBox = false,
 ): ImageGeometry {
   const imageRect = image.getBoundingClientRect()
   const wrapperRect = wrapper.getBoundingClientRect()
   const ownerWindow = image.ownerDocument.defaultView
   const style = ownerWindow?.getComputedStyle(image) ?? getComputedStyle(image)
+  if (renderedBox)
+    return {
+      viewport: {
+        left: imageRect.left - wrapperRect.left,
+        top: imageRect.top - wrapperRect.top,
+        width: imageRect.width,
+        height: imageRect.height,
+      },
+      image: { left: 0, top: 0, width: imageRect.width, height: imageRect.height },
+    }
   const borderLeft = finiteCssPixels(style.borderLeftWidth)
   const borderRight = finiteCssPixels(style.borderRightWidth)
   const borderTop = finiteCssPixels(style.borderTopWidth)
@@ -188,7 +190,11 @@ export function calculateImageGeometry(
     ),
     height: Math.max(
       0,
-      (localBox?.height ?? imageRect.height) - borderTop - borderBottom - paddingTop - paddingBottom,
+      (localBox?.height ?? imageRect.height) -
+        borderTop -
+        borderBottom -
+        paddingTop -
+        paddingBottom,
     ),
   }
   const fitted = objectFitRect(
@@ -278,7 +284,12 @@ export function visibleImageRects(
       0,
       ownerWindow?.innerHeight || ownerDocument.documentElement.clientHeight,
     )
-    if (rect.right <= 0 || rect.bottom <= 0 || rect.left >= viewportWidth || rect.top >= viewportHeight) {
+    if (
+      rect.right <= 0 ||
+      rect.bottom <= 0 ||
+      rect.left >= viewportWidth ||
+      rect.top >= viewportHeight
+    ) {
       return []
     }
     return [{ x: 0, y: 0, width: 1, height: 1 }]
@@ -294,14 +305,8 @@ export function visibleImageRects(
   const content: Rect = {
     left: rect.left + borderLeft + paddingLeft,
     top: rect.top + borderTop + paddingTop,
-    width: Math.max(
-      0,
-      rect.width - borderLeft - borderRight - paddingLeft - paddingRight,
-    ),
-    height: Math.max(
-      0,
-      rect.height - borderTop - borderBottom - paddingTop - paddingBottom,
-    ),
+    width: Math.max(0, rect.width - borderLeft - borderRight - paddingLeft - paddingRight),
+    height: Math.max(0, rect.height - borderTop - borderBottom - paddingTop - paddingBottom),
   }
   if (content.width <= 0 || content.height <= 0) return []
   const fitted = objectFitRect(

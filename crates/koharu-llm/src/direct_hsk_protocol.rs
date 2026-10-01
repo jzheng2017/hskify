@@ -6,7 +6,7 @@
 
 use std::fmt::Write as _;
 
-pub const DIRECT_HSK_PROMPT_REVISION: &str = "ordered-span-hsk-realization-v2-2026-08-09";
+pub const DIRECT_HSK_PROMPT_REVISION: &str = "source-anchored-item-hsk-realization-v5-2026-10-01";
 
 /// Canonical protocol description whose SHA-256 is
 /// [`DIRECT_HSK_PROMPT_HASH`].
@@ -14,23 +14,24 @@ pub const DIRECT_HSK_PROMPT_REVISION: &str = "ordered-span-hsk-realization-v2-20
 /// Keep this material synchronized with the builders below. The unit test pins
 /// the digest so a prompt-semantic change cannot silently reuse cache entries
 /// or benchmark evidence.
-pub const DIRECT_HSK_PROMPT_FINGERPRINT_MATERIAL: &str = r#"ordered-span-hsk-realization-v2-2026-08-09
+pub const DIRECT_HSK_PROMPT_FINGERPRINT_MATERIAL: &str = r#"source-anchored-item-hsk-realization-v5-2026-10-01
 input=generic ordered source spans paired with complete faithful Chinese references; image spans alone may carry measured character and line budgets
 provenance=DOM text is authoritative and must not be corrected; OCR spans alone receive a bounded obvious-recognition-error correction instruction
-chapter-context=daemon-owned preceding Chinese and bounded neighboring English are reference only; preserve canonical sourceIndex and itemOrder and never emit context-only spans
-names=render every name in Chinese, using the faithful reference as authority; no source-language name preservation mode exists
+chapter-context=immutable canonical neighboring English source windows are reference only; preserve canonical sourceIndex and itemOrder and never emit context-only spans
+names=render every name in Chinese, using the faithful reference as authority; source-anchored name metadata protects exact Chinese forms through validation and repair
 translation=realize each faithful Chinese reference at the requested HSK level; preserve its complete meaning, participant roles, agency, attachment, causality, modality, quantities, negation, tone, ambiguity, and numeric values while simplifying vocabulary and grammar
 natural-learning=target 90% coverage for levels 1-3, 93% for level 4, and 95% for levels 5-6; retain only indispensable above-level terms and expose them as teaching metadata
 strict-learning=avoid every above-level term unless the faithful Chinese name form makes it unavoidable
 layout=honor maximum Chinese characters and line count only when image constraints are supplied
 output=one terminal numbered Chinese line per input span, no labels, explanations, markup, IDs, source-language leakage, or provisional text
-decoding=deterministic greedy generation with a source-sized output budget capped at 1024 tokens; context-aware packing shrinks the batch before exceeding the resident model context
+faithful-output=one numbered Chinese line plus a JSON array of sourceText/chineseText/reason records separated by literal tabs; no contradictory position prohibition; demonstrate named and unnamed rows; constrained GBNF transport rejects Latin leakage in Chinese fields; reject malformed or unanchored records and discard lowercase source name exceptions
+decoding=deterministic greedy generation with source-sized output and bounded name-metadata reservation; require completion termination to be Stop; context-aware packing shrinks the batch before exceeding the resident model context
 repair=the same ordered context is supplied to one bounded terminal repair; rejected candidates stay hidden until repair or a source-preserving terminal result"#;
 
 // Filled from the exact UTF-8 bytes of
 // DIRECT_HSK_PROMPT_FINGERPRINT_MATERIAL.
 pub const DIRECT_HSK_PROMPT_HASH: &str =
-    "sha256:0204bc6cd0c4a4a4d5dbf5356a1fdf53da6d4893e599d1023c574097f1d45d09";
+    "sha256:f224b807cad9753a4abedb41a22a5812078d875f3c55d8cae3e88f873bba9f60";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DirectHskLearningMode {
@@ -46,10 +47,10 @@ pub enum DirectSourceProvenance {
 
 /// Shared identity of numbered-line parsing and deterministic preservation
 /// validation used by production and release evidence.
-pub const DIRECT_HSK_VALIDATOR_FINGERPRINT_MATERIAL: &str = "numbered-output-v4|ordered-span-count-and-id-coverage|source-language-and-Chinese-only-gates|numeric-and-critical-term-preservation|kind-label-rejection|hsk-natural-teaching-metadata-and-strict-vocabulary|optional-image-layout-character-and-line-budget|terminal-only-publication-v3|repair-evidence-is-item-local-and-contextual";
+pub const DIRECT_HSK_VALIDATOR_FINGERPRINT_MATERIAL: &str = "numbered-output-v6|ordered-span-coverage|source-language-and-Chinese-only-gates|explicit-question-punctuation|complete-signed-numeric-values-and-multiplicity|source-anchored-capitalized-protected-names|kind-label-rejection|hsk-lexical-policy-and-teaching-metadata|optional-image-layout|reject-token-limit-termination|one-terminal-repair|structural-checks-do-not-certify-meaning-or-grammar";
 
 pub const DIRECT_HSK_VALIDATOR_HASH: &str =
-    "sha256:729765101be1dcde612cec18613e8a01e8a1b70ae7898a74928ee49d8cfe4e68";
+    "sha256:30890b9a0969dca3ae7b415f9e01d13aac64af11fa3e3f80cfde6b842bdd768c";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DirectHskContext<'a> {

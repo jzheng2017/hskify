@@ -1,3 +1,30 @@
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum GenerationTermination {
+    Stop,
+    TokenLimit,
+}
+
+#[derive(Debug, Clone)]
+pub struct Generation {
+    pub text: String,
+    pub termination: GenerationTermination,
+}
+impl std::ops::Deref for Generation {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.text
+    }
+}
+impl From<String> for Generation {
+    fn from(text: String) -> Self {
+        Self {
+            text,
+            termination: GenerationTermination::Stop,
+        }
+    }
+}
+
 use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -301,6 +328,7 @@ impl Llm {
             cancel,
             |_| Ok(()),
         )
+        .map(|result| result.text)
     }
 
     /// Generate with an exact system prompt and optional GBNF constraint.
@@ -324,6 +352,7 @@ impl Llm {
             cancel,
             |_| Ok(()),
         )
+        .map(|result| result.text)
     }
 
     /// Generate with an exact system prompt and report decoded UTF-8 pieces as
@@ -340,7 +369,7 @@ impl Llm {
         system_prompt: &str,
         cancel: &AtomicBool,
         on_piece: impl FnMut(&str) -> Result<()>,
-    ) -> Result<String> {
+    ) -> Result<Generation> {
         self.generate_inner(
             prompt,
             opts,
@@ -361,10 +390,13 @@ impl Llm {
         exact_system_prompt: bool,
         cancel: &AtomicBool,
         mut on_piece: impl FnMut(&str) -> Result<()>,
-    ) -> Result<String> {
+    ) -> Result<Generation> {
         check_cancelled(cancel)?;
         if opts.max_tokens == 0 {
-            return Ok(String::new());
+            return Ok(Generation {
+                text: String::new(),
+                termination: GenerationTermination::Stop,
+            });
         }
 
         let prompt = if exact_system_prompt {
@@ -436,7 +468,10 @@ impl Llm {
 
         if should_stop(&self.model, self.eos_token, next_token) {
             tracing::warn!("Early stopping: EOS/EOG token generated at end of prompt");
-            return Ok(String::new());
+            return Ok(Generation {
+                text: String::new(),
+                termination: GenerationTermination::Stop,
+            });
         }
 
         let start_post_prompt = Instant::now();
@@ -480,7 +515,14 @@ impl Llm {
             rate(sampled, gen_dt)
         );
 
-        Ok(generated)
+        Ok(Generation {
+            text: generated,
+            termination: if sampled >= opts.max_tokens {
+                GenerationTermination::TokenLimit
+            } else {
+                GenerationTermination::Stop
+            },
+        })
     }
 }
 

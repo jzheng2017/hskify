@@ -52,6 +52,8 @@ describe('background acquisition prefetch handoff', () => {
     await router.route(
       {
         type: 'job:submit-image',
+        clientRequestId: 'test-request',
+        retryItemIds: [],
         ...source(),
         chapterSourceOrder: [1],
         surfaceKind: 'image',
@@ -66,6 +68,36 @@ describe('background acquisition prefetch handoff', () => {
     expect(acquire).toHaveBeenCalledTimes(1)
     expect(digest).toHaveBeenCalledTimes(1)
     expect(createJob).toHaveBeenCalledTimes(1)
+  })
+
+  it('checks current image bytes using existing acquisition and enforces renderer ownership', async () => {
+    const fixture = new FixtureService()
+    const router = new BackgroundRouter({ fixture })
+    const submitted = (await router.route(
+      {
+        type: 'job:submit-image',
+        clientRequestId: 'revision',
+        retryItemIds: [],
+        ...source(),
+        chapterSourceOrder: [1],
+        surfaceKind: 'image',
+        hskLevel: 3,
+        learningMode: 'natural',
+        readingDirection: 'ltr',
+        visibleRects: [],
+      },
+      sender(),
+    )) as { jobId: string; sourceSha256: string }
+    const request = { type: 'source:image-revision' as const, jobId: submitted.jobId }
+    expect(await router.route(request, sender())).toBe(submitted.sourceSha256)
+    await expect(
+      router.route(request, { ...sender(), tab: { id: 8 } } as browser.runtime.MessageSender),
+    ).rejects.toMatchObject({ code: 'RESULT_OWNER_MISMATCH' })
+    const bytes = await fixture.sourceImage(900, 16_000)
+    const view = new Uint8Array(bytes)
+    view[bytes.byteLength - 1] = view[bytes.byteLength - 1]! ^ 1
+    vi.spyOn(fixture, 'sourceImage').mockResolvedValue(bytes)
+    expect(await router.route(request, sender())).not.toBe(submitted.sourceSha256)
   })
 
   it('drops retained bytes on cancellation and does not hand them to a later submit', async () => {
@@ -85,6 +117,8 @@ describe('background acquisition prefetch handoff', () => {
     await router.route(
       {
         type: 'job:submit-image',
+        clientRequestId: 'test-request',
+        retryItemIds: [],
         ...source(),
         chapterSourceOrder: [1],
         surfaceKind: 'image',

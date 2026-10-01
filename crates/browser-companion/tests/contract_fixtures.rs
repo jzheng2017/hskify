@@ -42,6 +42,8 @@ fn repeated_document_request_fixture(name: &str) -> DocumentJobRequest {
     let text = descriptor.text_seed.repeat(descriptor.text_repeat);
     let blocks = (0..descriptor.block_count)
         .map(|item_order| DocumentSourceBlock {
+            parent_block_id: format!("parent-{item_order}"),
+            sub_item_order: 0,
             item_id: format!("block-{item_order}"),
             source_index: 0,
             item_order: u32::try_from(item_order).expect("fixture item order fits u32"),
@@ -51,6 +53,12 @@ fn repeated_document_request_fixture(name: &str) -> DocumentJobRequest {
         })
         .collect::<Vec<_>>();
     DocumentJobRequest {
+        client_request_id: "fixture-document-request".to_owned(),
+        retry_item_ids: Vec::new(),
+        focus: FocusUpdateRequest::Document {
+            active: true,
+            visible_block_ids: Vec::new(),
+        },
         build_fingerprint: BUILD_FINGERPRINT.to_owned(),
         page_session_id: descriptor.page_session_id,
         source_sha256: canonical_document_sha256(&blocks),
@@ -101,7 +109,7 @@ fn image_and_document_requests_and_focus_are_unversioned_and_valid() {
     let serialized = serde_json::to_value(request).unwrap();
     assert_eq!(
         serialized["buildFingerprint"],
-        "hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-08-09-r8"
+        "hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-10-01-r10"
     );
     assert!(serialized.get("protocolVersion").is_none());
 }

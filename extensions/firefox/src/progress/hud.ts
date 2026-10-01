@@ -152,9 +152,7 @@ export class ChapterProgressReducer {
     const next = CHAPTER_STAGE_PHASE[status.stage]
     const previous = this.jobs.get(key)
     const phase =
-      !previous || phaseIndex(next) >= phaseIndex(previous.phase)
-        ? next
-        : previous.phase
+      !previous || phaseIndex(next) >= phaseIndex(previous.phase) ? next : previous.phase
     const overallProgress =
       status.overallProgress === undefined
         ? previous?.overallProgress
@@ -202,9 +200,7 @@ export class ChapterProgressReducer {
   }
 }
 
-export function friendlyProgressMessage(
-  status: Pick<ProgressJobUpdate, 'stage'>,
-): string {
+export function friendlyProgressMessage(status: Pick<ProgressJobUpdate, 'stage'>): string {
   switch (status.stage) {
     case 'queued':
       return 'Waiting to start'
@@ -284,7 +280,7 @@ export class PageHud {
       : this.chapterProgress.snapshot()
     // The queue can work on several images concurrently. Show one chapter
     // phase instead of letting whichever image reported last replace it.
-    const message = status ? progress.message : input.message ?? progress.message
+    const message = status ? progress.message : (input.message ?? progress.message)
     this.state = {
       state,
       contentKind: this.contentKind,
@@ -312,9 +308,9 @@ export class PageHud {
       contentKind: this.contentKind,
       current: completed,
       total,
-      message: `${completed} of ${total} items ready`,
+      message: `All discovered content processed: ${completed} of ${total} items ready`,
     }
-    this.title.textContent = 'Translation complete'
+    this.title.textContent = 'Discovered content processed'
     this.detail.textContent = this.state.message
     this.progress.value = 1
     this.cancelButton.hidden = true
@@ -395,8 +391,7 @@ export class ImageStatusBadge {
   private readonly root: HTMLElement
 
   update(status: ProgressJobUpdate | string): void {
-    this.message.textContent =
-      typeof status === 'string' ? status : friendlyProgressMessage(status)
+    this.message.textContent = typeof status === 'string' ? status : friendlyProgressMessage(status)
     this.retryButton.hidden = true
     this.host.style.pointerEvents = 'none'
   }

@@ -47,6 +47,8 @@ function repeatedDocumentRequestFixture(name: string) {
   }
   const text = descriptor.textSeed.repeat(descriptor.textRepeat)
   const blocks = Array.from({ length: descriptor.blockCount }, (_, itemOrder) => ({
+    parentBlockId: `block-${itemOrder}`,
+    subItemOrder: 0,
     itemId: `block-${itemOrder}`,
     sourceIndex: 0 as const,
     itemOrder,
@@ -59,6 +61,9 @@ function repeatedDocumentRequestFixture(name: string) {
     .digest('hex')
   return {
     buildFingerprint: BUILD_FINGERPRINT,
+    clientRequestId: 'test-request',
+    retryItemIds: [],
+    focus: { kind: 'document' as const, active: true, visibleBlockIds: [] },
     pageSessionId: descriptor.pageSessionId,
     sourceSha256,
     settings: {
@@ -97,6 +102,8 @@ function repeatedDocumentFocusFixture(name: string) {
 function imageRequest() {
   return {
     buildFingerprint: BUILD_FINGERPRINT,
+    clientRequestId: 'test-request',
+    retryItemIds: [],
     clientImageId: 'page-0-hash',
     sourceSha256: 'a'.repeat(64),
     sourceMimeType: 'image/png',
@@ -121,6 +128,9 @@ function imageRequest() {
 function documentRequest() {
   return {
     buildFingerprint: BUILD_FINGERPRINT,
+    clientRequestId: 'test-request',
+    retryItemIds: [],
+    focus: { kind: 'document' as const, active: true, visibleBlockIds: [] },
     pageSessionId: 'chapter-document',
     sourceSha256: 'b'.repeat(64),
     settings: {
@@ -132,6 +142,8 @@ function documentRequest() {
     },
     blocks: [
       {
+        parentBlockId: 'heading-0',
+        subItemOrder: 0,
         itemId: 'heading-0',
         sourceIndex: 0,
         itemOrder: 0,
@@ -140,6 +152,8 @@ function documentRequest() {
         text: 'Chapter One',
       },
       {
+        parentBlockId: 'prose-1',
+        subItemOrder: 0,
         itemId: 'prose-1',
         sourceIndex: 0,
         itemOrder: 1,
@@ -220,9 +234,9 @@ describe('unversioned browser contract', () => {
     const totalBytes = repeatedDocumentRequestFixture(
       'invalid/document-job-request.total-bytes.descriptor.json',
     )
-    expect(
-      new TextEncoder().encode(JSON.stringify(totalBytes)).byteLength,
-    ).toBeGreaterThan(MAX_DOCUMENT_UTF8_BYTES)
+    expect(new TextEncoder().encode(JSON.stringify(totalBytes)).byteLength).toBeGreaterThan(
+      MAX_DOCUMENT_UTF8_BYTES,
+    )
     expect(() => parseDocumentJobRequest(totalBytes)).toThrow(/1048576/u)
 
     const blockCount = repeatedDocumentRequestFixture(
@@ -234,9 +248,9 @@ describe('unversioned browser contract', () => {
     const blockBytes = repeatedDocumentRequestFixture(
       'invalid/document-job-request.block-bytes.descriptor.json',
     )
-    expect(
-      new TextEncoder().encode(blockBytes.blocks[0]!.text).byteLength,
-    ).toBeGreaterThan(MAX_DOCUMENT_BLOCK_UTF8_BYTES)
+    expect(new TextEncoder().encode(blockBytes.blocks[0]!.text).byteLength).toBeGreaterThan(
+      MAX_DOCUMENT_BLOCK_UTF8_BYTES,
+    )
     expect(() => parseDocumentJobRequest(blockBytes)).toThrow(/UTF-8 bytes/u)
 
     const focus = repeatedDocumentFocusFixture(
@@ -319,6 +333,8 @@ describe('unversioned browser contract', () => {
         ...request,
         blocks: Array.from({ length: MAX_DOCUMENT_BLOCKS + 1 }, (_, itemOrder) => ({
           ...block,
+          parentBlockId: `block-${itemOrder}`,
+          subItemOrder: 0,
           itemId: `block-${itemOrder}`,
           itemOrder,
         })),
@@ -438,6 +454,8 @@ describe('unversioned browser contract', () => {
         sequence: 1,
         type: 'documentBlockPreserved',
         block: {
+          parentBlockId: 'block-0',
+          subItemOrder: 0,
           itemId: 'block-0',
           sourceIndex: 0,
           itemOrder: 0,
@@ -463,7 +481,12 @@ describe('unversioned browser contract', () => {
       parseLookupRequest({
         interaction: 'hover',
         characterOffset: 2,
-        jobId: 'job-1',
+        context: {
+          displayedChinese: '研究生离开。',
+          baseChinese: '研究生离开。',
+          sourceText: 'The graduate student left.',
+          properNames: [],
+        },
         itemId: 'item-1',
       }).interaction,
     ).toBe('hover')
@@ -508,7 +531,9 @@ describe('unversioned browser contract', () => {
     expect(() => parseImageJobRequest({ ...imageRequest(), chapterSourceOrder: [1] })).toThrow(
       /sourceIndex/,
     )
-    expect(() => parseLookupRequest({ interaction: 'hover', characterOffset: 0 })).toThrow(/jobId/)
+    expect(() => parseLookupRequest({ interaction: 'hover', characterOffset: 0 })).toThrow(
+      /context/,
+    )
     expect(() =>
       parseLookupRequest({ interaction: 'selection', selectedText: 'word', itemId: 'item-only' }),
     ).toThrow(/paired/)
@@ -541,18 +566,22 @@ describe('unversioned browser contract', () => {
       stage: 'registering' as const,
       message: 'Registered',
     }))
-    expect(parseJobUpdateBatch({
-      jobId: 'maximal-document-replay',
-      nextSequence: 1_024,
-      updates,
-    }).updates).toHaveLength(1_024)
-    expect(() => parseJobUpdateBatch({
-      jobId: 'oversized-document-replay',
-      nextSequence: 1_025,
-      updates: [
-        ...updates,
-        { sequence: 1_025, type: 'progress', stage: 'registering', message: 'Registered' },
-      ],
-    })).toThrow(/at most 1024/u)
+    expect(
+      parseJobUpdateBatch({
+        jobId: 'maximal-document-replay',
+        nextSequence: 1_024,
+        updates,
+      }).updates,
+    ).toHaveLength(1_024)
+    expect(() =>
+      parseJobUpdateBatch({
+        jobId: 'oversized-document-replay',
+        nextSequence: 1_025,
+        updates: [
+          ...updates,
+          { sequence: 1_025, type: 'progress', stage: 'registering', message: 'Registered' },
+        ],
+      }),
+    ).toThrow(/at most 1024/u)
   })
 })

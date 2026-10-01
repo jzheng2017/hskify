@@ -78,6 +78,8 @@ function fixtureChapter(): { chapter: DocumentChapter; root: HTMLElement } {
     sourceElements.set(itemId, source)
     structure.push({
       type: 'text',
+      parentBlockId: itemId,
+      subItemOrder: 0,
       itemId,
       order,
       kind,
@@ -106,6 +108,8 @@ function fixtureChapter(): { chapter: DocumentChapter; root: HTMLElement } {
   const blocks = structure
     .filter((item) => item.type === 'text')
     .map((item, itemOrder) => ({
+      parentBlockId: item.itemId,
+      subItemOrder: 0,
       itemId: item.itemId,
       sourceIndex: 0 as const,
       itemOrder,
@@ -125,6 +129,24 @@ function fixtureChapter(): { chapter: DocumentChapter; root: HTMLElement } {
     chapter: {
       sourceRoot: root,
       sourceElements,
+      sourceRevisions: new Map(
+        [...sourceElements.values()].map((element) => [
+          element.firstChild as Text,
+          (element.firstChild as Text).data,
+        ]),
+      ),
+      sourceSlots: new Map(
+        [...sourceElements].map(([id, element]) => [
+          id,
+          [
+            {
+              node: element.firstChild as Text,
+              start: 0,
+              end: (element.firstChild as Text).length,
+            },
+          ],
+        ]),
+      ),
       structure,
       snapshot: {
         sourceUrl: 'https://novels.example.test/chapter/1',
@@ -139,6 +161,8 @@ function fixtureChapter(): { chapter: DocumentChapter; root: HTMLElement } {
 
 function translation(sourceText: string): TranslatedText {
   return {
+    termination: 'stop',
+    protectedNames: [],
     sourceText,
     baseChinese: '\u6211\u4eec\u73b0\u5728\u51fa\u53d1\u3002',
     displayedChinese: '\u6211\u4eec\u73b0\u5728\u51fa\u53d1\u3002',
@@ -196,7 +220,9 @@ describe('document reader', () => {
     expect(host.dataset.hskifySourceBlockCount).toBe('6')
     expect(host.dataset.hskifySourceCharacterCount).toBe(String(chapter.snapshot.characterCount))
     expect(root.querySelectorAll('[data-hskify-item-id^="block-"]')).toHaveLength(6)
-    expect(chapter.sourceElements.get('block-0')?.textContent).toBe('\u200b')
+    expect(root.querySelector<HTMLElement>('[data-hskify-item-id=block-0]')?.style.visibility).toBe(
+      'hidden',
+    )
     expect(root.querySelector('img')?.getAttribute('src')).toBe(
       'https://images.example.test/plate.jpg',
     )
@@ -215,7 +241,7 @@ describe('document reader', () => {
 
     expect(reader.installBlock('block-1', text)).toBe(true)
     expect(reader.installBlock('block-1', text)).toBe(false)
-    const element = chapter.sourceElements.get('block-1')
+    const element = document.querySelector<HTMLElement>('[data-hskify-item-id=block-1]')
     expect(element?.textContent).toBe(text.displayedChinese)
     expect(element?.querySelector('.hskify-learning-term')?.textContent).toBe('\u73b0\u5728')
     expect(element?.dataset.hskifyHskLearningMode).toBe('natural')
@@ -237,8 +263,8 @@ describe('document reader', () => {
     expect(reader.preserveBlock('block-2', 'English source block number 2.', 'duplicate')).toBe(
       false,
     )
-    const preserved = chapter.sourceElements.get('block-2')
-    expect(preserved?.textContent).toBe('\u200b')
+    const preserved = document.querySelector<HTMLElement>('[data-hskify-item-id=block-2]')
+    expect(preserved?.textContent).toContain('Translation failed.')
     expect(preserved?.textContent).not.toContain('English')
     expect(preserved?.dataset.hskifyState).toBe('preserved')
     expect(() => reader.installBlock('block-3', translation('different source'))).toThrow(
@@ -266,8 +292,12 @@ describe('document reader', () => {
     )
 
     modeButton('Chinese')?.click()
-    expect(first.textContent).toBe('\u200b')
-    expect(first.dataset.hskifyState).toBe('pending')
+    expect(first.querySelector<HTMLElement>('[data-hskify-item-id]')?.style.visibility).toBe(
+      'hidden',
+    )
+    expect(first.querySelector<HTMLElement>('[data-hskify-item-id]')?.dataset.hskifyState).toBe(
+      'pending',
+    )
     expect(root.hidden).toBe(false)
     modeButton('Hold to compare')?.dispatchEvent(
       new Event('pointerdown', { bubbles: true, composed: true }),
@@ -277,7 +307,9 @@ describe('document reader', () => {
     modeButton('Hold to compare')?.dispatchEvent(
       new Event('pointerup', { bubbles: true, composed: true }),
     )
-    expect(first.textContent).toBe('\u200b')
+    expect(first.querySelector<HTMLElement>('[data-hskify-item-id]')?.style.visibility).toBe(
+      'hidden',
+    )
     expect(root.getAttribute('aria-hidden')).toBe('false')
 
     reader.destroy()
@@ -303,8 +335,8 @@ describe('document reader', () => {
       { onVisibleBlocksChanged: focus },
       { intersectionObserverFactory: factory },
     )
-    const first = chapter.sourceElements.get('block-0')!
-    const second = chapter.sourceElements.get('block-1')!
+    const first = document.querySelector<HTMLElement>('[data-hskify-item-id=block-0]')!
+    const second = document.querySelector<HTMLElement>('[data-hskify-item-id=block-1]')!
     observer?.trigger([second])
     observer?.trigger([first])
     expect(focus).not.toHaveBeenCalled()
@@ -330,7 +362,7 @@ describe('document reader', () => {
     }
     const reader = new DocumentReader(chapter, {}, { intersectionObserverFactory: factory })
     const source = chapter.sourceElements.get('block-1')!
-    observer?.trigger([source])
+    observer?.trigger([document.querySelector<HTMLElement>('[data-hskify-item-id=block-1]')!])
     vi.advanceTimersByTime(100)
     vi.spyOn(source, 'getBoundingClientRect')
       .mockReturnValueOnce({ top: 40 } as DOMRect)

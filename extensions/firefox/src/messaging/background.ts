@@ -433,6 +433,8 @@ export class BackgroundRouter {
     const { acquired, sourceSha256 } = prefetched ?? (await this.acquireAndHash(message))
     const clientImageId = `${message.pageSessionId}-${message.sourceIndex}-${sourceSha256.slice(0, 16)}`
     const request: ImageJobRequest = {
+      clientRequestId: message.clientRequestId,
+      retryItemIds: message.retryItemIds,
       buildFingerprint: BUILD_FINGERPRINT,
       clientImageId,
       sourceSha256,
@@ -800,12 +802,15 @@ export class BackgroundRouter {
           await this.cancelRecord(record)
           continue
         }
+        // A new renderer has no installed items. Replay from the beginning,
+        // independently of the previous renderer's delivery cursor.
+        await this.jobs.put({ ...record, acknowledgedSequence: 0, deliveredSequence: 0 })
         if (record.source.kind === 'document') {
           recovered.push({
             kind: 'document',
             jobId: record.jobId,
             sourceSha256: record.sourceSha256,
-            acknowledgedSequence: record.acknowledgedSequence,
+            acknowledgedSequence: 0,
           })
         } else {
           recovered.push({
@@ -817,7 +822,7 @@ export class BackgroundRouter {
             sourceWidth: record.source.sourceWidth,
             sourceHeight: record.source.sourceHeight,
             sourceIndex: record.source.sourceIndex,
-            acknowledgedSequence: record.acknowledgedSequence,
+            acknowledgedSequence: 0,
           })
         }
       } catch {
@@ -852,15 +857,7 @@ export class BackgroundRouter {
     message: Extract<BackgroundRequest, { type: 'dictionary:lookup' }>,
     sender: Sender,
   ): Promise<LookupResult> {
-    const { jobId, itemId } = message.request
-    if (jobId && itemId) {
-      const artifact = await this.ownedArtifact(jobId, sender)
-      if (!artifact.itemIds.includes(itemId))
-        throw new BackgroundOperationError(
-          'LOOKUP_ITEM_MISMATCH',
-          'The requested dictionary item does not belong to this job.',
-        )
-    }
+    senderLocation(sender)
     return this.fixture
       ? this.fixture.lookup(message.request)
       : this.companion.lookup(message.request)
@@ -1002,6 +999,47 @@ export class BackgroundRouter {
         return this.cancelPage(message.pageSessionId, sender)
       case 'dictionary:lookup':
         return this.lookup(message, sender)
+      case 'source:image-revision': {
+        const artifact = await this.ownedArtifact(message.jobId, sender)
+        if (artifact.source.kind !== 'image')
+          throw new BackgroundOperationError(
+            'SOURCE_MODALITY_MISMATCH',
+            'This source is not an image.',
+          )
+        const source = artifact.source
+        const result = await this.acquireAndHash({
+          type: 'image:prefetch',
+          pageSessionId: artifact.pageSessionId,
+          sourceIndex: source.sourceIndex,
+          imageUrl: source.sourceUrl,
+          pageUrl: artifact.pageUrl,
+          naturalWidth: source.sourceWidth,
+          naturalHeight: source.sourceHeight,
+        })
+        return result.sourceSha256
+      }
+      case 'source:capture-region': {
+        const { tabId } = senderLocation(sender)
+        assertSenderDocument(sender, message.pageUrl)
+        const tab = await browser.tabs.get(tabId)
+        if (!tab.active)
+          throw new BackgroundOperationError(
+            'CAPTURE_REQUIRES_VISIBLE_TAB',
+            'The selected source must be in the active tab.',
+          )
+        const captured = await browser.tabs.captureVisibleTab(tab.windowId!, {
+          format: 'png',
+          rect: message.rect,
+          scale: 1,
+        })
+        const current = await browser.tabs.get(tabId)
+        if (!current.active || current.url !== tab.url)
+          throw new BackgroundOperationError(
+            'CAPTURE_SOURCE_CHANGED',
+            'The visible tab changed during source capture.',
+          )
+        return captured
+      }
       case 'font:get':
         return this.font(message, sender)
     }
@@ -1062,6 +1100,8 @@ const BACKGROUND_MESSAGE_TYPES = new Set<BackgroundRequest['type']>([
   'jobs:recover',
   'jobs:cancel-page',
   'dictionary:lookup',
+  'source:capture-region',
+  'source:image-revision',
   'font:get',
 ])
 

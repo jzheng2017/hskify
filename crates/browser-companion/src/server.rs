@@ -43,7 +43,7 @@ use crate::crypto::{SECRET_BYTES, decode_secret, generate_secret, secrets_equal,
 use crate::decoded_cache::DecodedImageCache;
 use crate::origin::validate_extension_origin;
 use crate::pipeline_adapter::{
-    ChapterPipeline, HskifyPipeline, ImageJobInput, ItemLookupContext, LookupInput, PipelineError,
+    ChapterPipeline, HskifyPipeline, ImageJobInput, LookupInput, PipelineError,
 };
 use crate::result_cache::{CachedDocumentJob, CachedImageJob, CachedImageRegion, ResultCache};
 use crate::setup::{ManagedResourcePaths, ModelSetup};
@@ -51,7 +51,7 @@ use crate::{CONTROL_HEADER, EXTENSION_ORIGIN_HEADER};
 
 const INTERNAL_SESSION_PATH: &str = "/browser-internal/session";
 const MAX_INTERNAL_BODY_BYTES: usize = 4 * 1024;
-const MAX_LOOKUP_BODY_BYTES: usize = 16 * 1024;
+const MAX_LOOKUP_BODY_BYTES: usize = 128 * 1024;
 const MAX_FOCUS_BODY_BYTES: usize = 32 * 1024;
 const MAX_DOCUMENT_BODY_BYTES: usize = crate::contracts::MAX_DOCUMENT_BYTES;
 const MAX_FONT_BYTES: u64 = 32 * 1024 * 1024;
@@ -155,7 +155,7 @@ struct JobLog {
     published_items: HashSet<String>,
     translated_regions: HashMap<String, ImageRegionReady>,
     preserved_regions: HashMap<String, ImageRegionPreserved>,
-    lookup_contexts: HashMap<String, ItemLookupContext>,
+
     document_blocks: HashMap<String, DocumentBlockReady>,
     document_preserved: HashMap<String, DocumentBlockPreserved>,
     focus: JobFocus,
@@ -195,7 +195,6 @@ impl JobRecord {
                 published_items: HashSet::new(),
                 translated_regions: HashMap::new(),
                 preserved_regions: HashMap::new(),
-                lookup_contexts: HashMap::new(),
                 document_blocks: HashMap::new(),
                 document_preserved: HashMap::new(),
                 focus: JobFocus {
@@ -433,23 +432,6 @@ impl JobRecord {
             .clone()
     }
 
-    fn remember_lookup_context(&self, item_id: String, context: ItemLookupContext) {
-        self.log
-            .lock()
-            .expect("job log lock poisoned")
-            .lookup_contexts
-            .insert(item_id, context);
-    }
-
-    fn lookup_context(&self, item_id: &str) -> Option<ItemLookupContext> {
-        self.log
-            .lock()
-            .expect("job log lock poisoned")
-            .lookup_contexts
-            .get(item_id)
-            .cloned()
-    }
-
     fn translated_regions(&self) -> Vec<ImageRegionReady> {
         let mut regions = self
             .log
@@ -490,17 +472,7 @@ impl JobRecord {
         blocks.sort_by_key(|block| (block.source_index, block.item_order));
         let mut preserved = log.document_preserved.values().cloned().collect::<Vec<_>>();
         preserved.sort_by_key(|block| (block.source_index, block.item_order));
-        let mut lookup_contexts = log
-            .lookup_contexts
-            .iter()
-            .map(|(item_id, context)| (item_id.clone(), context.clone()))
-            .collect::<Vec<_>>();
-        lookup_contexts.sort_by(|left, right| left.0.cmp(&right.0));
-        CachedDocumentJob {
-            blocks,
-            preserved,
-            lookup_contexts,
-        }
+        CachedDocumentJob { blocks, preserved }
     }
 }
 
@@ -678,6 +650,10 @@ impl JobUpdateSink {
         Ok(update)
     }
 
+    pub(crate) fn preserved_regions(&self) -> Vec<ImageRegionPreserved> {
+        self.record.preserved_regions()
+    }
+
     pub fn focus(&self) -> JobFocus {
         self.record.focus()
     }
@@ -697,12 +673,6 @@ impl JobUpdateSink {
 
     pub fn is_cancelled(&self) -> bool {
         self.record.cancel.load(Ordering::Acquire)
-    }
-
-    /// Preserve only the language context used by the optional dictionary
-    /// lookup route. Browser clients receive terminal `ImageRegionReady` updates.
-    pub(crate) fn remember_item_for_lookup(&self, item_id: String, context: ItemLookupContext) {
-        self.record.remember_lookup_context(item_id, context);
     }
 }
 
@@ -866,6 +836,8 @@ pub struct BridgeState {
     setup: Option<Arc<ModelSetup>>,
     decoded_images: Mutex<DecodedImageCache>,
     result_cache: Arc<ResultCache>,
+    cache_writer: std::sync::mpsc::SyncSender<Box<dyn FnOnce() + Send>>,
+    creations: Mutex<HashMap<String, CreationEntry>>,
     sessions: Mutex<Vec<Session>>,
     storage: RwLock<Storage>,
     lifecycle: Mutex<Lifecycle>,
@@ -917,6 +889,16 @@ impl BridgeState {
             "at least one authenticated request must be admissible"
         );
         let request_capacity = Arc::new(Semaphore::new(config.limits.max_concurrent_requests));
+        let (cache_writer, cache_tasks) =
+            std::sync::mpsc::sync_channel::<Box<dyn FnOnce() + Send>>(2);
+        std::thread::Builder::new()
+            .name("result-cache-writer".to_owned())
+            .spawn(move || {
+                while let Ok(write) = cache_tasks.recv() {
+                    write();
+                }
+            })
+            .expect("spawn bounded result cache writer");
         Arc::new(Self {
             config,
             control_secret,
@@ -924,6 +906,8 @@ impl BridgeState {
             setup,
             decoded_images: Mutex::new(DecodedImageCache::default()),
             result_cache: Arc::new(ResultCache::new(cache_root.join("results"))),
+            cache_writer,
+            creations: Mutex::new(HashMap::new()),
             sessions: Mutex::new(Vec::new()),
             storage: RwLock::new(Storage::default()),
             lifecycle: Mutex::new(Lifecycle {
@@ -1248,20 +1232,64 @@ impl BridgeState {
                             "A completed region patch was unavailable for persistence.",
                         )
                     })?;
-                let lookup_context = record.lookup_context(&region.item_id).ok_or_else(|| {
-                    PipelineError::new(
-                        "CACHE_FAILED",
-                        "A completed region lookup context was unavailable for persistence.",
-                    )
-                })?;
-                Ok(CachedImageRegion {
-                    region,
-                    lookup_context,
-                    patch_png,
-                })
+                Ok(CachedImageRegion { region, patch_png })
             })
             .collect::<Result<Vec<_>, PipelineError>>()?;
         Ok(CachedImageJob { regions, preserved })
+    }
+}
+
+struct CreationEntry {
+    digest: String,
+    created: Instant,
+    job: Arc<tokio::sync::Mutex<Option<String>>>,
+}
+
+impl BridgeState {
+    async fn creation_guard(
+        &self,
+        id: &str,
+        digest: String,
+    ) -> Result<tokio::sync::OwnedMutexGuard<Option<String>>, ApiError> {
+        let job = {
+            let mut entries = self
+                .creations
+                .lock()
+                .expect("creation ledger lock poisoned");
+            if let Some(entry) = entries.get(id) {
+                if entry.digest != digest {
+                    return Err(ApiError::bad_request(
+                        "REQUEST_ID_CONFLICT",
+                        "clientRequestId was already used with a different payload.",
+                    ));
+                }
+                entry.job.clone()
+            } else {
+                if entries.len() >= 4096 {
+                    entries.retain(|_, entry| {
+                        entry.created.elapsed() < Duration::from_secs(30 * 60)
+                            || Arc::strong_count(&entry.job) > 1
+                    });
+                }
+                if entries.len() >= 4096 {
+                    return Err(ApiError::bad_request(
+                        "REQUEST_LEDGER_FULL",
+                        "Too many recent creation requests.",
+                    ));
+                }
+                let job = Arc::new(tokio::sync::Mutex::new(None));
+                entries.insert(
+                    id.to_owned(),
+                    CreationEntry {
+                        digest,
+                        created: Instant::now(),
+                        job: job.clone(),
+                    },
+                );
+                job
+            }
+        };
+        Ok(job.lock_owned().await)
     }
 }
 
@@ -1850,8 +1878,27 @@ async fn create_job(
         ));
     }
 
-    let pipeline_input = create_request.pipeline_input();
+    let mut pipeline_input = create_request.pipeline_input();
+    let payload = format!(
+        "image:{}:{}",
+        sha256_hex(&serde_json::to_vec(&create_request).map_err(|_| ApiError::internal())?),
+        sha256_hex(&image)
+    );
+    let mut creation = state
+        .creation_guard(&create_request.client_request_id, payload)
+        .await?;
+    if let Some(job_id) = creation.as_ref() {
+        return Ok((
+            StatusCode::ACCEPTED,
+            Json(BrowserJobCreated {
+                build_fingerprint: BUILD_FINGERPRINT.to_owned(),
+                job_id: job_id.clone(),
+            }),
+        ));
+    }
     let cache_context = state.pipeline.image_cache_context(&pipeline_input);
+    let frozen_cache_context = cache_context.clone();
+    pipeline_input.surrounding_context = frozen_cache_context.clone();
     let limits = state.config.limits.clone();
     let validation_request = pipeline_input.clone();
     let validation_state = state.clone();
@@ -1867,11 +1914,16 @@ async fn create_job(
                 validation_state
                     .result_cache
                     .invalidate_image(&validation_request, &cache_context)
-                    .map_err(|_| ApiError::internal())?;
+                    .ok();
                 None
             }
         };
-        if let Some(cached) = cached {
+        if let Some(cached) = cached.filter(|cached| {
+            validation_request.retry_item_ids.is_empty()
+                && cached.preserved.iter().all(|region| {
+                    region.disposition == crate::contracts::PreservationDisposition::Excluded
+                })
+        }) {
             return Ok(PreparedUpload::Cached(cached));
         }
         let source = decode_image_upload(
@@ -1892,7 +1944,15 @@ async fn create_job(
     };
     let (job_id, record, sink) =
         state.reserve_uploaded_job(source, create_request.visible_rects)?;
-    tokio::spawn(run_image_job(state, record, pipeline_input, sink, cached));
+    *creation = Some(job_id.clone());
+    tokio::spawn(run_image_job(
+        state,
+        record,
+        pipeline_input,
+        sink,
+        cached,
+        frozen_cache_context,
+    ));
 
     Ok((
         StatusCode::ACCEPTED,
@@ -1932,19 +1992,42 @@ async fn create_document_job(
             )
         }
     })?;
+    let digest = format!(
+        "document:{}",
+        sha256_hex(&serde_json::to_vec(&request).map_err(|_| ApiError::internal())?)
+    );
+    let mut creation = state
+        .creation_guard(&request.client_request_id, digest)
+        .await?;
+    if let Some(job_id) = creation.as_ref() {
+        return Ok((
+            StatusCode::ACCEPTED,
+            Json(BrowserJobCreated {
+                build_fingerprint: BUILD_FINGERPRINT.to_owned(),
+                job_id: job_id.clone(),
+            }),
+        ));
+    }
     let cache = state.result_cache.clone();
     let cache_request = request.clone();
     let cached = tokio::task::spawn_blocking(move || cache.load_document(&cache_request))
         .await
         .map_err(|_| ApiError::internal())?
-        .or_else(|_| {
-            state
-                .result_cache
-                .invalidate_document(&request)
-                .map(|_| None)
-        })
-        .map_err(|_| ApiError::internal())?;
-    let (job_id, record, sink) = state.reserve_document_job(Vec::new())?;
+        .unwrap_or_else(|_| {
+            let _ = state.result_cache.invalidate_document(&request);
+            None
+        });
+    let cached =
+        cached.filter(|cached| request.retry_item_ids.is_empty() && cached.preserved.is_empty());
+    let FocusUpdateRequest::Document {
+        visible_block_ids, ..
+    } = &request.focus
+    else {
+        return Err(ApiError::internal());
+    };
+    let (job_id, record, sink) = state.reserve_document_job(visible_block_ids.clone())?;
+    record.update_focus(request.focus.clone())?;
+    *creation = Some(job_id.clone());
     tokio::spawn(run_document_job(state, record, request, sink, cached));
     Ok((
         StatusCode::ACCEPTED,
@@ -2118,6 +2201,7 @@ async fn run_image_job(
     request: ImagePipelineInput,
     sink: JobUpdateSink,
     cached: Option<CachedImageJob>,
+    cache_context: Vec<crate::chapter_session::ChapterContextUnit>,
 ) {
     if record.cancel.load(Ordering::Acquire) {
         finish_active(&state, &record);
@@ -2207,54 +2291,23 @@ async fn run_image_job(
     match result {
         Ok(()) => {
             if !record.cancel.load(Ordering::Acquire) && !record.is_terminal() {
-                let cached = match state.completed_cache_job(&record) {
-                    Ok(cached) => cached,
-                    Err(error) => {
-                        fail_job(&state, &record, &sink, error);
-                        finish_active(&state, &record);
-                        return;
-                    }
-                };
-                let cache = state.result_cache.clone();
-                let cache_request = request.clone();
-                let cache_context = state.pipeline.image_cache_context(&request);
-                match tokio::task::spawn_blocking(move || {
-                    cache.store_image(&cache_request, &cache_context, &cached)
-                })
-                .await
-                {
-                    Ok(Ok(())) => {}
-                    Ok(Err(_)) => {
-                        fail_job(
-                            &state,
-                            &record,
-                            &sink,
-                            PipelineError::new(
-                                "CACHE_FAILED",
-                                "The completed result could not be persisted.",
-                            ),
-                        );
-                        finish_active(&state, &record);
-                        return;
-                    }
-                    Err(_) => {
-                        fail_job(
-                            &state,
-                            &record,
-                            &sink,
-                            PipelineError::new(
-                                "CACHE_FAILED",
-                                "The completed result persistence task did not complete.",
-                            ),
-                        );
-                        finish_active(&state, &record);
-                        return;
+                if let Ok(cached) = state.completed_cache_job(&record) {
+                    let cache = state.result_cache.clone();
+                    let cache_request = request.clone();
+                    if cached
+                        .regions
+                        .iter()
+                        .map(|region| region.patch_png.len())
+                        .sum::<usize>()
+                        <= 32 * 1024 * 1024
+                    {
+                        let _ = state.cache_writer.try_send(Box::new(move || {
+                            let _ = cache.store_image(&cache_request, &cache_context, &cached);
+                        }));
                     }
                 }
                 let _ = sink.publish(JobUpdateDraft::Complete {
-                    message: Some(
-                        "Local cleaning and HSK translation complete and persisted".to_owned(),
-                    ),
+                    message: Some("All discovered image content processed".to_owned()),
                 });
             }
         }
@@ -2313,28 +2366,13 @@ async fn run_document_job(
             let completed = record.completed_document();
             let cache = state.result_cache.clone();
             let cache_request = request.clone();
-            match tokio::task::spawn_blocking(move || {
-                cache.store_document(&cache_request, &completed)
-            })
-            .await
-            {
-                Ok(Ok(())) => {}
-                _ => {
-                    fail_job(
-                        &state,
-                        &record,
-                        &sink,
-                        PipelineError::new(
-                            "CACHE_FAILED",
-                            "The completed document result could not be persisted.",
-                        ),
-                    );
-                    finish_active(&state, &record);
-                    return;
+            let _ = state.cache_writer.try_send(Box::new(move || {
+                if cache_request.retry_item_ids.is_empty() {
+                    let _ = cache.store_document(&cache_request, &completed);
                 }
-            }
+            }));
             let _ = sink.publish(JobUpdateDraft::Complete {
-                message: Some("Document translation complete and persisted".to_owned()),
+                message: Some("All discovered document content processed".to_owned()),
             });
         }
         Ok(()) => {}
@@ -2350,10 +2388,6 @@ fn replay_cached_document(
     sink: &JobUpdateSink,
     cached: CachedDocumentJob,
 ) -> Result<(), PipelineError> {
-    let contexts = cached
-        .lookup_contexts
-        .into_iter()
-        .collect::<HashMap<_, _>>();
     enum Item {
         Ready(DocumentBlockReady),
         Preserved(DocumentBlockPreserved),
@@ -2372,17 +2406,6 @@ fn replay_cached_document(
         if sink.is_cancelled() {
             return Err(PipelineError::cancelled());
         }
-        let item_id = match &item {
-            Item::Ready(block) => &block.item_id,
-            Item::Preserved(block) => &block.item_id,
-        };
-        let context = contexts.get(item_id).cloned().ok_or_else(|| {
-            PipelineError::new(
-                "CACHE_REPLAY_FAILED",
-                "A cached document lookup context is missing.",
-            )
-        })?;
-        sink.remember_item_for_lookup(item_id.clone(), context);
         let update = match item {
             Item::Ready(block) => JobUpdateDraft::DocumentBlockReady { block },
             Item::Preserved(block) => JobUpdateDraft::DocumentBlockPreserved { block },
@@ -2426,16 +2449,6 @@ fn replay_cached_job(sink: &JobUpdateSink, cached: CachedImageJob) -> Result<(),
         }
         match item {
             ReplayItem::Preserved(region) => {
-                let source = region.source_text.clone();
-                sink.remember_item_for_lookup(
-                    region.item_id.clone(),
-                    ItemLookupContext {
-                        source_text: source.clone(),
-                        base_chinese: source.clone(),
-                        displayed_chinese: source,
-                        proper_names: Vec::new(),
-                    },
-                );
                 sink.publish(JobUpdateDraft::ImageRegionPreserved { region })
                     .map_err(|error| {
                         PipelineError::new("CACHE_REPLAY_FAILED", error.to_string())
@@ -2448,7 +2461,7 @@ fn replay_cached_job(sink: &JobUpdateSink, cached: CachedImageJob) -> Result<(),
                     .map_err(|error| {
                         PipelineError::new("CACHE_REPLAY_FAILED", error.to_string())
                     })?;
-                sink.remember_item_for_lookup(region.item_id.clone(), cached_region.lookup_context);
+
                 sink.publish(JobUpdateDraft::ImageRegionReady {
                     region: Box::new(region),
                 })
@@ -2631,14 +2644,7 @@ async fn lookup(
             "The lookup request failed semantic validation.",
         )
     })?;
-    let item = if let (Some(job_id), Some(item_id)) = (&request.job_id, &request.item_id) {
-        let job = find_job(&state, job_id)?;
-        Some(job.lookup_context(item_id).ok_or_else(|| {
-            ApiError::not_found("ITEM_NOT_FOUND", "The translated item does not exist.")
-        })?)
-    } else {
-        None
-    };
+    let item = request.context;
     let input = match request.interaction {
         LookupInteraction::Selection => LookupInput::Selection(
             request
@@ -2793,6 +2799,7 @@ mod tests {
         runs: AtomicUsize,
         warmups: AtomicUsize,
         ready: bool,
+        observed_focus: Mutex<Option<JobFocus>>,
     }
 
     #[async_trait::async_trait]
@@ -2814,20 +2821,45 @@ mod tests {
 
         async fn run_document(
             &self,
-            _request: DocumentJobRequest,
+            request: DocumentJobRequest,
             _cancel: Arc<AtomicBool>,
-            _sink: JobUpdateSink,
+            sink: JobUpdateSink,
         ) -> Result<(), PipelineError> {
             self.runs.fetch_add(1, Ordering::Relaxed);
+            *self.observed_focus.lock().unwrap() = Some(sink.focus());
+            for source in request.blocks {
+                if !request.retry_item_ids.is_empty()
+                    && !request.retry_item_ids.contains(&source.item_id)
+                {
+                    continue;
+                }
+                let mut block = document_block();
+                block.item_id = source.item_id;
+                block.parent_block_id = source.parent_block_id;
+                block.sub_item_order = source.sub_item_order;
+                block.source_index = source.source_index;
+                block.item_order = source.item_order;
+                block.kind = source.kind;
+                block.text.source_text = source.text;
+                block.text.hsk.requested_level = request.settings.hsk_level;
+                block.text.hsk.learning_mode = request.settings.learning_mode;
+                sink.publish(JobUpdateDraft::DocumentBlockReady { block })
+                    .map_err(|error| {
+                        PipelineError::new("TEST_PUBLISH_FAILED", error.to_string())
+                    })?;
+            }
             Ok(())
         }
 
         async fn lookup(
             &self,
             _input: LookupInput,
-            _item: Option<ItemLookupContext>,
+            _item: Option<crate::pipeline_adapter::ItemLookupContext>,
         ) -> Result<crate::contracts::LookupResult, PipelineError> {
-            Err(PipelineError::new("UNUSED", "lookup is not used"))
+            Ok(serde_json::from_slice(include_bytes!(
+                "../../../fixtures/contracts/lookup.valid.json"
+            ))
+            .expect("lookup fixture"))
         }
 
         fn resources_ready(&self) -> bool {
@@ -2840,6 +2872,7 @@ mod tests {
             runs: AtomicUsize::new(0),
             warmups: AtomicUsize::new(0),
             ready,
+            observed_focus: Mutex::new(None),
         })
     }
 
@@ -2887,6 +2920,227 @@ mod tests {
         ))
         .expect("valid image request");
         JobRecord::new(0, "job-image".to_owned(), None, request.visible_rects)
+    }
+
+    fn document_http_request(value: &DocumentJobRequest) -> Request {
+        Request::builder()
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::to_vec(value).unwrap()))
+            .unwrap()
+    }
+    async fn document_response_id(response: Response) -> String {
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let bytes = to_bytes(response.into_body(), 4_096).await.unwrap();
+        serde_json::from_slice::<BrowserJobCreated>(&bytes)
+            .unwrap()
+            .job_id
+    }
+
+    #[tokio::test]
+    async fn lost_creation_response_and_concurrent_retries_create_one_job_and_reject_conflicting_reuse()
+     {
+        let directory = tempfile::tempdir().unwrap();
+        let engine = pipeline(true);
+        let state = BridgeState::with_pipeline_and_setup(
+            BridgeConfig::for_port(1234),
+            [7; SECRET_BYTES],
+            engine.clone(),
+            None,
+            directory.path().to_path_buf(),
+        );
+        let request: DocumentJobRequest = serde_json::from_str(include_str!(
+            "../../../fixtures/contracts/document-job-request.valid.json"
+        ))
+        .unwrap();
+        let first = create_document_job(State(state.clone()), document_http_request(&request))
+            .await
+            .unwrap()
+            .into_response();
+        let original_id = document_response_id(first).await; // The caller loses this response and retries the same body.
+        let mut requests = tokio::task::JoinSet::new();
+        for _ in 0..16 {
+            let state = state.clone();
+            let request = request.clone();
+            requests.spawn(async move {
+                document_response_id(
+                    create_document_job(State(state), document_http_request(&request))
+                        .await
+                        .unwrap()
+                        .into_response(),
+                )
+                .await
+            });
+        }
+        while let Some(result) = requests.join_next().await {
+            assert_eq!(result.unwrap(), original_id);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(engine.runs.load(Ordering::Relaxed), 1);
+        let mut conflict = request.clone();
+        conflict.settings.hsk_level = HskLevel::Six;
+        let error = create_document_job(State(state), document_http_request(&conflict))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(error.code, "REQUEST_ID_CONFLICT");
+    }
+
+    #[tokio::test]
+    async fn creation_installs_viewport_focus_before_the_pipeline_can_dispatch() {
+        let directory = tempfile::tempdir().unwrap();
+        let engine = pipeline(true);
+        let state = BridgeState::with_pipeline_and_setup(
+            BridgeConfig::for_port(1234),
+            [7; SECRET_BYTES],
+            engine.clone(),
+            None,
+            directory.path().to_path_buf(),
+        );
+        let mut request: DocumentJobRequest = serde_json::from_str(include_str!(
+            "../../../fixtures/contracts/document-job-request.valid.json"
+        ))
+        .unwrap();
+        let visible = request.blocks.last().unwrap().item_id.clone();
+        request.focus = FocusUpdateRequest::Document {
+            active: false,
+            visible_block_ids: vec![visible.clone()],
+        };
+        create_document_job(State(state), document_http_request(&request))
+            .await
+            .unwrap();
+        for _ in 0..100 {
+            if engine.observed_focus.lock().unwrap().is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        let focus = engine
+            .observed_focus
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("pipeline observed its initial focus");
+        assert!(!focus.active);
+        assert_eq!(focus.visible_block_ids, [visible]);
+    }
+
+    #[tokio::test]
+    async fn a_cache_write_failure_cannot_fail_a_successfully_published_document() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("results"), b"not a directory").unwrap();
+        let state = BridgeState::with_pipeline_and_setup(
+            BridgeConfig::for_port(1234),
+            [7; SECRET_BYTES],
+            pipeline(true),
+            None,
+            directory.path().to_path_buf(),
+        );
+        let request: DocumentJobRequest = serde_json::from_str(include_str!(
+            "../../../fixtures/contracts/document-job-request.valid.json"
+        ))
+        .unwrap();
+        let id = document_response_id(
+            create_document_job(State(state.clone()), document_http_request(&request))
+                .await
+                .unwrap()
+                .into_response(),
+        )
+        .await;
+        for _ in 0..100 {
+            if state.storage.read().unwrap().jobs[&id].is_terminal() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        let record = state.storage.read().unwrap().jobs[&id].clone();
+        let log = record.log.lock().unwrap();
+        assert!(matches!(
+            log.updates.last(),
+            Some(JobUpdate::Complete {
+                translated_count: 2,
+                preserved_count: 0,
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn dictionary_context_remains_usable_after_more_than_128_image_jobs() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = BridgeState::with_pipeline_and_setup(
+            BridgeConfig::for_port(1234),
+            [7; SECRET_BYTES],
+            pipeline(true),
+            None,
+            directory.path().to_path_buf(),
+        );
+        let mut first_id = String::new();
+        for index in 0..129 {
+            let (id, record, sink) = state.reserve_uploaded_job(None, Vec::new()).unwrap();
+            if index == 0 {
+                first_id = id;
+            }
+            sink.publish(JobUpdateDraft::Complete { message: None })
+                .unwrap();
+            finish_active(&state, &record);
+        }
+        assert!(!state.storage.read().unwrap().jobs.contains_key(&first_id));
+        let response = lookup(State(state), Request::builder().header(CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::to_vec(&serde_json::json!({"interaction":"hover","characterOffset":0,"itemId":"evicted-item",
+                "context":{"displayedChinese":"离开","baseChinese":"离开","sourceText":"Leave","properNames":[]}})).unwrap())).unwrap()).await.unwrap();
+        assert_eq!(response.0.selected_text, "离开");
+    }
+
+    #[tokio::test]
+    async fn hidden_document_work_waits_for_focus_and_cancellation_revokes_the_wait() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = BridgeState::with_pipeline_and_setup(
+            BridgeConfig::for_port(1234),
+            [7; SECRET_BYTES],
+            pipeline(true),
+            None,
+            directory.path().to_path_buf(),
+        );
+        let (_id, record, sink) = state.reserve_document_job(vec!["middle".into()]).unwrap();
+        record
+            .update_focus(FocusUpdateRequest::Document {
+                active: false,
+                visible_block_ids: vec![],
+            })
+            .unwrap();
+        let cancel = record.cancel.clone();
+        let pending = tokio::spawn(async move {
+            crate::pipeline_adapter::wait_for_active_document(&sink, cancel.as_ref()).await
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(!pending.is_finished());
+        record
+            .update_focus(FocusUpdateRequest::Document {
+                active: true,
+                visible_block_ids: vec!["middle".into()],
+            })
+            .unwrap();
+        assert_eq!(
+            pending.await.unwrap().unwrap().visible_block_ids,
+            ["middle"]
+        );
+        record
+            .update_focus(FocusUpdateRequest::Document {
+                active: false,
+                visible_block_ids: vec![],
+            })
+            .unwrap();
+        let sink = JobUpdateSink {
+            record: record.clone(),
+            state: state.clone(),
+        };
+        let cancel = record.cancel.clone();
+        let pending = tokio::spawn(async move {
+            crate::pipeline_adapter::wait_for_active_document(&sink, cancel.as_ref()).await
+        });
+        record.cancel.store(true, Ordering::Release);
+        assert!(pending.await.unwrap().is_err());
     }
 
     #[test]
@@ -3185,7 +3439,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deleting_a_completed_job_releases_lookup_and_blob_artifacts() {
+    async fn deleting_a_completed_job_releases_blobs_and_preserves_stateless_lookup() {
         let temp = tempfile::tempdir().expect("temporary cache");
         let state = BridgeState::with_pipeline_and_setup(
             BridgeConfig::for_port(1234),
@@ -3199,15 +3453,7 @@ mod tests {
         let record = Arc::new(JobRecord::new(0, job_id.clone(), None, Vec::new()));
         let mut region = image_region();
         region.patch.blob_id = blob_id.clone();
-        record.remember_lookup_context(
-            region.item_id.clone(),
-            ItemLookupContext {
-                source_text: region.text.source_text.clone(),
-                base_chinese: region.text.base_chinese.clone(),
-                displayed_chinese: region.text.displayed_chinese.clone(),
-                proper_names: Vec::new(),
-            },
-        );
+
         record
             .append(JobUpdateDraft::ImageRegionReady {
                 region: Box::new(region.clone()),
@@ -3259,17 +3505,16 @@ mod tests {
                 serde_json::to_vec(&serde_json::json!({
                     "interaction": "hover",
                     "characterOffset": 0,
-                    "jobId": job_id,
+                    "context": {"sourceText": region.text.source_text, "displayedChinese": region.text.displayed_chinese, "baseChinese": region.text.base_chinese, "properNames": []},
                     "itemId": region.item_id,
                 }))
                 .expect("serialize lookup"),
             ))
             .expect("lookup request");
-        let lookup_error = lookup(State(state.clone()), lookup_request)
+        let result = lookup(State(state.clone()), lookup_request)
             .await
-            .expect_err("released lookup must be unavailable");
-        assert_eq!(lookup_error.status, StatusCode::NOT_FOUND);
-        assert_eq!(lookup_error.code, "JOB_NOT_FOUND");
+            .expect("bounded lookup survives job eviction");
+        assert!(!result.0.selected_text.is_empty());
 
         let blob_error = blob(State(state.clone()), Path(blob_id))
             .await

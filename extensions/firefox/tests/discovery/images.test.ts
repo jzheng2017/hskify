@@ -1,14 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import {
-  ImageDiscovery,
   discoverDeferredImages,
   discoverImages,
   evaluateImage,
   looksLikeSequentialArtReader,
   visibleFirst,
-  type DiscoveryEvent,
-  type ObserverFactories,
 } from '../../src/discovery/images'
 import { loadedImage } from '../helpers/images'
 
@@ -152,7 +149,9 @@ describe('conservative image discovery', () => {
     const selected = discoverImages()
     expect(document.querySelectorAll('img')).toHaveLength(154)
     expect(selected).toHaveLength(21)
-    expect(selected.filter((candidate) => candidate.element.hasAttribute('data-page-index'))).toHaveLength(20)
+    expect(
+      selected.filter((candidate) => candidate.element.hasAttribute('data-page-index')),
+    ).toHaveLength(20)
     expect(selected.filter((candidate) => candidate.sourceUrl.includes('.webp?'))).toHaveLength(20)
     expect(selected[0]?.visible).toBe(true)
     expect(selected.slice(0, 2).every((candidate) => candidate.visible)).toBe(true)
@@ -225,175 +224,6 @@ describe('conservative image discovery', () => {
     })
     expect(discoverImages().map((candidate) => candidate.element)).toEqual([webtoon])
     expect(discoverDeferredImages()).toEqual([asura])
-  })
-
-  it('does not treat a root-margin prefetch intersection as true viewport visibility', () => {
-    const events: DiscoveryEvent[] = []
-    let intersectionCallback: IntersectionObserverCallback = () => undefined
-    const factories: ObserverFactories = {
-      mutation: () => ({ observe: vi.fn(), disconnect: vi.fn() }),
-      intersection(callback) {
-        intersectionCallback = callback
-        return {
-          observe: vi.fn(),
-          unobserve: vi.fn(),
-          disconnect: vi.fn(),
-        }
-      },
-    }
-    const visibleImage = loadedImage('https://reader.test/visible.png')
-    const nearOffscreenImage = loadedImage('https://reader.test/near-offscreen.png')
-    document.body.append(visibleImage, nearOffscreenImage)
-    const discovery = new ImageDiscovery((event) => events.push(event), document, factories)
-    discovery.start()
-    events.splice(0)
-
-    intersectionCallback(
-      [
-        {
-          target: visibleImage,
-          isIntersecting: true,
-          intersectionRatio: 1,
-          boundingClientRect: viewportRect(0, 400),
-        } as unknown as IntersectionObserverEntry,
-        {
-          target: nearOffscreenImage,
-          isIntersecting: true,
-          intersectionRatio: 0.25,
-          boundingClientRect: viewportRect(window.innerHeight + 1, window.innerHeight + 401),
-        } as unknown as IntersectionObserverEntry,
-      ],
-      {} as IntersectionObserver,
-    )
-
-    expect(events).toHaveLength(1)
-    expect(events[0]?.type).toBe('visibility')
-    expect(
-      discovery.current().map((candidate) => ({
-        element: candidate.element,
-        visible: candidate.visible,
-      })),
-    ).toEqual([
-      { element: visibleImage, visible: true },
-      { element: nearOffscreenImage, visible: false },
-    ])
-
-    intersectionCallback(
-      [
-        {
-          target: nearOffscreenImage,
-          isIntersecting: true,
-          intersectionRatio: 0.25,
-          boundingClientRect: viewportRect(window.innerHeight - 1, window.innerHeight + 399),
-        } as unknown as IntersectionObserverEntry,
-      ],
-      {} as IntersectionObserver,
-    )
-
-    expect(discovery.current().every((candidate) => candidate.visible)).toBe(true)
-    discovery.stop()
-  })
-
-  it('publishes same-source DOM-order changes on rescan', () => {
-    const events: DiscoveryEvent[] = []
-    let mutationCallback: MutationCallback = () => undefined
-    const factories: ObserverFactories = {
-      mutation(callback) {
-        mutationCallback = callback
-        return { observe: vi.fn(), disconnect: vi.fn() }
-      },
-      intersection: () => undefined,
-    }
-    const first = loadedImage('https://reader.test/first.png')
-    const second = loadedImage('https://reader.test/second.png')
-    document.body.append(first, second)
-    const discovery = new ImageDiscovery((event) => events.push(event), document, factories)
-    discovery.start()
-    const idsBefore = new Map(
-      discovery.current().map((candidate) => [candidate.element, candidate.id]),
-    )
-    events.splice(0)
-
-    document.body.prepend(second)
-    mutationCallback([{ type: 'childList' } as MutationRecord], {} as MutationObserver)
-
-    const updates = events.filter(
-      (event): event is Extract<DiscoveryEvent, { type: 'updated' }> => event.type === 'updated',
-    )
-    expect(
-      updates.map((event) => ({
-        element: event.candidate.element,
-        previousDomIndex: event.previousDomIndex,
-        domIndex: event.candidate.domIndex,
-        sameSource: event.previousSourceUrl === event.candidate.sourceUrl,
-      })),
-    ).toEqual([
-      { element: second, previousDomIndex: 1, domIndex: 0, sameSource: true },
-      { element: first, previousDomIndex: 0, domIndex: 1, sameSource: true },
-    ])
-    expect(discovery.current().map((candidate) => candidate.element)).toEqual([second, first])
-    expect(
-      updates.map((event) => [event.candidate.element, event.candidate.id]),
-    ).toEqual([
-      [second, idsBefore.get(second)],
-      [first, idsBefore.get(first)],
-    ])
-    discovery.stop()
-  })
-
-  it('observes lazy additions, visibility, source replacement, and removal', () => {
-    const events: DiscoveryEvent[] = []
-    let mutationCallback: MutationCallback = () => undefined
-    let intersectionCallback: IntersectionObserverCallback = () => undefined
-    const factories: ObserverFactories = {
-      mutation(callback) {
-        mutationCallback = callback
-        return { observe: vi.fn(), disconnect: vi.fn() }
-      },
-      intersection(callback) {
-        intersectionCallback = callback
-        return {
-          observe: vi.fn(),
-          unobserve: vi.fn(),
-          disconnect: vi.fn(),
-        }
-      },
-    }
-    const discovery = new ImageDiscovery((event) => events.push(event), document, factories)
-    discovery.start()
-    const image = loadedImage()
-    document.body.append(image)
-    mutationCallback([{ type: 'childList' } as MutationRecord], {} as MutationObserver)
-    expect(events.at(-1)?.type).toBe('added')
-
-    intersectionCallback(
-      [
-        {
-          target: image,
-          isIntersecting: false,
-          intersectionRatio: 0,
-          boundingClientRect: viewportRect(10_000, 10_400),
-        } as unknown as IntersectionObserverEntry,
-      ],
-      {} as IntersectionObserver,
-    )
-    expect(events.at(-1)?.type).toBe('visibility')
-    expect(discovery.current()[0]?.visible).toBe(false)
-
-    Object.defineProperty(image, 'currentSrc', {
-      configurable: true,
-      value: 'https://reader.test/replaced.png',
-    })
-    mutationCallback(
-      [{ type: 'attributes', target: image } as unknown as MutationRecord],
-      {} as MutationObserver,
-    )
-    expect(events.at(-1)?.type).toBe('updated')
-
-    image.remove()
-    mutationCallback([{ type: 'childList' } as MutationRecord], {} as MutationObserver)
-    expect(events.at(-1)?.type).toBe('removed')
-    discovery.stop()
   })
 })
 

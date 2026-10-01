@@ -132,6 +132,13 @@ impl EncoderConvNormAct {
 
 impl Module for EncoderConvNormAct {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        #[cfg(feature = "cuda")]
+        let xs = if xs.device().is_cuda() {
+            super::depthwise::forward(&self.conv, xs)?
+        } else {
+            self.conv.forward(xs)?
+        };
+        #[cfg(not(feature = "cuda"))]
         let xs = self.conv.forward(xs)?;
         let xs = self.bn.forward_t(&xs, false)?;
         apply_activation(&xs, self.activation)

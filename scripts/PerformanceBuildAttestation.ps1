@@ -1,7 +1,7 @@
 Set-StrictMode -Version Latest
 
 $script:HskifyPerformanceAttestationSchema = 'hskify.performance-build-attestation.v1'
-$script:HskifyPerformanceBuildFingerprint = 'hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-08-09-r8'
+$script:HskifyPerformanceBuildFingerprint = 'hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-10-01-r10'
 $script:HskifyPerformanceTarget = 'x86_64-pc-windows-msvc'
 $script:HskifyPerformanceGpuName = 'NVIDIA GeForce RTX 4080 SUPER'
 $script:HskifyPerformanceGpuMemoryMiB = 16376

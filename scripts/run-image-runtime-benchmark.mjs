@@ -31,7 +31,7 @@ import {
 const execFileAsync = promisify(execFile)
 const REPOSITORY_ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)))
 const DEFAULT_OUTPUT = resolve(REPOSITORY_ROOT, '.cache/image-runtime-benchmark')
-const BUILD_FINGERPRINT = 'hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-08-09-r8'
+const BUILD_FINGERPRINT = 'hskify-windows-x86_64-msvc-cuda13.1-sm89-2026-10-01-r10'
 const GPU_SAMPLE_INTERVAL_MS = 100
 const IMAGE_BASELINE_BENCHMARK = 'hskify-image-language-baseline'
 const MAX_U32 = 0xffff_ffff
@@ -195,11 +195,7 @@ function exactSourceOrder(value, sourceIndex) {
   }
   const order = value.map((item, index) => boundedU32(item, `chapterSourceOrder[${index}]`))
   if (!order.includes(sourceIndex)) throw new Error('chapterSourceOrder must include sourceIndex.')
-  for (let index = 1; index < order.length; index += 1) {
-    if (order[index - 1] >= order[index]) {
-      throw new Error('chapterSourceOrder must be strictly increasing.')
-    }
-  }
+  if (new Set(order).size !== order.length) throw new Error('chapterSourceOrder must contain unique source identities in DOM order.')
   return order
 }
 

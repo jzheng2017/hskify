@@ -15,7 +15,7 @@ use koharu_runtime::RuntimeManager;
 use strum::{EnumProperty, IntoEnumIterator};
 
 pub use language::{Language, language_from_tag, supported_locales};
-pub use model::{GenerateOptions, Grammar, Llm};
+pub use model::{GenerateOptions, Generation, GenerationTermination, Grammar, Llm};
 pub use prompt::{ChatMessage, ChatRole};
 
 /// Optional positive thread limit for local llama.cpp and multimodal inference.

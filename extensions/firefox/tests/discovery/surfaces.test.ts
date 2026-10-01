@@ -44,7 +44,8 @@ describe('reader-agnostic page surfaces', () => {
     background.getBoundingClientRect = () => rect()
     root.body.append(background)
     vi.spyOn(window, 'getComputedStyle').mockImplementation((element) => {
-      if (element === background) return { backgroundImage: 'url("/page-3.webp")' } as CSSStyleDeclaration
+      if (element === background)
+        return { backgroundImage: 'url("/page-3.webp")' } as CSSStyleDeclaration
       return { backgroundImage: 'none' } as CSSStyleDeclaration
     })
 
@@ -71,9 +72,7 @@ describe('reader-agnostic page surfaces', () => {
     root.body.append(frame)
     const result = discoverPageSurfaces(root)
     expect(result.surfaces).toHaveLength(0)
-    expect(result.unsupported).toEqual([
-      { kind: 'frame', element: frame, reason: 'cross-origin' },
-    ])
+    expect(result.unsupported).toEqual([{ kind: 'frame', element: frame, reason: 'cross-origin' }])
   })
 
   it('emits one shared candidate contract for canvas and background surfaces', async () => {
@@ -98,58 +97,22 @@ describe('reader-agnostic page surfaces', () => {
       sourceHeight: 1800,
     })
     expect(events).toEqual(['added:canvas'])
-    await expect(candidate?.capture?.()).resolves.toMatchObject({
-      mimeType: 'image/png',
-      width: 900,
-      height: 1800,
-    })
+    await expect(candidate?.capture?.()).resolves.toBeUndefined() // No readable pixel context exists in this DOM fixture.
     discovery.stop()
   })
 
-  it('captures WebGL framebuffer pixels in page order before encoding the patch source', async () => {
+  it('never initializes the publisher canvas context while discovering it', () => {
     const root = document.implementation.createHTMLDocument('reader')
     const canvas = root.createElement('canvas')
-    canvas.width = 2
-    canvas.height = 2
-    canvas.getBoundingClientRect = () => rect(2, 2)
-    const framebuffer = new Uint8Array([
-      // bottom row (WebGL origin)
-      0, 0, 255, 255, 0, 255, 0, 255,
-      // top row
-      255, 0, 0, 255, 255, 255, 255, 255,
-    ])
-    const gl = {
-      RGBA: 0x1908,
-      UNSIGNED_BYTE: 0x1401,
-      readPixels: vi.fn((_x, _y, _width, _height, _format, _type, target: Uint8Array) => {
-        target.set(framebuffer)
-      }),
-    }
-    const context = {
-      createImageData: () => ({ data: new Uint8ClampedArray(16) }),
-      putImageData: vi.fn(),
-    }
-    const getContext = vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(
-      ((kind: string) => (kind === 'webgl2' ? gl : kind === '2d' ? context : null)) as typeof HTMLCanvasElement.prototype.getContext,
-    )
-    vi.spyOn(HTMLCanvasElement.prototype, 'toDataURL').mockReturnValue(
-      'data:image/png;base64,AA==',
-    )
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(new Uint8Array([1, 2, 3]))))
+    canvas.width = 900
+    canvas.height = 1800
+    canvas.getBoundingClientRect = () => rect(900, 1800)
+    const getContext = vi.spyOn(canvas, 'getContext')
     root.body.append(canvas)
-
     const discovery = new LiveSurfaceDiscovery(() => undefined, root)
     discovery.start()
-    const candidate = discovery.current()[0]
-    expect(candidate?.kind).toBe('webgl')
-    await expect(candidate?.capture?.()).resolves.toMatchObject({
-      mimeType: 'image/png',
-      width: 2,
-      height: 2,
-    })
-    expect(gl.readPixels).toHaveBeenCalledTimes(1)
-    expect(context.putImageData).toHaveBeenCalledTimes(1)
-    getContext.mockRestore()
+    expect(discovery.current()[0]?.kind).toBe('canvas')
+    expect(getContext).not.toHaveBeenCalled()
     discovery.stop()
   })
 
@@ -170,7 +133,12 @@ describe('reader-agnostic page surfaces', () => {
     const discovery = new LiveSurfaceDiscovery(() => undefined, root)
     discovery.start()
     const before = new Map(
-      discovery.current().map((candidate) => [candidate.element, { id: candidate.id, sourceUrl: candidate.sourceUrl }]),
+      discovery
+        .current()
+        .map((candidate) => [
+          candidate.element,
+          { id: candidate.id, sourceUrl: candidate.sourceUrl },
+        ]),
     )
     const inserted = root.createElement('canvas')
     inserted.width = 900
@@ -216,7 +184,12 @@ describe('reader-agnostic page surfaces', () => {
     const discovery = new LiveSurfaceDiscovery(() => undefined, root)
     discovery.start()
     const before = new Map(
-      discovery.current().map((candidate) => [candidate.element, { id: candidate.id, sourceUrl: candidate.sourceUrl }]),
+      discovery
+        .current()
+        .map((candidate) => [
+          candidate.element,
+          { id: candidate.id, sourceUrl: candidate.sourceUrl },
+        ]),
     )
     expect(discovery.current().every((candidate) => candidate.captureOnly)).toBe(true)
 

@@ -246,7 +246,7 @@ export async function launchPackagedFirefox(config) {
     const identity = await extensionPage.evaluate(async () => ({
       id: globalThis.browser.runtime.id,
       manifest: globalThis.browser.runtime.getManifest(),
-      origin: new URL(globalThis.browser.runtime.getURL('')).origin,
+      origin: globalThis.browser.runtime.getURL('').replace(/\/$/, ''),
     }))
     if (identity.id !== EXTENSION_ID) throw new Error(`Extension runtime ID mismatch: ${identity.id}.`)
     if (identity.manifest.version !== config.extensionVersion) {
@@ -296,8 +296,8 @@ async function timedExtensionMessage(extensionPage, message) {
   return { issuedAtEpochMs: timed.issuedAtEpochMs, responseAtEpochMs: timed.responseAtEpochMs, value: timed.response.value }
 }
 
-export async function timedContentStart(extensionPage, hskLevel, expectedPageUrl, readingDirection) {
-  const timed = await extensionPage.evaluate(async ({ level, pageUrl, direction }) => {
+export async function timedContentStart(extensionPage, hskLevel, expectedPageUrl, readingDirection, learningMode = 'natural') {
+  const timed = await extensionPage.evaluate(async ({ level, pageUrl, direction, mode }) => {
     const tabs = await globalThis.browser.tabs.query({})
     const tab = tabs.find((candidate) => candidate.url === pageUrl)
     if (!Number.isInteger(tab?.id)) throw new Error(`No chapter tab for ${pageUrl}.`)
@@ -306,17 +306,17 @@ export async function timedContentStart(extensionPage, hskLevel, expectedPageUrl
       globalThis.__hskifyJobMonitor.actionIssuedAtEpochMs = issuedAtEpochMs
     }
     const response = await globalThis.browser.tabs.sendMessage(tab.id, {
-      type: 'content:start', scope: 'all', hskLevel: level, learningMode: 'natural', readingDirection: direction,
+      type: 'content:start', scope: 'all', hskLevel: level, learningMode: mode, readingDirection: direction,
     })
     return { issuedAtEpochMs, responseAtEpochMs: Date.now(), response }
-  }, { level: hskLevel, pageUrl: expectedPageUrl, direction: readingDirection })
+  }, { level: hskLevel, pageUrl: expectedPageUrl, direction: readingDirection, mode: learningMode })
   if (!timed.response || typeof timed.response.state !== 'string') throw new Error('Content runtime returned no valid start state.')
   return { issuedAtEpochMs: timed.issuedAtEpochMs, responseAtEpochMs: timed.responseAtEpochMs, value: timed.response }
 }
 
 /** Start a content run without waiting for the chapter's terminal response. */
-export async function beginContentStart(extensionPage, hskLevel, expectedPageUrl, readingDirection) {
-  return extensionPage.evaluate(async ({ level, pageUrl, direction }) => {
+export async function beginContentStart(extensionPage, hskLevel, expectedPageUrl, readingDirection, learningMode = 'natural') {
+  return extensionPage.evaluate(async ({ level, pageUrl, direction, mode }) => {
     const tabs = await globalThis.browser.tabs.query({})
     const tab = tabs.find((candidate) => candidate.url === pageUrl)
     if (!Number.isInteger(tab?.id)) throw new Error(`No chapter tab for ${pageUrl}.`)
@@ -329,7 +329,7 @@ export async function beginContentStart(extensionPage, hskLevel, expectedPageUrl
         type: 'content:start',
         scope: 'all',
         hskLevel: level,
-        learningMode: 'natural',
+        learningMode: mode,
         readingDirection: direction,
       })
       .then(
@@ -341,7 +341,7 @@ export async function beginContentStart(extensionPage, hskLevel, expectedPageUrl
         }),
       )
     return { issuedAtEpochMs, tabId: tab.id }
-  }, { level: hskLevel, pageUrl: expectedPageUrl, direction: readingDirection })
+  }, { level: hskLevel, pageUrl: expectedPageUrl, direction: readingDirection, mode: learningMode })
 }
 
 export async function startJobMonitor(extensionPage, pageUrl, runId) {
@@ -457,6 +457,12 @@ export async function installDomObserver(page, runId) {
     globalThis.__hskifyRuntimeEvidence = state
     const observed = new WeakSet()
     const observedDocumentHosts = new WeakSet()
+    const committed = new WeakMap()
+    const changed = element => {
+      const signature = (element.dataset.hskifyState ?? element.className) + '\u001f' + element.textContent
+      if (committed.get(element) === signature) return false
+      committed.set(element, signature); return true
+    }
     const emit = (type, details = {}) => state.events.push({ index: state.nextEventIndex++, type, epochMs: Date.now(), performanceMs: performance.now(), ...details })
     if (nativeLongTaskSupported) {
       const longTaskObserver = new PerformanceObserver((entries) => {
@@ -502,7 +508,11 @@ export async function installDomObserver(page, runId) {
     const visible = (element) => {
       const rect = element.getBoundingClientRect()
       const style = getComputedStyle(element)
-      return rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.right > 0 && rect.top < innerHeight && rect.left < innerWidth && style.visibility !== 'hidden' && style.display !== 'none'
+      return rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.right > 0 && rect.top < innerHeight && rect.left < innerWidth && style.visibility !== 'hidden' && style.display !== 'none' && Number.parseFloat(style.opacity || '1') > 0
+    }
+    const readable = (element) => {
+      const style = getComputedStyle(element)
+      return visible(element) && style.userSelect !== 'none' && Number.parseFloat(style.fontSize) >= 10 && /\p{Script=Han}/u.test(element.textContent ?? '')
     }
     const recordHud = (root) => {
       const title = root.querySelector('.title')?.textContent?.trim() ?? ''
@@ -510,7 +520,7 @@ export async function installDomObserver(page, runId) {
       if (!title || title === state.lastHudState) return
       state.lastHudState = title
       if (title === 'Hskify' || title === 'Translating chapter' || title === 'Preparing chapter') emit('hudAcknowledged', { title, detail })
-      if (title === 'Translation complete') emit('hudComplete', { title, detail })
+      if (title === 'Discovered content processed') emit('hudComplete', { title, detail })
       if (title === 'Translation cancelled') emit('hudCancelled', { title, detail })
       if (title === 'Translation needs attention') emit('hudFailed', { title, detail })
     }
@@ -535,8 +545,8 @@ export async function installDomObserver(page, runId) {
     recordElement = (element) => {
       if (!(element instanceof Element)) return
       for (const patch of [...(element.matches('.hskify-patch') ? [element] : []), ...element.querySelectorAll('.hskify-patch')]) emit('patchDomCommitted', { patchId: patch.dataset.hskifyPatchId ?? '', complete: patch.complete, naturalWidth: patch.naturalWidth, naturalHeight: patch.naturalHeight, decodedAndInstalled: patch.complete && patch.naturalWidth > 0 && patch.naturalHeight > 0, page: pageFor(patch), visible: visible(patch) })
-      for (const region of [...(element.matches('.hskify-region') ? [element] : []), ...element.querySelectorAll('.hskify-region')]) emit('selectableTextDomCommitted', { itemId: region.dataset.hskifyItemId ?? '', sourceText: region.dataset.hskifySourceText ?? '', hskValid: region.dataset.hskifyHskValid ?? '', repairState: region.dataset.hskifyHskRepairState ?? '', sourcePreserving: region.classList.contains('hskify-source-notice'), text: region.textContent ?? '', pinyin: region.dataset.hskifyPinyin ?? '', page: pageFor(region), visible: visible(region) })
-      for (const block of [...(element.matches('[data-hskify-item-id][data-hskify-state]') ? [element] : []), ...element.querySelectorAll('[data-hskify-item-id][data-hskify-state]')]) emit('documentBlockDomCommitted', { itemId: block.dataset.hskifyItemId ?? '', state: block.dataset.hskifyState ?? '', text: block.textContent ?? '' })
+      for (const region of [...(element.matches('.hskify-region') ? [element] : []), ...element.querySelectorAll('.hskify-region')]) if (changed(region)) emit('selectableTextDomCommitted', { itemId: region.dataset.hskifyItemId ?? '', sourceText: region.dataset.hskifySourceText ?? '', hskValid: region.dataset.hskifyHskValid ?? '', repairState: region.dataset.hskifyHskRepairState ?? '', sourcePreserving: region.classList.contains('hskify-source-notice'), text: region.textContent ?? '', pinyin: region.dataset.hskifyPinyin ?? '', page: pageFor(region), visible: visible(region), readable: !region.classList.contains('hskify-source-notice') && readable(region) })
+      for (const block of [...(element.matches('[data-hskify-item-id][data-hskify-state]') ? [element] : []), ...element.querySelectorAll('[data-hskify-item-id][data-hskify-state]')]) if (changed(block)) emit('documentBlockDomCommitted', { itemId: block.dataset.hskifyItemId ?? '', state: block.dataset.hskifyState ?? '', text: block.textContent ?? '', visible: visible(block), readable: block.dataset.hskifyState === 'translated' && readable(block) })
       for (const owned of [...(element.matches('[data-hskify-owned="true"]') ? [element] : []), ...element.querySelectorAll('[data-hskify-owned="true"]')]) {
         if (owned.classList.contains('hskify-wrapper')) emit('imageWrapperCommitted', { page: Number(owned.querySelector('img[data-page]')?.dataset.page ?? 0) })
         if (owned.dataset.hskifyDocumentReader === 'true' && !observedDocumentHosts.has(owned)) {
@@ -546,8 +556,14 @@ export async function installDomObserver(page, runId) {
         if (owned.shadowRoot) observeShadow(owned.shadowRoot)
       }
     }
-    const observer = new MutationObserver((records) => { for (const record of records) for (const node of record.addedNodes) recordElement(node) })
-    observer.observe(document.documentElement, { childList: true, subtree: true })
+    const observer = new MutationObserver((records) => {
+      for (const record of records) {
+        if (record.type === 'attributes') recordElement(record.target)
+        else if (record.type === 'characterData') recordElement(record.target.parentElement)
+        else for (const node of record.addedNodes) recordElement(node instanceof Element ? node : node.parentElement)
+      }
+    })
+    observer.observe(document.documentElement, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['data-hskify-state'] })
     state.observers.push(observer)
     for (const child of document.documentElement.children) recordElement(child)
     emit('observerReady')
@@ -648,7 +664,7 @@ export async function routeEvidence(extensionPage, records, terminalRequired, ex
     const stored = await globalThis.browser.storage.session.get(sessionKey)
     const session = stored[sessionKey]
     if (!session || typeof session.token !== 'string' || typeof session.port !== 'number') throw new Error('The extension has no authenticated daemon session.')
-    const headers = { Authorization: `Bearer ${session.token}`, 'X-Hskify-Extension-Origin': new URL(globalThis.browser.runtime.getURL('')).origin }
+    const headers = { Authorization: `Bearer ${session.token}`, 'X-Hskify-Extension-Origin': globalThis.browser.runtime.getURL('').replace(/\/$/, '') }
     const request = async (path) => {
       const started = performance.now()
       const response = await fetch(`http://127.0.0.1:${session.port}${path}`, { headers, cache: 'no-store', redirect: 'error' })

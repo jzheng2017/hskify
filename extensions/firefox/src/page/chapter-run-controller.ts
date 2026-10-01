@@ -47,10 +47,14 @@ export class ChapterRunController {
   private chapterClosePromise: Promise<void> | undefined
   private pageReleased = false
   private releasing = false
-  private running = false
-  private cancelled = false
-  private completed = false
-  private destroyed = false
+  private phase:
+    | 'idle'
+    | 'running'
+    | 'settled'
+    | 'complete'
+    | 'cancelled'
+    | 'failed'
+    | 'destroyed' = 'idle'
   private state: PageState
 
   constructor(
@@ -80,18 +84,21 @@ export class ChapterRunController {
     return this.hudValue
   }
   get isRunning(): boolean {
-    return this.running
+    return this.phase === 'running' || this.phase === 'settled'
   }
   get isCancelled(): boolean {
-    return this.cancelled
+    return this.phase === 'cancelled'
   }
   get isComplete(): boolean {
-    return this.completed
+    return (
+      this.phase === 'complete' ||
+      (this.phase === 'settled' && this.snapshot().state === 'complete')
+    )
   }
 
   currentToken(): ChapterRunToken {
     const signal = this.abortController?.signal
-    if (!this.running || !signal) throw chapterAbortError()
+    if (!this.isRunning || !signal) throw chapterAbortError()
     return {
       generation: this.generationValue,
       pageSessionId: this.pageSessionIdValue,
@@ -101,7 +108,7 @@ export class ChapterRunController {
   }
 
   async start(total: number, message: string): Promise<ChapterRunToken> {
-    if (this.destroyed) throw new Error('The chapter mode has been destroyed.')
+    if (this.phase === 'destroyed') throw new Error('The chapter mode has been destroyed.')
 
     const previousSessionId = this.hasRun ? this.pageSessionIdValue : undefined
     const previousChapterOpen = this.hasRun && !this.chapterClosed
@@ -121,9 +128,7 @@ export class ChapterRunController {
     this.chapterClosePromise = undefined
     this.pageReleased = false
     this.releasing = false
-    this.running = true
-    this.cancelled = false
-    this.completed = false
+    this.phase = 'running'
     const controller = new AbortController()
     this.abortController = controller
     const generation = ++this.generationValue
@@ -188,7 +193,9 @@ export class ChapterRunController {
     try {
       this.assertCurrent(token)
     } catch (error) {
-      this.cancelJob(jobId)
+      // Creation may complete after the page-wide cancellation already ran.
+      this.activeJobIds.delete(jobId)
+      void sendBackgroundMessage({ type: 'job:cancel', jobId }).catch(() => undefined)
       throw error
     }
   }
@@ -226,6 +233,8 @@ export class ChapterRunController {
   }
 
   update(input: Parameters<PageHud['update']>[0]): void {
+    if (!this.isRunning) return
+    this.phase = 'running'
     this.hudValue?.update(input)
     this.state = this.hudValue?.snapshot() ?? {
       state: 'running',
@@ -241,11 +250,9 @@ export class ChapterRunController {
   }
 
   finish(counts: ChapterRunCounts, failureMessage?: string, keepAliveForRetry = false): PageState {
-    if (!this.running) return this.snapshot()
-    this.running = failureMessage !== undefined && keepAliveForRetry
-    this.completed = failureMessage === undefined
-    this.cancelled = false
-    if (!this.running) this.abortController = undefined
+    if (!this.isRunning) return this.snapshot()
+    this.phase = keepAliveForRetry ? 'settled' : failureMessage ? 'failed' : 'complete'
+    if (!this.isRunning) this.abortController = undefined
     if (failureMessage) this.hudValue?.fail(failureMessage, counts.current, counts.total)
     else this.hudValue?.complete(counts.current, counts.total)
     this.state = this.hudValue?.snapshot() ?? {
@@ -255,7 +262,7 @@ export class ChapterRunController {
       total: counts.total,
       message: failureMessage ?? `${counts.current} of ${counts.total} items ready`,
     }
-    if (!this.running) void this.closeChapter('chapter:finish')
+    if (!this.isRunning) void this.closeChapter('chapter:finish')
     return this.snapshot()
   }
 
@@ -265,9 +272,7 @@ export class ChapterRunController {
     this.abortController?.abort()
     this.abortController = undefined
     this.restoreMode()
-    this.running = false
-    this.completed = false
-    this.cancelled = false
+    this.phase = 'failed'
     const close = this.hasRun ? this.closeChapter('chapter:cancel') : undefined
     this.releaseCurrentPage(close)
     this.hudValue?.fail(message, counts.current, counts.total)
@@ -287,9 +292,7 @@ export class ChapterRunController {
     this.abortController?.abort()
     this.abortController = undefined
     this.restoreMode()
-    this.running = false
-    this.completed = false
-    this.cancelled = true
+    this.phase = 'cancelled'
     const close = this.hasRun ? this.closeChapter('chapter:cancel') : undefined
     this.releaseCurrentPage(close)
     this.hudValue?.cancelled(counts.current, counts.total)
@@ -309,8 +312,8 @@ export class ChapterRunController {
 
   assertCurrent(identity: ChapterRunIdentity, signal?: AbortSignal): void {
     if (
-      this.destroyed ||
-      !this.running ||
+      this.phase === 'destroyed' ||
+      !this.isRunning ||
       this.generationValue !== identity.generation ||
       this.pageSessionIdValue !== identity.pageSessionId ||
       this.pageUrlValue !== identity.pageUrl ||
@@ -323,18 +326,16 @@ export class ChapterRunController {
   }
 
   destroy(): void {
-    if (this.destroyed) return
-    this.destroyed = true
+    if (this.phase === 'destroyed') return
     ++this.generationValue
-    const wasRunning = this.running
+    const wasRunning = this.isRunning
+    this.phase = 'destroyed'
     this.releasing = true
     this.abortController?.abort()
     this.abortController = undefined
     this.restoreMode()
-    this.running = false
-    const close = wasRunning && this.hasRun
-      ? this.closeChapter('chapter:cancel')
-      : this.chapterClosePromise
+    const close =
+      wasRunning && this.hasRun ? this.closeChapter('chapter:cancel') : this.chapterClosePromise
     this.releaseCurrentPage(close)
     this.hudValue?.destroy()
     this.hudValue = undefined
@@ -344,7 +345,7 @@ export class ChapterRunController {
     this.abortController?.abort()
     this.abortController = undefined
     this.activeJobIds.clear()
-    this.running = false
+    this.phase = 'idle'
   }
 
   private releaseCurrentPage(after?: Promise<unknown>): void {
